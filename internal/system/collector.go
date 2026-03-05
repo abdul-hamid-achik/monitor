@@ -132,7 +132,7 @@ func (c *Collector) collectMemory(ctx context.Context) {
 	// macOS specific memory breakdown (approximate)
 	// Note: gopsutil doesn't provide all macOS-specific metrics directly
 	c.info.Memory.AppMemory = vm.Used
-	c.info.Memory.WiredMemory = 0  // Would need CGO for accurate macOS SMC data
+	c.info.Memory.WiredMemory = 0 // Would need CGO for accurate macOS SMC data
 	c.info.Memory.CompressedMemory = 0
 	c.info.Memory.CacheMemory = vm.Total - vm.Used - vm.Free
 	c.info.Memory.PurgeableMemory = 0
@@ -163,15 +163,15 @@ func (c *Collector) collectTemperature(ctx context.Context) {
 	// A production version would use Objective-C bindings
 
 	// Estimate temperature based on CPU usage (simplified model)
-	baseTemp := 35.0 // Base idle temperature for M-series chips
+	baseTemp := 35.0                          // Base idle temperature for M-series chips
 	loadTemp := c.info.CPU.UsagePercent * 0.5 // Add temperature based on load
 
 	c.info.Temperature.CPUPackage = baseTemp + loadTemp
 	c.info.Temperature.CPUCores = baseTemp + loadTemp + 2
 	c.info.Temperature.GPU = baseTemp + (c.info.CPU.UsagePercent * 0.3)
 	c.info.Temperature.ANE = baseTemp + (c.info.CPU.UsagePercent * 0.2)
-	c.info.Temperature.Battery = 38.0 // Typical battery temperature
-	c.info.Temperature.Ambient = 22.0 // Assume room temperature
+	c.info.Temperature.Battery = 38.0                                  // Typical battery temperature
+	c.info.Temperature.Ambient = 22.0                                  // Assume room temperature
 	c.info.Temperature.FanRPM = 2000 + int(c.info.CPU.UsagePercent*40) // Estimate
 	c.info.Temperature.FanMode = "Auto"
 	c.info.Temperature.Available = true
@@ -201,6 +201,16 @@ func (c *Collector) collectNetwork(ctx context.Context) {
 		if elapsed > 0 {
 			c.info.Network.BytesSentPerSec = uint64(float64(current.BytesSent-c.lastNetStats.BytesSent) / elapsed)
 			c.info.Network.BytesRecvPerSec = uint64(float64(current.BytesRecv-c.lastNetStats.BytesRecv) / elapsed)
+
+			// Track history for sparklines
+			c.info.Network.DownloadHistory = append(c.info.Network.DownloadHistory, float64(c.info.Network.BytesRecvPerSec))
+			c.info.Network.UploadHistory = append(c.info.Network.UploadHistory, float64(c.info.Network.BytesSentPerSec))
+			if len(c.info.Network.DownloadHistory) > c.historySize {
+				c.info.Network.DownloadHistory = c.info.Network.DownloadHistory[1:]
+			}
+			if len(c.info.Network.UploadHistory) > c.historySize {
+				c.info.Network.UploadHistory = c.info.Network.UploadHistory[1:]
+			}
 		}
 	}
 

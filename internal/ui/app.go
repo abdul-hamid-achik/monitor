@@ -29,6 +29,7 @@ const (
 	TabOverview Tab = iota
 	TabCPU
 	TabMemory
+	TabNetwork
 	TabProcesses
 	TabTemperature
 	TabSettings
@@ -39,6 +40,7 @@ var TabNames = []string{
 	"Overview",
 	"CPU",
 	"Memory",
+	"Network",
 	"Processes",
 	"Temperature",
 	"Settings",
@@ -300,14 +302,18 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.calculateTabBounds()
 		return m, nil
 	case "4":
-		m.activeTab = TabProcesses
+		m.activeTab = TabNetwork
 		m.calculateTabBounds()
 		return m, nil
 	case "5":
-		m.activeTab = TabTemperature
+		m.activeTab = TabProcesses
 		m.calculateTabBounds()
 		return m, nil
 	case "6":
+		m.activeTab = TabTemperature
+		m.calculateTabBounds()
+		return m, nil
+	case "7":
 		m.activeTab = TabSettings
 		m.calculateTabBounds()
 		return m, nil
@@ -765,7 +771,7 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	if availableHeight < 5 {
 		availableHeight = 5
 	}
-	tableWidth := max(60, m.width-8)
+	tableWidth := max(60, m.width-6)
 	m.processTable.SetHeight(availableHeight)
 	m.processTable.SetWidth(tableWidth)
 	m.calculateTabBounds()
@@ -909,6 +915,8 @@ func (m Model) renderActiveTab() string {
 		return m.renderCPUView()
 	case TabMemory:
 		return m.renderMemoryView()
+	case TabNetwork:
+		return m.renderNetworkView()
 	case TabProcesses:
 		return m.renderProcessesView()
 	case TabTemperature:
@@ -1090,6 +1098,120 @@ func (m Model) renderMemoryView() string {
 		"\n",
 		PanelStyle.Width(m.width-4).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Swap "), "", swapBar.Render(), fmt.Sprintf("  Total: %s    Used: %s    Free: %s", system.FormatBytes(m.systemInfo.Memory.SwapTotal), system.FormatBytes(m.systemInfo.Memory.SwapUsed), system.FormatBytes(m.systemInfo.Memory.SwapFree)))),
 	)
+}
+
+func (m Model) renderNetworkView() string {
+	panelWidth := (m.width - 6) / 2
+	if panelWidth < 40 {
+		panelWidth = 40
+	}
+
+	downloadBar := widgets.NewBarGauge()
+	downloadBar.Value = 0
+	downloadBar.Width = panelWidth - 10
+	downloadBar.ShowPercent = false
+	downloadBar.ColorFunc = func(v float64) string { return Nord8 }
+	downloadSpeed := float64(m.systemInfo.Network.BytesRecvPerSec)
+	downloadBar.Value = downloadSpeed / (1024 * 1024)
+	downloadBar.Max = 100
+
+	uploadBar := widgets.NewBarGauge()
+	uploadBar.Value = 0
+	uploadBar.Width = panelWidth - 10
+	uploadBar.ShowPercent = false
+	uploadBar.ColorFunc = func(v float64) string { return Nord14 }
+	uploadSpeed := float64(m.systemInfo.Network.BytesSentPerSec)
+	uploadBar.Value = uploadSpeed / (1024 * 1024)
+	uploadBar.Max = 100
+
+	downloadPanel := PanelStyle.Width(panelWidth).Render(
+		lipgloss.JoinVertical(
+			lipgloss.Left,
+			PanelTitleStyle.Render(" Download "),
+			"",
+			lipgloss.NewStyle().Foreground(lipgloss.Color(Nord8)).Bold(true).Render(" ↓ ")+downloadBar.Render()+" "+system.FormatBytes(m.systemInfo.Network.BytesRecvPerSec)+"/s",
+		),
+	)
+
+	uploadPanel := PanelStyle.Width(panelWidth).Render(
+		lipgloss.JoinVertical(
+			lipgloss.Left,
+			PanelTitleStyle.Render(" Upload "),
+			"",
+			lipgloss.NewStyle().Foreground(lipgloss.Color(Nord14)).Bold(true).Render(" ↑ ")+uploadBar.Render()+" "+system.FormatBytes(m.systemInfo.Network.BytesSentPerSec)+"/s",
+		),
+	)
+
+	speedHistory := widgets.NewSparkline()
+	speedHistory.Width = m.width - 20
+	speedHistory.Height = 8
+	speedHistory.ShowAxis = true
+
+	if len(m.systemInfo.Network.DownloadHistory) > 0 || len(m.systemInfo.Network.UploadHistory) > 0 {
+		combined := make([]float64, 0, len(m.systemInfo.Network.DownloadHistory)+len(m.systemInfo.Network.UploadHistory))
+		maxLen := len(m.systemInfo.Network.DownloadHistory)
+		if len(m.systemInfo.Network.UploadHistory) > maxLen {
+			maxLen = len(m.systemInfo.Network.UploadHistory)
+		}
+		for i := 0; i < maxLen; i++ {
+			var val float64
+			if i < len(m.systemInfo.Network.DownloadHistory) {
+				val = m.systemInfo.Network.DownloadHistory[i]
+			}
+			if i < len(m.systemInfo.Network.UploadHistory) && m.systemInfo.Network.UploadHistory[i] > val {
+				val = m.systemInfo.Network.UploadHistory[i]
+			}
+			combined = append(combined, val/(1024*1024))
+		}
+		speedHistory.Data = combined
+		speedHistory.Color = Nord8
+	}
+	historyPanel := PanelStyle.Width(m.width - 4).Render(
+		lipgloss.JoinVertical(
+			lipgloss.Left,
+			PanelTitleStyle.Render(" Speed History "),
+			"",
+			speedHistory.Render(),
+		),
+	)
+
+	totalPanel := PanelStyle.Width(panelWidth).Render(
+		lipgloss.JoinVertical(
+			lipgloss.Left,
+			PanelTitleStyle.Render(" Total Transfer "),
+			"",
+			lipgloss.NewStyle().Foreground(lipgloss.Color(Nord8)).Render(" ↓ "+system.FormatBytes(m.systemInfo.Network.BytesRecv)),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(Nord14)).Render(" ↑ "+system.FormatBytes(m.systemInfo.Network.BytesSent)),
+		),
+	)
+
+	packetsPanel := PanelStyle.Width(panelWidth).Render(
+		lipgloss.JoinVertical(
+			lipgloss.Left,
+			PanelTitleStyle.Render(" Packets "),
+			"",
+			lipgloss.NewStyle().Foreground(lipgloss.Color(Nord8)).Render(" ↓ "+formatNumber(m.systemInfo.Network.PacketsRecv)),
+			lipgloss.NewStyle().Foreground(lipgloss.Color(Nord14)).Render(" ↑ "+formatNumber(m.systemInfo.Network.PacketsSent)),
+		),
+	)
+
+	topRow := lipgloss.JoinHorizontal(lipgloss.Top, downloadPanel, uploadPanel)
+	midRow := lipgloss.JoinHorizontal(lipgloss.Top, totalPanel, packetsPanel)
+
+	return lipgloss.JoinVertical(lipgloss.Left, historyPanel, "\n", topRow, "\n", midRow)
+}
+
+func formatNumber(n uint64) string {
+	if n >= 1_000_000_000 {
+		return fmt.Sprintf("%.2fB", float64(n)/1_000_000_000)
+	}
+	if n >= 1_000_000 {
+		return fmt.Sprintf("%.2fM", float64(n)/1_000_000)
+	}
+	if n >= 1_000 {
+		return fmt.Sprintf("%.2fK", float64(n)/1_000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 func (m Model) renderTemperatureView() string {
