@@ -101,7 +101,7 @@ Just run `./bin/monitor` in your Ghostty terminal.
 | `q` / `Ctrl+C` | Quit application |
 | `→` / `Tab` / `l` | Next tab |
 | `←` / `Shift+Tab` / `h` | Previous tab |
-| `1-5` | Switch to specific tab (1=Overview, 2=CPU, 3=Memory, 4=Processes, 5=Temperature) |
+| `1-6` | Switch to specific tab (1=Overview, 2=CPU, 3=Memory, 4=Processes, 5=Temperature, 6=Settings) |
 | `r` | Refresh data |
 | `?` | Toggle help |
 | `/` | Filter processes |
@@ -113,6 +113,15 @@ Just run `./bin/monitor` in your Ghostty terminal.
 | `Page Down` / `f` | Page down |
 | `Home` / `g` | Go to top |
 | `End` / `G` | Go to bottom |
+
+#### Settings Tab (Tab 6)
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` or `j/k` | Navigate settings |
+| `←` / `→` or `Enter` | Change setting value |
+| `1-4` | Quick select setting |
+| `r` | Reset to defaults |
 
 ### Mouse Controls
 
@@ -150,6 +159,15 @@ Temperature monitoring with:
 - Sensor readings (CPU, GPU, ANE, Battery)
 - Temperature history graph
 - Fan speed and control
+
+#### 6. Settings (Tab 6)
+Customize the application behavior:
+- **Update Interval**: How often to refresh data (500ms, 1s, 2s, 5s)
+- **Temperature Unit**: Display temperatures in Celsius or Fahrenheit
+- **Show System Procs**: Toggle visibility of system processes
+- **Max Processes**: Limit the number of processes shown (20, 50, 100, 200)
+
+Settings are automatically saved to `~/.config/monitor/config.json` after each change.
 
 ## Safety Features
 
