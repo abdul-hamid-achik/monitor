@@ -1,0 +1,44 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output files
+*.out
+
+# Go workspace file
+go.work
+
+# Dependency directories
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# Coverage
+*.prof
+*.out
+coverage.txt
+
+# Taskfile
+Taskfile~

@@ -1,0 +1,154 @@
+version: '3'
+
+silent: false
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build the monitor binary
+    cmds:
+      - echo "Building monitor..."
+      - go build -o bin/monitor ./cmd/monitor
+      - echo "Build complete."
+
+  build:release:
+    desc: Build optimized release binary
+    cmds:
+      - echo "Building release binary..."
+      - go build -ldflags="-s -w" -o bin/monitor ./cmd/monitor
+      - echo "Release build complete."
+
+  run:
+    desc: Run the monitor application
+    deps: [build]
+    cmds:
+      - ./bin/monitor
+
+  dev:
+    desc: Run in development mode with auto-reload
+    watch: true
+    sources:
+      - '**/*.go'
+      - go.mod
+      - go.sum
+    cmds:
+      - go build -o bin/monitor ./cmd/monitor
+      - ./bin/monitor
+
+  test:
+    desc: Run tests
+    cmds:
+      - echo "Running tests..."
+      - go test -v ./...
+
+  test:coverage:
+    desc: Run tests with coverage report
+    cmds:
+      - echo "Running tests with coverage..."
+      - go test -v -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+      - 'echo "Coverage report generated: coverage.html"'
+
+  lint:
+    desc: Run linter
+    cmds:
+      - echo "Running linter..."
+      - go vet ./...
+      - cmd: staticcheck ./...
+        ignore_error: true
+        silent: true
+
+  tidy:
+    desc: Tidy Go modules
+    cmds:
+      - echo "Tidying Go modules..."
+      - go mod tidy
+      - echo "Go modules tidied."
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - echo "Cleaning build artifacts..."
+      - rm -rf bin/monitor
+      - rm -f coverage.out coverage.html
+      - echo "Clean complete."
+
+  install:
+    desc: Install monitor system-wide to /usr/local/bin
+    deps: [build:release]
+    cmds:
+      - echo "Installing monitor to /usr/local/bin..."
+      - sudo cp bin/monitor /usr/local/bin/monitor
+      - echo "Installation complete."
+
+  uninstall:
+    desc: Uninstall monitor from system
+    cmds:
+      - echo "Uninstalling monitor from /usr/local/bin..."
+      - sudo rm -f /usr/local/bin/monitor
+      - echo "Uninstallation complete."
+
+  version:
+    desc: Show Go version and main dependencies
+    cmds:
+      - go version
+      - echo ""
+      - echo "Main dependencies:"
+      - go list -m all | grep -E "bubbletea|bubbles|lipgloss|gopsutil"
+
+  info:
+    desc: Show project information
+    cmds:
+      - echo "Monitor CLI - Terminal System Monitor for macOS"
+      - echo "================================================"
+      - echo ""
+      - 'echo "Binary: bin/monitor"'
+      - 'ls -lh bin/monitor 2>/dev/null || echo "Status: Not built yet"'
+      - echo ""
+      - echo "Run 'task run' to start the application"
+      - echo "Run 'task --list' to see all available tasks"
+
+  docs:
+    desc: Show documentation files
+    cmds:
+      - echo "Documentation files:"
+      - echo "  - README.md (Main documentation)"
+      - echo "  - QUICKSTART.md (Quick reference guide)"
+      - echo "  - DESIGN.md (UI mockups and architecture)"
+      - echo "  - CHANGELOG.md (Project changelog)"
+      - echo ""
+      - ls -lh *.md
+
+  all:
+    desc: Run full CI pipeline
+    deps: [tidy, lint, test, build:release]
+    cmds:
+      - echo ""
+      - echo "All checks passed!"
+
+  help:
+    desc: Show help and quick start guide
+    cmds:
+      - echo "Monitor CLI - Taskfile Help"
+      - echo "============================"
+      - echo ""
+      - echo "Quick Start:"
+      - echo "  task build    - Build the application"
+      - echo "  task run      - Run the application"
+      - echo "  task dev      - Development mode with watch"
+      - echo "  task clean    - Clean build artifacts"
+      - echo ""
+      - echo "Development:"
+      - echo "  task test     - Run tests"
+      - echo "  task lint     - Run linter"
+      - echo "  task tidy     - Tidy Go modules"
+      - echo ""
+      - echo "Deployment:"
+      - echo "  task install   - Install system-wide"
+      - echo "  task uninstall - Remove from system"
+      - echo ""
+      - echo "Run 'task --list' for all available tasks"
