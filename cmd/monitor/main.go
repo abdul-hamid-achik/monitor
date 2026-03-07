@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 
@@ -10,7 +11,20 @@ import (
 	"github.com/monitor/monitor/internal/ui"
 )
 
+// version is set by goreleaser during build
+var version = "dev"
+
 func main() {
+	// Parse command line flags
+	versionFlag := flag.Bool("version", false, "Print version information")
+	flag.Parse()
+
+	// Handle version flag
+	if *versionFlag {
+		fmt.Println(version)
+		os.Exit(0)
+	}
+
 	// Check if terminal supports true color
 	if !lipgloss.HasDarkBackground() {
 		fmt.Fprintln(os.Stderr, "Warning: This application is designed for dark terminals")
@@ -20,9 +34,8 @@ func main() {
 	model := ui.NewModel()
 	p := tea.NewProgram(
 		model,
-		tea.WithAltScreen(),        // Use alternate screen buffer
-		tea.WithMouseAllMotion(),   // Enable full mouse support
-		tea.WithANSICompressor(),   // Enable ANSI compression for better performance
+		tea.WithAltScreen(),      // Use alternate screen buffer
+		tea.WithMouseAllMotion(), // Enable full mouse support
 	)
 
 	if _, err := p.Run(); err != nil {
