@@ -204,11 +204,12 @@ func NewModel() Model {
 func (m *Model) setupProcessTable() {
 	columns := []table.Column{
 		{Title: "PID", Width: 8},
-		{Title: "Name", Width: 25},
-		{Title: "CPU%", Width: 8},
-		{Title: "Memory", Width: 12},
-		{Title: "Threads", Width: 8},
-		{Title: "User", Width: 15},
+		{Title: "Name", Width: 22},
+		{Title: "CPU%", Width: 7},
+		{Title: "Memory", Width: 10},
+		{Title: "Net I/O", Width: 10},
+		{Title: "Threads", Width: 7},
+		{Title: "User", Width: 12},
 	}
 	m.processTable = table.New(table.WithColumns(columns), table.WithHeight(20), table.WithFocused(true))
 	s := table.DefaultStyles()
@@ -654,18 +655,16 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if msg.Action == tea.MouseActionPress {
-		if msg.Y == 0 && m.width > 0 {
-			titleWidth := lipgloss.Width(TitleStyle.Render(" MONITOR "))
-			tabStart := titleWidth
-			for i, tabName := range TabNames {
-				tabWidth := lipgloss.Width(TabInactiveStyle.Render(" " + tabName + " "))
-				if msg.X >= tabStart && msg.X < tabStart+tabWidth {
+		// Use pre-calculated tabBounds for accurate click detection
+		if msg.Y == 0 && m.width > 0 && len(m.tabBounds) == len(TabNames) {
+			for i, bounds := range m.tabBounds {
+				if msg.X >= bounds.start && msg.X < bounds.end {
 					if m.activeTab != Tab(i) {
 						m.activeTab = Tab(i)
-						return m, nil
+						m.calculateTabBounds() // Recalculate with new active tab style
 					}
+					return m, nil
 				}
-				tabStart = tabStart + tabWidth + 1
 			}
 		}
 		if m.activeTab == TabProcesses && msg.Y >= 2 {
@@ -677,18 +676,19 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					x = 0
 				}
 				// Column boundaries including header cell padding(0,1): each col rendered width = col.Width + 2
-				// PID(10) Name(27) CPU%(10) Memory(14) Threads(10) User(17)
+				// PID(8) Name(22) CPU%(7) Memory(10) Net I/O(10) Threads(7) User(12)
 				colBounds := []struct {
 					end    int
 					name   string
 					defAsc bool
 				}{
 					{10, "pid", false},
-					{37, "name", true},
-					{47, "cpu", false},
-					{61, "memory", false},
-					{71, "threads", false},
-					{88, "user", true},
+					{34, "name", true},
+					{43, "cpu", false},
+					{55, "memory", false},
+					{67, "network", false},
+					{76, "threads", false},
+					{92, "user", true},
 				}
 				sortCol := "cpu"
 				defAsc := false
@@ -811,6 +811,8 @@ func (m *Model) updateProcessTable() {
 			less = procs[i].Threads < procs[j].Threads
 		case "user":
 			less = procs[i].User < procs[j].User
+		case "network":
+			less = (procs[i].BytesSent + procs[i].BytesRecv) < (procs[j].BytesSent + procs[j].BytesRecv)
 		default:
 			m.sortBy = "cpu"
 			m.sortAsc = false
@@ -823,19 +825,21 @@ func (m *Model) updateProcessTable() {
 	})
 	rows := make([]table.Row, 0, len(procs))
 	for _, p := range procs {
-		name := truncate(p.Name, 23)
+		name := truncate(p.Name, 20)
 		if m.selectedPids[p.PID] {
 			name = "▸ " + name
 		} else {
 			name = "  " + name
 		}
+		netIO := system.FormatBytes(p.BytesRecv) + "/" + system.FormatBytes(p.BytesSent)
 		rows = append(rows, table.Row{
 			fmt.Sprintf("%d", p.PID),
 			name,
 			fmt.Sprintf("%.1f", p.CPUPercent),
 			system.FormatBytes(p.Memory),
+			netIO,
 			fmt.Sprintf("%d", p.Threads),
-			truncate(p.User, 15),
+			truncate(p.User, 12),
 		})
 	}
 	m.processTable.SetRows(rows)

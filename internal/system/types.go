@@ -68,18 +68,21 @@ type NetworkInfo struct {
 
 // ProcessInfo contains process information
 type ProcessInfo struct {
-	PID           int32
-	Name          string
-	CPUPercent    float64
-	Memory        uint64
-	MemoryPercent float64
-	Threads       int32
-	User          string
-	Status        string
-	CreateTime    int64
-	Parent        int32
-	IsSystem      bool
-	IsProtected   bool // Cannot be killed safely
+	PID            int32
+	Name           string
+	CPUPercent     float64
+	Memory         uint64
+	MemoryPercent  float64
+	Threads        int32
+	User           string
+	Status         string
+	CreateTime     int64
+	Parent         int32
+	IsSystem       bool
+	IsProtected    bool // Cannot be killed safely
+	BytesSent      uint64 // Network bytes sent
+	BytesRecv      uint64 // Network bytes received
+	Connections    int32  // Active network connections
 }
 
 // SystemInfo aggregates all system metrics
