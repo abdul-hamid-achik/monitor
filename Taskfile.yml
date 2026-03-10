@@ -58,9 +58,7 @@ tasks:
     cmds:
       - echo "Running linter..."
       - go vet ./...
-      - cmd: staticcheck ./...
-        ignore_error: true
-        silent: true
+      - staticcheck ./...
 
   tidy:
     desc: Tidy Go modules

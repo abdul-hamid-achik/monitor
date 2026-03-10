@@ -319,11 +319,11 @@ func (c *Collector) getProcessInfo(ctx context.Context, p *process.Process) (Pro
 	// Determine if protected (critical system processes) using shared list
 	info.IsProtected = ProtectedProcessNames[info.Name] || info.PID == 1
 
-	// Get network I/O stats for this process
+	// Get per-process I/O stats
 	ioStats, err := p.IOCountersWithContext(ctx)
 	if err == nil && ioStats != nil {
-		info.BytesSent = ioStats.WriteBytes
-		info.BytesRecv = ioStats.ReadBytes
+		info.IOReadBytes = ioStats.ReadBytes
+		info.IOWriteBytes = ioStats.WriteBytes
 	}
 
 	// Get network connections for this process

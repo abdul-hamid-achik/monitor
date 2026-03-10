@@ -46,6 +46,31 @@ var TabNames = []string{
 	"Settings",
 }
 
+type processColumnSpec struct {
+	title  string
+	width  int
+	sortBy string
+	defAsc bool
+}
+
+var processTableSpecs = []processColumnSpec{
+	{title: "PID", width: 8, sortBy: "pid"},
+	{title: "Name", width: 22, sortBy: "name", defAsc: true},
+	{title: "CPU%", width: 7, sortBy: "cpu"},
+	{title: "Memory", width: 10, sortBy: "memory"},
+	{title: "I/O", width: 10, sortBy: "io"},
+	{title: "Threads", width: 7, sortBy: "threads"},
+	{title: "User", width: 12, sortBy: "user", defAsc: true},
+}
+
+type processLayout struct {
+	panelX     int
+	panelY     int
+	tableX     int
+	tableY     int
+	tableLines []string
+}
+
 // Context menu state
 type ContextMenuState int
 
@@ -104,14 +129,13 @@ type Model struct {
 	mouseEnabled bool
 
 	// Settings
-	settings         *config.Settings
-	selectedSetting  int
-	settingsSavedMsg bool
+	settings             *config.Settings
+	selectedSetting      int
+	statusMessage        string
+	statusMessageIsError bool
 
 	// Layout tracking for click detection
-	tabBounds        []struct{ start, end int }
-	processTableY    int
-	processTableRows int
+	tabBounds []struct{ start, end int }
 }
 
 // keyMap defines keyboard shortcuts
@@ -193,7 +217,7 @@ func NewModel() Model {
 
 	settings, err := config.Load()
 	if err != nil {
-		settings = &config.DefaultSettings
+		settings = config.Default()
 	}
 	m.settings = settings
 	m.mouseEnabled = settings.MouseEnabled
@@ -202,20 +226,28 @@ func NewModel() Model {
 }
 
 func (m *Model) setupProcessTable() {
-	columns := []table.Column{
-		{Title: "PID", Width: 8},
-		{Title: "Name", Width: 22},
-		{Title: "CPU%", Width: 7},
-		{Title: "Memory", Width: 10},
-		{Title: "Net I/O", Width: 10},
-		{Title: "Threads", Width: 7},
-		{Title: "User", Width: 12},
+	columns := make([]table.Column, 0, len(processTableSpecs))
+	for _, spec := range processTableSpecs {
+		columns = append(columns, table.Column{Title: spec.title, Width: spec.width})
 	}
 	m.processTable = table.New(table.WithColumns(columns), table.WithHeight(20), table.WithFocused(true))
 	s := table.DefaultStyles()
 	s.Header = s.Header.BorderStyle(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color(Nord9)).BorderBottom(true).Bold(true).Foreground(lipgloss.Color(Nord8))
 	s.Selected = s.Selected.Foreground(lipgloss.Color(Nord0)).Background(lipgloss.Color(Nord8)).Bold(true)
 	m.processTable.SetStyles(s)
+}
+
+func (m Model) processViewTitle() string {
+	if len(m.selectedPids) > 0 {
+		return fmt.Sprintf(" Processes - %d selected │ Space:toggle Enter:menu k:kill x:force-kill ", len(m.selectedPids))
+	}
+	return " Processes - Click header to sort, Right-click for menu "
+}
+
+func (m Model) renderProcessesPanel() string {
+	return PanelStyle.Width(m.width - 4).Render(
+		lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(m.processViewTitle()), "", m.processTable.View()),
+	)
 }
 
 func (m Model) Init() tea.Cmd {
@@ -281,6 +313,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.selectedPids) > 0 {
 			m.selectedPids = make(map[int32]bool)
 			m.lastSelectedPid = 0
+			m.updateProcessTable()
 			return m, nil
 		}
 		m.contextMenuState = ContextMenuNone
@@ -288,6 +321,12 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.showKillConfirm {
 		return m.handleKillConfirmKeys(msg)
+	}
+	if m.activeTab == TabSettings {
+		switch msg.String() {
+		case "1", "2", "3", "4":
+			return m.handleSettingsKeys(msg)
+		}
 	}
 	switch msg.String() {
 	case "1":
@@ -351,39 +390,29 @@ func (m Model) handleContextMenuKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.contextMenuState = ContextMenuNone
 		return m, nil
 	case "1":
-		if m.contextMenuState == ContextMenuProcess {
-			m.selectedPids = map[int32]bool{m.contextMenuPid: true}
-			m.forceKill = false
-			m.killConfirmation = system.CheckKillSafety(m.getSelectedPidsSlice())
-			m.showKillConfirm = true
-			m.contextMenuState = ContextMenuNone
-		}
+		m.openContextMenuKill(false)
 		return m, nil
 	case "2":
-		if m.contextMenuState == ContextMenuProcess {
-			m.selectedPids = map[int32]bool{m.contextMenuPid: true}
-			m.forceKill = true
-			m.killConfirmation = system.CheckKillSafety(m.getSelectedPidsSlice())
-			m.showKillConfirm = true
-			m.contextMenuState = ContextMenuNone
-		}
+		m.openContextMenuKill(true)
 		return m, nil
 	case "3", "c", "C":
-		clipboard.WriteAll(fmt.Sprintf("%d", m.contextMenuPid))
+		if err := clipboard.WriteAll(fmt.Sprintf("%d", m.contextMenuPid)); err != nil {
+			m.setStatusMessage(fmt.Sprintf("Copy failed: %v", err), true)
+		} else {
+			m.setStatusMessage("PID copied to clipboard", false)
+		}
 		m.contextMenuState = ContextMenuNone
 		return m, nil
 	case "4", "n", "N":
-		clipboard.WriteAll(m.contextMenuName)
+		if err := clipboard.WriteAll(m.contextMenuName); err != nil {
+			m.setStatusMessage(fmt.Sprintf("Copy failed: %v", err), true)
+		} else {
+			m.setStatusMessage("Process name copied to clipboard", false)
+		}
 		m.contextMenuState = ContextMenuNone
 		return m, nil
 	case "enter", "k", "K":
-		if m.contextMenuState == ContextMenuProcess {
-			m.selectedPids = map[int32]bool{m.contextMenuPid: true}
-			m.forceKill = false
-			m.killConfirmation = system.CheckKillSafety(m.getSelectedPidsSlice())
-			m.showKillConfirm = true
-			m.contextMenuState = ContextMenuNone
-		}
+		m.openContextMenuKill(false)
 		return m, nil
 	}
 	return m, nil
@@ -391,14 +420,35 @@ func (m Model) handleContextMenuKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleProcessKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
+	case key.Matches(msg, keys.SelectAll):
+		m.selectAllProcesses()
+		m.updateProcessTable()
+		return m, nil
+	case key.Matches(msg, keys.ClearSel):
+		m.selectedPids = make(map[int32]bool)
+		m.lastSelectedPid = 0
+		m.updateProcessTable()
+		return m, nil
+	case msg.String() == " " || msg.String() == "space":
+		pid, ok := m.selectedRowPID()
+		if !ok {
+			return m, nil
+		}
+		if m.selectedPids[pid] {
+			delete(m.selectedPids, pid)
+			if m.lastSelectedPid == pid {
+				m.lastSelectedPid = 0
+			}
+		} else {
+			m.selectedPids[pid] = true
+			m.lastSelectedPid = pid
+		}
+		m.updateProcessTable()
+		return m, nil
 	case key.Matches(msg, keys.Kill):
 		// Kill all selected processes, or the cursor row if none selected
 		if len(m.selectedPids) == 0 {
-			if row := m.processTable.SelectedRow(); len(row) > 0 {
-				var pid int32
-				if _, err := fmt.Sscanf(row[0], "%d", &pid); err != nil {
-					return m, nil
-				}
+			if pid, ok := m.selectedRowPID(); ok {
 				m.selectedPids = map[int32]bool{pid: true}
 				m.lastSelectedPid = pid
 			}
@@ -411,11 +461,7 @@ func (m Model) handleProcessKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, keys.ForceKill):
 		if len(m.selectedPids) == 0 {
-			if row := m.processTable.SelectedRow(); len(row) > 0 {
-				var pid int32
-				if _, err := fmt.Sscanf(row[0], "%d", &pid); err != nil {
-					return m, nil
-				}
+			if pid, ok := m.selectedRowPID(); ok {
 				m.selectedPids = map[int32]bool{pid: true}
 				m.lastSelectedPid = pid
 			}
@@ -446,16 +492,20 @@ func (m Model) handleProcessKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, keys.Enter):
 		if row := m.processTable.SelectedRow(); len(row) > 0 {
-			var pid int32
-			if _, err := fmt.Sscanf(row[0], "%d", &pid); err != nil {
+			pid, ok := m.selectedRowPID()
+			if !ok {
 				return m, nil
+			}
+			name := row[1]
+			cursor := m.processTable.Cursor()
+			displayed := m.displayProcesses()
+			if cursor >= 0 && cursor < len(displayed) {
+				name = displayed[cursor].Name
 			}
 			m.contextMenuState = ContextMenuProcess
 			m.contextMenuPid = pid
-			m.contextMenuName = row[1]
-			cursor := m.processTable.Cursor()
-			m.contextMenuX = 30
-			m.contextMenuY = 6 + cursor
+			m.contextMenuName = name
+			m.clampContextMenuPosition(30, 6+cursor)
 		}
 		return m, nil
 	}
@@ -494,9 +544,10 @@ func (m Model) handleSettingsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.changeSettingPrev(m.selectedSetting)
 		return m, nil
 	case "r", "R":
-		m.settings = &config.DefaultSettings
+		m.settings = config.Default()
 		m.saveSettings()
 		m.mouseEnabled = m.settings.MouseEnabled
+		m.updateProcessTable()
 		return m, nil
 	}
 	return m, nil
@@ -538,6 +589,7 @@ func (m *Model) changeSetting(idx int) {
 	}
 	m.saveSettings()
 	m.mouseEnabled = m.settings.MouseEnabled
+	m.updateProcessTable()
 }
 
 func (m *Model) changeSettingPrev(idx int) {
@@ -576,6 +628,7 @@ func (m *Model) changeSettingPrev(idx int) {
 	}
 	m.saveSettings()
 	m.mouseEnabled = m.settings.MouseEnabled
+	m.updateProcessTable()
 }
 
 func (m *Model) saveSettings() {
@@ -583,9 +636,150 @@ func (m *Model) saveSettings() {
 		return
 	}
 	if err := m.settings.Save(); err != nil {
+		m.setStatusMessage(fmt.Sprintf("Failed to save settings: %v", err), true)
 		return
 	}
-	m.settingsSavedMsg = true
+	m.setStatusMessage("Settings saved", false)
+}
+
+func (m *Model) openContextMenuKill(force bool) {
+	if m.contextMenuState != ContextMenuProcess {
+		return
+	}
+
+	m.selectedPids = map[int32]bool{m.contextMenuPid: true}
+	m.lastSelectedPid = m.contextMenuPid
+	m.forceKill = force
+	m.killConfirmation = system.CheckKillSafety(m.getSelectedPidsSlice())
+	m.showKillConfirm = true
+	m.contextMenuState = ContextMenuNone
+	m.updateProcessTable()
+}
+
+func (m *Model) processLayout() processLayout {
+	const (
+		processPanelY        = 1
+		processPanelBorder   = 1
+		processPanelPaddingX = 2
+		processPanelPaddingY = 1
+	)
+
+	titleHeight := strings.Count(PanelTitleStyle.Render(m.processViewTitle()), "\n") + 1
+	panel := m.renderProcessesPanel()
+	panelWidth := lipgloss.Width(panel)
+	panelX := 0
+	if m.width > panelWidth {
+		panelX = (m.width - panelWidth) / 2
+	}
+
+	return processLayout{
+		panelX:     panelX,
+		panelY:     processPanelY,
+		tableX:     panelX + processPanelBorder + processPanelPaddingX,
+		tableY:     processPanelY + processPanelBorder + processPanelPaddingY + titleHeight + 1,
+		tableLines: strings.Split(m.processTable.View(), "\n"),
+	}
+}
+
+func (m Model) processColumnHit(x int) (string, bool) {
+	columnEnd := 0
+	for _, spec := range processTableSpecs {
+		columnEnd += spec.width + 2
+		if x < columnEnd {
+			return spec.sortBy, spec.defAsc
+		}
+	}
+	return "cpu", false
+}
+
+func (m Model) processRowHit(layout processLayout, x, y int) (int, bool) {
+	const tableHeaderLines = 2
+
+	rowIndex := y - (layout.tableY + tableHeaderLines)
+	if rowIndex < 0 {
+		return 0, false
+	}
+
+	lineIndex := tableHeaderLines + rowIndex
+	if lineIndex < 0 || lineIndex >= len(layout.tableLines) {
+		return 0, false
+	}
+
+	rowWidth := ansi.StringWidth(layout.tableLines[lineIndex])
+	if x < layout.tableX || x >= layout.tableX+rowWidth {
+		return 0, false
+	}
+
+	return rowIndex, true
+}
+
+func (m Model) handleContextMenuMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
+	menu := m.renderContextMenu()
+	menuLines := strings.Split(menu, "\n")
+	menuWidth := 0
+	for _, line := range menuLines {
+		menuWidth = max(menuWidth, ansi.StringWidth(line))
+	}
+	menuHeight := len(menuLines)
+
+	if msg.X < m.contextMenuX || msg.X >= m.contextMenuX+menuWidth || msg.Y < m.contextMenuY || msg.Y >= m.contextMenuY+menuHeight {
+		m.contextMenuState = ContextMenuNone
+		return m, nil
+	}
+
+	line := menuLines[msg.Y-m.contextMenuY]
+	switch {
+	case strings.Contains(line, "[1] Kill"):
+		m.openContextMenuKill(false)
+	case strings.Contains(line, "[2] Force Kill"):
+		m.openContextMenuKill(true)
+	case strings.Contains(line, "[3] Copy PID"):
+		if err := clipboard.WriteAll(fmt.Sprintf("%d", m.contextMenuPid)); err != nil {
+			m.setStatusMessage(fmt.Sprintf("Copy failed: %v", err), true)
+		} else {
+			m.setStatusMessage("PID copied to clipboard", false)
+		}
+		m.contextMenuState = ContextMenuNone
+	case strings.Contains(line, "[4] Copy Name"):
+		if err := clipboard.WriteAll(m.contextMenuName); err != nil {
+			m.setStatusMessage(fmt.Sprintf("Copy failed: %v", err), true)
+		} else {
+			m.setStatusMessage("Process name copied to clipboard", false)
+		}
+		m.contextMenuState = ContextMenuNone
+	case strings.Contains(line, "[Esc] Close"):
+		m.contextMenuState = ContextMenuNone
+	}
+
+	return m, nil
+}
+
+func (m *Model) clampContextMenuPosition(x, y int) {
+	menuLines := strings.Split(m.renderContextMenu(), "\n")
+	menuWidth := 0
+	for _, line := range menuLines {
+		menuWidth = max(menuWidth, ansi.StringWidth(line))
+	}
+	menuHeight := len(menuLines)
+
+	maxX := max(0, m.width-menuWidth)
+	maxY := max(0, m.height-menuHeight-1)
+
+	if x < 0 {
+		x = 0
+	}
+	if y < 0 {
+		y = 0
+	}
+	if x > maxX {
+		x = maxX
+	}
+	if y > maxY {
+		y = maxY
+	}
+
+	m.contextMenuX = x
+	m.contextMenuY = y
 }
 
 func (m Model) handleKillConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -594,8 +788,11 @@ func (m Model) handleKillConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showKillConfirm = false
 		m.selectedPids = make(map[int32]bool)
 		m.forceKill = false
+		m.updateProcessTable()
 		return m, nil
 	case "y", "Y":
+		killed := 0
+		skipped := 0
 		killErrors := []string{}
 		for pid := range m.selectedPids {
 			protected := false
@@ -608,15 +805,18 @@ func (m Model) handleKillConfirmKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if !protected {
 				if err := system.KillProcess(pid, m.forceKill); err != nil {
 					killErrors = append(killErrors, fmt.Sprintf("PID %d: %v", pid, err))
+					continue
 				}
+				killed++
+				continue
 			}
+			skipped++
 		}
-		if len(killErrors) > 0 {
-			_ = killErrors
-		}
+		m.setKillStatus(killed, skipped, killErrors)
 		m.showKillConfirm = false
 		m.selectedPids = make(map[int32]bool)
 		m.forceKill = false
+		m.updateProcessTable()
 		return m, m.fetchSystemInfo()
 	}
 	return m, nil
@@ -627,12 +827,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.contextMenuState != ContextMenuNone && msg.Action == tea.MouseActionPress {
-		// Menu is positioned at contextMenuX/Y; rendered width ~34, height ~13
-		menuWidth, menuHeight := 34, 13
-		if msg.X < m.contextMenuX || msg.X > m.contextMenuX+menuWidth || msg.Y < m.contextMenuY || msg.Y > m.contextMenuY+menuHeight {
-			m.contextMenuState = ContextMenuNone
-		}
-		return m, nil
+		return m.handleContextMenuMouse(msg)
 	}
 	if msg.Action == tea.MouseActionPress {
 		switch msg.Button {
@@ -667,88 +862,55 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		if m.activeTab == TabProcesses && msg.Y >= 2 {
-			// Header row is at Y=6 (border+padding+title+empty+header)
-			if msg.Y == 6 {
-				// Panel offset: border(1) + padding(2) = 3 chars
-				x := msg.X - 3
-				if x < 0 {
-					x = 0
-				}
-				// Column boundaries including header cell padding(0,1): each col rendered width = col.Width + 2
-				// PID(8) Name(22) CPU%(7) Memory(10) Net I/O(10) Threads(7) User(12)
-				colBounds := []struct {
-					end    int
-					name   string
-					defAsc bool
-				}{
-					{10, "pid", false},
-					{34, "name", true},
-					{43, "cpu", false},
-					{55, "memory", false},
-					{67, "network", false},
-					{76, "threads", false},
-					{92, "user", true},
-				}
-				sortCol := "cpu"
-				defAsc := false
-				for _, col := range colBounds {
-					if x < col.end {
-						sortCol = col.name
-						defAsc = col.defAsc
-						break
+		if m.activeTab == TabProcesses {
+			layout := m.processLayout()
+			if len(layout.tableLines) > 0 && msg.Y == layout.tableY {
+				headerWidth := ansi.StringWidth(layout.tableLines[0])
+				if msg.X >= layout.tableX && msg.X < layout.tableX+headerWidth {
+					sortCol, defAsc := m.processColumnHit(msg.X - layout.tableX)
+					if m.sortBy == sortCol {
+						m.sortAsc = !m.sortAsc
+					} else {
+						m.sortBy = sortCol
+						m.sortAsc = defAsc
 					}
-				}
-				if m.sortBy == sortCol {
-					m.sortAsc = !m.sortAsc
-				} else {
-					m.sortBy = sortCol
-					m.sortAsc = defAsc
-				}
-				m.sortProcesses()
-				return m, nil
-			}
-			// Handle process row selection
-			// Layout: header(1) + newline(1) + border(1) + padding(1) + title(1) + empty(1) + tableHeader(1) + headerBorder(1) = 8 lines before data
-			// Data rows start at Y=8, so row index = msg.Y - 8
-			cursorIndex := msg.Y - 8
-			rows := m.processTable.Rows()
-			if cursorIndex >= 0 && cursorIndex < len(rows) {
-				var clickedPid int32
-				if _, err := fmt.Sscanf(rows[cursorIndex][0], "%d", &clickedPid); err != nil {
+					m.sortProcesses()
 					return m, nil
 				}
+			}
+
+			cursorIndex, ok := m.processRowHit(layout, msg.X, msg.Y)
+			displayed := m.displayProcesses()
+			if ok && cursorIndex < len(displayed) {
+				clickedProc := displayed[cursorIndex]
 				hasShift, hasCtrl := msg.Shift, msg.Ctrl || msg.Alt
 				switch {
 				case hasShift && m.lastSelectedPid != 0:
-					// Clear previous selection, then select range (like macOS)
 					m.selectedPids = make(map[int32]bool)
-					m.selectRange(m.lastSelectedPid, clickedPid)
+					m.selectRange(m.lastSelectedPid, clickedProc.PID)
 					m.processTable.SetCursor(cursorIndex)
 				case hasCtrl:
-					if m.selectedPids[clickedPid] {
-						delete(m.selectedPids, clickedPid)
+					if m.selectedPids[clickedProc.PID] {
+						delete(m.selectedPids, clickedProc.PID)
 					} else {
-						m.selectedPids[clickedPid] = true
-						m.lastSelectedPid = clickedPid
+						m.selectedPids[clickedProc.PID] = true
+						m.lastSelectedPid = clickedProc.PID
 					}
 					m.processTable.SetCursor(cursorIndex)
 				default:
 					m.selectedPids = make(map[int32]bool)
-					m.selectedPids[clickedPid] = true
-					m.lastSelectedPid = clickedPid
+					m.selectedPids[clickedProc.PID] = true
+					m.lastSelectedPid = clickedProc.PID
 					m.processTable.SetCursor(cursorIndex)
 				}
+				m.updateProcessTable()
 				if msg.Button == tea.MouseButtonRight {
 					m.contextMenuState = ContextMenuProcess
-					m.contextMenuPid = clickedPid
-					m.contextMenuName = rows[cursorIndex][1]
-					m.contextMenuY = msg.Y + 1
-					m.contextMenuX = msg.X - 25
-					if m.contextMenuX < 0 {
-						m.contextMenuX = 0
-					}
+					m.contextMenuPid = clickedProc.PID
+					m.contextMenuName = clickedProc.Name
+					m.clampContextMenuPosition(msg.X-25, msg.Y+1)
 				}
+				return m, nil
 			}
 		}
 	}
@@ -794,35 +956,7 @@ func (m *Model) sortProcesses() {
 }
 
 func (m *Model) updateProcessTable() {
-	procs := make([]system.ProcessInfo, len(m.systemInfo.Processes))
-	copy(procs, m.systemInfo.Processes)
-	sort.Slice(procs, func(i, j int) bool {
-		var less bool
-		switch m.sortBy {
-		case "pid":
-			less = procs[i].PID < procs[j].PID
-		case "name":
-			less = procs[i].Name < procs[j].Name
-		case "cpu":
-			less = procs[i].CPUPercent < procs[j].CPUPercent
-		case "memory":
-			less = procs[i].Memory < procs[j].Memory
-		case "threads":
-			less = procs[i].Threads < procs[j].Threads
-		case "user":
-			less = procs[i].User < procs[j].User
-		case "network":
-			less = (procs[i].BytesSent + procs[i].BytesRecv) < (procs[j].BytesSent + procs[j].BytesRecv)
-		default:
-			m.sortBy = "cpu"
-			m.sortAsc = false
-			less = procs[i].CPUPercent < procs[j].CPUPercent
-		}
-		if m.sortAsc {
-			return less
-		}
-		return !less
-	})
+	procs := m.displayProcesses()
 	rows := make([]table.Row, 0, len(procs))
 	for _, p := range procs {
 		name := truncate(p.Name, 20)
@@ -831,18 +965,24 @@ func (m *Model) updateProcessTable() {
 		} else {
 			name = "  " + name
 		}
-		netIO := system.FormatBytes(p.BytesRecv) + "/" + system.FormatBytes(p.BytesSent)
 		rows = append(rows, table.Row{
 			fmt.Sprintf("%d", p.PID),
 			name,
 			fmt.Sprintf("%.1f", p.CPUPercent),
 			system.FormatBytes(p.Memory),
-			netIO,
+			system.FormatBytes(p.IOReadBytes + p.IOWriteBytes),
 			fmt.Sprintf("%d", p.Threads),
 			truncate(p.User, 12),
 		})
 	}
 	m.processTable.SetRows(rows)
+	if len(rows) == 0 {
+		m.processTable.SetCursor(0)
+		return
+	}
+	if cursor := m.processTable.Cursor(); cursor >= len(rows) {
+		m.processTable.SetCursor(len(rows) - 1)
+	}
 }
 
 func (m Model) View() string {
@@ -970,18 +1110,12 @@ func (m *Model) calculateTabBounds() {
 	for i := range TabNames {
 		tabWidth := lipgloss.Width(tabs[i])
 		m.tabBounds[i].start, m.tabBounds[i].end = tabStart, tabStart+tabWidth
-		tabStart = tabStart + tabWidth + 1
+		tabStart += tabWidth
 	}
 }
 
 func (m Model) renderProcessesView() string {
-	title := " Processes - Click header to sort, Right-click for menu "
-	if len(m.selectedPids) > 0 {
-		title = fmt.Sprintf(" Processes - %d selected │ Enter:menu k:kill x:force-kill ", len(m.selectedPids))
-	}
-	panel := PanelStyle.Width(m.width - 4).Render(
-		lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(title), "", m.processTable.View()),
-	)
+	panel := m.renderProcessesPanel()
 	return lipgloss.PlaceHorizontal(m.width, lipgloss.Center, panel)
 }
 
@@ -1044,12 +1178,12 @@ func (m Model) renderTopProcesses(n int) string {
 	header := lipgloss.NewStyle().Foreground(lipgloss.Color(Nord8)).Bold(true).Render(fmt.Sprintf("  %-8s %-30s %-8s %-12s %-8s %-15s", "PID", "Name", "CPU%", "Memory", "Threads", "User"))
 	rows = append(rows, header)
 	rows = append(rows, strings.Repeat("─", m.width-8))
-	for i, p := range m.systemInfo.Processes {
-		if i >= n {
-			break
-		}
+	for _, p := range m.topProcesses(n) {
 		row := fmt.Sprintf("  %-8s %-30s %-8s %-12s %-8s %-15s", fmt.Sprintf("%d", p.PID), truncate(p.Name, 30), fmt.Sprintf("%.1f", p.CPUPercent), system.FormatBytes(p.Memory), fmt.Sprintf("%d", p.Threads), truncate(p.User, 15))
 		rows = append(rows, lipgloss.NewStyle().Foreground(lipgloss.Color(Nord4)).Render(row))
+	}
+	if len(rows) == 2 {
+		rows = append(rows, lipgloss.NewStyle().Foreground(lipgloss.Color(Nord13)).Render("  No processes match the current settings"))
 	}
 	return PanelStyle.Width(m.width - 4).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Top Processes "), "", strings.Join(rows, "\n")))
 }
@@ -1229,7 +1363,7 @@ func (m Model) renderTemperatureView() string {
 		fmt.Sprintf("  Battery:      %s  %s", m.formatTemp(m.systemInfo.Temperature.Battery), getTempStatus(m.systemInfo.Temperature.Battery)),
 	}
 	sensorsPanel := PanelStyle.Width((m.width - 6) / 2).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Sensor Readings "), "", strings.Join(sensors, "\n")))
-	fanPanel := PanelStyle.Width((m.width - 6) / 2).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Fan Control "), "", fmt.Sprintf("  Speed: %d RPM", m.systemInfo.Temperature.FanRPM), fmt.Sprintf("  Mode: %s", m.systemInfo.Temperature.FanMode), fmt.Sprintf("  Max: 6000 RPM")))
+	fanPanel := PanelStyle.Width((m.width - 6) / 2).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Fan Telemetry "), "", fmt.Sprintf("  Speed: %d RPM", m.systemInfo.Temperature.FanRPM), fmt.Sprintf("  Mode: %s", m.systemInfo.Temperature.FanMode), "  Max: 6000 RPM"))
 	historyPanel := PanelStyle.Width(m.width - 4).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Temperature History "), "", tempSpark.Render()))
 	return lipgloss.JoinVertical(lipgloss.Left, historyPanel, "\n", lipgloss.JoinHorizontal(lipgloss.Top, sensorsPanel, fanPanel))
 }
@@ -1301,11 +1435,6 @@ func (m Model) renderSettingsView() string {
 	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(Nord6)).Render("  ↑/↓ or j/k: Navigate  ←/→ or Enter: Change value"))
 	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(Nord6)).Render("  r: Reset to defaults"))
 
-	if m.settingsSavedMsg {
-		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(Nord14)).Bold(true).Render("  ✓ Settings saved"))
-	}
-
 	return PanelStyle.Width(m.width - 4).Render(strings.Join(lines, "\n"))
 }
 
@@ -1347,20 +1476,164 @@ func (m Model) renderKillConfirmation() string {
 }
 
 func (m Model) renderStatusBar() string {
+	displayedProcesses, totalProcesses := m.processCounts()
+	processCount := fmt.Sprintf("Processes: %d", displayedProcesses)
+	if displayedProcesses != totalProcesses {
+		processCount = fmt.Sprintf("Processes: %d/%d", displayedProcesses, totalProcesses)
+	}
 	sortIndicator := ""
 	if m.activeTab == TabProcesses {
 		sortOrder := "↓"
 		if m.sortAsc {
 			sortOrder = "↑"
 		}
-		sortIndicator = fmt.Sprintf(" │ Sort: %s %s", m.sortBy, sortOrder)
+		sortIndicator = fmt.Sprintf(" │ Sort: %s %s", m.sortLabel(), sortOrder)
 	}
 	selCount := ""
 	if len(m.selectedPids) > 0 {
 		selCount = fmt.Sprintf(" │ Selected: %d", len(m.selectedPids))
 	}
-	status := fmt.Sprintf(" Processes: %d  │  CPU: %.1f%%  │  Memory: %.1f%%  │  Update: %s  │  Mouse: %s%s%s", len(m.systemInfo.Processes), m.systemInfo.CPU.UsagePercent, m.systemInfo.Memory.UsagePercent, m.lastUpdate.Format("15:04:05"), map[bool]string{true: "ON", false: "OFF"}[m.mouseEnabled], sortIndicator, selCount)
+	message := ""
+	if m.statusMessage != "" {
+		messageStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(Nord14)).Bold(true)
+		if m.statusMessageIsError {
+			messageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(Nord11)).Bold(true)
+		}
+		message = messageStyle.Render(m.statusMessage) + " │ "
+	}
+	lastUpdate := m.lastUpdate
+	if !m.systemInfo.LastUpdate.IsZero() {
+		lastUpdate = m.systemInfo.LastUpdate
+	}
+	status := fmt.Sprintf(" %s%s  │  CPU: %.1f%%  │  Memory: %.1f%%  │  Update: %s  │  Mouse: %s%s%s", message, processCount, m.systemInfo.CPU.UsagePercent, m.systemInfo.Memory.UsagePercent, lastUpdate.Format("15:04:05"), map[bool]string{true: "ON", false: "OFF"}[m.mouseEnabled], sortIndicator, selCount)
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(Nord6)).Background(lipgloss.Color(Nord2)).Bold(true).Width(m.width).Render(status)
+}
+
+func (m Model) filteredProcesses() []system.ProcessInfo {
+	showSystemProcesses := config.DefaultSettings.ShowSystemProcesses
+	if m.settings != nil {
+		showSystemProcesses = m.settings.ShowSystemProcesses
+	}
+
+	procs := make([]system.ProcessInfo, 0, len(m.systemInfo.Processes))
+	for _, proc := range m.systemInfo.Processes {
+		if !showSystemProcesses && proc.IsSystem {
+			continue
+		}
+		procs = append(procs, proc)
+	}
+
+	return procs
+}
+
+func (m Model) displayProcesses() []system.ProcessInfo {
+	procs := m.filteredProcesses()
+	m.sortProcessSlice(procs)
+
+	maxProcesses := config.DefaultSettings.MaxProcesses
+	if m.settings != nil && m.settings.MaxProcesses > 0 {
+		maxProcesses = m.settings.MaxProcesses
+	}
+	if maxProcesses > 0 && len(procs) > maxProcesses {
+		procs = procs[:maxProcesses]
+	}
+
+	return procs
+}
+
+func (m Model) topProcesses(limit int) []system.ProcessInfo {
+	procs := m.filteredProcesses()
+	sort.SliceStable(procs, func(i, j int) bool {
+		cmp := compareFloat64(procs[i].CPUPercent, procs[j].CPUPercent)
+		if cmp == 0 {
+			return procs[i].PID < procs[j].PID
+		}
+		return cmp > 0
+	})
+	if limit > 0 && len(procs) > limit {
+		procs = procs[:limit]
+	}
+	return procs
+}
+
+func (m Model) processCounts() (displayed int, total int) {
+	total = len(m.filteredProcesses())
+	displayed = total
+	maxProcesses := config.DefaultSettings.MaxProcesses
+	if m.settings != nil && m.settings.MaxProcesses > 0 {
+		maxProcesses = m.settings.MaxProcesses
+	}
+	if maxProcesses > 0 && displayed > maxProcesses {
+		displayed = maxProcesses
+	}
+	return displayed, total
+}
+
+func (m Model) sortLabel() string {
+	switch m.sortBy {
+	case "pid":
+		return "PID"
+	case "name":
+		return "Name"
+	case "memory":
+		return "Memory"
+	case "threads":
+		return "Threads"
+	case "user":
+		return "User"
+	case "io":
+		return "I/O"
+	default:
+		return "CPU"
+	}
+}
+
+func (m Model) selectedRowPID() (int32, bool) {
+	row := m.processTable.SelectedRow()
+	if len(row) == 0 {
+		return 0, false
+	}
+
+	var pid int32
+	if _, err := fmt.Sscanf(row[0], "%d", &pid); err != nil {
+		return 0, false
+	}
+
+	return pid, true
+}
+
+func (m *Model) sortProcessSlice(procs []system.ProcessInfo) {
+	sort.SliceStable(procs, func(i, j int) bool {
+		cmp := m.compareProcesses(procs[i], procs[j])
+		if m.sortAsc {
+			return cmp < 0
+		}
+		return cmp > 0
+	})
+}
+
+func (m *Model) compareProcesses(left, right system.ProcessInfo) int {
+	var cmp int
+	switch m.sortBy {
+	case "pid":
+		cmp = compareInt32(left.PID, right.PID)
+	case "name":
+		cmp = strings.Compare(strings.ToLower(left.Name), strings.ToLower(right.Name))
+	case "memory":
+		cmp = compareUint64(left.Memory, right.Memory)
+	case "threads":
+		cmp = compareInt32(left.Threads, right.Threads)
+	case "user":
+		cmp = strings.Compare(strings.ToLower(left.User), strings.ToLower(right.User))
+	case "io":
+		cmp = compareUint64(left.IOReadBytes+left.IOWriteBytes, right.IOReadBytes+right.IOWriteBytes)
+	default:
+		cmp = compareFloat64(left.CPUPercent, right.CPUPercent)
+	}
+	if cmp == 0 {
+		return compareInt32(left.PID, right.PID)
+	}
+	return cmp
 }
 
 func (m *Model) getSelectedPidsSlice() []int32 {
@@ -1373,17 +1646,21 @@ func (m *Model) getSelectedPidsSlice() []int32 {
 
 func (m *Model) selectAllProcesses() {
 	m.selectedPids = make(map[int32]bool)
-	for _, p := range m.systemInfo.Processes {
+	displayed := m.displayProcesses()
+	for _, p := range displayed {
 		m.selectedPids[p.PID] = true
 	}
-	if len(m.systemInfo.Processes) > 0 {
-		m.lastSelectedPid = m.systemInfo.Processes[0].PID
+	if len(displayed) > 0 {
+		m.lastSelectedPid = displayed[0].PID
+		return
 	}
+	m.lastSelectedPid = 0
 }
 
 func (m *Model) selectRange(startPid, endPid int32) {
+	displayed := m.displayProcesses()
 	startIdx, endIdx := -1, -1
-	for i, p := range m.systemInfo.Processes {
+	for i, p := range displayed {
 		if p.PID == startPid {
 			startIdx = i
 		}
@@ -1398,7 +1675,7 @@ func (m *Model) selectRange(startPid, endPid int32) {
 		startIdx, endIdx = endIdx, startIdx
 	}
 	for i := startIdx; i <= endIdx; i++ {
-		m.selectedPids[m.systemInfo.Processes[i].PID] = true
+		m.selectedPids[displayed[i].PID] = true
 	}
 	m.lastSelectedPid = endPid
 }
@@ -1448,6 +1725,66 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func compareFloat64(left, right float64) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func compareUint64(left, right uint64) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func compareInt32(left, right int32) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (m *Model) setStatusMessage(message string, isError bool) {
+	m.statusMessage = message
+	m.statusMessageIsError = isError
+}
+
+func (m *Model) setKillStatus(killed, skipped int, killErrors []string) {
+	parts := make([]string, 0, 3)
+	if killed > 0 {
+		action := "terminated"
+		if m.forceKill {
+			action = "force-killed"
+		}
+		parts = append(parts, fmt.Sprintf("%d process(es) %s", killed, action))
+	}
+	if skipped > 0 {
+		parts = append(parts, fmt.Sprintf("%d protected skipped", skipped))
+	}
+	if len(killErrors) > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed: %s", len(killErrors), strings.Join(killErrors, "; ")))
+	}
+	if len(parts) == 0 {
+		m.setStatusMessage("No process actions were applied", true)
+		return
+	}
+	m.setStatusMessage(strings.Join(parts, " | "), len(killErrors) > 0 || skipped > 0 && killed == 0)
 }
 
 // placeOverlay renders overlay on top of background at position (x, y) using ANSI-aware string manipulation.

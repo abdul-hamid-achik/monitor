@@ -3,7 +3,7 @@
 A beautiful terminal-based system monitor for macOS inspired by Activity Monitor, built with Go using the Charm ecosystem and Nord theme.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Go](https://img.shields.io/badge/go-1.21+-blue.svg)
+![Go](https://img.shields.io/badge/go-1.25+-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-blue)
 
 ## Features
@@ -13,9 +13,9 @@ A beautiful terminal-based system monitor for macOS inspired by Activity Monitor
 - 🖱️ **Enhanced Mouse Support** - Click tabs, select processes, scroll with wheel
 - ⌨️ **Keyboard Navigation** - Full keyboard control with shortcuts
 - 📈 **Interactive Graphs** - Sparkline charts showing historical data
-- 🔍 **Process Filtering** - Filter and sort processes by various criteria
+- 🔍 **Process Sorting + Multi-Select** - Sort, select, and act on processes safely
 - ⚠️ **Safe Process Killing** - Protected system processes with confirmation dialogs
-- 📑 **Tab Navigation** - 5 different views (Overview, CPU, Memory, Processes, Temperature)
+- 📑 **Tab Navigation** - 7 different views (Overview, CPU, Memory, Network, Processes, Temperature, Settings)
 - 📺 **Full Screen Layout** - Responsive design that adapts to terminal size
 - 🔄 **Auto-Resize** - Automatically adjusts when terminal window changes
 
@@ -23,7 +23,7 @@ A beautiful terminal-based system monitor for macOS inspired by Activity Monitor
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│  MONITOR v1.0    Overview  CPU  Memory  Processes  Temperature  Settings     │
+│  MONITOR v1.0    Overview  CPU  Memory  Network  Processes  Temperature  Settings │
 │  MacBook Pro · 14:30:45                                                     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
@@ -50,7 +50,7 @@ Processes: 342  │  CPU: 42.0%  │  Memory: 78.0%  │  Last Update: 14:30:45
 
 ### Prerequisites
 
-- Go 1.21 or higher
+- Go 1.25 or higher
 - macOS (optimized for Apple Silicon M1/M2/M3/M5)
 - [Task](https://taskfile.dev/) - Task runner (optional but recommended)
 
@@ -101,20 +101,22 @@ Just run `./bin/monitor` in your Ghostty terminal.
 | `q` / `Ctrl+C` | Quit application |
 | `→` / `Tab` / `l` | Next tab |
 | `←` / `Shift+Tab` / `h` | Previous tab |
-| `1-6` | Switch to specific tab (1=Overview, 2=CPU, 3=Memory, 4=Processes, 5=Temperature, 6=Settings) |
+| `1-7` | Switch to specific tab (1=Overview, 2=CPU, 3=Memory, 4=Network, 5=Processes, 6=Temperature, 7=Settings) |
 | `r` | Refresh data |
 | `?` | Toggle help |
-| `/` | Filter processes |
-| `k` | Kill selected process |
-| `Space` | Select process (multi-select) |
-| `↑` / `k` | Move up |
-| `↓` / `j` | Move down |
+| `Enter` | Open process menu |
+| `k` / `x` | Terminate / force kill selected process |
+| `Space` | Toggle process selection |
+| `Ctrl+A` / `Ctrl+D` | Select all / clear selection |
+| `c` / `m` | Sort process list by CPU / memory |
+| `↑` / `w` | Move up |
+| `↓` / `s` | Move down |
 | `Page Up` / `b` | Page up |
 | `Page Down` / `f` | Page down |
 | `Home` / `g` | Go to top |
 | `End` / `G` | Go to bottom |
 
-#### Settings Tab (Tab 6)
+#### Settings Tab (Tab 7)
 
 | Key | Action |
 |-----|--------|
@@ -127,8 +129,8 @@ Just run `./bin/monitor` in your Ghostty terminal.
 
 - **Click tabs** to switch views
 - **Click process rows** to select
+- **Right-click a process** to open actions
 - **Scroll wheel** to navigate lists
-- **Click buttons** for actions
 
 ### Views
 
@@ -147,20 +149,26 @@ Memory monitoring with:
 - Swap usage
 - Memory pressure indicator
 
-#### 4. Processes (Tab 4)
+#### 4. Network (Tab 4)
+Network monitoring with:
+- Current download/upload rates
+- Transfer history graph
+- Packet and transfer totals
+
+#### 5. Processes (Tab 5)
 Full process list with:
 - Sortable columns
-- Filtering support
 - Multi-select for batch operations
+- Process I/O column
 - Safe process termination
 
-#### 5. Temperature (Tab 5)
+#### 6. Temperature (Tab 6)
 Temperature monitoring with:
-- Sensor readings (CPU, GPU, ANE, Battery)
+- Estimated sensor readings (CPU, GPU, ANE, Battery)
 - Temperature history graph
-- Fan speed and control
+- Fan telemetry
 
-#### 6. Settings (Tab 6)
+#### 7. Settings (Tab 7)
 Customize the application behavior:
 - **Update Interval**: How often to refresh data (500ms, 1s, 2s, 5s)
 - **Temperature Unit**: Display temperatures in Celsius or Fahrenheit
@@ -178,7 +186,7 @@ Monitor includes multiple safety layers to prevent accidental system damage:
 1. **Protected Processes** - Critical system processes (launchd, kernel_task, etc.) cannot be killed
 2. **System Process Warning** - Root-owned processes show caution warnings
 3. **Confirmation Dialog** - Requires explicit confirmation before killing
-4. **Graceful Termination** - Uses SIGTERM first, escalates to SIGKILL only if needed
+4. **Separate Kill Modes** - Offers both SIGTERM and SIGKILL actions explicitly
 5. **Visual Warnings** - Color-coded safety levels (Green=Safe, Yellow=Caution, Red=Critical)
 
 ### Protected Process List
@@ -241,6 +249,8 @@ Accents:     #88C0D0 (Blue), #A3BE8C (Green), #BF616A (Red)
 ### Temperature Monitoring
 
 Accurate temperature readings on macOS Apple Silicon require access to the System Management Controller (SMC) via CGO/Objective-C bindings. The current implementation provides **estimated temperatures** based on CPU usage patterns.
+
+Fan telemetry shown in the temperature view is also estimated.
 
 For production use with accurate temperatures, consider:
 - Adding CGO bindings to access SMC

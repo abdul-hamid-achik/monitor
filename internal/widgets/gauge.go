@@ -26,7 +26,6 @@ var (
 	sparklineStyleCache = make(map[string]lipgloss.Style)
 	barFilledStyleCache = make(map[string]lipgloss.Style)
 	barEmptyStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#434C5E")) // Nord2
-	defaultSparkColor   = "#88C0D0"                                                  // Nord8
 )
 
 func getSparklineStyle(color string) lipgloss.Style {
@@ -46,6 +45,7 @@ func getBarFilledStyle(color string) lipgloss.Style {
 	barFilledStyleCache[color] = style
 	return style
 }
+
 var SparklineChars = []string{" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
 
 // NewSparkline creates a new sparkline widget
@@ -97,7 +97,7 @@ func (s *Sparkline) Render() string {
 	for x := 0; x < len(sampled) && x < s.Width; x++ {
 		value := sampled[x]
 		normalized := (value - min) / (max - min)
-		
+
 		// Map to character index (0-8)
 		charIndex := int(normalized * float64(len(SparklineChars)-1))
 		if charIndex < 0 {
@@ -132,7 +132,7 @@ func (s *Sparkline) Render() string {
 	if s.ShowLabels {
 		maxLabel := fmt.Sprintf("%6.1f", max)
 		minLabel := fmt.Sprintf("%6.1f", min)
-		
+
 		if s.ShowAxis {
 			for i := range lines {
 				if i == 0 {
@@ -198,12 +198,12 @@ func getMinMax(data []float64) (float64, float64) {
 
 // MultiSparkline renders multiple sparklines stacked vertically
 type MultiSparkline struct {
-	Data    [][]float64
-	Labels  []string
-	Width   int
-	Colors  []string
-	Max     float64
-	Min     float64
+	Data   [][]float64
+	Labels []string
+	Width  int
+	Colors []string
+	Max    float64
+	Min    float64
 }
 
 // NewMultiSparkline creates a new multi-sparkline widget
@@ -272,12 +272,12 @@ func (m *MultiSparkline) Render() string {
 
 // BarGauge renders a horizontal bar gauge
 type BarGauge struct {
-	Value      float64
-	Max        float64
-	Width      int
-	ShowValue  bool
+	Value       float64
+	Max         float64
+	Width       int
+	ShowValue   bool
 	ShowPercent bool
-	ColorFunc  func(float64) string
+	ColorFunc   func(float64) string
 }
 
 // NewBarGauge creates a new bar gauge widget
