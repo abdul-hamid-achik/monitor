@@ -87,18 +87,20 @@ type ProcessInfo struct {
 
 // SystemInfo aggregates all system metrics
 type SystemInfo struct {
-	CPU         CPUInfo
-	Memory      MemoryInfo
-	Temperature TemperatureInfo
-	Network     NetworkInfo
-	Processes   []ProcessInfo
-	Hostname    string
-	OS          string
-	Platform    string
-	Kernel      string
-	Uptime      uint64
-	BootTime    uint64
-	LastUpdate  time.Time
+	CPU                 CPUInfo
+	Memory              MemoryInfo
+	Temperature         TemperatureInfo
+	Network             NetworkInfo
+	Disk                DiskInfo
+	Processes           []ProcessInfo
+	ProcessesLastUpdate time.Time
+	Hostname            string
+	OS                  string
+	Platform            string
+	Kernel              string
+	Uptime              uint64
+	BootTime            uint64
+	LastUpdate          time.Time
 }
 
 // KillConfirmation contains information for safe process termination
@@ -108,4 +110,27 @@ type KillConfirmation struct {
 	HasSystem      bool
 	RequiresSudo   bool
 	SafetyWarnings []string
+}
+
+// DiskPartitionInfo contains information about a disk partition/mount point
+type DiskPartitionInfo struct {
+	Device       string // e.g., "/dev/disk1s1"
+	MountPoint   string // e.g., "/"
+	TotalBytes   uint64
+	UsedBytes    uint64
+	FreeBytes    uint64
+	UsagePercent float64
+	Filesystem   string // e.g., "apfs", "hfs"
+}
+
+// DiskInfo contains disk metrics
+type DiskInfo struct {
+	Partitions   []DiskPartitionInfo
+	ReadBytes    uint64
+	WriteBytes   uint64
+	ReadPerSec   uint64
+	WritePerSec  uint64
+	ReadHistory  []float64
+	WriteHistory []float64
+	LastUpdate   time.Time
 }

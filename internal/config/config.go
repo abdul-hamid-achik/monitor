@@ -13,22 +13,29 @@ type Settings struct {
 	ShowSystemProcesses bool          `json:"show_system_processes"`
 	MaxProcesses        int           `json:"max_processes"`
 	MouseEnabled        bool          `json:"mouse_enabled"`
+	// Alert thresholds (0 = disabled)
+	CPUAlertThreshold    float64 `json:"cpu_alert_threshold"`
+	MemoryAlertThreshold float64 `json:"memory_alert_threshold"`
 }
 
 type settingsFile struct {
-	UpdateInterval      *time.Duration `json:"update_interval"`
-	TemperatureUnit     *string        `json:"temperature_unit"`
-	ShowSystemProcesses *bool          `json:"show_system_processes"`
-	MaxProcesses        *int           `json:"max_processes"`
-	MouseEnabled        *bool          `json:"mouse_enabled"`
+	UpdateInterval       *time.Duration `json:"update_interval"`
+	TemperatureUnit      *string        `json:"temperature_unit"`
+	ShowSystemProcesses  *bool          `json:"show_system_processes"`
+	MaxProcesses         *int           `json:"max_processes"`
+	MouseEnabled         *bool          `json:"mouse_enabled"`
+	CPUAlertThreshold    *float64       `json:"cpu_alert_threshold"`
+	MemoryAlertThreshold *float64       `json:"memory_alert_threshold"`
 }
 
 var DefaultSettings = Settings{
-	UpdateInterval:      time.Second,
-	TemperatureUnit:     "C",
-	ShowSystemProcesses: false,
-	MaxProcesses:        50,
-	MouseEnabled:        true,
+	UpdateInterval:       time.Second,
+	TemperatureUnit:      "C",
+	ShowSystemProcesses:  false,
+	MaxProcesses:         50,
+	MouseEnabled:         true,
+	CPUAlertThreshold:    0, // Disabled by default
+	MemoryAlertThreshold: 0, // Disabled by default
 }
 
 func Default() *Settings {
@@ -83,11 +90,17 @@ func Load() (*Settings, error) {
 	if file.ShowSystemProcesses != nil {
 		settings.ShowSystemProcesses = *file.ShowSystemProcesses
 	}
-	if file.MaxProcesses != nil && *file.MaxProcesses > 0 {
+	if file.MaxProcesses != nil && *file.MaxProcesses > 0 && *file.MaxProcesses <= 1000 {
 		settings.MaxProcesses = *file.MaxProcesses
 	}
 	if file.MouseEnabled != nil {
 		settings.MouseEnabled = *file.MouseEnabled
+	}
+	if file.CPUAlertThreshold != nil && *file.CPUAlertThreshold >= 0 {
+		settings.CPUAlertThreshold = *file.CPUAlertThreshold
+	}
+	if file.MemoryAlertThreshold != nil && *file.MemoryAlertThreshold >= 0 {
+		settings.MemoryAlertThreshold = *file.MemoryAlertThreshold
 	}
 	return &settings, nil
 }

@@ -2,8 +2,11 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -29,6 +32,7 @@ const (
 	TabOverview Tab = iota
 	TabCPU
 	TabMemory
+	TabDisk
 	TabNetwork
 	TabProcesses
 	TabTemperature
@@ -40,6 +44,7 @@ var TabNames = []string{
 	"Overview",
 	"CPU",
 	"Memory",
+	"Disk",
 	"Network",
 	"Processes",
 	"Temperature",
@@ -69,6 +74,13 @@ type processLayout struct {
 	tableX     int
 	tableY     int
 	tableLines []string
+}
+
+type processViewData struct {
+	displayed     []system.ProcessInfo
+	topByCPU      []system.ProcessInfo
+	totalFiltered int
+	ready         bool
 }
 
 // Context menu state
@@ -102,7 +114,8 @@ type Model struct {
 	showingHelp bool
 
 	// System info
-	systemInfo system.SystemInfo
+	systemInfo  system.SystemInfo
+	processData processViewData
 
 	// Components
 	processTable table.Model
@@ -125,6 +138,9 @@ type Model struct {
 	killConfirmation system.KillConfirmation
 	forceKill        bool
 
+	// Settings reset confirmation
+	showResetConfirm bool
+
 	// Mouse tracking
 	mouseEnabled bool
 
@@ -133,9 +149,14 @@ type Model struct {
 	selectedSetting      int
 	statusMessage        string
 	statusMessageIsError bool
+	statusMessageTime    time.Time
 
 	// Layout tracking for click detection
 	tabBounds []struct{ start, end int }
+
+	// Process search/filter
+	processSearchMode  bool
+	processSearchQuery string
 }
 
 // keyMap defines keyboard shortcuts
@@ -159,6 +180,8 @@ type keyMap struct {
 	Escape    key.Binding
 	SelectAll key.Binding
 	ClearSel  key.Binding
+	Search    key.Binding
+	Export    key.Binding
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
@@ -196,6 +219,8 @@ var keys = keyMap{
 	Escape:    key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "close menu")),
 	SelectAll: key.NewBinding(key.WithKeys("ctrl+a"), key.WithHelp("ctrl+a", "select all")),
 	ClearSel:  key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "clear selection")),
+	Search:    key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
+	Export:    key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "export to JSON")),
 }
 
 func NewModel() Model {
@@ -220,9 +245,81 @@ func NewModel() Model {
 		settings = config.Default()
 	}
 	m.settings = settings
-	m.mouseEnabled = settings.MouseEnabled
+	m.applySettings()
 
 	return m
+}
+
+func (m *Model) applySettings() {
+	if m.settings == nil {
+		m.settings = config.Default()
+	}
+	m.mouseEnabled = m.settings.MouseEnabled
+	m.syncCollectorProcessSettings()
+}
+
+func (m *Model) refreshProcessData() {
+	data := m.buildProcessViewData()
+	data.ready = true
+	m.processData = data
+}
+
+func processRefreshIntervalFor(updateInterval time.Duration, activeTab Tab) time.Duration {
+	if updateInterval <= 0 {
+		updateInterval = config.DefaultSettings.UpdateInterval
+	}
+
+	interval := updateInterval * 4
+	minInterval := 3 * time.Second
+	maxInterval := 8 * time.Second
+	if activeTab == TabProcesses {
+		interval = updateInterval * 2
+		minInterval = time.Second
+		maxInterval = 3 * time.Second
+	}
+
+	return clampDuration(interval, minInterval, maxInterval)
+}
+
+func clampDuration(value, minValue, maxValue time.Duration) time.Duration {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
+}
+
+func (m *Model) syncCollectorProcessSettings() {
+	if m.collector == nil {
+		return
+	}
+
+	updateInterval := config.DefaultSettings.UpdateInterval
+	if m.settings != nil && m.settings.UpdateInterval > 0 {
+		updateInterval = m.settings.UpdateInterval
+	}
+
+	m.collector.SetProcessCollectionOptions(
+		processRefreshIntervalFor(updateInterval, m.activeTab),
+		m.activeTab == TabProcesses,
+	)
+}
+
+func (m *Model) activateTab(tab Tab) tea.Cmd {
+	if m.activeTab == tab {
+		return nil
+	}
+
+	m.activeTab = tab
+	m.calculateTabBounds()
+	m.syncCollectorProcessSettings()
+	if tab == TabProcesses {
+		m.updateProcessTable()
+		return m.fetchSystemInfo()
+	}
+	return nil
 }
 
 func (m *Model) setupProcessTable() {
@@ -245,8 +342,20 @@ func (m Model) processViewTitle() string {
 }
 
 func (m Model) renderProcessesPanel() string {
+	var content []string
+	content = append(content, PanelTitleStyle.Render(m.processViewTitle()))
+
+	// Add search input if in search mode
+	if m.processSearchMode {
+		searchStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(Nord8))
+		queryStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(Nord4))
+		content = append(content, searchStyle.Render(" Search: ")+queryStyle.Render(m.processSearchQuery)+"_")
+	}
+
+	content = append(content, "", m.processTable.View())
+
 	return PanelStyle.Width(m.width - 4).Render(
-		lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(m.processViewTitle()), "", m.processTable.View()),
+		lipgloss.JoinVertical(lipgloss.Left, content...),
 	)
 }
 
@@ -310,6 +419,13 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Refresh):
 		return m, m.fetchSystemInfo()
 	case key.Matches(msg, keys.Escape):
+		if m.processSearchMode {
+			m.processSearchMode = false
+			m.processSearchQuery = ""
+			m.refreshProcessData()
+			m.updateProcessTable()
+			return m, nil
+		}
 		if len(m.selectedPids) > 0 {
 			m.selectedPids = make(map[int32]bool)
 			m.lastSelectedPid = 0
@@ -330,53 +446,58 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "1":
-		m.activeTab = TabOverview
-		m.calculateTabBounds()
-		return m, nil
+		return m, m.activateTab(TabOverview)
 	case "2":
-		m.activeTab = TabCPU
-		m.calculateTabBounds()
-		return m, nil
+		return m, m.activateTab(TabCPU)
 	case "3":
-		m.activeTab = TabMemory
-		m.calculateTabBounds()
-		return m, nil
+		return m, m.activateTab(TabMemory)
 	case "4":
-		m.activeTab = TabNetwork
-		m.calculateTabBounds()
-		return m, nil
+		return m, m.activateTab(TabDisk)
 	case "5":
-		m.activeTab = TabProcesses
-		m.calculateTabBounds()
-		return m, nil
+		return m, m.activateTab(TabNetwork)
 	case "6":
-		m.activeTab = TabTemperature
-		m.calculateTabBounds()
-		return m, nil
+		return m, m.activateTab(TabProcesses)
 	case "7":
-		m.activeTab = TabSettings
-		m.calculateTabBounds()
-		return m, nil
+		return m, m.activateTab(TabTemperature)
+	case "8":
+		return m, m.activateTab(TabSettings)
 	}
 	switch {
 	case key.Matches(msg, keys.NextTab):
-		m.activeTab++
-		if m.activeTab > TabSettings {
-			m.activeTab = TabOverview
+		nextTab := m.activeTab + 1
+		if nextTab > TabSettings {
+			nextTab = TabOverview
 		}
-		m.calculateTabBounds()
-		return m, nil
+		return m, m.activateTab(nextTab)
 	case key.Matches(msg, keys.PrevTab):
+		prevTab := TabSettings
 		if m.activeTab > 0 {
-			m.activeTab--
-		} else {
-			m.activeTab = TabSettings
+			prevTab = m.activeTab - 1
 		}
-		m.calculateTabBounds()
-		return m, nil
+		return m, m.activateTab(prevTab)
 	}
 	switch m.activeTab {
 	case TabProcesses:
+		// Handle search mode text input first
+		if m.processSearchMode {
+			switch msg.Type {
+			case tea.KeyBackspace:
+				if len(m.processSearchQuery) > 0 {
+					m.processSearchQuery = m.processSearchQuery[:len(m.processSearchQuery)-1]
+					m.refreshProcessData()
+					m.updateProcessTable()
+				}
+				return m, nil
+			case tea.KeyRunes:
+				// Only accept printable characters
+				if len(msg.Runes) > 0 && msg.Runes[0] >= 32 && msg.Runes[0] < 127 {
+					m.processSearchQuery += string(msg.Runes)
+					m.refreshProcessData()
+					m.updateProcessTable()
+				}
+				return m, nil
+			}
+		}
 		return m.handleProcessKeys(msg)
 	case TabSettings:
 		return m.handleSettingsKeys(msg)
@@ -490,6 +611,17 @@ func (m Model) handleProcessKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.sortProcesses()
 		return m, nil
+	case key.Matches(msg, keys.Export):
+		m.exportProcesses()
+		return m, nil
+	case key.Matches(msg, keys.Search):
+		m.processSearchMode = !m.processSearchMode
+		if !m.processSearchMode {
+			m.processSearchQuery = ""
+		}
+		m.refreshProcessData()
+		m.updateProcessTable()
+		return m, nil
 	case key.Matches(msg, keys.Enter):
 		if row := m.processTable.SelectedRow(); len(row) > 0 {
 			pid, ok := m.selectedRowPID()
@@ -513,7 +645,26 @@ func (m Model) handleProcessKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleSettingsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	numSettings := 4
+	// Handle reset confirmation keys first
+	if m.showResetConfirm {
+		switch msg.String() {
+		case "y", "Y":
+			m.settings = config.Default()
+			m.saveSettings()
+			m.applySettings()
+			m.refreshProcessData()
+			m.updateProcessTable()
+			m.showResetConfirm = false
+			m.setStatusMessage("Settings reset to defaults", false)
+			return m, nil
+		case "n", "N", "esc":
+			m.showResetConfirm = false
+			return m, nil
+		}
+		return m, nil
+	}
+
+	numSettings := 6
 	switch msg.String() {
 	case "up", "w":
 		if m.selectedSetting > 0 {
@@ -537,6 +688,12 @@ func (m Model) handleSettingsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "4":
 		m.selectedSetting = 3
 		return m, nil
+	case "5":
+		m.selectedSetting = 4
+		return m, nil
+	case "6":
+		m.selectedSetting = 5
+		return m, nil
 	case "right", "l", "enter", " ":
 		m.changeSetting(m.selectedSetting)
 		return m, nil
@@ -544,55 +701,21 @@ func (m Model) handleSettingsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.changeSettingPrev(m.selectedSetting)
 		return m, nil
 	case "r", "R":
-		m.settings = config.Default()
-		m.saveSettings()
-		m.mouseEnabled = m.settings.MouseEnabled
-		m.updateProcessTable()
+		m.showResetConfirm = true
 		return m, nil
 	}
 	return m, nil
 }
 
 func (m *Model) changeSetting(idx int) {
-	if m.settings == nil {
-		return
-	}
-	switch idx {
-	case 0:
-		intervals := []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 5 * time.Second}
-		currentIdx := 0
-		for i, iv := range intervals {
-			if m.settings.UpdateInterval == iv {
-				currentIdx = i
-				break
-			}
-		}
-		m.settings.UpdateInterval = intervals[(currentIdx+1)%len(intervals)]
-	case 1:
-		if m.settings.TemperatureUnit == "C" {
-			m.settings.TemperatureUnit = "F"
-		} else {
-			m.settings.TemperatureUnit = "C"
-		}
-	case 2:
-		m.settings.ShowSystemProcesses = !m.settings.ShowSystemProcesses
-	case 3:
-		maxes := []int{20, 50, 100, 200}
-		currentIdx := 0
-		for i, mx := range maxes {
-			if m.settings.MaxProcesses == mx {
-				currentIdx = i
-				break
-			}
-		}
-		m.settings.MaxProcesses = maxes[(currentIdx+1)%len(maxes)]
-	}
-	m.saveSettings()
-	m.mouseEnabled = m.settings.MouseEnabled
-	m.updateProcessTable()
+	m.cycleSetting(idx, 1)
 }
 
 func (m *Model) changeSettingPrev(idx int) {
+	m.cycleSetting(idx, -1)
+}
+
+func (m *Model) cycleSetting(idx int, direction int) {
 	if m.settings == nil {
 		return
 	}
@@ -606,7 +729,7 @@ func (m *Model) changeSettingPrev(idx int) {
 				break
 			}
 		}
-		m.settings.UpdateInterval = intervals[(currentIdx-1+len(intervals))%len(intervals)]
+		m.settings.UpdateInterval = intervals[(currentIdx+direction+len(intervals))%len(intervals)]
 	case 1:
 		if m.settings.TemperatureUnit == "C" {
 			m.settings.TemperatureUnit = "F"
@@ -624,10 +747,33 @@ func (m *Model) changeSettingPrev(idx int) {
 				break
 			}
 		}
-		m.settings.MaxProcesses = maxes[(currentIdx-1+len(maxes))%len(maxes)]
+		m.settings.MaxProcesses = maxes[(currentIdx+direction+len(maxes))%len(maxes)]
+	case 4:
+		// CPU Alert Threshold: OFF, 50%, 70%, 80%, 90%, 95%
+		thresholds := []float64{0, 50, 70, 80, 90, 95}
+		currentIdx := 0
+		for i, th := range thresholds {
+			if m.settings.CPUAlertThreshold == th {
+				currentIdx = i
+				break
+			}
+		}
+		m.settings.CPUAlertThreshold = thresholds[(currentIdx+direction+len(thresholds))%len(thresholds)]
+	case 5:
+		// Memory Alert Threshold: OFF, 50%, 70%, 80%, 90%, 95%
+		thresholds := []float64{0, 50, 70, 80, 90, 95}
+		currentIdx := 0
+		for i, th := range thresholds {
+			if m.settings.MemoryAlertThreshold == th {
+				currentIdx = i
+				break
+			}
+		}
+		m.settings.MemoryAlertThreshold = thresholds[(currentIdx+direction+len(thresholds))%len(thresholds)]
 	}
 	m.saveSettings()
-	m.mouseEnabled = m.settings.MouseEnabled
+	m.applySettings()
+	m.refreshProcessData()
 	m.updateProcessTable()
 }
 
@@ -854,11 +1000,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if msg.Y == 0 && m.width > 0 && len(m.tabBounds) == len(TabNames) {
 			for i, bounds := range m.tabBounds {
 				if msg.X >= bounds.start && msg.X < bounds.end {
-					if m.activeTab != Tab(i) {
-						m.activeTab = Tab(i)
-						m.calculateTabBounds() // Recalculate with new active tab style
-					}
-					return m, nil
+					return m, m.activateTab(Tab(i))
 				}
 			}
 		}
@@ -942,16 +1084,53 @@ func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleTick(msg tickMsg) (tea.Model, tea.Cmd) {
 	m.lastUpdate = time.Time(msg)
+	// Clear status message after 5 seconds
+	if m.statusMessage != "" && !m.statusMessageTime.IsZero() {
+		if time.Since(m.statusMessageTime) > 5*time.Second {
+			m.statusMessage = ""
+			m.statusMessageTime = time.Time{}
+		}
+	}
 	return m, tea.Batch(m.tickCmd(), m.fetchSystemInfo(), m.spinner.Tick)
 }
 
 func (m Model) handleSystemInfo(msg systemInfoMsg) (tea.Model, tea.Cmd) {
+	processDataChanged := !msg.info.ProcessesLastUpdate.Equal(m.systemInfo.ProcessesLastUpdate)
 	m.systemInfo = msg.info
-	m.updateProcessTable()
+	if processDataChanged {
+		m.refreshProcessData()
+	}
+	if m.activeTab == TabProcesses && processDataChanged {
+		m.updateProcessTable()
+	}
+
+	// Check alert thresholds
+	m.checkAlertThresholds()
+
 	return m, nil
 }
 
+// checkAlertThresholds checks if CPU or memory usage exceeds configured thresholds
+func (m *Model) checkAlertThresholds() {
+	if m.settings == nil {
+		return
+	}
+
+	// Check CPU threshold
+	if m.settings.CPUAlertThreshold > 0 && m.systemInfo.CPU.UsagePercent >= m.settings.CPUAlertThreshold {
+		m.setStatusMessage(fmt.Sprintf("⚠️  CPU Alert: %.1f%% exceeds threshold (%.0f%%)",
+			m.systemInfo.CPU.UsagePercent, m.settings.CPUAlertThreshold), true)
+	}
+
+	// Check Memory threshold
+	if m.settings.MemoryAlertThreshold > 0 && m.systemInfo.Memory.UsagePercent >= m.settings.MemoryAlertThreshold {
+		m.setStatusMessage(fmt.Sprintf("⚠️  Memory Alert: %.1f%% exceeds threshold (%.0f%%)",
+			m.systemInfo.Memory.UsagePercent, m.settings.MemoryAlertThreshold), true)
+	}
+}
+
 func (m *Model) sortProcesses() {
+	m.refreshProcessData()
 	m.updateProcessTable()
 }
 
@@ -1032,6 +1211,10 @@ func (m Model) View() string {
 		dialog := m.renderKillConfirmation()
 		baseContent = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, dialog)
 	}
+	if m.showResetConfirm {
+		dialog := m.renderResetConfirmation()
+		baseContent = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, dialog)
+	}
 	renderedLines := strings.Count(baseContent, "\n") + 1
 	remainingLines := m.height - renderedLines - 1
 	var finalBuilder strings.Builder
@@ -1059,6 +1242,8 @@ func (m Model) renderActiveTab() string {
 		return m.renderCPUView()
 	case TabMemory:
 		return m.renderMemoryView()
+	case TabDisk:
+		return m.renderDiskView()
 	case TabNetwork:
 		return m.renderNetworkView()
 	case TabProcesses:
@@ -1079,7 +1264,8 @@ func (m Model) renderHeader() string {
 		if Tab(i) == m.activeTab {
 			style = TabActiveStyle
 		}
-		tabs = append(tabs, style.Render(" "+tabName+" "))
+		// Add number hint for tab switching
+		tabs = append(tabs, style.Render(fmt.Sprintf(" %d:%s ", i+1, tabName)))
 	}
 	tabsRow := lipgloss.JoinHorizontal(lipgloss.Left, tabs...)
 	titleWidth := lipgloss.Width(TitleStyle.Render(" MONITOR "))
@@ -1165,7 +1351,7 @@ func (m Model) renderOverview() string {
 	}
 	memPanel := PanelStyle.Width(panelWidth).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Memory "), "", memGauge.Render(), fmt.Sprintf("  %s / %s  │  %s swap", system.FormatBytes(m.systemInfo.Memory.UsedBytes), system.FormatBytes(m.systemInfo.Memory.TotalBytes), system.FormatBytes(m.systemInfo.Memory.SwapUsed))))
 	tempStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(TemperatureColor(m.systemInfo.Temperature.CPUPackage)))
-	tempPanel := PanelStyle.Width(panelWidth).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Temperature "), "", tempStyle.Render(fmt.Sprintf("  CPU: %s  │  GPU: %s  │  ANE: %s", m.formatTemp(m.systemInfo.Temperature.CPUPackage), m.formatTemp(m.systemInfo.Temperature.GPU), m.formatTemp(m.systemInfo.Temperature.ANE))), fmt.Sprintf("  Fan: %d RPM (%s)", m.systemInfo.Temperature.FanRPM, m.systemInfo.Temperature.FanMode)))
+	tempPanel := PanelStyle.Width(panelWidth).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Temperature "), "", tempStyle.Render(fmt.Sprintf("  CPU: %s*  │  GPU: %s*  │  ANE: %s*", m.formatTemp(m.systemInfo.Temperature.CPUPackage), m.formatTemp(m.systemInfo.Temperature.GPU), m.formatTemp(m.systemInfo.Temperature.ANE))), fmt.Sprintf("  Fan: %d RPM (%s) - estimated", m.systemInfo.Temperature.FanRPM, m.systemInfo.Temperature.FanMode)))
 	netPanel := PanelStyle.Width(panelWidth).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Network "), "", fmt.Sprintf("  ↓ %s/s    ↑ %s/s", system.FormatBytes(m.systemInfo.Network.BytesRecvPerSec), system.FormatBytes(m.systemInfo.Network.BytesSentPerSec)), fmt.Sprintf("  Total: ↓ %s    ↑ %s", system.FormatBytes(m.systemInfo.Network.BytesRecv), system.FormatBytes(m.systemInfo.Network.BytesSent))))
 	topProcs := m.renderTopProcesses(8)
 	topRow := lipgloss.JoinHorizontal(lipgloss.Top, cpuPanel, memPanel)
@@ -1235,6 +1421,48 @@ func (m Model) renderMemoryView() string {
 		PanelStyle.Width(m.width-4).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Physical Memory "), "", memBar.Render(), fmt.Sprintf("  Total: %s    Used: %s    Available: %s", system.FormatBytes(m.systemInfo.Memory.TotalBytes), system.FormatBytes(m.systemInfo.Memory.UsedBytes), system.FormatBytes(m.systemInfo.Memory.AvailableBytes)))),
 		"\n",
 		PanelStyle.Width(m.width-4).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Swap "), "", swapBar.Render(), fmt.Sprintf("  Total: %s    Used: %s    Free: %s", system.FormatBytes(m.systemInfo.Memory.SwapTotal), system.FormatBytes(m.systemInfo.Memory.SwapUsed), system.FormatBytes(m.systemInfo.Memory.SwapFree)))),
+	)
+}
+
+func (m Model) renderDiskView() string {
+	var partitionLines []string
+	for _, partition := range m.systemInfo.Disk.Partitions {
+		if partition.MountPoint == "" {
+			continue
+		}
+
+		bar := widgets.NewBarGauge()
+		bar.Value = partition.UsagePercent
+		bar.Width = 25
+		bar.ShowPercent = true
+		bar.ColorFunc = func(v float64) string {
+			if v >= 90 {
+				return Nord11
+			} else if v >= 70 {
+				return Nord12
+			}
+			return Nord14
+		}
+
+		line := fmt.Sprintf("  %-15s %s  %s / %s",
+			partition.MountPoint,
+			bar.Render(),
+			system.FormatBytes(partition.UsedBytes),
+			system.FormatBytes(partition.TotalBytes),
+		)
+		partitionLines = append(partitionLines, line)
+	}
+
+	spark := widgets.NewSparkline()
+	spark.Data, spark.Width, spark.Height, spark.Color = m.systemInfo.Disk.ReadHistory, m.width-20, 6, Nord8
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		PanelStyle.Width(m.width-4).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Disk Usage "), "", strings.Join(partitionLines, "\n"))),
+		"\n",
+		PanelStyle.Width(m.width-4).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Disk I/O "), "",
+			spark.Render(),
+			fmt.Sprintf("  Read: %s/s    Write: %s/s", system.FormatBytes(m.systemInfo.Disk.ReadPerSec), system.FormatBytes(m.systemInfo.Disk.WritePerSec)),
+		)),
 	)
 }
 
@@ -1356,14 +1584,14 @@ func (m Model) renderTemperatureView() string {
 	tempSpark := widgets.NewSparkline()
 	tempSpark.Data, tempSpark.Width, tempSpark.Height, tempSpark.Color = m.systemInfo.Temperature.History, m.width-20, 6, Nord12
 	sensors := []string{
-		fmt.Sprintf("  CPU Package:  %s  %s", m.formatTemp(m.systemInfo.Temperature.CPUPackage), getTempStatus(m.systemInfo.Temperature.CPUPackage)),
-		fmt.Sprintf("  CPU Cores:    %s  %s", m.formatTemp(m.systemInfo.Temperature.CPUCores), getTempStatus(m.systemInfo.Temperature.CPUCores)),
-		fmt.Sprintf("  GPU:          %s  %s", m.formatTemp(m.systemInfo.Temperature.GPU), getTempStatus(m.systemInfo.Temperature.GPU)),
-		fmt.Sprintf("  ANE:          %s  %s", m.formatTemp(m.systemInfo.Temperature.ANE), getTempStatus(m.systemInfo.Temperature.ANE)),
-		fmt.Sprintf("  Battery:      %s  %s", m.formatTemp(m.systemInfo.Temperature.Battery), getTempStatus(m.systemInfo.Temperature.Battery)),
+		fmt.Sprintf("  CPU Package:  %s  %s (estimated)", m.formatTemp(m.systemInfo.Temperature.CPUPackage), getTempStatus(m.systemInfo.Temperature.CPUPackage)),
+		fmt.Sprintf("  CPU Cores:    %s  %s (estimated)", m.formatTemp(m.systemInfo.Temperature.CPUCores), getTempStatus(m.systemInfo.Temperature.CPUCores)),
+		fmt.Sprintf("  GPU:          %s  %s (estimated)", m.formatTemp(m.systemInfo.Temperature.GPU), getTempStatus(m.systemInfo.Temperature.GPU)),
+		fmt.Sprintf("  ANE:          %s  %s (estimated)", m.formatTemp(m.systemInfo.Temperature.ANE), getTempStatus(m.systemInfo.Temperature.ANE)),
+		fmt.Sprintf("  Battery:      %s  %s (estimated)", m.formatTemp(m.systemInfo.Temperature.Battery), getTempStatus(m.systemInfo.Temperature.Battery)),
 	}
 	sensorsPanel := PanelStyle.Width((m.width - 6) / 2).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Sensor Readings "), "", strings.Join(sensors, "\n")))
-	fanPanel := PanelStyle.Width((m.width - 6) / 2).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Fan Telemetry "), "", fmt.Sprintf("  Speed: %d RPM", m.systemInfo.Temperature.FanRPM), fmt.Sprintf("  Mode: %s", m.systemInfo.Temperature.FanMode), "  Max: 6000 RPM"))
+	fanPanel := PanelStyle.Width((m.width - 6) / 2).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Fan Telemetry "), "", fmt.Sprintf("  Speed: %d RPM (estimated)", m.systemInfo.Temperature.FanRPM), fmt.Sprintf("  Mode: %s", m.systemInfo.Temperature.FanMode), "  Max: 6000 RPM"))
 	historyPanel := PanelStyle.Width(m.width - 4).Render(lipgloss.JoinVertical(lipgloss.Left, PanelTitleStyle.Render(" Temperature History "), "", tempSpark.Render()))
 	return lipgloss.JoinVertical(lipgloss.Left, historyPanel, "\n", lipgloss.JoinHorizontal(lipgloss.Top, sensorsPanel, fanPanel))
 }
@@ -1431,6 +1659,26 @@ func (m Model) renderSettingsView() string {
 	}
 	lines = append(lines, fmt.Sprintf("  %s [4] Max Processes:    [%s]", cursor, maxProcs))
 
+	cursor = " "
+	if m.selectedSetting == 4 {
+		cursor = "▶"
+	}
+	cpuAlert := "OFF"
+	if m.settings != nil && m.settings.CPUAlertThreshold > 0 {
+		cpuAlert = fmt.Sprintf("%.0f%%", m.settings.CPUAlertThreshold)
+	}
+	lines = append(lines, fmt.Sprintf("  %s [5] CPU Alert:        [%s]", cursor, cpuAlert))
+
+	cursor = " "
+	if m.selectedSetting == 5 {
+		cursor = "▶"
+	}
+	memAlert := "OFF"
+	if m.settings != nil && m.settings.MemoryAlertThreshold > 0 {
+		memAlert = fmt.Sprintf("%.0f%%", m.settings.MemoryAlertThreshold)
+	}
+	lines = append(lines, fmt.Sprintf("  %s [6] Memory Alert:     [%s]", cursor, memAlert))
+
 	lines = append(lines, "")
 	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(Nord6)).Render("  ↑/↓ or j/k: Navigate  ←/→ or Enter: Change value"))
 	lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color(Nord6)).Render("  r: Reset to defaults"))
@@ -1475,6 +1723,24 @@ func (m Model) renderKillConfirmation() string {
 	return dialog
 }
 
+func (m Model) renderResetConfirmation() string {
+	var lines []string
+	lines = append(lines, "⚠️  RESET SETTINGS CONFIRMATION")
+	lines = append(lines, "")
+	lines = append(lines, "  You are about to reset all settings to their")
+	lines = append(lines, "  default values.")
+	lines = append(lines, "")
+	lines = append(lines, "  This will affect:")
+	lines = append(lines, "    • Update Interval")
+	lines = append(lines, "    • Temperature Unit")
+	lines = append(lines, "    • Show System Processes")
+	lines = append(lines, "    • Max Processes Displayed")
+	lines = append(lines, "")
+	lines = append(lines, "  Press 'y' to confirm reset, 'n' to cancel")
+	dialog := lipgloss.NewStyle().Border(lipgloss.ThickBorder()).BorderForeground(lipgloss.Color(Nord12)).Padding(1, 2).Render(strings.Join(lines, "\n"))
+	return dialog
+}
+
 func (m Model) renderStatusBar() string {
 	displayedProcesses, totalProcesses := m.processCounts()
 	processCount := fmt.Sprintf("Processes: %d", displayedProcesses)
@@ -1493,6 +1759,10 @@ func (m Model) renderStatusBar() string {
 	if len(m.selectedPids) > 0 {
 		selCount = fmt.Sprintf(" │ Selected: %d", len(m.selectedPids))
 	}
+	searchIndicator := ""
+	if m.activeTab == TabProcesses && m.processSearchMode {
+		searchIndicator = fmt.Sprintf(" │ Search: %d/%d", displayedProcesses, totalProcesses)
+	}
 	message := ""
 	if m.statusMessage != "" {
 		messageStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(Nord14)).Bold(true)
@@ -1505,7 +1775,7 @@ func (m Model) renderStatusBar() string {
 	if !m.systemInfo.LastUpdate.IsZero() {
 		lastUpdate = m.systemInfo.LastUpdate
 	}
-	status := fmt.Sprintf(" %s%s  │  CPU: %.1f%%  │  Memory: %.1f%%  │  Update: %s  │  Mouse: %s%s%s", message, processCount, m.systemInfo.CPU.UsagePercent, m.systemInfo.Memory.UsagePercent, lastUpdate.Format("15:04:05"), map[bool]string{true: "ON", false: "OFF"}[m.mouseEnabled], sortIndicator, selCount)
+	status := fmt.Sprintf(" %s%s  │  CPU: %.1f%%  │  Memory: %.1f%%  │  Update: %s  │  Mouse: %s%s%s%s", message, processCount, m.systemInfo.CPU.UsagePercent, m.systemInfo.Memory.UsagePercent, lastUpdate.Format("15:04:05"), map[bool]string{true: "ON", false: "OFF"}[m.mouseEnabled], sortIndicator, selCount, searchIndicator)
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(Nord6)).Background(lipgloss.Color(Nord2)).Bold(true).Width(m.width).Render(status)
 }
 
@@ -1520,36 +1790,65 @@ func (m Model) filteredProcesses() []system.ProcessInfo {
 		if !showSystemProcesses && proc.IsSystem {
 			continue
 		}
+		// Apply search filter
+		if m.processSearchQuery != "" {
+			if !strings.Contains(strings.ToLower(proc.Name), strings.ToLower(m.processSearchQuery)) {
+				continue
+			}
+		}
 		procs = append(procs, proc)
 	}
 
 	return procs
 }
 
-func (m Model) displayProcesses() []system.ProcessInfo {
-	procs := m.filteredProcesses()
-	m.sortProcessSlice(procs)
+func (m Model) buildProcessViewData() processViewData {
+	filtered := m.filteredProcesses()
+	data := processViewData{
+		totalFiltered: len(filtered),
+	}
+
+	displayed := append([]system.ProcessInfo(nil), filtered...)
+	m.sortProcessSlice(displayed)
 
 	maxProcesses := config.DefaultSettings.MaxProcesses
 	if m.settings != nil && m.settings.MaxProcesses > 0 {
 		maxProcesses = m.settings.MaxProcesses
 	}
-	if maxProcesses > 0 && len(procs) > maxProcesses {
-		procs = procs[:maxProcesses]
+	if maxProcesses > 0 && len(displayed) > maxProcesses {
+		displayed = displayed[:maxProcesses]
 	}
+	data.displayed = displayed
 
-	return procs
-}
-
-func (m Model) topProcesses(limit int) []system.ProcessInfo {
-	procs := m.filteredProcesses()
-	sort.SliceStable(procs, func(i, j int) bool {
-		cmp := compareFloat64(procs[i].CPUPercent, procs[j].CPUPercent)
+	topByCPU := append([]system.ProcessInfo(nil), filtered...)
+	sort.SliceStable(topByCPU, func(i, j int) bool {
+		cmp := compareFloat64(topByCPU[i].CPUPercent, topByCPU[j].CPUPercent)
 		if cmp == 0 {
-			return procs[i].PID < procs[j].PID
+			return topByCPU[i].PID < topByCPU[j].PID
 		}
 		return cmp > 0
 	})
+	data.topByCPU = topByCPU
+
+	return data
+}
+
+func (m Model) currentProcessViewData() processViewData {
+	if m.processData.ready {
+		return m.processData
+	}
+
+	data := m.buildProcessViewData()
+	data.ready = true
+	return data
+}
+
+func (m Model) displayProcesses() []system.ProcessInfo {
+	return m.currentProcessViewData().displayed
+}
+
+func (m Model) topProcesses(limit int) []system.ProcessInfo {
+	procs := m.currentProcessViewData().topByCPU
 	if limit > 0 && len(procs) > limit {
 		procs = procs[:limit]
 	}
@@ -1557,16 +1856,8 @@ func (m Model) topProcesses(limit int) []system.ProcessInfo {
 }
 
 func (m Model) processCounts() (displayed int, total int) {
-	total = len(m.filteredProcesses())
-	displayed = total
-	maxProcesses := config.DefaultSettings.MaxProcesses
-	if m.settings != nil && m.settings.MaxProcesses > 0 {
-		maxProcesses = m.settings.MaxProcesses
-	}
-	if maxProcesses > 0 && displayed > maxProcesses {
-		displayed = maxProcesses
-	}
-	return displayed, total
+	data := m.currentProcessViewData()
+	return len(data.displayed), data.totalFiltered
 }
 
 func (m Model) sortLabel() string {
@@ -1763,6 +2054,7 @@ func compareInt32(left, right int32) int {
 func (m *Model) setStatusMessage(message string, isError bool) {
 	m.statusMessage = message
 	m.statusMessageIsError = isError
+	m.statusMessageTime = time.Now()
 }
 
 func (m *Model) setKillStatus(killed, skipped int, killErrors []string) {
@@ -1785,6 +2077,77 @@ func (m *Model) setKillStatus(killed, skipped int, killErrors []string) {
 		return
 	}
 	m.setStatusMessage(strings.Join(parts, " | "), len(killErrors) > 0 || skipped > 0 && killed == 0)
+}
+
+// exportProcesses exports the current process list to a JSON file
+func (m *Model) exportProcesses() {
+	if len(m.processData.displayed) == 0 {
+		m.setStatusMessage("No processes to export", true)
+		return
+	}
+
+	// Generate filename with timestamp
+	timestamp := time.Now().Format("20060102-150405")
+	filename := fmt.Sprintf("monitor-processes-%s.json", timestamp)
+
+	// Get home directory
+	home, err := os.UserHomeDir()
+	if err != nil {
+		m.setStatusMessage(fmt.Sprintf("Export failed: %v", err), true)
+		return
+	}
+
+	// Create exports directory
+	exportDir := filepath.Join(home, ".config", "monitor", "exports")
+	if err := os.MkdirAll(exportDir, 0755); err != nil {
+		m.setStatusMessage(fmt.Sprintf("Export failed: %v", err), true)
+		return
+	}
+
+	// Build JSON export
+	type processExport struct {
+		PID           int32   `json:"pid"`
+		Name          string  `json:"name"`
+		CPUPercent    float64 `json:"cpu_percent"`
+		Memory        uint64  `json:"memory_bytes"`
+		MemoryPercent float64 `json:"memory_percent"`
+		Threads       int32   `json:"threads"`
+		User          string  `json:"user"`
+		IsSystem      bool    `json:"is_system"`
+		ExportedAt    string  `json:"exported_at"`
+	}
+
+	var exports []processExport
+	now := time.Now().Format(time.RFC3339)
+	for _, proc := range m.processData.displayed {
+		exports = append(exports, processExport{
+			PID:           proc.PID,
+			Name:          proc.Name,
+			CPUPercent:    proc.CPUPercent,
+			Memory:        proc.Memory,
+			MemoryPercent: proc.MemoryPercent,
+			Threads:       proc.Threads,
+			User:          proc.User,
+			IsSystem:      proc.IsSystem,
+			ExportedAt:    now,
+		})
+	}
+
+	// Marshal to JSON
+	data, err := json.MarshalIndent(exports, "", "  ")
+	if err != nil {
+		m.setStatusMessage(fmt.Sprintf("Export failed: %v", err), true)
+		return
+	}
+
+	// Write file
+	fullPath := filepath.Join(exportDir, filename)
+	if err := os.WriteFile(fullPath, data, 0644); err != nil {
+		m.setStatusMessage(fmt.Sprintf("Export failed: %v", err), true)
+		return
+	}
+
+	m.setStatusMessage(fmt.Sprintf("Exported %d processes to %s", len(exports), fullPath), false)
 }
 
 // placeOverlay renders overlay on top of background at position (x, y) using ANSI-aware string manipulation.

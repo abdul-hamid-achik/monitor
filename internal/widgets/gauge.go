@@ -24,6 +24,7 @@ type Sparkline struct {
 // Pre-defined styles to avoid allocations in hot loops
 var (
 	sparklineStyleCache = make(map[string]lipgloss.Style)
+	sparklineGlyphCache = make(map[string][]string)
 	barFilledStyleCache = make(map[string]lipgloss.Style)
 	barEmptyStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#434C5E")) // Nord2
 )
@@ -46,6 +47,20 @@ func getBarFilledStyle(color string) lipgloss.Style {
 	return style
 }
 
+func getSparklineGlyphs(color string) []string {
+	if glyphs, ok := sparklineGlyphCache[color]; ok {
+		return glyphs
+	}
+
+	style := getSparklineStyle(color)
+	glyphs := make([]string, len(SparklineChars))
+	for i, char := range SparklineChars {
+		glyphs[i] = style.Render(char)
+	}
+	sparklineGlyphCache[color] = glyphs
+	return glyphs
+}
+
 var SparklineChars = []string{" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
 
 // NewSparkline creates a new sparkline widget
@@ -61,7 +76,7 @@ func NewSparkline() *Sparkline {
 
 // Render renders the sparkline
 func (s *Sparkline) Render() string {
-	if len(s.Data) == 0 {
+	if len(s.Data) == 0 || s.Width <= 0 || s.Height <= 0 {
 		return ""
 	}
 
@@ -84,14 +99,14 @@ func (s *Sparkline) Render() string {
 		max = min + 1
 	}
 
-	// Create the graph lines
-	lines := make([]string, s.Height)
-	for i := range lines {
-		lines[i] = ""
-	}
-
 	// Sample data to fit width
 	sampled := sampleData(s.Data, s.Width)
+	if len(sampled) == 0 {
+		return ""
+	}
+	glyphs := getSparklineGlyphs(s.Color)
+	var builders []strings.Builder
+	builders = make([]strings.Builder, s.Height)
 
 	// Generate sparkline characters
 	for x := 0; x < len(sampled) && x < s.Width; x++ {
@@ -107,25 +122,26 @@ func (s *Sparkline) Render() string {
 			charIndex = len(SparklineChars) - 1
 		}
 
-		char := SparklineChars[charIndex]
-		styledChar := getSparklineStyle(s.Color).Render(char)
+		styledChar := glyphs[charIndex]
 
 		// Fill from bottom up
 		for y := 0; y < s.Height; y++ {
 			lineIndex := s.Height - 1 - y
 			if y < charIndex {
-				lines[lineIndex] += styledChar
+				builders[lineIndex].WriteString(styledChar)
 			} else {
-				lines[lineIndex] += " "
+				builders[lineIndex].WriteByte(' ')
 			}
 		}
 	}
 
-	// Pad lines to width
-	for i := range lines {
-		for len(lines[i]) < s.Width {
-			lines[i] += " "
+	lines := make([]string, s.Height)
+	padWidth := s.Width - minInt(len(sampled), s.Width)
+	for i := range builders {
+		if padWidth > 0 {
+			builders[i].WriteString(strings.Repeat(" ", padWidth))
 		}
+		lines[i] = builders[i].String()
 	}
 
 	// Add axis labels if enabled
@@ -151,6 +167,9 @@ func (s *Sparkline) Render() string {
 
 // sampleData reduces data points to fit the specified width
 func sampleData(data []float64, width int) []float64 {
+	if width <= 0 {
+		return nil
+	}
 	if len(data) <= width {
 		return data
 	}
@@ -314,16 +333,7 @@ func (b *BarGauge) Render() string {
 		color = b.ColorFunc(b.Value)
 	}
 
-	var bar strings.Builder
-	for i := 0; i < b.Width; i++ {
-		if i < filled {
-			bar.WriteString(getBarFilledStyle(color).Render("▓"))
-		} else {
-			bar.WriteString(barEmptyStyle.Render("░"))
-		}
-	}
-
-	result := bar.String()
+	result := renderGaugeSegments(color, filled, b.Width-filled)
 
 	if b.ShowPercent {
 		result += fmt.Sprintf(" %5.1f%%", percent)
@@ -374,22 +384,33 @@ func (m *MiniGauge) Render() string {
 		filled = m.Width
 	}
 
-	var bar strings.Builder
-	for i := 0; i < m.Width; i++ {
-		if i < filled {
-			bar.WriteString(getBarFilledStyle(m.Color).Render("▓"))
-		} else {
-			bar.WriteString(barEmptyStyle.Render("░"))
-		}
-	}
+	bar := renderGaugeSegments(m.Color, filled, m.Width-filled)
 
 	if m.ShowValue {
 		unit := m.Unit
 		if unit != "" {
 			unit = " " + unit
 		}
-		return fmt.Sprintf("%s %6.1f%s", bar.String(), m.Value, unit)
+		return fmt.Sprintf("%s %6.1f%s", bar, m.Value, unit)
 	}
 
-	return bar.String()
+	return bar
+}
+
+func renderGaugeSegments(color string, filledCount, emptyCount int) string {
+	var builder strings.Builder
+	if filledCount > 0 {
+		builder.WriteString(getBarFilledStyle(color).Render(strings.Repeat("▓", filledCount)))
+	}
+	if emptyCount > 0 {
+		builder.WriteString(barEmptyStyle.Render(strings.Repeat("░", emptyCount)))
+	}
+	return builder.String()
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

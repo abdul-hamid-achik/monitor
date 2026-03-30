@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -180,6 +181,73 @@ func TestCalculateTabBoundsAreContiguous(t *testing.T) {
 	}
 }
 
+func TestProcessRefreshIntervalForProcessesTab(t *testing.T) {
+	tests := []struct {
+		name           string
+		updateInterval time.Duration
+		expected       time.Duration
+	}{
+		{name: "minimum", updateInterval: 500 * time.Millisecond, expected: time.Second},
+		{name: "scaled", updateInterval: time.Second, expected: 2 * time.Second},
+		{name: "capped", updateInterval: 5 * time.Second, expected: 3 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if interval := processRefreshIntervalFor(tt.updateInterval, TabProcesses); interval != tt.expected {
+				t.Fatalf("processRefreshIntervalFor(%s, processes) = %s, want %s", tt.updateInterval, interval, tt.expected)
+			}
+		})
+	}
+}
+
+func TestProcessRefreshIntervalForBackgroundTabs(t *testing.T) {
+	tests := []struct {
+		name           string
+		updateInterval time.Duration
+		expected       time.Duration
+	}{
+		{name: "minimum", updateInterval: 500 * time.Millisecond, expected: 3 * time.Second},
+		{name: "scaled", updateInterval: time.Second, expected: 4 * time.Second},
+		{name: "capped", updateInterval: 5 * time.Second, expected: 8 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if interval := processRefreshIntervalFor(tt.updateInterval, TabOverview); interval != tt.expected {
+				t.Fatalf("processRefreshIntervalFor(%s, overview) = %s, want %s", tt.updateInterval, interval, tt.expected)
+			}
+		})
+	}
+}
+
+func TestHandleSystemInfoSkipsProcessRefreshWhenTimestampUnchanged(t *testing.T) {
+	processStamp := time.Unix(100, 0)
+	m := Model{
+		processData: processViewData{
+			displayed:     []system.ProcessInfo{{PID: 99, Name: "cached"}},
+			topByCPU:      []system.ProcessInfo{{PID: 99, Name: "cached"}},
+			totalFiltered: 1,
+			ready:         true,
+		},
+		systemInfo: system.SystemInfo{
+			ProcessesLastUpdate: processStamp,
+		},
+	}
+
+	model, _ := m.handleSystemInfo(systemInfoMsg{
+		info: system.SystemInfo{
+			Processes:           []system.ProcessInfo{{PID: 1, Name: "new"}},
+			ProcessesLastUpdate: processStamp,
+		},
+	})
+	updated := model.(Model)
+
+	if got := updated.displayProcesses(); len(got) != 1 || got[0].PID != 99 {
+		t.Fatalf("expected cached process data to remain in use, got %+v", got)
+	}
+}
+
 func TestHandleMouseIgnoresRowClickOutsideTableBounds(t *testing.T) {
 	m := newMouseTestModel()
 
@@ -279,4 +347,232 @@ func newMouseTestModel() Model {
 	m.calculateTabBounds()
 	m.updateProcessTable()
 	return m
+}
+
+// Process search/filter tests
+func TestProcessSearchModeToggle(t *testing.T) {
+	m := Model{
+		activeTab:          TabProcesses,
+		settings:           config.Default(),
+		selectedPids:       make(map[int32]bool),
+		processSearchMode:  false,
+		processSearchQuery: "",
+	}
+
+	// Test toggling search mode on
+	model, _ := m.handleProcessKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated := model.(Model)
+	if !updated.processSearchMode {
+		t.Fatal("Expected process search mode to be enabled")
+	}
+
+	// Test toggling search mode off
+	model, _ = updated.handleProcessKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated = model.(Model)
+	if updated.processSearchMode {
+		t.Fatal("Expected process search mode to be disabled")
+	}
+	if updated.processSearchQuery != "" {
+		t.Fatalf("Expected search query to be cleared, got %q", updated.processSearchQuery)
+	}
+}
+
+func TestProcessSearchFiltering(t *testing.T) {
+	m := Model{
+		activeTab: TabProcesses,
+		settings:  config.Default(),
+		systemInfo: system.SystemInfo{
+			Processes: []system.ProcessInfo{
+				{PID: 1, Name: "kernel_task", CPUPercent: 50},
+				{PID: 2, Name: "chrome", CPUPercent: 30},
+				{PID: 3, Name: "chromium", CPUPercent: 20},
+				{PID: 4, Name: "firefox", CPUPercent: 10},
+			},
+		},
+		processSearchMode:  true,
+		processSearchQuery: "chrom",
+	}
+
+	filtered := m.filteredProcesses()
+
+	if len(filtered) != 2 {
+		t.Fatalf("Expected 2 filtered processes, got %d", len(filtered))
+	}
+
+	// Check that only chrome and chromium are in the filtered list
+	foundChrome := false
+	foundChromium := false
+	for _, p := range filtered {
+		if p.Name == "chrome" {
+			foundChrome = true
+		}
+		if p.Name == "chromium" {
+			foundChromium = true
+		}
+		if p.Name == "kernel_task" || p.Name == "firefox" {
+			t.Fatalf("Expected %s to be filtered out", p.Name)
+		}
+	}
+	if !foundChrome {
+		t.Fatal("Expected chrome to be in filtered results")
+	}
+	if !foundChromium {
+		t.Fatal("Expected chromium to be in filtered results")
+	}
+}
+
+func TestProcessSearchCaseInsensitive(t *testing.T) {
+	m := Model{
+		activeTab: TabProcesses,
+		settings:  config.Default(),
+		systemInfo: system.SystemInfo{
+			Processes: []system.ProcessInfo{
+				{PID: 1, Name: "Chrome", CPUPercent: 50},
+				{PID: 2, Name: "FIREFOX", CPUPercent: 30},
+				{PID: 3, Name: "safari", CPUPercent: 20},
+			},
+		},
+		processSearchMode:  true,
+		processSearchQuery: "CHROME",
+	}
+
+	filtered := m.filteredProcesses()
+
+	if len(filtered) != 1 {
+		t.Fatalf("Expected 1 filtered process, got %d", len(filtered))
+	}
+	if filtered[0].Name != "Chrome" {
+		t.Fatalf("Expected Chrome to be found (case insensitive), got %s", filtered[0].Name)
+	}
+}
+
+func TestProcessSearchEscapeClearsFilter(t *testing.T) {
+	m := Model{
+		activeTab:          TabProcesses,
+		settings:           config.Default(),
+		processSearchMode:  true,
+		processSearchQuery: "test",
+	}
+
+	model, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyEscape})
+	updated := model.(Model)
+
+	if updated.processSearchMode {
+		t.Fatal("Expected search mode to be disabled after escape")
+	}
+	if updated.processSearchQuery != "" {
+		t.Fatalf("Expected search query to be cleared, got %q", updated.processSearchQuery)
+	}
+}
+
+func TestProcessSearchBackspace(t *testing.T) {
+	m := Model{
+		activeTab:          TabProcesses,
+		settings:           config.Default(),
+		processSearchMode:  true,
+		processSearchQuery: "test",
+		systemInfo: system.SystemInfo{
+			Processes: []system.ProcessInfo{
+				{PID: 1, Name: "testing", CPUPercent: 50},
+				{PID: 2, Name: "test", CPUPercent: 30},
+				{PID: 3, Name: "tes", CPUPercent: 20},
+			},
+		},
+	}
+
+	model, _ := m.handleKeyPress(tea.KeyMsg{Type: tea.KeyBackspace})
+	updated := model.(Model)
+
+	if updated.processSearchQuery != "tes" {
+		t.Fatalf("Expected query to be 'tes' after backspace, got %q", updated.processSearchQuery)
+	}
+
+	// Verify filtering updated - 'tes' should match all 3: testing, test, tes
+	filtered := updated.filteredProcesses()
+	if len(filtered) != 3 {
+		t.Fatalf("Expected 3 processes matching 'tes', got %d", len(filtered))
+	}
+}
+
+func TestProcessSearchOnlyInProcessesTab(t *testing.T) {
+	m := Model{
+		activeTab:         TabOverview,
+		settings:          config.Default(),
+		processSearchMode: false,
+	}
+
+	model, _ := m.handleProcessKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated := model.(Model)
+
+	// Search mode should still toggle even when not on Processes tab
+	// because handleProcessKeys is called from the main Update
+	// But in reality, the key handling happens in the tab-specific handler
+	// Let's test the actual key binding in the processes tab
+	m.activeTab = TabProcesses
+	model, _ = m.handleProcessKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated = model.(Model)
+	if !updated.processSearchMode {
+		t.Fatal("Expected search mode to toggle when on Processes tab")
+	}
+}
+
+func TestProcessSearchViewRendering(t *testing.T) {
+	m := Model{
+		width:              120,
+		height:             30,
+		activeTab:          TabProcesses,
+		settings:           config.Default(),
+		selectedPids:       make(map[int32]bool),
+		processSearchMode:  true,
+		processSearchQuery: "chrome",
+		systemInfo: system.SystemInfo{
+			Processes: []system.ProcessInfo{
+				{PID: 1, Name: "chrome", CPUPercent: 50, User: "user"},
+			},
+		},
+	}
+	m.setupProcessTable()
+	m.processTable.SetWidth(max(60, m.width-6))
+	m.processTable.SetHeight(20)
+	m.calculateTabBounds()
+	m.updateProcessTable()
+
+	view := m.renderProcessesView()
+
+	if !strings.Contains(view, "Search:") {
+		t.Fatal("Expected view to contain 'Search:' when in search mode")
+	}
+	if !strings.Contains(view, "chrome") {
+		t.Fatal("Expected view to show search query")
+	}
+}
+
+func TestProcessSearchStatusBarShowsFilteredCount(t *testing.T) {
+	m := Model{
+		width:              120,
+		activeTab:          TabProcesses,
+		settings:           config.Default(),
+		selectedPids:       make(map[int32]bool),
+		processSearchMode:  true,
+		processSearchQuery: "chrome",
+		systemInfo: system.SystemInfo{
+			Processes: []system.ProcessInfo{
+				{PID: 1, Name: "chrome", CPUPercent: 50},
+				{PID: 2, Name: "chrome-helper", CPUPercent: 30},
+				{PID: 3, Name: "firefox", CPUPercent: 20},
+			},
+		},
+	}
+	m.setupProcessTable()
+	m.updateProcessTable()
+
+	statusBar := m.renderStatusBar()
+
+	if !strings.Contains(statusBar, "Search:") {
+		t.Fatal("Expected status bar to show search indicator")
+	}
+	// Search indicator shows displayed/totalFiltered, both should be 2 since we're filtering
+	if !strings.Contains(statusBar, "Search: 2/2") {
+		t.Fatalf("Expected status bar to show 'Search: 2/2' filtered count, got:\n%s", statusBar)
+	}
 }

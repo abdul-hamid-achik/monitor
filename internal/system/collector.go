@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/net"
@@ -16,19 +17,72 @@ import (
 
 // Collector collects system metrics
 type Collector struct {
-	mu           sync.RWMutex
-	info         SystemInfo
-	historySize  int
-	lastNetStats net.IOCountersStat
-	lastNetTime  time.Time
+	mu                      sync.RWMutex
+	info                    SystemInfo
+	historySize             int
+	lastNetStats            net.IOCountersStat
+	lastNetTime             time.Time
+	lastCPUInfoRefresh      time.Time
+	cpuInfoRefreshInterval  time.Duration
+	lastHostInfoRefresh     time.Time
+	hostInfoRefreshInterval time.Duration
+	lastProcessRefresh      time.Time
+	processRefreshInterval  time.Duration
+	includeProcessIO        bool
+	processRefreshPending   bool
+
+	// Ring buffers for history to avoid memory allocations
+	cpuUsageHistory    *RingBuffer[float64]
+	memUsageHistory    *RingBuffer[float64]
+	tempHistory        *RingBuffer[float64]
+	netDownloadHistory *RingBuffer[float64]
+	netUploadHistory   *RingBuffer[float64]
+	diskReadHistory    *RingBuffer[float64]
+	diskWriteHistory   *RingBuffer[float64]
+
+	// Last disk stats for calculating I/O per second
+	lastDiskStats []DiskPartitionInfo
+	lastDiskTime  time.Time
+	diskIORead    uint64
+	diskIOWrite   uint64
 }
 
 // NewCollector creates a new system collector
 func NewCollector() *Collector {
+	historySize := 60 // Keep 60 data points (1 minute at 1s intervals)
 	return &Collector{
-		historySize: 60, // Keep 60 data points (1 minute at 1s intervals)
-		lastNetTime: time.Now(),
+		historySize:             historySize,
+		cpuUsageHistory:         NewRingBuffer[float64](historySize),
+		memUsageHistory:         NewRingBuffer[float64](historySize),
+		tempHistory:             NewRingBuffer[float64](historySize),
+		netDownloadHistory:      NewRingBuffer[float64](historySize),
+		netUploadHistory:        NewRingBuffer[float64](historySize),
+		diskReadHistory:         NewRingBuffer[float64](historySize),
+		diskWriteHistory:        NewRingBuffer[float64](historySize),
+		lastNetTime:             time.Now(),
+		lastDiskTime:            time.Now(),
+		cpuInfoRefreshInterval:  30 * time.Second,
+		hostInfoRefreshInterval: 30 * time.Second,
+		processRefreshInterval:  4 * time.Second, // Background tabs don't need a per-second process sweep.
+		processRefreshPending:   true,
 	}
+}
+
+// SetProcessCollectionOptions adjusts how often the process list is refreshed and
+// whether expensive per-process I/O stats should be collected.
+func (c *Collector) SetProcessCollectionOptions(interval time.Duration, includeIO bool) {
+	if interval <= 0 {
+		interval = time.Second
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.processRefreshInterval != interval || c.includeProcessIO != includeIO {
+		c.processRefreshPending = true
+	}
+	c.processRefreshInterval = interval
+	c.includeProcessIO = includeIO
 }
 
 // Collect gathers all system metrics
@@ -50,11 +104,21 @@ func (c *Collector) Collect(ctx context.Context) SystemInfo {
 	// Collect Network metrics
 	c.collectNetwork(ctx)
 
-	// Collect Process list
-	c.collectProcesses(ctx)
+	// Collect Disk metrics
+	c.collectDisk(ctx)
 
-	// Collect Host info (once or periodically)
-	c.collectHostInfo(ctx)
+	// Collect Process list less frequently than the lightweight system metrics.
+	if c.shouldRefreshProcesses(c.info.LastUpdate) {
+		c.collectProcesses(ctx)
+		c.lastProcessRefresh = c.info.LastUpdate
+		c.processRefreshPending = false
+	}
+
+	// Host metadata changes rarely, so refresh it on a slower cadence.
+	if c.shouldRefreshHostInfo(c.info.LastUpdate) {
+		c.collectHostInfo(ctx)
+		c.lastHostInfoRefresh = c.info.LastUpdate
+	}
 
 	return c.info
 }
@@ -64,6 +128,27 @@ func (c *Collector) GetInfo() SystemInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.info
+}
+
+func (c *Collector) shouldRefreshProcesses(now time.Time) bool {
+	if c.processRefreshPending || c.lastProcessRefresh.IsZero() {
+		return true
+	}
+	return now.Sub(c.lastProcessRefresh) >= c.processRefreshInterval
+}
+
+func (c *Collector) shouldRefreshCPUInfo(now time.Time) bool {
+	if c.lastCPUInfoRefresh.IsZero() {
+		return true
+	}
+	return now.Sub(c.lastCPUInfoRefresh) >= c.cpuInfoRefreshInterval
+}
+
+func (c *Collector) shouldRefreshHostInfo(now time.Time) bool {
+	if c.lastHostInfoRefresh.IsZero() {
+		return true
+	}
+	return now.Sub(c.lastHostInfoRefresh) >= c.hostInfoRefreshInterval
 }
 
 // collectCPU gathers CPU metrics
@@ -81,11 +166,14 @@ func (c *Collector) collectCPU(ctx context.Context) {
 		c.info.CPU.CoreCount = len(perCore)
 	}
 
-	// Get CPU frequency
-	info, err := cpu.InfoWithContext(ctx)
-	if err == nil && len(info) > 0 {
-		c.info.CPU.FrequencyMHz = info[0].Mhz
-		c.info.CPU.ThreadCount = int(info[0].Cores) * len(info)
+	// Frequency and thread metadata change much less frequently than utilization.
+	if c.shouldRefreshCPUInfo(c.info.LastUpdate) {
+		info, err := cpu.InfoWithContext(ctx)
+		if err == nil && len(info) > 0 {
+			c.info.CPU.FrequencyMHz = info[0].Mhz
+			c.info.CPU.ThreadCount = int(info[0].Cores) * len(info)
+		}
+		c.lastCPUInfoRefresh = c.info.LastUpdate
 	}
 
 	// Get load averages (not available on macOS via gopsutil, use 0 as fallback)
@@ -94,22 +182,20 @@ func (c *Collector) collectCPU(ctx context.Context) {
 	c.info.CPU.LoadAvg5 = 0
 	c.info.CPU.LoadAvg15 = 0
 
-	// Update history
-	c.info.CPU.History = append(c.info.CPU.History, c.info.CPU.UsagePercent)
-	if len(c.info.CPU.History) > c.historySize {
-		c.info.CPU.History = c.info.CPU.History[1:]
-	}
+	// Update history using ring buffer
+	c.cpuUsageHistory.Push(c.info.CPU.UsagePercent)
+	c.info.CPU.History = c.cpuUsageHistory.ToSlice()
 
 	// Update per-core history
 	if len(c.info.CPU.PerCoreUsage) > 0 {
 		if len(c.info.CPU.PerCoreHistory) == 0 {
 			c.info.CPU.PerCoreHistory = make([][]float64, len(c.info.CPU.PerCoreUsage))
 		}
+		for i := range c.info.CPU.PerCoreHistory {
+			c.info.CPU.PerCoreHistory[i] = c.info.CPU.PerCoreHistory[i][:0]
+		}
 		for i, usage := range c.info.CPU.PerCoreUsage {
 			c.info.CPU.PerCoreHistory[i] = append(c.info.CPU.PerCoreHistory[i], usage)
-			if len(c.info.CPU.PerCoreHistory[i]) > c.historySize {
-				c.info.CPU.PerCoreHistory[i] = c.info.CPU.PerCoreHistory[i][1:]
-			}
 		}
 	}
 
@@ -176,11 +262,9 @@ func (c *Collector) collectTemperature(ctx context.Context) {
 	c.info.Temperature.FanMode = "Auto"
 	c.info.Temperature.Available = true
 
-	// Update history
-	c.info.Temperature.History = append(c.info.Temperature.History, c.info.Temperature.CPUPackage)
-	if len(c.info.Temperature.History) > c.historySize {
-		c.info.Temperature.History = c.info.Temperature.History[1:]
-	}
+	// Update history using ring buffer
+	c.tempHistory.Push(c.info.Temperature.CPUPackage)
+	c.info.Temperature.History = c.tempHistory.ToSlice()
 
 	c.info.Temperature.LastUpdate = time.Now()
 }
@@ -202,15 +286,11 @@ func (c *Collector) collectNetwork(ctx context.Context) {
 			c.info.Network.BytesSentPerSec = uint64(float64(current.BytesSent-c.lastNetStats.BytesSent) / elapsed)
 			c.info.Network.BytesRecvPerSec = uint64(float64(current.BytesRecv-c.lastNetStats.BytesRecv) / elapsed)
 
-			// Track history for sparklines
-			c.info.Network.DownloadHistory = append(c.info.Network.DownloadHistory, float64(c.info.Network.BytesRecvPerSec))
-			c.info.Network.UploadHistory = append(c.info.Network.UploadHistory, float64(c.info.Network.BytesSentPerSec))
-			if len(c.info.Network.DownloadHistory) > c.historySize {
-				c.info.Network.DownloadHistory = c.info.Network.DownloadHistory[1:]
-			}
-			if len(c.info.Network.UploadHistory) > c.historySize {
-				c.info.Network.UploadHistory = c.info.Network.UploadHistory[1:]
-			}
+			// Track history for sparklines using ring buffers
+			c.netDownloadHistory.Push(float64(c.info.Network.BytesRecvPerSec))
+			c.netUploadHistory.Push(float64(c.info.Network.BytesSentPerSec))
+			c.info.Network.DownloadHistory = c.netDownloadHistory.ToSlice()
+			c.info.Network.UploadHistory = c.netUploadHistory.ToSlice()
 		}
 	}
 
@@ -222,6 +302,73 @@ func (c *Collector) collectNetwork(ctx context.Context) {
 	c.lastNetStats = current
 	c.lastNetTime = now
 	c.info.Network.LastUpdate = now
+}
+
+// collectDisk gathers disk metrics
+func (c *Collector) collectDisk(ctx context.Context) {
+	// Get disk partitions
+	partitions, err := disk.PartitionsWithContext(ctx, false)
+	if err != nil {
+		return
+	}
+
+	var diskInfos []DiskPartitionInfo
+	for _, p := range partitions {
+		usage, err := disk.UsageWithContext(ctx, p.Mountpoint)
+		if err != nil {
+			continue
+		}
+
+		diskInfos = append(diskInfos, DiskPartitionInfo{
+			Device:       p.Device,
+			MountPoint:   p.Mountpoint,
+			TotalBytes:   usage.Total,
+			UsedBytes:    usage.Used,
+			FreeBytes:    usage.Free,
+			UsagePercent: usage.UsedPercent,
+			Filesystem:   p.Fstype,
+		})
+	}
+
+	// Sort by mount point to keep order consistent
+	sort.Slice(diskInfos, func(i, j int) bool {
+		return diskInfos[i].MountPoint < diskInfos[j].MountPoint
+	})
+
+	c.info.Disk.Partitions = diskInfos
+
+	// Calculate disk I/O rates
+	now := time.Now()
+	if !c.lastDiskTime.IsZero() {
+		elapsed := now.Sub(c.lastDiskTime).Seconds()
+		if elapsed > 0 {
+			// Get disk I/O counters
+			ioCounters, err := disk.IOCountersWithContext(ctx)
+			if err == nil {
+				var totalRead, totalWrite uint64
+				for _, counter := range ioCounters {
+					totalRead += counter.ReadBytes
+					totalWrite += counter.WriteBytes
+				}
+
+				c.info.Disk.ReadPerSec = uint64(float64(totalRead-c.diskIORead) / elapsed)
+				c.info.Disk.WritePerSec = uint64(float64(totalWrite-c.diskIOWrite) / elapsed)
+
+				// Track history using ring buffers
+				c.diskReadHistory.Push(float64(c.info.Disk.ReadPerSec))
+				c.diskWriteHistory.Push(float64(c.info.Disk.WritePerSec))
+				c.info.Disk.ReadHistory = c.diskReadHistory.ToSlice()
+				c.info.Disk.WriteHistory = c.diskWriteHistory.ToSlice()
+
+				c.diskIORead = totalRead
+				c.diskIOWrite = totalWrite
+			}
+		}
+	}
+
+	c.lastDiskTime = now
+	c.lastDiskStats = diskInfos
+	c.info.Disk.LastUpdate = now
 }
 
 // collectProcesses gathers process information
@@ -246,6 +393,7 @@ func (c *Collector) collectProcesses(ctx context.Context) {
 	})
 
 	c.info.Processes = procInfos
+	c.info.ProcessesLastUpdate = c.info.LastUpdate
 }
 
 // getProcessInfo gets detailed information for a single process
@@ -273,14 +421,6 @@ func (c *Collector) getProcessInfo(ctx context.Context, p *process.Process) (Pro
 		info.Memory = memInfo.RSS
 	}
 
-	// Get memory percent (returns float32, convert to float64)
-	memPercent, err := p.MemoryPercentWithContext(ctx)
-	if err != nil {
-		info.MemoryPercent = 0
-	} else {
-		info.MemoryPercent = float64(memPercent)
-	}
-
 	// Get thread count
 	info.Threads, err = p.NumThreadsWithContext(ctx)
 	if err != nil {
@@ -293,43 +433,19 @@ func (c *Collector) getProcessInfo(ctx context.Context, p *process.Process) (Pro
 		info.User = "unknown"
 	}
 
-	// Get status
-	status, err := p.StatusWithContext(ctx)
-	if err == nil && len(status) > 0 {
-		info.Status = status[0]
-	} else {
-		info.Status = "unknown"
-	}
-
-	// Get create time
-	info.CreateTime, err = p.CreateTimeWithContext(ctx)
-	if err != nil {
-		info.CreateTime = 0
-	}
-
-	// Get parent PID
-	info.Parent, err = p.PpidWithContext(ctx)
-	if err != nil {
-		info.Parent = 0
-	}
-
 	// Determine if system process
 	info.IsSystem = info.User == "root" || info.User == "_mbsetupuser" || info.PID < 100
 
 	// Determine if protected (critical system processes) using shared list
 	info.IsProtected = ProtectedProcessNames[info.Name] || info.PID == 1
 
-	// Get per-process I/O stats
-	ioStats, err := p.IOCountersWithContext(ctx)
-	if err == nil && ioStats != nil {
-		info.IOReadBytes = ioStats.ReadBytes
-		info.IOWriteBytes = ioStats.WriteBytes
-	}
-
-	// Get network connections for this process
-	conns, err := p.ConnectionsWithContext(ctx)
-	if err == nil {
-		info.Connections = int32(len(conns))
+	if c.includeProcessIO {
+		// Per-process I/O is only shown in the Processes tab, so skip the syscall elsewhere.
+		ioStats, err := p.IOCountersWithContext(ctx)
+		if err == nil && ioStats != nil {
+			info.IOReadBytes = ioStats.ReadBytes
+			info.IOWriteBytes = ioStats.WriteBytes
+		}
 	}
 
 	return info, nil
