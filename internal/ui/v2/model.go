@@ -27,6 +27,9 @@ const (
 	viewNetwork
 	viewProcesses
 	viewSettings
+	viewTrends
+
+	viewCount = iota // number of tabs
 )
 
 type Model struct {
@@ -59,6 +62,9 @@ type Model struct {
 	showKillConfirm bool
 	forceKill       bool
 	killConf        kill.Confirmation
+
+	settingsCursor int
+	settingsSaved  bool
 }
 
 func NewModel() Model {
@@ -79,11 +85,17 @@ func NewModel() Model {
 		BorderForeground(lipgloss.Color("#3B4252")).
 		Padding(0, 1)
 
+	// Load the user's saved settings (falls back to defaults on any error).
+	settings, err := config.Load()
+	if err != nil || settings == nil {
+		settings = config.Default()
+	}
+
 	m := Model{
 		ctx:          ctx,
 		cancel:       cancel,
 		collector:    c,
-		settings:     config.Default(),
+		settings:     settings,
 		view:         viewOverview,
 		selectedPids: make(map[int32]bool),
 		sortBy:       "cpu",
@@ -160,10 +172,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel()
 			return m, tea.Quit
 		case "tab", "right", "l":
-			m.view = (m.view + 1) % 8
+			m.view = (m.view + 1) % viewCount
 			return m, nil
 		case "shift+tab", "left", "h":
-			m.view = (m.view + 7) % 8
+			m.view = (m.view + viewCount - 1) % viewCount
 			return m, nil
 		case "1":
 			m.view = viewOverview
@@ -189,9 +201,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "8":
 			m.view = viewSettings
 			return m, nil
+		case "9":
+			m.view = viewTrends
+			return m, nil
+		}
+		if m.view == viewSettings {
+			return m.handleSettingsKeys(msg)
 		}
 		if m.view == viewProcesses {
 			return m.handleProcessKeys(msg)
+		}
+		return m, nil
+	case tea.MouseWheelMsg:
+		if m.view == viewProcesses && m.processTable != nil {
+			updated, cmd := m.processTable.Update(msg)
+			m.processTable = &updated
+			return m, cmd
+		}
+		return m, nil
+	case tea.MouseClickMsg:
+		// A click on the header row (line 0) switches to the clicked tab.
+		if msg.Mouse().Y == 0 {
+			if v, ok := tabHitTest(msg.Mouse().X, m.titleWidth(), m.tabWidths()); ok {
+				m.view = v
+				return m, nil
+			}
+		}
+		if m.view == viewProcesses && m.processTable != nil {
+			updated, cmd := m.processTable.Update(msg)
+			m.processTable = &updated
+			return m, cmd
 		}
 		return m, nil
 	default:
@@ -216,6 +255,9 @@ func (m Model) View() tea.View {
 	body := m.render()
 	v := tea.NewView(body)
 	v.AltScreen = true
+	if m.settings != nil && m.settings.MouseEnabled {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	return v
 }
 
@@ -239,6 +281,8 @@ func (m Model) render() string {
 		content = m.renderProcesses()
 	case viewSettings:
 		content = m.renderSettings()
+	case viewTrends:
+		content = m.renderTrends()
 	default:
 		content = "Unknown view"
 	}
@@ -257,6 +301,7 @@ func (m Model) renderHeader() string {
 	network := m.tabInactive.Render(" 6:Network ")
 	processes := m.tabInactive.Render(" 7:Processes ")
 	settings := m.tabInactive.Render(" 8:Settings ")
+	trends := m.tabInactive.Render(" 9:Trends ")
 	if m.view == viewOverview {
 		overview = m.tabActive.Render(" 1:Overview ")
 	}
@@ -281,8 +326,11 @@ func (m Model) renderHeader() string {
 	if m.view == viewSettings {
 		settings = m.tabActive.Render(" 8:Settings ")
 	}
+	if m.view == viewTrends {
+		trends = m.tabActive.Render(" 9:Trends ")
+	}
 	title := m.titleStyle.Render(fmt.Sprintf(" MONITOR (v2)  %s ", m.last.LastUpdate.Format("15:04:05")))
-	tabs := lipgloss.JoinHorizontal(lipgloss.Top, overview, cpu, memory, temperature, disk, network, processes, settings)
+	tabs := lipgloss.JoinHorizontal(lipgloss.Top, overview, cpu, memory, temperature, disk, network, processes, settings, trends)
 	return lipgloss.JoinHorizontal(lipgloss.Top, title, tabs)
 }
 
@@ -375,8 +423,19 @@ func (m Model) renderSettings() string {
 		fmt.Sprintf("  CPU Alert Threshold:  %s", cpuAlert),
 		fmt.Sprintf("  Memory Alert Threshold: %s", memAlert),
 	}
+	// Mark the selected row.
+	sel := lipgloss.NewStyle().Foreground(lipgloss.Color("#88C0D0")).Bold(true)
+	for i := range rows {
+		if i == m.settingsCursor {
+			rows[i] = sel.Render("▸" + rows[i][1:])
+		}
+	}
 	body := strings.Join(rows, "\n")
-	footer := "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("#4C566A")).Render("  (read-only in v2; edit via config file)")
+	hint := "  ↑/↓ select  ·  enter/space change  ·  - back  ·  s save"
+	if m.settingsSaved {
+		hint += "   ✓ saved"
+	}
+	footer := "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("#4C566A")).Render(hint)
 	return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Settings ") + "\n\n" + body + footer)
 }
 

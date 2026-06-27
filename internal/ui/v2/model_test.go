@@ -8,7 +8,57 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/config"
 )
+
+func TestTabHitTest(t *testing.T) {
+	widths := []int{5, 5, 5} // three tabs of width 5, starting at x=10
+	if v, ok := tabHitTest(12, 10, widths); !ok || v != 0 {
+		t.Errorf("x=12 -> (%d,%v), want tab 0", v, ok)
+	}
+	if v, ok := tabHitTest(16, 10, widths); !ok || v != 1 {
+		t.Errorf("x=16 -> (%d,%v), want tab 1", v, ok)
+	}
+	if _, ok := tabHitTest(3, 10, widths); ok {
+		t.Error("a click over the title should miss")
+	}
+	if _, ok := tabHitTest(99, 10, widths); ok {
+		t.Error("a click past the last tab should miss")
+	}
+}
+
+func TestSettingsEditing(t *testing.T) {
+	m := NewModel()
+	m.view = viewSettings
+	m.settings = config.Default()
+
+	// Cursor 0 = Update Interval; enter cycles it to a different value.
+	before := m.settings.UpdateInterval
+	updated, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = updated.(Model)
+	if m.settings.UpdateInterval == before {
+		t.Errorf("enter on Update Interval should change it; still %v", m.settings.UpdateInterval)
+	}
+
+	// Cursor 2 = Show System Procs; space toggles it.
+	m.settingsCursor = 2
+	sys := m.settings.ShowSystemProcesses
+	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Text: " ", Code: ' '}))
+	m = updated.(Model)
+	if m.settings.ShowSystemProcesses == sys {
+		t.Error("space on Show System Procs should toggle it")
+	}
+}
+
+func TestRenderTrendsProducesOutput(t *testing.T) {
+	m := NewModel()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	fm := updated.(Model)
+	fm.view = viewTrends
+	if fm.renderTrends() == "" {
+		t.Error("renderTrends should produce output even with no recorded history")
+	}
+}
 
 func TestNewModelBasics(t *testing.T) {
 	m := NewModel()
@@ -70,22 +120,22 @@ func TestTabSwitching(t *testing.T) {
 }
 
 func TestTabWrapAllDirections(t *testing.T) {
-	for start := viewID(0); start < 8; start++ {
+	for start := viewID(0); start < viewCount; start++ {
 		m := NewModel()
 		m.view = start
-		for i := 0; i < 8; i++ {
+		for i := 0; i < viewCount; i++ {
 			updated, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyTab}))
 			m = updated.(Model)
 		}
 		if m.view != start {
-			t.Errorf("tab x8 from %d: ended at %d, want %d", start, m.view, start)
+			t.Errorf("tab x%d from %d: ended at %d, want %d", viewCount, start, m.view, start)
 		}
-		for i := 0; i < 8; i++ {
+		for i := 0; i < viewCount; i++ {
 			updated, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyLeft}))
 			m = updated.(Model)
 		}
 		if m.view != start {
-			t.Errorf("left x8 from %d: ended at %d, want %d", start, m.view, start)
+			t.Errorf("left x%d from %d: ended at %d, want %d", viewCount, start, m.view, start)
 		}
 	}
 }

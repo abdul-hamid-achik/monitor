@@ -10,6 +10,8 @@ package history
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -18,6 +20,20 @@ import (
 )
 
 const collection = "metrics"
+
+// DefaultPath returns the default history store path
+// (~/.local/share/monitor/history.veclite), creating the directory.
+func DefaultPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".local", "share", "monitor")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "history.veclite"), nil
+}
 
 // Sample is one scalar metric reading.
 type Sample struct {
@@ -105,6 +121,9 @@ func (s *Store) Query(metric string, since time.Time) ([]Point, error) {
 	if s.db == nil {
 		return nil, errors.New("store not open")
 	}
+	if !s.db.HasCollection(collection) {
+		return nil, nil // nothing recorded yet
+	}
 	res, err := s.db.Collection(collection).Find()
 	if err != nil {
 		return nil, err
@@ -133,6 +152,9 @@ func (s *Store) Metrics() ([]string, error) {
 	defer s.mu.Unlock()
 	if s.db == nil {
 		return nil, errors.New("store not open")
+	}
+	if !s.db.HasCollection(collection) {
+		return nil, nil
 	}
 	res, err := s.db.Collection(collection).Find()
 	if err != nil {

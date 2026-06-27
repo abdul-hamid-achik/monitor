@@ -38,10 +38,10 @@ outcomes:
       command:
         run: "./bin/monitor v2 --help | grep -q 'charm.land/bubbletea/v2'"
   - id: v2_help_mentions_all_tabs
-    description: v2 --help mentions all 8 tabs or the default TUI
+    description: v2 --help mentions all 9 tabs or the default TUI
     verify:
       command:
-        run: "./bin/monitor v2 --help | grep -qiE 'all 8 tabs|Overview.*CPU.*Memory'"
+        run: "./bin/monitor v2 --help | grep -qiE 'all 9 tabs|Overview.*CPU.*Memory'"
   - id: clean_exit
     description: v2 --help exits cleanly
     verify:

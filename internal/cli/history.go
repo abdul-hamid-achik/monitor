@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -21,25 +20,11 @@ func newHistoryCmd() *cobra.Command {
 	return cmd
 }
 
-// historyDBPath returns the default history store path
-// (~/.local/share/monitor/history.veclite), creating the directory.
-func historyDBPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(home, ".local", "share", "monitor")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "history.veclite"), nil
-}
-
 func resolveHistoryPath(dbPath string) (string, error) {
 	if dbPath != "" {
 		return dbPath, nil
 	}
-	return historyDBPath()
+	return history.DefaultPath()
 }
 
 // sampleSystem extracts the recorded scalar metric series from a snapshot.
