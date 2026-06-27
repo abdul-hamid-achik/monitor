@@ -57,14 +57,19 @@ jobs:
         run: go build -o bin/monitor ./cmd/monitor
 
       - name: Run specs
-        # stash.yml is excluded: it asserts a real fcheap stash_id, and fcheap
-        # is a Homebrew-distributed tool not available on CI runners. Every
-        # other spec exercises only the monitor binary (tools degrade
-        # gracefully when absent).
+        # Two specs are skipped on CI:
+        #   stash.yml          - asserts a real fcheap stash_id; fcheap is a
+        #                        Homebrew-distributed tool, not on CI runners.
+        #   profile_sample.yml - needs macOS `sample` (the parser itself is
+        #                        unit-tested on both OSes via the test matrix).
+        # Every other spec exercises only the monitor binary.
         run: |
           fail=0
           for spec in specs/*.yml; do
-            case "$spec" in */stash.yml) echo "skip $spec (needs fcheap)"; continue ;; esac
+            case "$spec" in
+              */stash.yml) echo "skip $spec (needs fcheap)"; continue ;;
+              */profile_sample.yml) echo "skip $spec (needs macOS sample)"; continue ;;
+            esac
             result=$(glyph run "$spec" --format json | python3 -c "import sys, json; print(json.load(sys.stdin).get('status', ''))")
             if [ "$result" = "passed" ]; then
               echo "PASS $spec"
