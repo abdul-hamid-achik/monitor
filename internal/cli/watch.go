@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -9,7 +11,9 @@ import (
 
 	"github.com/abdul-hamid-achik/monitor/internal/analyzer"
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/config"
 	"github.com/abdul-hamid-achik/monitor/internal/incidents"
+	"github.com/abdul-hamid-achik/monitor/internal/notify"
 )
 
 // Event is the NDJSON event type emitted by `monitor watch --json`.
@@ -29,10 +33,12 @@ type Event struct {
 
 func newWatchCmd() *cobra.Command {
 	var (
-		interval time.Duration
-		once     bool
-		stash    bool
-		stashTTL string
+		interval      time.Duration
+		once          bool
+		stash         bool
+		stashTTL      string
+		webhookURL    string
+		notifyDesktop bool
 	)
 	cmd := &cobra.Command{
 		Use:   "watch",
@@ -55,15 +61,16 @@ the incident via internal/incidents (fcheap stash, content-addressed).`,
 			engine := analyzer.NewEngine()
 			engine.AddRule(&analyzer.CPUSpikeRule{Factor: 3.0})
 			engine.AddRule(&analyzer.RSSGrowthRule{})
+			// Give the config.json cpu/memory alert thresholds teeth.
+			if cfg, err := config.Load(); err == nil && (cfg.CPUAlertThreshold > 0 || cfg.MemoryAlertThreshold > 0) {
+				engine.AddRule(&analyzer.ThresholdRule{CPUPercent: cfg.CPUAlertThreshold, MemPercent: cfg.MemoryAlertThreshold})
+			}
 
-			var stashFn func(ev collector.Event, a collector.Alert)
+			// Each enabled sink is one alert handler; all run in goroutines so
+			// the watch loop never blocks on I/O.
+			var handlers []func(ev collector.Event, a collector.Alert)
 			if stash {
-				// stashOnAlert runs in a goroutine so the watch loop
-				// never blocks on fcheap I/O. The Capture call itself
-				// is synchronous; if fcheap stalls the user sees the
-				// warning in the JSON `stash_error` field rather than
-				// a stalled stdout stream.
-				stashFn = func(ev collector.Event, a collector.Alert) {
+				handlers = append(handlers, func(ev collector.Event, a collector.Alert) {
 					go func(ev collector.Event, a collector.Alert) {
 						ctx2, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 						defer cancel()
@@ -79,21 +86,44 @@ the incident via internal/incidents (fcheap stash, content-addressed).`,
 							Trigger: "alert",
 							TTL:     stashTTL,
 						})
-						// Write the stash outcome as a separate NDJSON line so
-						// downstream consumers see when an incident landed.
-						ev2 := Event{
-							Type:      "stash",
-							Timestamp: time.Now(),
-							Stash:     &res,
-						}
+						ev2 := Event{Type: "stash", Timestamp: time.Now(), Stash: &res}
 						if err != nil {
 							ev2.StashErr = err.Error()
 						}
 						_ = WriteNDJSON(ev2)
 					}(ev, a)
-				}
+				})
 			}
-			engine.SetOnAlert(stashFn)
+			if webhookURL != "" {
+				client := &http.Client{Timeout: 10 * time.Second}
+				handlers = append(handlers, func(_ collector.Event, a collector.Alert) {
+					go func(a collector.Alert) {
+						ctx2, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+						defer cancel()
+						if err := notify.Webhook(ctx2, client, webhookURL, a); err != nil {
+							fmt.Fprintf(os.Stderr, "monitor: webhook failed: %v\n", err)
+						}
+					}(a)
+				})
+			}
+			if notifyDesktop {
+				handlers = append(handlers, func(_ collector.Event, a collector.Alert) {
+					go func(a collector.Alert) {
+						ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						if err := notify.Desktop(ctx2, a); err != nil {
+							fmt.Fprintf(os.Stderr, "monitor: desktop notify failed: %v\n", err)
+						}
+					}(a)
+				})
+			}
+			if len(handlers) > 0 {
+				engine.SetOnAlert(func(ev collector.Event, a collector.Alert) {
+					for _, h := range handlers {
+						h(ev, a)
+					}
+				})
+			}
 
 			if once {
 				info := c.Collect(ctx)
@@ -134,6 +164,10 @@ the incident via internal/incidents (fcheap stash, content-addressed).`,
 		"on every alert, capture the incident to fcheap via internal/incidents")
 	cmd.Flags().StringVar(&stashTTL, "stash-ttl", "7d",
 		"TTL for incident stashes (passed to fcheap --ttl)")
+	cmd.Flags().StringVar(&webhookURL, "webhook", "",
+		"POST each alert as JSON to this URL")
+	cmd.Flags().BoolVar(&notifyDesktop, "notify", false,
+		"show a desktop notification on each alert (osascript / notify-send)")
 	return cmd
 }
 

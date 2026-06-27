@@ -3,12 +3,45 @@
 package analyzer
 
 import (
+	"fmt"
 	"math"
 	"sync"
 	"time"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 )
+
+// ThresholdRule fires when overall CPU or memory usage meets/exceeds a
+// configured percentage. A threshold of 0 disables that check. This is the
+// rule that gives the config.json cpu/memory alert thresholds teeth.
+type ThresholdRule struct {
+	CPUPercent float64
+	MemPercent float64
+}
+
+// Name returns the rule name.
+func (r *ThresholdRule) Name() string { return "threshold" }
+
+// Evaluate emits a cpu_threshold / mem_threshold alert when usage crosses the
+// configured percentage.
+func (r *ThresholdRule) Evaluate(ev collector.Event, _ *History) []collector.Alert {
+	var out []collector.Alert
+	if r.CPUPercent > 0 && ev.CPU.UsagePercent >= r.CPUPercent {
+		out = append(out, collector.Alert{
+			Severity: "warning",
+			Rule:     "cpu_threshold",
+			Detail:   fmt.Sprintf("CPU %.0f%% >= threshold %.0f%%", ev.CPU.UsagePercent, r.CPUPercent),
+		})
+	}
+	if r.MemPercent > 0 && ev.Memory.UsagePercent >= r.MemPercent {
+		out = append(out, collector.Alert{
+			Severity: "warning",
+			Rule:     "mem_threshold",
+			Detail:   fmt.Sprintf("memory %.0f%% >= threshold %.0f%%", ev.Memory.UsagePercent, r.MemPercent),
+		})
+	}
+	return out
+}
 
 // Rule is the interface every check implements.
 type Rule interface {

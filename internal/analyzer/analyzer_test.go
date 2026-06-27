@@ -49,6 +49,29 @@ func TestOnAlertHookFiresPerAlert(t *testing.T) {
 	}
 }
 
+func TestThresholdRule(t *testing.T) {
+	r := &ThresholdRule{CPUPercent: 80, MemPercent: 90}
+	// CPU over, memory under -> one cpu_threshold alert.
+	ev := collector.Event{
+		Timestamp: time.Now(),
+		CPU:       collector.CPUInfo{UsagePercent: 85},
+		Memory:    collector.MemoryInfo{UsagePercent: 50},
+	}
+	alerts := r.Evaluate(ev, nil)
+	if len(alerts) != 1 || alerts[0].Rule != "cpu_threshold" {
+		t.Fatalf("alerts = %+v, want one cpu_threshold", alerts)
+	}
+	// Both over -> two alerts.
+	ev.Memory.UsagePercent = 95
+	if got := r.Evaluate(ev, nil); len(got) != 2 {
+		t.Errorf("both over: got %d alerts, want 2", len(got))
+	}
+	// A 0 threshold disables the check.
+	if got := (&ThresholdRule{}).Evaluate(ev, nil); len(got) != 0 {
+		t.Errorf("zero thresholds should not fire; got %+v", got)
+	}
+}
+
 func TestCPUSpikeRule(t *testing.T) {
 	r := &CPUSpikeRule{Factor: 2.0}
 	e := NewEngine()
