@@ -2,8 +2,55 @@ package profiler
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/http/pprof"
+	"strings"
 	"testing"
 )
+
+// TestCaptureHeapOverHTTP exercises the real scrape path: Capture builds the
+// /debug/pprof/heap?debug=1 URL, fetches it over HTTP, and parses frames. We
+// serve a live pprof endpoint from this test process so the data is real.
+func TestCaptureHeapOverHTTP(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index) // dispatches /debug/pprof/heap etc.
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	for _, pt := range []ProfileType{ProfileHeap, ProfileGoroutine} {
+		p, err := Capture(context.Background(), 4321, pt, addr)
+		if err != nil {
+			t.Fatalf("Capture(%s): %v", pt, err)
+		}
+		if p.PID != 4321 || p.Type != pt {
+			t.Errorf("%s: meta = %+v", pt, p)
+		}
+		if p.Text == "" {
+			t.Errorf("%s: expected profile text", pt)
+		}
+	}
+
+	// The debug=1 heap profile carries a recognizable header.
+	p, _ := Capture(context.Background(), 1, ProfileHeap, addr)
+	if !strings.Contains(p.Text, "heap profile") {
+		t.Errorf("heap text missing 'heap profile' header:\n%.200s", p.Text)
+	}
+}
+
+// TestCaptureScrapeErrorIsReported: a non-2xx endpoint surfaces a scrape error
+// rather than a silent empty profile.
+func TestCaptureScrapeErrorIsReported(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	if _, err := Capture(context.Background(), 1, ProfileHeap, addr); err == nil {
+		t.Error("expected a scrape error on a 500 response")
+	}
+}
 
 func TestCaptureInvalidPID(t *testing.T) {
 	for _, pt := range []ProfileType{ProfileHeap, ProfileCPU, ProfileGoroutine, ProfileSample} {

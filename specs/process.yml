@@ -1,0 +1,60 @@
+version: 1
+name: monitor_process
+
+intent: |
+  `monitor process <pid>` prints detailed info for a process. This locks the
+  once-broken path (it formerly always reported "pid not found" due to a
+  Snapshot-vs-Collect bug). For pid 1 it reports is_system + is_protected; an
+  unknown pid errors with a non-zero exit. JSON carries pid/name/parent.
+
+target:
+  cmd: ["./bin/monitor", "process", "1", "--json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: json_has_pid1
+    description: JSON reports pid 1
+    verify:
+      command:
+        run: "./bin/monitor process 1 --json | grep -q '\"pid\": 1'"
+  - id: json_has_name
+    description: JSON includes a name field
+    verify:
+      command:
+        run: "./bin/monitor process 1 --json | grep -q '\"name\"'"
+  - id: pid1_protected_system
+    description: pid 1 is flagged both protected and system (cross-platform)
+    verify:
+      command:
+        run: "./bin/monitor process 1 --json | grep -q '\"is_protected\": true' && ./bin/monitor process 1 --json | grep -q '\"is_system\": true'"
+  - id: unknown_pid_errors
+    description: an unknown pid errors with a non-zero exit (the once-broken path now works)
+    verify:
+      command:
+        run: "! ./bin/monitor process 999999 >/dev/null 2>&1 && ./bin/monitor process 999999 2>&1 | grep -qi 'not found'"
+  - id: human_renders
+    description: the human form renders the process detail
+    verify:
+      command:
+        run: "./bin/monitor process 1 | grep -qE 'PID 1|CPU|Memory'"
+  - id: clean_exit
+    description: process 1 --json exits cleanly
+    verify:
+      process:
+        exitCode: 0

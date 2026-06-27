@@ -135,20 +135,25 @@ monitor/
 │   └── widgets/                 # Reusable widgets (sparklines, gauges; lipgloss v2)
 │       ├── gauge.go
 │       └── gauge_test.go
-├── specs/                       # glyphrun behavioral specs (19 specs, all passing)
+├── specs/                       # glyphrun behavioral specs (20 specs, all passing)
+│   ├── baseline.yml             # save/list/delete + path-traversal guard
 │   ├── cli_help.yml
+│   ├── diff.yml                 # baseline vs live diff
 │   ├── doctor_json.yml
 │   ├── env_detection.yml
+│   ├── history.yml              # query/list on a fresh store
 │   ├── investigate.yml
 │   ├── kill_safety.yml
 │   ├── logs_capture.yml
 │   ├── logs_search.yml
 │   ├── mcp_handshake.yml
-│   ├── profile_sample.yml
+│   ├── process.yml              # process <pid> incl. unknown-pid error
+│   ├── profile_sample.yml       # (skipped in CI — needs macOS `sample`)
 │   ├── reload.yml
 │   ├── snapshot_json.yml
-│   ├── stash.yml
-│   ├── v2_help.yml
+│   ├── stash.yml                # (skipped in CI — needs fcheap)
+│   ├── studio_help.yml          # studio TUI help + bare-monitor-shows-help
+│   ├── tree.yml                 # process hierarchy
 │   ├── version.yml
 │   └── watch_tick.yml
 ├── Taskfile.yml                 # Single-word commands
@@ -164,10 +169,10 @@ monitor/
 
 ### Mode Dispatch (`cmd/monitor/main.go`)
 
-- No args → launch TUI (`internal/ui`)
-- Subcommand → cobra CLI (`internal/cli`)
-- Unknown flag → cobra help (CLI mode)
-- Backward-compatible: existing `monitor` (bare) launches the TUI
+- `monitor studio` (alias `tui`) → launch the TUI (`internal/ui/studio`)
+- Other subcommand → cobra CLI (`internal/cli`)
+- No args / unknown flag → cobra help
+- main.go extracts only the global `--pprof` flag, then hands argv to cobra
 
 ### Event Bus (`internal/collector`)
 
