@@ -12,9 +12,6 @@ import (
 	uiv2 "github.com/abdul-hamid-achik/monitor/internal/ui/v2"
 )
 
-// version is set by goreleaser during build
-var version = "dev"
-
 // reloadServer, when set, is started by runTUI() to expose POST /reload
 // on 127.0.0.1:7351 (or the configured addr). External processes can
 // then trigger an in-process refresh via `monitor reload`. The flag is
@@ -40,7 +37,8 @@ func main() {
 		runTUI()
 		return
 	}
-	cli.Version = version
+	// cli.Version is set at link time by goreleaser's
+	// -X .../internal/cli.Version=<tag> ldflag; "dev" for plain `go build`.
 	cli.Execute()
 }
 
