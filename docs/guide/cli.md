@@ -13,7 +13,7 @@ the CLI is the primary surface for scripts and agents.
 The subcommands group into four purposes:
 
 - **Inspect** — read current state: [`snapshot`](#snapshot),
-  [`watch`](#watch), [`process`](#process).
+  [`watch`](#watch), [`process`](#process), [`tree`](#tree).
 - **Act** — change something: [`kill`](#kill).
 - **Diagnose** — capture and analyze: [`profile`](#profile),
   [`investigate`](#investigate), [`stash`](#stash), [`incidents`](#incidents),
@@ -29,7 +29,29 @@ The subcommands group into four purposes:
 |------|--------|
 | `--no-temperature-source` | Skip `powermetrics`; use the CPU-load estimation fallback (no sudo required). Persistent — available under every subcommand. |
 | `--json` | Emit JSON (or NDJSON for [`watch`](#watch)) to stdout. Supported by every subcommand except [`run`](#run), [`reload`](#reload), [`mcp`](#mcp), [`vault`](#vault), and [`v2`](#v2). |
+| `--pprof <addr>` | Expose Monitor's **own** `net/http/pprof` on `addr` (e.g. `localhost:6060`). Off by default. |
 | `--version` | Print the version and exit. |
+
+### Profiling Monitor itself
+
+`--pprof <addr>` starts an HTTP server serving Monitor's own
+`/debug/pprof/` endpoints on the given address, then continues with whatever
+subcommand or mode you asked for. It is most useful with the long-running modes
+— the TUI, [`watch`](#watch), [`history record`](#history-record), and
+[`mcp serve`](#mcp) — where there's a live process to profile. Monitor logs the
+listen address to stderr:
+
+```bash
+./bin/monitor --pprof localhost:6060 watch --json
+# monitor: pprof listening on http://localhost:6060/debug/pprof/
+```
+
+Because the endpoint is a standard `net/http/pprof` server, you can point
+Monitor's own profiler at it to capture Monitor profiling Monitor:
+
+```bash
+./bin/monitor profile <monitor-pid> --type heap --pprof-addr localhost:6060 --json
+```
 
 ### Observed-child environment
 
@@ -97,12 +119,19 @@ Pipe into `jq` or any other line-oriented tool.
 | `--notify` | `false` | Show a desktop notification on each alert (`osascript` / `notify-send`). |
 | `--json` | `false` | Emit NDJSON to stdout. |
 
-Alerts come from the built-in analyzer. Two rules always run — a CPU-spike rule
-and an RSS-growth rule. In addition, the `cpu_alert_threshold` and
-`memory_alert_threshold` settings in [`config.json`](/reference/configuration) get teeth
-here: when either is set above `0`, a threshold rule fires `cpu_threshold` /
-`mem_threshold` alerts whenever overall CPU or memory usage crosses the
-configured percentage.
+Alerts come from the built-in analyzer. Four rules always run, and watch feeds
+the analyzer the full event — including per-partition `Disk` and the
+`Processes` list — so the per-process rules fire too:
+
+- `cpu_spike` — a process's CPU jumps to ~3x its rolling baseline.
+- `rss_growth` — a process's resident memory keeps climbing.
+- `disk_fill` — any mounted partition's usage is `>= 90%`.
+- `swap_pressure` — swap used is `>= 50%` of swap total (real memory pressure).
+
+In addition, the `cpu_alert_threshold` and `memory_alert_threshold` settings in
+[`config.json`](/reference/configuration) get teeth here: when either is set
+above `0`, a threshold rule fires `cpu_threshold` / `mem_threshold` alerts
+whenever overall CPU or memory usage crosses the configured percentage.
 
 With `--stash`, each alert captures an incident bundle in a background
 goroutine and emits a separate `stash` line reporting the outcome; the watch
@@ -154,6 +183,54 @@ Print detailed information for a single PID. Takes exactly one argument.
   "is_system": false,
   "is_protected": false
 }
+```
+
+### `tree`
+
+Print the process forest by parent/child relationship. With no argument, every
+top-level process is shown (one whose parent isn't in the captured set, e.g.
+reparented to init), each followed by its descendants indented underneath. Pass
+a PID to print just that process's subtree. Children are sorted by PID for
+determinism.
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--json` | `false` | Emit nested JSON output. |
+
+```bash
+./bin/monitor tree              # the whole forest
+./bin/monitor tree 1234         # the subtree rooted at pid 1234
+./bin/monitor tree --json | jq '.[0].children'
+```
+
+The text output indents each child under its parent and annotates CPU and
+memory:
+
+```
+launchd (pid 1)  cpu 0.0%  mem 12.1 MB
+  loginwindow (pid 512)  cpu 0.1%  mem 48.0 MB
+  node (pid 1133)  cpu 3.1%  mem 256.0 MB
+    esbuild (pid 1190)  cpu 0.0%  mem 32.0 MB
+```
+
+With `--json`, each node is the full process object with its children nested
+under a `children` array (omitted when a process has none):
+
+```json
+[
+  {
+    "pid": 1,
+    "name": "launchd",
+    "cpu_percent": 0.0,
+    "memory": 12685312,
+    "children": [
+      {"pid": 1133, "name": "node", "cpu_percent": 3.1, "memory": 268435456,
+       "children": [
+         {"pid": 1190, "name": "esbuild", "cpu_percent": 0.0, "memory": 33554432}
+       ]}
+    ]
+  }
+]
 ```
 
 ## Act
