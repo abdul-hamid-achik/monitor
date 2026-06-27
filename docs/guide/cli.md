@@ -17,7 +17,8 @@ The subcommands group into four purposes:
 - **Act** — change something: [`kill`](#kill).
 - **Diagnose** — capture and analyze: [`profile`](#profile),
   [`investigate`](#investigate), [`stash`](#stash), [`incidents`](#incidents),
-  [`logs`](#logs), [`history`](#history).
+  [`logs`](#logs), [`history`](#history), [`baseline`](#baseline),
+  [`diff`](#diff).
 - **Ecosystem & runtime** — talk to sibling tools and the running TUI:
   [`doctor`](#doctor), [`run`](#run), [`reload`](#reload), [`mcp`](#mcp),
   [`vault`](#vault), [`v2`](#v2).
@@ -92,22 +93,40 @@ Pipe into `jq` or any other line-oriented tool.
 | `--once` | `false` | Emit one event and exit. |
 | `--stash` | `false` | On every alert, capture the incident to fcheap via `internal/incidents`. |
 | `--stash-ttl` | `7d` | TTL for incident stashes (passed to fcheap `--ttl`). |
+| `--webhook` | `""` | POST each alert as JSON to this URL. |
+| `--notify` | `false` | Show a desktop notification on each alert (`osascript` / `notify-send`). |
 | `--json` | `false` | Emit NDJSON to stdout. |
 
-Alerts come from the built-in analyzer (a CPU-spike rule and an RSS-growth
-rule). With `--stash`, each alert captures an incident bundle in a background
+Alerts come from the built-in analyzer. Two rules always run — a CPU-spike rule
+and an RSS-growth rule. In addition, the `cpu_alert_threshold` and
+`memory_alert_threshold` settings in [`config.json`](/reference/configuration) get teeth
+here: when either is set above `0`, a threshold rule fires `cpu_threshold` /
+`mem_threshold` alerts whenever overall CPU or memory usage crosses the
+configured percentage.
+
+With `--stash`, each alert captures an incident bundle in a background
 goroutine and emits a separate `stash` line reporting the outcome; the watch
 loop never blocks on fcheap I/O, and a stash failure shows up in a
 `stash_error` field rather than stalling stdout.
 
+`--webhook` and `--notify` are additional alert sinks — they fire alongside
+(not instead of) the NDJSON stream and `--stash`. Each sink runs in its own
+goroutine, so the watch loop never blocks on network or notifier I/O. `--webhook`
+POSTs the raw `collector.Alert` JSON (the same object embedded in an `alert`
+line) to the given URL; a non-2xx response is logged to stderr. `--notify`
+shells out to `osascript` on macOS or `notify-send` on Linux; delivery failures
+are logged to stderr and never stall the stream.
+
 ```bash
 ./bin/monitor watch --json | jq -c 'select(.type=="tick")'
 ./bin/monitor watch --json --stash --stash-ttl 24h
+./bin/monitor watch --json --webhook https://hooks.example.com/alerts --notify
 ```
 
 ```json
 {"type":"tick","timestamp":"2026-06-27T00:02:38Z","cpu":{"usage_percent":25.9},"memory":{"usage_percent":68.1},"hostname":"host"}
 {"type":"alert","timestamp":"2026-06-27T00:02:41Z","alert":{"rule":"cpu_spike","severity":"warning","pid":1133,"process":"node","detail":"3.1x baseline"}}
+{"type":"alert","timestamp":"2026-06-27T00:02:44Z","alert":{"rule":"cpu_threshold","severity":"warning","detail":"cpu 91.2% >= 90%"}}
 ```
 
 ### `process`
@@ -432,6 +451,111 @@ List the metrics that have been recorded into the store.
 
 ```json
 ["cpu.usage", "disk.read_bps", "disk.write_bps", "load.1", "mem.pressure", "mem.usage", "net.recv_bps", "net.sent_bps"]
+```
+
+### `baseline`
+
+Capture and manage labeled system baselines. A baseline is an inspectable JSON
+snapshot — overall CPU / memory / load1, every process keyed by PID (name,
+memory, CPU percent), and the TCP listening sockets — saved to
+`~/.local/share/monitor/baselines/<name>.json`. Pair baselines with
+[`diff`](#diff) to answer "what changed?" across a deploy, a restart, or an
+incident window. Three subcommands: `save`, `list`, and `delete`.
+
+#### `baseline save`
+
+Capture the current system as a named baseline. Takes exactly one argument —
+the baseline name. Listeners are gathered best-effort; some sockets are
+invisible without elevated privileges.
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--json` | `false` | Emit JSON output. |
+
+```bash
+./bin/monitor baseline save pre-deploy
+./bin/monitor baseline save pre-deploy --json
+```
+
+```json
+{"saved": "pre-deploy", "processes": 412, "listeners": 37}
+```
+
+#### `baseline list`
+
+List the names of saved baselines (sorted).
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--json` | `false` | Emit JSON output. |
+
+```bash
+./bin/monitor baseline list
+./bin/monitor baseline list --json
+```
+
+```json
+["post-deploy", "pre-deploy"]
+```
+
+#### `baseline delete`
+
+Delete a saved baseline. Takes exactly one argument — the baseline name.
+
+```bash
+./bin/monitor baseline delete pre-deploy
+```
+
+### `diff`
+
+Compare a saved [`baseline`](#baseline) against the live system, or against a
+second baseline. Takes one required argument (the "from" baseline) and an
+optional second argument (the "to" baseline); with one argument, the live
+system is captured as the "to" side. Reports new / gone / changed processes,
+new / gone listening ports, and the shift in CPU / memory / load1.
+
+A process present in both sides is reported as **changed** only when its memory
+moved by at least `--mem-threshold` (in KB). Changed processes are sorted by the
+largest absolute memory movement first.
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--mem-threshold` | `1024` | Minimum per-process memory change to report, in KB. |
+| `--json` | `false` | Emit JSON output. |
+
+```bash
+./bin/monitor diff pre-deploy                 # pre-deploy -> live
+./bin/monitor diff pre-deploy post-deploy     # pre-deploy -> post-deploy
+./bin/monitor diff pre-deploy --mem-threshold 8192 --json
+```
+
+The `--json` output is the `Diff` struct: `cpu_delta` / `mem_delta` are
+percentage-point shifts, `load1_delta` is the load-average shift, and each
+process change carries `old_mem` / `new_mem` / `mem_delta` in bytes.
+
+```json
+{
+  "from": "pre-deploy",
+  "to": "live",
+  "cpu_delta": 12.4,
+  "mem_delta": 3.1,
+  "load1_delta": 0.87,
+  "new_procs": [
+    {"pid": 4821, "name": "myapp", "new_mem": 58720256}
+  ],
+  "gone_procs": [
+    {"pid": 4099, "name": "myapp", "old_mem": 47185920}
+  ],
+  "changed_procs": [
+    {"pid": 1133, "name": "node", "old_mem": 268435456, "new_mem": 402653184, "mem_delta": 134217728}
+  ],
+  "new_listeners": [
+    {"proto": "tcp", "port": 8080, "pid": 4821, "process": "myapp"}
+  ],
+  "gone_listeners": [
+    {"proto": "tcp", "port": 8079, "pid": 4099, "process": "myapp"}
+  ]
+}
 ```
 
 ## Ecosystem & runtime

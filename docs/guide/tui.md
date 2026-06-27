@@ -1,19 +1,19 @@
 # The TUI
 
 Running `monitor` with no subcommand launches the interactive TUI — a Bubble
-Tea v2 application with a Nord theme, eight tabs, and full keyboard and mouse
+Tea v2 application with a Nord theme, nine tabs, and full keyboard and mouse
 navigation.
 
 ```bash
-./bin/monitor          # launches the TUI (8 tabs)
+./bin/monitor          # launches the TUI (9 tabs)
 ```
 
 The same data is available without a terminal via the [CLI](./cli.md) and the
 [MCP server](./mcp.md); the TUI is just the human-facing surface.
 
-## The eight tabs
+## The nine tabs
 
-The tab bar runs across the top of the screen. Tabs are numbered `1`–`8` and
+The tab bar runs across the top of the screen. Tabs are numbered `1`–`9` and
 always appear in this order:
 
 | # | Tab | What it shows |
@@ -25,11 +25,12 @@ always appear in this order:
 | 5 | **Disk** | Disk usage and I/O |
 | 6 | **Network** | Network throughput |
 | 7 | **Processes** | A sortable, searchable, selectable process table |
-| 8 | **Settings** | The current configuration (read-only in the TUI) |
+| 8 | **Settings** | The current configuration (editable in the TUI) |
+| 9 | **Trends** | Sparklines and summary stats over the persistent history captured by `monitor history record` |
 
 The active tab is highlighted, and a status bar across the bottom shows live
-CPU and memory percentages, the last update time, and a reminder of the
-`1`–`8` tab and `q` quit shortcuts.
+CPU and memory percentages, the last update time, and a reminder of the tab
+and `q` quit shortcuts.
 
 ### Temperature badges
 
@@ -40,11 +41,23 @@ keys are restricted), in which case the tab says so.
 
 ### Settings tab
 
-The Settings tab is **read-only** in the TUI — it displays the update
-interval, temperature unit, whether system processes are shown, the maximum
-process count, mouse enablement, and the CPU/memory alert thresholds. To
-change any of these, edit the [config file](/reference/configuration) at
-`~/.config/monitor/config.json`.
+The Settings tab is **editable** in the TUI. It lists the update interval,
+temperature unit, whether system processes are shown, the maximum process
+count, mouse enablement, and the CPU/memory alert thresholds. A `▸` marks the
+selected row:
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Select a setting row |
+| `Enter` / `Space` | Cycle the selected value forward |
+| `-` | Cycle the selected value back |
+| `s` | Save the current settings to the config file |
+
+Because `h`/`l` and the arrow keys `←`/`→` remain bound to tab navigation,
+row selection uses `↑`/`↓` and value editing uses `Enter`/`Space`/`-`. Changes
+are held in memory until you press `s`, which writes them to the
+[config file](/reference/configuration) at `~/.config/monitor/config.json`; a
+`✓ saved` marker confirms the write.
 
 ## Keyboard shortcuts
 
@@ -55,7 +68,7 @@ change any of these, edit the [config file](/reference/configuration) at
 | `q` / `Ctrl+C` / `Esc` | Quit |
 | `Tab` / `→` / `l` | Next tab |
 | `Shift+Tab` / `←` / `h` | Previous tab |
-| `1`–`8` | Jump directly to a tab |
+| `1`–`9` | Jump directly to a tab |
 
 Tab navigation wraps around in both directions.
 
@@ -111,7 +124,12 @@ server: **protected processes are never killed**, even if you confirm. See
 
 ## Mouse
 
-Mouse support is controlled by `mouse_enabled` in the
-[config](/reference/configuration), which is on by default. On the Processes tab,
-mouse events are forwarded to the table, so you can click a row to highlight
-it and scroll to move through the list.
+Mouse support is controlled by the **Mouse Enabled** setting (`mouse_enabled`
+in the [config](/reference/configuration)), which is on by default. You can
+toggle it from the [Settings tab](#settings-tab) or the config file. When it is
+on:
+
+- **Clicking a tab** in the header row switches directly to that tab.
+- **Scrolling the wheel** on the Processes tab scrolls the process table.
+
+When `mouse_enabled` is off, the TUI is keyboard-only.

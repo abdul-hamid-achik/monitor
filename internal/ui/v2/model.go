@@ -287,7 +287,7 @@ func (m Model) render() string {
 		content = "Unknown view"
 	}
 	status := m.statusStyle.Width(m.width).Render(
-		fmt.Sprintf(" CPU %.1f%%  │  Mem %.1f%%  │  Update %s  │  1-8: tabs  │  q: quit ",
+		fmt.Sprintf(" CPU %.1f%%  │  Mem %.1f%%  │  Update %s  │  1-9: tabs  │  q: quit ",
 			m.last.CPU.UsagePercent, m.last.Memory.UsagePercent, m.last.LastUpdate.Format("15:04:05")))
 	return strings.Join([]string{header, content, status}, "\n")
 }
