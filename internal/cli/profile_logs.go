@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/abdul-hamid-achik/monitor/internal/capture"
+	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
 	"github.com/abdul-hamid-achik/monitor/internal/incidents"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 )
@@ -245,15 +247,21 @@ fcheap stash step (useful for sandboxed environments).`,
 			// Capture the profile first; if the process is gone, the
 			// snapshot-only stash is still useful.
 			profile, _ := profiler.Capture(ctx, pid, profiler.ProfileHeap, "")
+
+			// Sample once and reuse it for both the process-name lookup and
+			// the bundle (avoids two back-to-back full system samples).
+			snapshot := NewCollector(0).Collect(ctx)
 			processName := ""
-			for _, p := range NewCollector(0).Collect(ctx).Processes {
+			for _, p := range snapshot.Processes {
 				if p.PID == pid {
 					processName = p.Name
 					break
 				}
 			}
 
-			snapshot := NewCollector(0).Collect(ctx)
+			// Best-effort process->code correlation: resolve the profile's
+			// frames to their codemap symbols (FQN/kind).
+			correlations := correlateProfile(ctx, profile.Symbols)
 
 			req := incidents.CaptureRequest{
 				Snapshot: snapshot,
@@ -276,6 +284,9 @@ fcheap stash step (useful for sandboxed environments).`,
 					"profile":    profile,
 					"note":       "--no-save: bundle not stashed; profile included in JSON",
 				}
+				if correlations != nil {
+					report["correlations"] = correlations
+				}
 				return WriteJSON(report)
 			}
 
@@ -286,6 +297,9 @@ fcheap stash step (useful for sandboxed environments).`,
 				"steps":      []string{"snapshot", "profile", "stash"},
 				"stash":      res,
 				"note":       "investigation pipeline (capture + stash)",
+			}
+			if correlations != nil {
+				report["correlations"] = correlations
 			}
 			if err != nil {
 				report["stash_error"] = err.Error()
@@ -308,6 +322,34 @@ fcheap stash step (useful for sandboxed environments).`,
 // newStashCmd is a manual incident-capture entry point. Useful when an
 // operator sees something the analyzer didn't fire on, or before/after
 // a known-good deploy.
+// correlateProfile resolves each profile frame's file:line to its enclosing
+// codemap symbol (FQN/kind), enriching the diagnose flow. Best-effort: it
+// returns nil when codemap isn't on PATH or there are no frames, and silently
+// skips frames codemap can't resolve (e.g. the profiled process's source
+// isn't part of a codemap-indexed project). Paths must match the indexed
+// project's layout for resolution to succeed.
+func correlateProfile(ctx context.Context, syms []profiler.Symbol) []map[string]any {
+	if !ecosystem.CodemapAvailable() || len(syms) == 0 {
+		return nil
+	}
+	var out []map[string]any
+	for _, s := range syms {
+		if s.File == "" || s.Line <= 0 {
+			continue
+		}
+		entry := map[string]any{"func": s.Func, "file": s.File, "line": s.Line}
+		if sym, err := ecosystem.CodemapSymbolAt(ctx, s.File, s.Line); err == nil {
+			entry["resolution"] = sym.Resolution
+			if sym.FQN != "" {
+				entry["fqn"] = sym.FQN
+				entry["kind"] = sym.Kind
+			}
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 func newStashCmd() *cobra.Command {
 	var (
 		note string

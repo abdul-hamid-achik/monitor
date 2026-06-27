@@ -32,6 +32,8 @@ changes. When in doubt, follow AGENTS.md (it is more comprehensive).
 | `task fmt` | gofmt -w . |
 | `task tidy` | go mod tidy |
 | `task specs` | Run all glyphrun specs |
+| `task docs` | Serve the VitePress docs site (`docs/`) locally |
+| `task docs-build` | Build the docs site (fails on dead links) |
 | `task check` | Full CI (tidy + lint + test + release) |
 | `task snapshot` | Shortcut: print JSON system snapshot |
 | `task doctor` | Shortcut: print ecosystem health |

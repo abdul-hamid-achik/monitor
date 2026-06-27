@@ -2,12 +2,27 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
 	"strconv"
 	"testing"
+
+	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 )
+
+func TestCorrelateProfileSkipsFramesWithoutFileLine(t *testing.T) {
+	// Frames lacking a file:line are skipped regardless of codemap presence,
+	// so this is deterministic in CI (where codemap/the index may be absent).
+	syms := []profiler.Symbol{
+		{Func: "a", File: "", Line: 0},
+		{Func: "b", File: "x.go", Line: 0},
+	}
+	if got := correlateProfile(context.Background(), syms); len(got) != 0 {
+		t.Errorf("frames without file:line should be skipped; got %v", got)
+	}
+}
 
 func TestWriteJSON(t *testing.T) {
 	old := os.Stdout

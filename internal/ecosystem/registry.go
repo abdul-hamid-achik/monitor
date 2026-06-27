@@ -91,6 +91,41 @@ func TinyvaultRun(ctx context.Context, project string, args ...string) ([]byte, 
 	return run(ctx, "tvault", full...)
 }
 
+// -- codemap wrappers ------------------------------------------------------
+
+// SymbolAt is the result of `codemap symbol-at <file>:<line> --json`. It maps
+// a source position to its enclosing symbol. Resolution is "exact" (the line
+// is the symbol's declaration), "enclosing" (inside the symbol's range), or
+// "none" (no symbol — e.g. the file/project isn't indexed).
+type SymbolAt struct {
+	File       string `json:"file"`
+	Line       int    `json:"line"`
+	Symbol     string `json:"symbol,omitempty"`
+	FQN        string `json:"fqn,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	StartLine  int    `json:"start_line,omitempty"`
+	EndLine    int    `json:"end_line,omitempty"`
+	Resolution string `json:"resolution"`
+}
+
+// CodemapAvailable reports whether the codemap binary is on PATH.
+func CodemapAvailable() bool {
+	_, err := exec.LookPath("codemap")
+	return err == nil
+}
+
+// CodemapSymbolAt resolves a file:line position to its enclosing symbol via
+// `codemap symbol-at`. An unresolved position is a valid result
+// (Resolution "none"), not an error; an error is returned only when the
+// subprocess or JSON decode fails.
+func CodemapSymbolAt(ctx context.Context, file string, line int) (SymbolAt, error) {
+	out, err := runJSON(ctx, "codemap", "symbol-at", fmt.Sprintf("%s:%d", file, line), "--json")
+	if err != nil {
+		return SymbolAt{}, err
+	}
+	return decodeJSON[SymbolAt](out, "codemap symbol-at")
+}
+
 // -- fcheap wrappers -------------------------------------------------------
 //
 // monitor uses fcheap as its incident-stash vault. Each alert (or manual

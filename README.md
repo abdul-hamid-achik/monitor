@@ -102,9 +102,8 @@ sudo cp bin/monitor /usr/local/bin/
 | `c` / `m` | Sort processes by CPU / memory |
 | `k` / `x` | Terminate / force-kill selected (with confirmation) |
 
-### Mouse
-
-- Click tabs to switch views, click process rows to select, scroll to navigate.
+The v2 TUI is keyboard-driven; navigate tabs and the process table with the
+keys above.
 
 ### Tabs
 

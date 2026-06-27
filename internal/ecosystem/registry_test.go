@@ -37,6 +37,24 @@ func TestDecodeJSON(t *testing.T) {
 	}
 }
 
+// TestSymbolAtDecode locks the SymbolAt struct tags against the real
+// `codemap symbol-at --json` output shape.
+func TestSymbolAtDecode(t *testing.T) {
+	js := `{"file":"a.go","line":45,"symbol":"Alert","fqn":"collector.Alert","kind":"type","start_line":43,"end_line":49,"resolution":"enclosing"}`
+	got, err := decodeJSON[SymbolAt]([]byte(js), "codemap symbol-at")
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.FQN != "collector.Alert" || got.Kind != "type" || got.Resolution != "enclosing" || got.StartLine != 43 || got.EndLine != 49 {
+		t.Errorf("decoded = %+v", got)
+	}
+	// The "none" shape (unindexed/unresolved) must decode cleanly too.
+	none, err := decodeJSON[SymbolAt]([]byte(`{"file":"a.go","line":1,"resolution":"none"}`), "codemap symbol-at")
+	if err != nil || none.Resolution != "none" || none.FQN != "" {
+		t.Errorf("none decode = %+v, err %v", none, err)
+	}
+}
+
 func TestProbeRunsEvenWithMissingTools(t *testing.T) {
 	// Probe must never panic and must return a Status struct.
 	st := Probe(context.Background())

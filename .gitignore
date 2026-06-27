@@ -48,3 +48,8 @@ Taskfile~
 
 # Backup files
 *.bak
+
+# VitePress / Node
+node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/

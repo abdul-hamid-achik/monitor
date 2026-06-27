@@ -103,6 +103,20 @@ tasks:
         done
       - echo "Specs complete."
 
+  docs:
+    desc: Serve the VitePress documentation site locally
+    dir: docs
+    cmds:
+      - npm install
+      - npm run dev
+
+  docs-build:
+    desc: Build the VitePress documentation site (fails on dead links)
+    dir: docs
+    cmds:
+      - npm install
+      - npm run build
+
   snapshot:
     desc: Emit a one-shot JSON system snapshot
     deps: [build]
