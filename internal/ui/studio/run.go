@@ -1,4 +1,4 @@
-package v2
+package studio
 
 import (
 	"fmt"
@@ -12,7 +12,7 @@ func Run() error {
 	p := tea.NewProgram(model)
 	final, err := p.Run()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error running monitor v2: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error running monitor studio: %v\n", err)
 		return err
 	}
 	if fm, ok := final.(Model); ok {

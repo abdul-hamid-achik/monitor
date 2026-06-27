@@ -1,8 +1,9 @@
 # CLI Reference
 
-Monitor runs as an interactive TUI by default, but every view is also a
-subcommand. Most subcommands support `--json` for machine-readable output, so
-the CLI is the primary surface for scripts and agents.
+Monitor offers an interactive TUI (`monitor studio`), but every view is also a
+subcommand. Running bare `monitor` prints help. Most subcommands support
+`--json` for machine-readable output, so the CLI is the primary surface for
+scripts and agents.
 
 ```bash
 ./bin/monitor --help          # list every subcommand
@@ -731,15 +732,15 @@ binary on `$PATH` and a configured tinyvault project.
 ./bin/monitor vault --project myapp -- env   # debug: show injected env
 ```
 
-### `v2`
+### `studio`
 
-Launch the Bubble Tea v2 TUI. This is the default when you run bare `monitor`;
-the `v2` subcommand is kept as an explicit alias. All eight tabs are rendered
-with full interactivity.
+Launch the interactive TUI (Bubble Tea v2). All nine tabs are rendered with
+full keyboard + mouse interactivity. `tui` is an alias.
 
 ```bash
-./bin/monitor            # same thing
-./bin/monitor v2
+./bin/monitor studio                  # launch the TUI
+./bin/monitor tui                     # alias
+./bin/monitor studio --reload-server  # also expose POST /reload for agents/CI
 ```
 
 See [The TUI](/guide/tui) for the tab and keyboard reference.

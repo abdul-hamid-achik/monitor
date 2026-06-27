@@ -57,8 +57,9 @@ changes. When in doubt, follow AGENTS.md (it is more comprehensive).
 - `internal/ecosystem/` — CLI wrappers for codemap, fcheap, tvault, etc.
 - `internal/mcp/` — MCP stdio server
 - `internal/kill/` — safe process termination
-- `internal/ui/v2/` — the TUI (Bubble Tea v2 / charm.land; **default** bare
-  `monitor`; all 8 tabs with full interactivity). v1 has been removed.
+- `internal/ui/studio/` — the TUI (Bubble Tea v2 / charm.land), launched via
+  `monitor studio` (alias `tui`); all 9 tabs with full interactivity. Bare
+  `monitor` prints help. v1 has been removed.
 - `internal/widgets/` — sparklines, gauges (lipgloss v2)
 - `internal/config/` — JSON settings at ~/.config/monitor/config.json
 - `specs/` — glyphrun behavioral specs
@@ -84,7 +85,7 @@ changes. When in doubt, follow AGENTS.md (it is more comprehensive).
 ## Things to avoid
 
 - Don't reintroduce Bubble Tea v1 — the v1 TUI and `internal/system/` were
-  removed; the only TUI is `internal/ui/v2/` on `charm.land/*`
+  removed; the only TUI is `internal/ui/studio/` on `charm.land/*`
 - Don't add new dependencies without checking existing patterns first
 - Don't run the TUI in tests (it requires a real terminal)
 - Don't call `cobra.Execute()` from tests (use `Root().Commands()` to inspect)

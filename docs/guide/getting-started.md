@@ -3,8 +3,9 @@
 Monitor is a terminal-based, **agent-harnessable** system monitor for macOS and
 Linux, built in Go with the Charm ecosystem (Bubble Tea v2) and a Nord theme.
 
-It runs as an interactive TUI by default, and exposes the same data to scripts,
-agents, and other tools via JSON CLI commands and an MCP stdio server.
+It offers an interactive TUI (`monitor studio`) and exposes the same data to
+scripts, agents, and other tools via JSON CLI commands and an MCP stdio server.
+Running bare `monitor` prints help.
 
 ## Prerequisites
 
@@ -51,21 +52,22 @@ sudo cp bin/monitor /usr/local/bin/
 
 ## First run
 
-With no arguments, Monitor launches the interactive Bubble Tea v2 TUI:
+Launch the interactive TUI with the `studio` subcommand (running bare
+`monitor` prints help instead):
 
 ```bash
-./bin/monitor
+./bin/monitor studio   # `monitor tui` is an alias
 ```
 
-You will land on the **Overview** tab. The TUI ships eight tabs — Overview,
-CPU, Memory, Temperature, Disk, Network, Processes, and Settings — with full
-keyboard and mouse navigation.
+You will land on the **Overview** tab. The TUI ships nine tabs — Overview,
+CPU, Memory, Temperature, Disk, Network, Processes, Settings, and Trends —
+with full keyboard and mouse navigation.
 
 A few keys to get moving:
 
 | Key | Action |
 |-----|--------|
-| `1`–`8` | Jump to a tab |
+| `1`–`9` | Jump to a tab |
 | `→` / `Tab` / `l` | Next tab |
 | `←` / `Shift+Tab` / `h` | Previous tab |
 | `/` | Search processes |

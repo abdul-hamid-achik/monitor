@@ -2,8 +2,8 @@ version: 1
 name: monitor_reload
 
 intent: |
-  `monitor --reload-server` starts a localhost HTTP /reload endpoint
-  inside the TUI binary. `monitor reload` POSTs to that endpoint and
+  `monitor studio --reload-server` starts a localhost HTTP /reload endpoint
+  alongside the TUI. `monitor reload` POSTs to that endpoint and
   prints the response. Verifies the round-trip works end-to-end
   without a real TTY (the server runs even when the TUI fails to
   claim a terminal, so the spec can exercise it from CI).

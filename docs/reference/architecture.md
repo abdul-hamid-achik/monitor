@@ -6,14 +6,16 @@ package layout and the data flow that ties them together.
 
 ## Mode dispatch
 
-`cmd/monitor/main.go` is the entry point. It picks a mode from the arguments:
+`cmd/monitor/main.go` is the entry point. It extracts the global `--pprof`
+flag, then hands everything to cobra (`internal/cli`):
 
-- **No args** → launch the Bubble Tea v2 TUI (`internal/ui/v2`)
-- **A subcommand** → run the cobra CLI (`internal/cli`)
-- **An unknown flag** → fall through to cobra help
+- **`monitor studio`** (alias `tui`) → launch the Bubble Tea v2 TUI
+  (`internal/ui/studio`)
+- **A subcommand** (`snapshot`, `watch`, `mcp serve`, ...) → run the cobra CLI
+- **No args / unknown flag** → print cobra help
 
-A bare `monitor` therefore stays backward-compatible as the TUI, while
-`monitor snapshot`, `monitor mcp serve`, and friends route into the CLI surface.
+So the TUI is an explicit subcommand and a bare `monitor` surfaces the help —
+clearer DX than auto-launching a full-screen UI.
 
 ## Package layout
 
@@ -34,7 +36,7 @@ monitor/
 │   ├── ecosystem/             # CLI wrappers for codemap/fcheap/tvault/glyphrun
 │   ├── kill/                  # safe process termination
 │   ├── config/                # JSON settings (~/.config/monitor/config.json)
-│   ├── ui/v2/                 # the TUI (Bubble Tea v2 / charm.land)
+│   ├── ui/studio/             # the TUI (Bubble Tea v2 / charm.land)
 │   └── widgets/               # sparklines, gauges (lipgloss v2)
 ├── specs/                     # glyphrun behavioral specs
 ├── Taskfile.yml
@@ -58,7 +60,7 @@ monitor/
 | `internal/ecosystem` | CLI wrappers for the surrounding tools (codemap, fcheap, tinyvault, glyphrun, ...); `Status(ctx)` returns aggregate health for `doctor`. |
 | `internal/kill` | Safe process termination — the shared safety check used by the TUI, CLI, and MCP alike. |
 | `internal/config` | JSON settings read from and written atomically to `~/.config/monitor/config.json`. |
-| `internal/ui/v2` | The TUI, on Bubble Tea v2 (`charm.land/bubbletea/v2`) — all tabs with full keyboard and mouse interactivity. |
+| `internal/ui/studio` | The TUI (`monitor studio`), on Bubble Tea v2 (`charm.land/bubbletea/v2`) — all 9 tabs with full keyboard and mouse interactivity. |
 | `internal/widgets` | Reusable rendering widgets (sparklines, gauges) on lipgloss v2. |
 
 ## Data flow
@@ -76,13 +78,13 @@ the streaming CLI, the analyzer, the MCP surface, and log capture:
             ┌────────────────────┼────────────────────┐
             ▼                    ▼                    ▼
      ┌─────────────┐     ┌──────────────┐     ┌──────────────┐
-     │  ui/v2 TUI  │     │  cli (JSON)  │     │  mcp server  │
+     │ studio TUI  │     │  cli (JSON)  │     │  mcp server  │
      └─────────────┘     └──────────────┘     └──────────────┘
             │                    │                    │
             └─────── analyzer, capture, incidents ────┘
 ```
 
-- **TUI** (`internal/ui/v2`) subscribes and re-renders each tab as events arrive.
+- **TUI** (`internal/ui/studio`) subscribes and re-renders each tab as events arrive.
 - **CLI** (`internal/cli`) reads a single `Event` for `snapshot`, or streams
   NDJSON for `watch`.
 - **MCP** (`internal/mcp`) answers `monitor_snapshot` / `monitor_processes`
@@ -100,8 +102,8 @@ MCP tools need `confirm: true`).
 
 - **v1 was removed.** Earlier builds shipped a Bubble Tea v1 TUI under
   `internal/ui` (reachable via `monitor v1`) alongside a legacy
-  `internal/system` collector. Both are gone — `internal/ui/v2` is the only TUI
-  and `internal/collector` is the only collector.
+  `internal/system` collector. Both are gone — `internal/ui/studio` is the only
+  TUI and `internal/collector` is the only collector.
 - **A single lipgloss.** The binary links exactly one lipgloss,
   `charm.land/lipgloss/v2`. Both the TUI and `internal/widgets` are on v2, so
   there is no v1/v2 styling split to reconcile.

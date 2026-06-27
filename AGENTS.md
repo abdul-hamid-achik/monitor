@@ -83,7 +83,7 @@ monitor/
 │   │   ├── profile_logs.go      # `monitor profile`, `monitor logs`, `monitor investigate`
 │   │   ├── doctor.go            # `monitor doctor` + `monitor run`
 │   │   ├── mcp.go               # `monitor mcp serve`
-│   │   ├── v2.go                # `monitor v2` (Bubble Tea v2 prototype TUI)
+│   │   ├── studio.go            # `monitor studio` (the TUI; alias `tui`)
 │   │   ├── util.go              # JSON output helpers, context handling
 │   │   └── cli_test.go
 │   ├── collector/               # NEW: pub/sub metric collector
@@ -123,9 +123,9 @@ monitor/
 │   ├── profiler/                # NEW: pprof + sample profiling
 │   │   ├── profiler.go
 │   │   └── profiler_test.go
-│   ├── ui/v2/                   # The TUI (Bubble Tea v2 — charm.land/bubbletea/v2 + lipgloss/v2)
-│   │   ├── model.go             # Model, tea.View, tea.KeyPressMsg, tab router, header, status bar, Overview/Temperature/Settings tabs
-│   │   ├── run.go               # entry point (bare `monitor` and `monitor v2`)
+│   ├── ui/studio/               # The TUI (Bubble Tea v2 — charm.land/bubbletea/v2 + lipgloss/v2)
+│   │   ├── model.go             # Model, tea.View, tea.KeyPressMsg, tab router, header, status bar (all 9 tabs)
+│   │   ├── run.go               # entry point (`monitor studio`)
 │   │   ├── cpu.go               # CPU tab
 │   │   ├── memory.go            # Memory tab
 │   │   ├── disk.go              # Disk tab
@@ -327,9 +327,9 @@ and `internal/widgets` are on v2.
 2. **cobra `--version` exits the process** — test via `Root().Version`, not by
    executing with `--version` (would call `os.Exit`).
 3. **Bubble Tea v2 is a breaking change** — `View()` returns `tea.View`, not
-   `string`; `tea.KeyMsg` becomes `tea.KeyPressMsg`. Migration pending
-   (v2 prototype is in `internal/ui/v2/`; full port per tab is in the
-   BACKLOG).
+   `string`; `tea.KeyMsg` becomes `tea.KeyPressMsg`. The TUI lives in
+   `internal/ui/studio/` (launched via `monitor studio`); all 9 tabs are
+   ported with full interactivity.
 4. **MCP tool handlers** need `*mcp.CallToolRequest` as second argument.
 5. **Temperature readings come from `sudo powermetrics` when available**
    (`internal/temperature`). Falls back to a CPU-load estimate when
@@ -371,10 +371,12 @@ and `internal/widgets` are on v2.
 
 ## Known Limitations
 
-1. **TUI v2 port partial** — `monitor v2` renders Overview, Temperature, and Settings. CPU/Memory/Disk/Network/Processes remaining. (BACKLOG)
-2. **Load averages** — always 0 (gopsutil doesn't expose on macOS)
-3. **macOS only** — uses gopsutil macOS paths
-4. **No persistent incident stashes** — manual capture works (`monitor stash` → fcheap) but snapshot-on-alert still pending. (BACKLOG)
+1. **Load averages on macOS** — always 0 (gopsutil doesn't expose them on
+   macOS); Linux reads real values from `/proc/loadavg`.
+2. **Temperature** — real SMC readings need `sudo powermetrics` (macOS); else a
+   CPU-load estimate, badged `est`. Linux is always the estimate.
+3. **History concurrency** — the recorder holds an exclusive veclite lock, so
+   `monitor history query` can't run while a recorder is active (clear error).
 
 ---
 

@@ -1,0 +1,61 @@
+version: 1
+name: monitor_studio_help
+
+intent: |
+  `monitor studio --help` documents the interactive TUI (formerly the default
+  of bare `monitor`, and formerly the `v2` subcommand) and lists the same
+  flags/usage shape as the other subcommands. This proves the studio subcommand
+  is wired into the cobra command tree without crashing, and that bare
+  `monitor` now surfaces help with studio listed.
+
+target:
+  cmd: ["./bin/monitor", "studio", "--help"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 40
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: subcommand_listed
+    description: monitor --help lists the studio subcommand
+    verify:
+      command:
+        run: "./bin/monitor --help | grep -qE '^[[:space:]]+studio[[:space:]]+Launch the interactive TUI'"
+  - id: bare_monitor_shows_help
+    description: bare `monitor` prints help (not the TUI) and exits 0
+    verify:
+      command:
+        run: "./bin/monitor | grep -q 'monitor studio'"
+  - id: studio_help_describes_libs
+    description: studio --help mentions the charm.land v2 libraries
+    verify:
+      command:
+        run: "./bin/monitor studio --help | grep -q 'charm.land/bubbletea/v2'"
+  - id: studio_help_mentions_all_tabs
+    description: studio --help mentions all 9 tabs
+    verify:
+      command:
+        run: "./bin/monitor studio --help | grep -qiE 'all 9 tabs|Overview.*CPU.*Memory'"
+  - id: tui_alias
+    description: studio has a `tui` alias
+    verify:
+      command:
+        run: "./bin/monitor tui --help | grep -q 'studio launches'"
+  - id: clean_exit
+    description: studio --help exits cleanly
+    verify:
+      process:
+        exitCode: 0

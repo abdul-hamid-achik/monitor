@@ -14,11 +14,13 @@ var Version = "dev"
 func Root() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "monitor",
-		Short: "Local-first observability tool for macOS",
-		Long: `Monitor is a terminal-based, agent-harnessable system monitor for macOS.
+		Short: "Local-first, agent-harnessable system monitor for macOS & Linux",
+		Long: `Monitor is a terminal-based, agent-harnessable system monitor for macOS
+and Linux.
 
-It runs as an interactive TUI by default, and exposes its data to scripts,
-agents, and other tools via JSON CLI commands and an MCP stdio server.
+Run the interactive TUI with 'monitor studio'. Every view is also a JSON CLI
+command (snapshot, watch, process, tree, history, diff, ...) and an MCP stdio
+server ('monitor mcp serve'), so scripts and agents get the same data.
 
 When the monitor launches a child process or spec, it sets MONITOR=1 and
 MONITOR_RUN_DIR=<dir> so the child can detect it is being observed.`,
@@ -49,7 +51,7 @@ MONITOR_RUN_DIR=<dir> so the child can detect it is being observed.`,
 		newRunCmd(),
 		newReloadCmd(),
 		newMCPCmd(),
-		newV2Cmd(),
+		newStudioCmd(),
 		newVaultCmd(),
 		newHistoryCmd(),
 		newBaselineCmd(),
@@ -58,18 +60,6 @@ MONITOR_RUN_DIR=<dir> so the child can detect it is being observed.`,
 	)
 
 	return root
-}
-
-// SubcommandNames returns the names and aliases of every registered
-// subcommand. The entry point (cmd/monitor) uses it for CLI-vs-TUI dispatch
-// so that list can't drift from the AddCommand registrations above.
-func SubcommandNames() []string {
-	var names []string
-	for _, c := range Root().Commands() {
-		names = append(names, c.Name())
-		names = append(names, c.Aliases...)
-	}
-	return names
 }
 
 // Execute runs the root command and exits with a non-zero status on failure.

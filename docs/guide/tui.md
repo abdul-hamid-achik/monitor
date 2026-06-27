@@ -1,11 +1,11 @@
 # The TUI
 
-Running `monitor` with no subcommand launches the interactive TUI — a Bubble
-Tea v2 application with a Nord theme, nine tabs, and full keyboard and mouse
-navigation.
+`monitor studio` launches the interactive TUI — a Bubble Tea v2 application
+with a Nord theme, nine tabs, and full keyboard and mouse navigation. (Running
+bare `monitor` prints help instead.)
 
 ```bash
-./bin/monitor          # launches the TUI (9 tabs)
+./bin/monitor studio   # launches the TUI (9 tabs); `monitor tui` also works
 ```
 
 The same data is available without a terminal via the [CLI](./cli.md) and the

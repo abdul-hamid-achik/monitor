@@ -22,10 +22,10 @@ tasks:
       - go build -ldflags="-s -w" -o {{.BINARY}} ./cmd/monitor
 
   run:
-    desc: Build and run the monitor TUI
+    desc: Build and run the monitor TUI (monitor studio)
     deps: [build]
     cmds:
-      - ./{{.BINARY}}
+      - ./{{.BINARY}} studio
 
   dev:
     desc: Development mode with auto-reload on file changes

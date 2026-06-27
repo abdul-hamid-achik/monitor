@@ -3,9 +3,9 @@
 A terminal-based, **agent-harnessable** system monitor for macOS and Linux,
 built in Go with the Charm ecosystem (Bubble Tea v2) and a Nord theme.
 
-Monitor runs as an interactive TUI by default, and exposes the same data to
-scripts, agents, and other tools via JSON CLI commands and an MCP stdio
-server.
+Monitor exposes the same system data three ways: an interactive TUI
+(`monitor studio`), JSON CLI commands, and an MCP stdio server — for humans,
+scripts, and agents alike. Running bare `monitor` prints help.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Go](https://img.shields.io/badge/go-1.25+-blue.svg)
@@ -29,7 +29,8 @@ server.
 ### 1. Interactive TUI
 
 ```bash
-./bin/monitor          # launches the Bubble Tea v2 TUI (9 tabs)
+./bin/monitor studio   # launches the TUI (9 tabs); `monitor tui` also works
+./bin/monitor          # prints help (the TUI is no longer the bare default)
 ```
 
 ### 2. CLI + JSON (for scripts and agents)
@@ -108,7 +109,7 @@ sudo cp bin/monitor /usr/local/bin/
 | `c` / `m` | Sort processes by CPU / memory |
 | `k` / `x` | Terminate / force-kill selected (with confirmation) |
 
-The v2 TUI is keyboard-driven; navigate tabs and the process table with the
+Studio (the TUI) is keyboard-driven; navigate tabs and the process table with the
 keys above.
 
 ### Tabs
@@ -148,7 +149,7 @@ monitor/
 │   ├── ecosystem/             # CLI wrappers for codemap/fcheap/tvault/glyphrun
 │   ├── kill/                  # safe process termination
 │   ├── config/                # JSON settings (~/.config/monitor/config.json)
-│   ├── ui/v2/                 # the TUI (Bubble Tea v2 / charm.land)
+│   ├── ui/studio/             # the TUI (Bubble Tea v2 / charm.land)
 │   └── widgets/               # sparklines, gauges (lipgloss v2)
 ├── specs/                     # glyphrun behavioral specs
 ├── Taskfile.yml
