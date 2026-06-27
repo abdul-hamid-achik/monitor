@@ -1,0 +1,49 @@
+version: 1
+name: monitor_logs_search
+
+intent: |
+  `monitor logs search <query> --json` returns a JSON array of matching log
+  entries. Empty results return `[]` (a valid JSON array) rather than an
+  error.
+
+target:
+  cmd: ["./bin/monitor", "logs", "search", "should-not-match-anything", "--json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: valid_json_array
+    description: stdout is a valid JSON array
+    verify:
+      command:
+        run: "./bin/monitor logs search should-not-match --json | python3 -c 'import json,sys; json.load(sys.stdin); print(\"ok\")'"
+  - id: empty_array_for_no_match
+    description: a query with no matches returns an empty array
+    verify:
+      command:
+        run: "./bin/monitor logs search zz_should_not_match_zz --json | grep -q '^\\[\\]$'"
+  - id: supports_limit_flag
+    description: the --limit flag is accepted
+    verify:
+      command:
+        run: "./bin/monitor logs search foo --limit 5 --json | grep -qE '^\\[|^\\{'"
+  - id: clean_exit
+    description: the binary exits cleanly
+    verify:
+      process:
+        exitCode: 0

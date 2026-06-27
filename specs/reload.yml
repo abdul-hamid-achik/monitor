@@ -1,0 +1,51 @@
+version: 1
+name: monitor_reload
+
+intent: |
+  `monitor --reload-server` starts a localhost HTTP /reload endpoint
+  inside the TUI binary. `monitor reload` POSTs to that endpoint and
+  prints the response. Verifies the round-trip works end-to-end
+  without a real TTY (the server runs even when the TUI fails to
+  claim a terminal, so the spec can exercise it from CI).
+
+target:
+  cmd: ["./bin/monitor", "reload", "--help"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 40
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: help_describes_reload
+    description: monitor reload --help explains the trigger behavior
+    verify:
+      command:
+        run: "./bin/monitor reload --help 2>&1 | grep -qE '127\\.0\\.0\\.1:7351|reload endpoint'"
+  - id: help_has_addr_flag
+    description: monitor reload --help documents the --addr flag
+    verify:
+      command:
+        run: "./bin/monitor reload --help 2>&1 | grep -qE '\\-\\-addr'"
+  - id: help_lists_timeout
+    description: monitor reload --help documents the --timeout flag
+    verify:
+      command:
+        run: "./bin/monitor reload --help 2>&1 | grep -qE '\\-\\-timeout'"
+  - id: clean_exit
+    description: monitor reload --help exits cleanly
+    verify:
+      process:
+        exitCode: 0

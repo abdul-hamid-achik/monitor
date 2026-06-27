@@ -1,0 +1,64 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/spf13/cobra"
+
+	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/kill"
+	"github.com/abdul-hamid-achik/monitor/internal/mcp"
+	"github.com/abdul-hamid-achik/monitor/internal/profiler"
+)
+
+func newMCPCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "mcp <subcommand>",
+		Short: "Run an MCP stdio server exposing monitor data",
+	}
+	cmd.AddCommand(newMCPServeCmd())
+	return cmd
+}
+
+func newMCPServeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Start the MCP stdio server (newline-delimited JSON-RPC)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			c := NewCollector(0)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			svc := &mcp.Service{
+				// Read tool: latest snapshot.
+				Snapshots: func() collector.SystemInfo {
+					return c.Collect(ctx)
+				},
+				// Mutating tools: thin wrappers over the CLI's existing logic.
+				Kill: func(pid int32, force bool) error {
+					return kill.Kill(pid, force)
+				},
+				Profile: func(ctx context.Context, pid int32, ptype profiler.ProfileType) (profiler.Profile, error) {
+					return profiler.Capture(ctx, pid, ptype)
+				},
+				// Investigate stays a stub until the full pipeline lands; the
+				// tool returns the same shape the CLI emits today so the
+				// surface is stable for agents. The fallback is implemented
+				// inside mcp.handleInvestigate when svc.Investigate is nil.
+				//
+				// Record: no real wiring yet — vidtrace is an external CLI
+				// that would be invoked via ecosystem.TinyvaultRun-style
+				// wrappers. Leaving nil so the tool returns a structured
+				// "not configured" refusal; the agent sees the same shape
+				// regardless.
+			}
+			s := mcp.NewServer(svc)
+			if err := s.Run(ctx); err != nil {
+				return fmt.Errorf("mcp serve: %w", err)
+			}
+			return nil
+		},
+	}
+	return cmd
+}

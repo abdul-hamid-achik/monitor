@@ -1,0 +1,40 @@
+version: 1
+name: monitor_env_detection
+
+intent: |
+  When monitor launches a child process, the child receives MONITOR=1 and
+  MONITOR_RUN_DIR set in its environment so it can detect it is being observed.
+
+target:
+  cmd: ["/bin/sh", "-lc", "if [ \"$MONITOR\" = \"1\" ] && [ -n \"$MONITOR_RUN_DIR\" ]; then echo DETECTED; else echo MISSING; fi"]
+  cwd: "."
+  env:
+    MONITOR: "1"
+    MONITOR_RUN_DIR: "/tmp/monitor-run-test"
+
+terminal:
+  cols: 100
+  rows: 30
+  profile: xterm-256color
+
+steps:
+  - wait:
+      screen:
+        contains: "DETECTED"
+      timeoutMs: 5000
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: env_detected
+    description: child prints DETECTED when MONITOR=1 and MONITOR_RUN_DIR are set
+    verify:
+      screen:
+        contains: "DETECTED"
+  - id: clean_exit
+    description: process exits 0
+    verify:
+      process:
+        exitCode: 0

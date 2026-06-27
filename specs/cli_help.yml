@@ -1,0 +1,49 @@
+version: 1
+name: monitor_cli_help
+
+intent: |
+  the monitor CLI shows help text when invoked with --help and exits cleanly.
+
+target:
+  cmd: ["./bin/monitor", "--help"]
+  cwd: "."
+  env:
+    MONITOR: "1"
+
+terminal:
+  cols: 100
+  rows: 30
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: help_lists_snapshot
+    description: help text mentions the snapshot subcommand
+    verify:
+      command:
+        run: "./bin/monitor --help | grep -q 'snapshot'"
+  - id: help_lists_doctor
+    description: help text mentions the doctor subcommand
+    verify:
+      command:
+        run: "./bin/monitor --help | grep -q 'doctor'"
+  - id: help_lists_kill
+    description: help text mentions the kill subcommand
+    verify:
+      command:
+        run: "./bin/monitor --help | grep -q 'kill'"
+  - id: clean_exit
+    description: the binary exits cleanly
+    verify:
+      process:
+        exitCode: 0

@@ -1,35 +1,62 @@
 # AGENTS.md - Monitor CLI Development Guide
 
-This document provides essential information for AI agents working in the Monitor CLI codebase.
+Local-first observability hub for macOS. Built with Go, Bubble Tea, and the Charm
+ecosystem. Designed for both human use (TUI) and agent use (JSON CLI + MCP
+server).
 
 ## Project Overview
 
-**Monitor** is a terminal-based system monitor for macOS (optimized for Apple Silicon) built with Go and the Charm ecosystem. It features a Bubble Tea TUI with Nord theme, real-time system metrics (CPU, Memory, Temperature, Network, Processes), and safe process termination.
+**Monitor** is an agent-harnessable local observability tool for macOS (optimized
+for Apple Silicon). It features:
 
-**Platform**: macOS Apple Silicon (M1/M2/M3/M5)  
-**Language**: Go 1.25.5  
-**Architecture**: Single binary CLI application
+- Interactive Bubble Tea TUI (Nord theme)
+- JSON CLI commands (`snapshot`, `watch`, `process`, `kill`, `profile`,
+  `investigate`, `logs`, `doctor`, `mcp`)
+- MCP stdio server (read-only + mutating tools; mutating require
+  `confirm: true` in the typed input)
+- Process profiling (pprof HTTP scraping + macOS `sample`)
+- Anomaly detection (CPU spike, RSS growth with linear regression)
+- Ecosystem integrations: codemap, fcheap, vecgrep, vidtrace, glyphrun,
+  cairntrace, tinyvault, veclite, tmux
+- veclite-backed log store with shared-read for CLI search
+- Glyphrun behavioral specs
+
+**Platform**: macOS Apple Silicon (M1/M2/M3/M5)
+**Language**: Go 1.25+
+**Module**: `github.com/abdul-hamid-achik/monitor`
 
 ---
 
 ## Quick Reference
 
-### Essential Commands
-
-All commands use [Task](https://taskfile.dev/) runner (install recommended):
+### Single-word Taskfile commands
 
 ```bash
-task build          # Build to bin/monitor
-task run            # Build and run
-task dev            # Development mode with watch
-task test           # Run all tests
-task lint           # Run go vet + staticcheck
-task clean          # Remove build artifacts
-task install        # Install to /usr/local/bin
-task all            # Full CI pipeline (tidy, lint, test, build)
+task build    # Build to bin/monitor
+task run      # Build and run
+task dev      # Auto-reload on file changes
+task test     # Run all unit tests
+task cover    # Generate HTML coverage
+task bench    # Run benchmarks
+task lint     # go vet ./...
+task fmt      # gofmt -w .
+task tidy     # go mod tidy
+task specs    # Run glyphrun behavioral specs
+task snapshot # Print JSON system snapshot (shortcut)
+task doctor   # Print ecosystem health
+task release  # Build optimized release binary
+task install  # Install to /usr/local/bin
+task remove   # Remove from /usr/local/bin
+task version  # Print Go and module versions
+task info     # Show project info
+task help     # Show all available tasks
+task clean    # Remove build artifacts
+task check    # Full CI pipeline (tidy + lint + test + release)
+task all      # Alias for check
 ```
 
-Manual commands:
+### Direct Go commands
+
 ```bash
 go build -o bin/monitor ./cmd/monitor
 go test -v ./...
@@ -37,513 +64,338 @@ go vet ./...
 go mod tidy
 ```
 
-### File Locations
-
-- **Entry point**: `cmd/monitor/main.go`
-- **UI layer**: `internal/ui/app.go` (Bubble Tea model)
-- **System metrics**: `internal/system/collector.go`
-- **Data types**: `internal/system/types.go`
-- **Process killing**: `internal/system/kill.go`
-- **Widgets**: `internal/widgets/gauge.go` (sparklines, gauges)
-
 ---
 
-## Code Organization
+## File Layout
 
 ```
 monitor/
 ├── cmd/monitor/
-│   └── main.go              # Entry point, initializes Bubble Tea
+│   └── main.go                  # Entry: dispatches CLI vs TUI based on args
 ├── internal/
-│   ├── system/
-│   │   ├── collector.go     # System metrics collection (gopsutil wrapper)
-│   │   ├── types.go         # Data structures (SystemInfo, ProcessInfo, etc.)
-│   │   ├── kill.go          # Safe process termination with safety checks
-│   │   └── *_test.go        # Unit tests
-│   ├── ui/
-│   │   ├── app.go           # Main Bubble Tea application model
-│   │   ├── styles.go        # Nord theme styles and colors
-│   │   └── app_test.go      # UI tests
-│   └── widgets/
-│       ├── gauge.go         # Custom gauge widgets (Sparkline, BarGauge, etc.)
-│       └── gauge_test.go    # Widget tests
-├── go.mod                   # Module definition
-├── Taskfile.yml             # Task runner configuration
-└── README.md                # User documentation
+│   ├── analyzer/                # NEW: anomaly detection (CPU spike, RSS growth)
+│   │   └── analyzer_test.go
+│   ├── cli/                     # NEW: cobra subcommands
+│   │   ├── root.go              # Root + subcommand registration
+│   │   ├── snapshot.go          # `monitor snapshot`
+│   │   ├── watch.go             # `monitor watch` (NDJSON)
+│   │   ├── kill.go              # `monitor kill` + `monitor process`
+│   │   ├── profile_logs.go      # `monitor profile`, `monitor logs`, `monitor investigate`
+│   │   ├── doctor.go            # `monitor doctor` + `monitor run`
+│   │   ├── mcp.go               # `monitor mcp serve`
+│   │   ├── v2.go                # `monitor v2` (Bubble Tea v2 prototype TUI)
+│   │   ├── util.go              # JSON output helpers, context handling
+│   │   └── cli_test.go
+│   ├── collector/               # NEW: pub/sub metric collector
+│   │   ├── collector.go         # Collector + Subscribe
+│   │   ├── types.go             # CPUInfo, MemoryInfo, ProcessInfo, etc.
+│   │   ├── ringbuffer.go        # Generic ring buffer
+│   │   ├── collector_test.go
+│   │   ├── ringbuffer_test.go
+│   │   └── types_test.go
+│   ├── config/                  # Settings (JSON at ~/.config/monitor/config.json)
+│   │   ├── config.go
+│   │   └── config_test.go
+│   ├── ecosystem/               # NEW: CLI wrappers for codemap/fcheap/tvault/etc.
+│   │   ├── registry.go          # Status + TinyvaultRun + RunGlyphrun
+│   │   └── registry_test.go
+│   ├── incidents/               # NEW: fcheap content-addressed incident stash
+│   │   ├── incidents.go         # Capture (bundle + tree-hash + fcheap save)
+│   │   └── incidents_test.go    # tree-hash stability, no-fcheap fallback, bundle round-trip
+│   ├── capture/                  # NEW: log capture pipeline
+│   │   ├── capture.go            # Source, Runner, parseLevel, looksLikeLogPath
+│   │   └── capture_test.go       # 9 unit tests
+│   ├── kill/                    # NEW: safe process termination
+│   │   ├── kill.go
+│   │   └── kill_test.go
+│   ├── reload/                  # NEW: /reload HTTP endpoint for the TUI
+│   │   ├── reload.go            # Reloader, NoopReloader, Server, DefaultAddr
+│   │   └── reload_test.go       # 7 unit tests (healthz, reload, idempotence, ...)
+│   ├── logger/                  # NEW: veclite-backed log store
+│   │   ├── store.go
+│   │   └── store_test.go
+│   ├── mcp/                     # NEW: MCP stdio server (7 tools: 3 read-only + 4 mutating)
+│   │   ├── server.go            # Service, Server, tool handlers, confirm gate
+│   │   └── server_test.go       # handler unit tests
+│   ├── temperature/             # NEW: real SMC temperature via sudo powermetrics
+│   │   ├── temperature.go       # Source, Kind, Reading; streaming subprocess lifecycle
+│   │   └── temperature_test.go  # parser variants, fallback, fake-binary upgrade
+│   ├── profiler/                # NEW: pprof + sample profiling
+│   │   ├── profiler.go
+│   │   └── profiler_test.go
+│   ├── system/                  # ORIGINAL: legacy collector (kept for TUI compat)
+│   │   ├── collector.go
+│   │   ├── kill.go
+│   │   ├── ringbuffer.go
+│   │   ├── types.go
+│   │   └── *_test.go
+│   ├── ui/                      # TUI v1 (Bubble Tea v1, default bare `monitor`)
+│   │   ├── app.go               # 862 lines — router + chrome (header, status, dispatch)
+│   │   ├── chrome.go            # NewModel, settings persistence, status helpers, temp labels
+│   │   ├── app_test.go          # 21 unit tests, all green
+│   │   ├── styles.go
+│   │   ├── tab_overview.go
+│   │   ├── tab_cpu.go
+│   │   ├── tab_memory.go
+│   │   ├── tab_disk.go
+│   │   ├── tab_network.go
+│   │   ├── tab_processes.go
+│   │   ├── tab_temperature.go
+│   │   ├── tab_settings.go
+│   │   └── v2/                  # TUI v2 prototype (`monitor v2`) — charm.land/*
+│   │       ├── model.go         # tea.View, tea.KeyPressMsg, lipgloss/v2
+│   │       ├── run.go           # entry point
+│   │       └── model_test.go    # 6 v2 unit tests, all green
+│   └── widgets/                 # Reusable widgets (sparklines, gauges)
+│       ├── gauge.go
+│       └── gauge_test.go
+├── specs/                       # glyphrun behavioral specs (13 specs, 51 outcomes)
+│   ├── cli_help.yml
+│   ├── snapshot_json.yml
+│   ├── doctor_json.yml
+│   ├── kill_safety.yml
+│   ├── watch_tick.yml
+│   ├── version.yml
+│   ├── env_detection.yml
+│   ├── profile_sample.yml
+│   ├── logs_search.yml
+│   ├── investigate.yml
+│   ├── v2_help.yml
+│   ├── mcp_handshake.yml
+│   └── stash.yml
+│   ├── reload.yml
+│   └── logs_capture.yml
+├── Taskfile.yml                 # Single-word commands
+├── AGENTS.md                    # This file
+├── CLAUDE.md                    # Claude Code companion
+├── go.mod
+└── README.md
 ```
 
 ---
 
-## Architecture Patterns
+## Architecture
 
-### 1. Bubble Tea (Elm Architecture)
+### Mode Dispatch (`cmd/monitor/main.go`)
 
-The UI follows the Elm architecture pattern:
+- No args → launch TUI (`internal/ui`)
+- Subcommand → cobra CLI (`internal/cli`)
+- Unknown flag → cobra help (CLI mode)
+- Backward-compatible: existing `monitor` (bare) launches the TUI
 
-- **Model** (`internal/ui/app.go:Model`) - Holds all application state
-- **Update** (`Model.Update()`) - Handles messages (key, mouse, tick, system info)
-- **View** (`Model.View()`) - Renders UI to string
+### Event Bus (`internal/collector`)
 
-```go
-// Message types
-type systemInfoMsg struct { info system.SystemInfo }
-type tickMsg time.Time
+The collector publishes `Event` on every tick. Subscribers receive non-blocking
+callbacks. This decouples collection from presentation:
 
-// Update pattern
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-    switch msg := msg.(type) {
-    case tea.KeyMsg: return m.handleKeyPress(msg)
-    case tea.MouseMsg: return m.handleMouse(msg)
-    case tickMsg: return m.handleTick(msg)
-    case systemInfoMsg: return m.handleSystemInfo(msg)
-    }
-}
+```
+Collector → [subs] → TUI renderer, analyzer, MCP stream, log capture
 ```
 
-### 2. System Collection Layer
+### Ecosystem Layer (`internal/ecosystem`)
 
-Metrics are collected by `system.Collector` using `gopsutil`:
+Each tool has an `Available() bool` and typed methods. The `Status(ctx)` function
+returns JSON-ready aggregate health. Wrappers follow the vidtrace pattern:
+`run(ctx, bin, args)` + `decodeJSON[T]`.
 
-```go
-collector := system.NewCollector()
-info := collector.Collect(ctx)  // Returns SystemInfo struct
-```
+### MCP Server (`internal/mcp`)
 
-**Important**: Temperature readings are **estimated** (not real) - accurate values require CGO bindings to access macOS SMC (System Management Controller).
+Standard Model Context Protocol stdio transport. Tools return JSON via the
+shared `result()` helper. Pattern matches codemap's server (one Server struct,
+one Service, NL-JSON-RPC framing).
 
-### 3. Tab Navigation
+Read-only tools shipped:
 
-Six tabs managed by `Tab` type enum:
-- Tab 0: Overview
-- Tab 1: CPU
-- Tab 2: Memory
-- Tab 3: Processes
-- Tab 4: Temperature
-- Tab 5: Settings
+- `monitor_snapshot` — full SystemInfo
+- `monitor_processes` — top processes
+- `monitor_doctor` — ecosystem health
 
-Tab state tracked in `Model.activeTab` with bounds calculated in `calculateTabBounds()`.
+Mutating tools (all require `confirm: true` in the typed input):
+
+- `monitor_kill` — terminate a process; safety-checked, refuses protected
+- `monitor_profile_capture` — heap/cpu/goroutine/sample profile
+- `monitor_investigate` — diagnostic pipeline (stub when no svc wired)
+- `monitor_record` — vidtrace recording (stub; returns structured refusal)
+
+Two-layer safety: the MCP SDK validates the typed input schema (rejecting
+calls that omit `confirm` outright), and the handlers re-check `confirm`
+so agents that hand-build a request still get a structured refusal payload
+with `refused: true` and a `reason`.
+
+### Logger (`internal/logger`)
+
+veclite-backed log store. TUI holds the writer lock; CLI search uses
+`OpenReadOnly` with `WithSharedRead(true)` + `WithReadOnly(true)` so concurrent
+queries don't block collection. The `/reload` HTTP endpoint in `internal/reload` (POST /reload on 127.0.0.1:7351) signals external processes that data has changed; `monitor --reload-server` starts it and `monitor reload` posts to it.
+
+### Profiler (`internal/profiler`)
+
+- Go processes: scrape `net/http/pprof` over HTTP
+- Any process: macOS `sample <pid> 1 -mayDie`
+- Parses pprof text into `Symbol{Func, File, Line}`
+
+### Analyzer (`internal/analyzer`)
+
+Pluggable rules:
+
+- `CPUSpikeRule` — flags CPU% > factor × baseline
+- `RSSGrowthRule` — linear regression on RSS ring buffer; slope + R²
+- `ZombieRule` — processes in state Z (planned)
+
+Engine observes every `collector.Event` and returns fired alerts.
+
+### Environment Detection
+
+When monitor launches a child process or spec, it sets:
+
+- `MONITOR=1`
+- `MONITOR_RUN_DIR=<run-dir>`
+
+So child processes can detect they are being observed. Mirrors glyphrun's
+`GLYPHRUN=1` / `GLYPHRUN_RUN_DIR` pattern.
 
 ---
 
-## Code Style & Conventions
+## Coding Conventions
 
 ### Naming
 
-- **Files**: lowercase, underscores for multi-word (`collector.go`, `app.go`)
-- **Types**: PascalCase with domain prefix (`CPUInfo`, `ProcessInfo`, `BarGauge`)
-- **Functions**: PascalCase exported, camelCase private (`Collect` vs `collectCPU`)
-- **Constants**: PascalCase (`TabOverview`, `ContextMenuNone`)
-- **Variables**: camelCase, descriptive names (`selectedPids`, `lastUpdateTime`)
+- Files: lowercase, snake_case (`collector.go`, `app.go`)
+- Types: PascalCase, no domain prefix (`CPUInfo`, `ProcessInfo`)
+- Functions: PascalCase exported, camelCase private
+- Constants: PascalCase (`TabOverview`)
+- Variables: camelCase, descriptive
 
-### Style Patterns
+### Style
 
-- **Error handling**: Return errors immediately, use early returns
-- **Struct initialization**: Composite literals with field names
-- **Comments**: Package-level docs, inline comments for "why" not "what"
-- **Imports**: Standard lib first, third-party second, local packages last
+- Errors returned immediately, early returns
+- Composite struct literals with field names
+- Package-level doc comments on every package
+- Imports: stdlib first, third-party second, local last
 
-### Example from Codebase
+### JSON Tags
 
-```go
-// Collector collects system metrics
-type Collector struct {
-    mu           sync.RWMutex
-    info         SystemInfo
-    historySize  int
-    lastNetStats net.IOCountersStat
-}
-
-// NewCollector creates a new system collector
-func NewCollector() *Collector {
-    return &Collector{
-        historySize: 60, // Keep 60 data points (1 minute at 1s intervals)
-        lastNetTime: time.Now(),
-    }
-}
-```
+All metric structs include `json:"snake_case"` tags for stable CLI output.
 
 ---
 
-## Testing Approach
+## Testing
 
-### Test Files
+### Unit tests
 
-Each `.go` file has a corresponding `*_test.go`:
-- `collector_test.go` - System metrics collection tests
-- `kill_test.go` - Process termination safety tests
-- `app_test.go` - UI model tests
-- `gauge_test.go` - Widget rendering tests
-
-### Running Tests
+Every package has a `_test.go`. Run with:
 
 ```bash
-task test              # Run all tests
-task test:coverage     # Generate HTML coverage report
-go test -v ./...       # Verbose output
+task test          # all
+go test ./internal/collector/...
 ```
 
-### Test Patterns
+Test patterns:
 
-Tests follow standard Go testing:
+- Table-driven tests for pure functions
+- `t.TempDir()` for filesystem
+- `context.Background()` for collector; `context.WithCancel` for goroutines
 
-```go
-func TestSomething(t *testing.T) {
-    // Arrange
-    collector := system.NewCollector()
-    
-    // Act
-    info := collector.Collect(context.Background())
-    
-    // Assert
-    if info.CPU.UsagePercent < 0 || info.CPU.UsagePercent > 100 {
-        t.Errorf("CPU usage out of range: %f", info.CPU.UsagePercent)
-    }
-}
+### Glyphrun behavioral specs
+
+```bash
+task specs                                  # all specs
+~/projects/glyphrun/bin/glyph run specs/version.yml
 ```
+
+Each spec has:
+
+- `intent:` — one-line purpose
+- `target:` — command under test
+- `terminal:` — PTY dimensions
+- `preconditions:` — setup commands
+- `steps:` — interaction sequence
+- `outcomes:` — verifiable assertions (screen / process / command)
+
+Adding a new spec: copy an existing one, adjust intent + target + outcomes.
 
 ---
 
-## Key Data Structures
+## Dependency Plan
 
-### SystemInfo (internal/system/types.go)
+| Package | Import |
+|---------|--------|
+| Bubble Tea v1 | `github.com/charmbracelet/bubbletea` (current); v2 port pending |
+| Bubbles | `github.com/charmbracelet/bubbles` |
+| Lipgloss | `github.com/charmbracelet/lipgloss` |
+| gopsutil | `github.com/shirou/gopsutil/v4` |
+| Cobra | `github.com/spf13/cobra` |
+| MCP SDK | `github.com/modelcontextprotocol/go-sdk/mcp` |
+| Veclite | `github.com/abdul-hamid-achik/veclite` |
+| Clipboard | `github.com/atotto/clipboard` |
 
-```go
-type SystemInfo struct {
-    CPU         CPUInfo
-    Memory      MemoryInfo
-    Temperature TemperatureInfo
-    Network     NetworkInfo
-    Processes   []ProcessInfo
-    Hostname    string
-    OS          string
-    // ...
-}
-```
-
-### ProcessInfo
-
-```go
-type ProcessInfo struct {
-    PID          int32
-    Name         string
-    CPUPercent   float64
-    Memory       uint64
-    MemoryPercent float64
-    Threads      int32
-    User         string
-    IsSystem     bool
-    IsProtected  bool  // Cannot be killed safely
-}
-```
-
----
-
-## Safety Features
-
-### Protected Processes
-
-Critical system processes that **cannot** be killed (`internal/system/kill.go:12`):
-
-```go
-var ProtectedProcessNames = map[string]bool{
-    "launchd": true, "kernel_task": true, "init": true,
-    "Finder": true, "Dock": true, "WindowServer": true,
-    // ... (see kill.go for full list)
-}
-```
-
-### Kill Safety Checks
-
-Before killing, `CheckKillSafety()` validates:
-1. Process is not in protected list
-2. Process is not root-owned (system process warning)
-3. User has permissions (sudo check)
-4. Confirmation dialog shown with warnings
+Future: port to `charm.land/bubbletea/v2` and split `app.go` per tab.
 
 ---
 
 ## Important Gotchas
 
-### 1. Temperature Readings Are Estimated
-
-⚠️ **Critical Limitation**: Accurate temperature on macOS Apple Silicon requires CGO bindings to access SMC (System Management Controller). Current implementation **estimates** temperatures based on CPU usage patterns:
-
-```go
-// internal/system/collector.go:165
-baseTemp := 35.0 // Base idle temperature for M-series chips
-loadTemp := c.info.CPU.UsagePercent * 0.5
-c.info.Temperature.CPUPackage = baseTemp + loadTemp
-```
-
-For production use, implement:
-- CGO bindings to access SMC
-- `powermetrics` with sudo (requires elevated privileges)
-- Integration with existing macOS frameworks
-
-### 2. Load Averages Not Available
-
-gopsutil does not expose load averages on macOS. Values always show `0.0`:
-
-```go
-// internal/system/collector.go:91
-// Load averages are not exposed via gopsutil on macOS
-c.info.CPU.LoadAvg1 = 0
-c.info.CPU.LoadAvg5 = 0
-c.info.CPU.LoadAvg15 = 0
-```
-
-### 3. Terminal Compatibility
-
-Application requires:
-- **Dark background** (warns if light terminal detected)
-- **True color** (24-bit) support
-- **UTF-8** encoding
-- **Mouse events** enabled
-
-Best compatibility: Ghostty > iTerm2 > Terminal.app
-
-### 4. Mouse Coordinate Calculations
-
-UI layout calculations use hard-coded offsets. If modifying header/footer, update Y-coordinate math:
-
-```go
-// internal/ui/app.go:571
-// Data rows start at Y=8, so row index = msg.Y - 8
-cursorIndex := msg.Y - 8
-```
-
-### 5. Style Caching for Performance
-
-Widgets cache lipgloss styles to avoid allocations in hot loops:
-
-```go
-// internal/widgets/gauge.go:25
-var (
-    sparklineStyleCache = make(map[string]lipgloss.Style)
-    barFilledStyleCache = make(map[string]lipgloss.Style)
-)
-```
-
-**Do not modify colors at runtime** - cached styles won't update.
-
-### 6. Context Menu Centering
-
-Context menu uses hard-coded dimensions for centering:
-
-```go
-// internal/ui/app.go:467
-menuWidth, menuHeight := 34, 13
-menuX := (m.width - menuWidth) / 2
-menuY := (m.height - menuHeight) / 2
-```
-
-If modifying menu content, update these constants.
-
----
-
-## Nord Theme Colors
-
-Defined in `internal/ui/styles.go`:
-
-```
-Background:  #2E3440 (Nord0)
-Foreground:  #D8DEE9 (Nord4)
-Blue:        #88C0D0 (Nord8)
-Green:       #A3BE8C (Nord14)
-Red:         #BF616A (Nord11)
-Yellow:      #EBCB8B (Nord12)
-```
-
-Use `TemperatureColor()` helper to colorize temps:
-- < 60°C: Green (#A3BE8C)
-- 60-85°C: Yellow (#EBCB8B)
-- > 85°C: Red (#BF616A)
-
----
-
-## Development Workflow
-
-### 1. Make Changes
-
-Edit files following existing patterns. Key files:
-- UI changes: `internal/ui/app.go`
-- Metrics: `internal/system/collector.go`
-- New widgets: `internal/widgets/`
-
-### 2. Run Tests
-
-```bash
-task test
-```
-
-Fix any failures immediately.
-
-### 3. Lint
-
-```bash
-task lint
-```
-
-Addresses `go vet` warnings. `staticcheck` failures are ignored.
-
-### 4. Build & Test Manually
-
-```bash
-task run
-```
-
-Verify UI renders correctly and features work.
-
-### 5. Full CI Check
-
-```bash
-task all
-```
-
-Runs: tidy → lint → test → build:release
+1. **veclite requires read-only for shared-read** — a writer cannot enable
+   shared-read; only readers do.
+2. **cobra `--version` exits the process** — test via `Root().Version`, not by
+   executing with `--version` (would call `os.Exit`).
+3. **Bubble Tea v2 is a breaking change** — `View()` returns `tea.View`, not
+   `string`; `tea.KeyMsg` becomes `tea.KeyPressMsg`. Migration pending
+   (v2 prototype is in `internal/ui/v2/`; full port per tab is in the
+   BACKLOG).
+4. **MCP tool handlers** need `*mcp.CallToolRequest` as second argument.
+5. **Temperature readings come from `sudo powermetrics` when available**
+   (`internal/temperature`). Falls back to a CPU-load estimate when
+   sudo can't be obtained; the `temperature.source` field on the
+   `SystemInfo` JSON (`"estimated"` or `"powermetrics"`) and the TUI's
+   `● real` / `● est` badge tell the caller which.
 
 ---
 
 ## Common Tasks for Agents
 
-### Adding a New Metric
+### Add a CLI subcommand
 
-1. Add field to appropriate `*Info` struct in `internal/system/types.go`
-2. Collect metric in `collector.go` (e.g., `collectCPU()`, `collectMemory()`)
-3. Render metric in view (e.g., `renderCPUView()`)
-4. Add test in `collector_test.go`
+1. Create `internal/cli/<name>.go` with `newXxxCmd()` returning `*cobra.Command`
+2. Register in `internal/cli/root.go`'s `AddCommand` list
+3. Add `JSONOutput(cmd) bool` branch for `--json`
+4. Test manually: `./bin/monitor <name> --help`
+5. Add unit test in `cli_test.go`
 
-### Adding a New Tab
+### Add an MCP tool
 
-1. Add constant to `Tab` enum in `internal/ui/app.go`
-2. Add tab name to `TabNames` slice
-3. Add case to `renderActiveTab()` switch
-4. Implement render function (e.g., `renderNewTabView()`)
-5. Update keyboard shortcuts (`1-6` keys)
+1. Add typed input struct in `internal/mcp/server.go`
+2. Add handler `func (s *Server) handleXxx(ctx, req, in) (*CallToolResult, any, error)`
+3. Register in `register()` via `mcp.AddTool`
+4. Test with an MCP client (Claude Code)
 
-### Modifying Process Killing
+### Add a glyphrun spec
 
-1. Update `ProtectedProcessNames` in `internal/system/kill.go`
-2. Modify `CheckKillSafety()` validation logic
-3. Update confirmation dialog in `renderKillConfirmation()`
-4. Test with safe/unsafe processes
+1. Copy an existing spec in `specs/`
+2. Adjust intent, target, steps, outcomes
+3. Validate: `glyph spec verify specs/<name>.yml`
+4. Run: `glyph run specs/<name>.yml --format md`
 
-### Changing Update Interval
+### Update protected-process list
 
-Currently hard-coded to 1 second in multiple places:
-- `internal/ui/app.go:207` (tick command)
-- `internal/system/collector.go:29` (history size = 60 seconds)
-
-To make configurable:
-1. Add field to `Model` struct
-2. Add to settings tab
-3. Pass to collector via constructor or setter
-
----
-
-## File-Specific Patterns
-
-### internal/ui/app.go
-
-- **Line 145-165**: Key bindings definition
-- **Line 167-184**: Model initialization
-- **Line 219-242**: Message dispatch (Update method)
-- **Line 461-611**: Mouse handling
-- **Line 699-762**: View composition
-- **Line 825-1010**: View rendering functions
-
-### internal/system/collector.go
-
-- **Line 27-32**: Collector initialization
-- **Line 34-60**: Main collection loop
-- **Line 69-117**: CPU collection
-- **Line 119-155**: Memory collection
-- **Line 157-186**: Temperature (estimated)
-- **Line 350-417**: Byte formatting utilities
-
-### internal/widgets/gauge.go
-
-- **Line 51-150**: Sparkline rendering
-- **Line 273-335**: Bar gauge rendering
-- **Style caches**: Lines 25-48 (performance optimization)
-
----
-
-## Dependencies
-
-```go
-github.com/charmbracelet/bubbles    // TUI components (table, help, spinner)
-github.com/charmbracelet/bubbletea  // TUI framework (Elm architecture)
-github.com/charmbracelet/lipgloss   // Styling and layout
-github.com/shirou/gopsutil/v4       // System metrics
-github.com/atotto/clipboard         // Clipboard access
-```
+`internal/collector/types.go` — `ProtectedProcessNames` map.
 
 ---
 
 ## Known Limitations
 
-1. **Temperature**: Estimated values only (see Gotcha #1)
-2. **Load Averages**: Always 0.0 (see Gotcha #2)
-3. **macOS Only**: Uses macOS-specific process attributes
-4. **Dark Terminal Required**: Light terminals show warning
-5. **Minimum Terminal Size**: 60x20 enforced in code
+1. **TUI v2 port partial** — `monitor v2` renders Overview, Temperature, and Settings. CPU/Memory/Disk/Network/Processes remaining. (BACKLOG)
+2. **Load averages** — always 0 (gopsutil doesn't expose on macOS)
+3. **macOS only** — uses gopsutil macOS paths
+4. **No persistent incident stashes** — manual capture works (`monitor stash` → fcheap) but snapshot-on-alert still pending. (BACKLOG)
 
 ---
 
-## Troubleshooting
+## References
 
-### UI Rendering Issues
-
-Check terminal compatibility:
-```bash
-echo $TERM  # Should be xterm-256color or similar
-```
-
-Ensure dark background, UTF-8, true color support.
-
-### Build Failures
-
-```bash
-go mod tidy      # Fix dependency issues
-task clean       # Remove stale binaries
-task build       # Rebuild
-```
-
-### Test Failures
-
-Run with verbose output:
-```bash
-go test -v ./...
-```
-
-Common causes:
-- Race conditions (add `go test -race`)
-- Timing issues (tests use time-based metrics)
-- Permission issues (process killing tests)
-
----
-
-## Contributing Areas
-
-Improvements welcome in:
-
-1. **Accurate Temperature** - Implement SMC access via CGO
-2. **Historical Data** - Add more graph views, export functionality
-3. **Alerts** - Configurable thresholds with notifications
-4. **Plugins** - Extensible architecture for custom metrics
-5. **Cross-platform** - Support Linux/Windows with appropriate backends
-
----
-
-## Additional Resources
-
-- **Charm Documentation**: https://charm.sh/docs
-- **Bubble Tea Tutorial**: https://github.com/charmbracelet/bubbletea#tutorial
-- **gopsutil Docs**: https://pkg.go.dev/github.com/shirou/gopsutil/v4
-- **Nord Theme**: https://www.nordtheme.com/docs/colors-and-palettes
-
----
-
-*Last updated: Based on codebase analysis*  
-*Generated for AI agents working in this repository*
+- Design notes: `~/notes/projects/monitor/`
+- Iteration 1 (Vision & Roadmap): `~/notes/projects/monitor/Rewrite Vision and Roadmap.md`
+- Iteration 2 (Concrete Specs): `~/notes/projects/monitor/Iteration 2 - Concrete Specs and Validated Patterns.md`
+- Codemap MCP pattern: `~/projects/codemap/internal/mcp/server.go`
+- Vecgrep Bubble Tea v2 studio: `~/projects/vecgrep/internal/studio/`
+- Glyphrun spec model: `~/projects/glyphrun/docs/verifiers.md`

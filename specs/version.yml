@@ -1,0 +1,37 @@
+version: 1
+name: monitor_version
+
+intent: |
+  `monitor --version` prints the build version string and exits cleanly.
+
+target:
+  cmd: ["./bin/monitor", "--version"]
+  cwd: "."
+
+terminal:
+  cols: 100
+  rows: 30
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: version_printed
+    description: stdout contains the string 'monitor'
+    verify:
+      command:
+        run: "./bin/monitor --version | grep -qi 'monitor'"
+  - id: clean_exit
+    description: exit code is 0
+    verify:
+      process:
+        exitCode: 0

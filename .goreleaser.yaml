@@ -10,24 +10,32 @@ builds:
   - id: monitor
     main: ./cmd/monitor
     binary: monitor
+    env:
+      - CGO_ENABLED=0
     goos:
+      - linux
       - darwin
     goarch:
       - amd64
       - arm64
-    env:
-      - CGO_ENABLED=0
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w
+      - -X github.com/abdul-hamid-achik/monitor/internal/cli.Version={{.Version}}
 
 archives:
   - id: default
+    formats:
+      - tar.gz
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "arm64" }}arm64
       {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - README.md
+      - AGENTS.md
+      - LICENSE*
 
 checksum:
   name_template: "checksums.txt"
@@ -46,6 +54,26 @@ changelog:
       - Merge pull request
       - Merge branch
 
+homebrew_casks:
+  - name: monitor
+    binaries:
+      - monitor
+    repository:
+      owner: abdul-hamid-achik
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    homepage: "https://github.com/abdul-hamid-achik/monitor"
+    description: "Local-first agent-harnessable observability tool for macOS"
+    caveats: "monitor works offline for system/process metrics; real temperature readings require sudo powermetrics (optional)."
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/monitor"]
+          end
+    skip_upload: "{{ if .Env.HOMEBREW_TAP_TOKEN }}false{{ else }}true{{ end }}"
+
 release:
   github:
     owner: abdul-hamid-achik
@@ -53,19 +81,3 @@ release:
   draft: false
   prerelease: auto
   name_template: "v{{.Version}}"
-
-brews:
-  - name: monitor
-    homepage: https://github.com/abdul-hamid-achik/monitor
-    description: "Terminal-based system monitor for macOS (Apple Silicon) built with Go"
-    license: MIT
-    directory: Formula
-    repository:
-      owner: abdul-hamid-achik
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    install: |
-      bin.install "monitor"
-    test: |
-      system "#{bin}/monitor", "--version"
-    skip_upload: "{{ if .Env.HOMEBREW_TAP_TOKEN }}false{{ else }}true{{ end }}"

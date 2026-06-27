@@ -1,0 +1,53 @@
+version: 1
+name: monitor_snapshot_json
+
+intent: |
+  `monitor snapshot --json` returns a valid JSON document with CPU, memory,
+  network, and process information for the running system.
+
+target:
+  cmd: ["./bin/monitor", "snapshot", "--json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: cpu_field_present
+    description: stdout includes a cpu field
+    verify:
+      command:
+        run: "./bin/monitor snapshot --json | grep -q '\"cpu\"'"
+  - id: memory_field_present
+    description: stdout includes a memory field
+    verify:
+      command:
+        run: "./bin/monitor snapshot --json | grep -q '\"memory\"'"
+  - id: hostname_present
+    description: stdout includes a hostname field
+    verify:
+      command:
+        run: "./bin/monitor snapshot --json | grep -q '\"hostname\"'"
+  - id: processes_present
+    description: stdout includes a processes array
+    verify:
+      command:
+        run: "./bin/monitor snapshot --json | grep -q '\"processes\"'"
+  - id: clean_exit
+    description: the binary exits cleanly
+    verify:
+      process:
+        exitCode: 0

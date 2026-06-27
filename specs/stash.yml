@@ -1,0 +1,50 @@
+version: 1
+name: monitor_stash
+
+intent: |
+  `monitor stash --json` captures the current system snapshot into a
+  content-addressed fcheap stash and returns the stash ID + tree-hash.
+  The same incident captured twice produces the same tree-hash, so
+  fcheap dedups naturally.
+  `monitor incidents --json` lists recent monitor-tagged stashes.
+
+target:
+  cmd: ["./bin/monitor", "stash", "--json", "--note", "spec-test"]
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 80
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    # The verify script lives outside the repo so we inline it via a
+    # heredoc here to keep the spec self-contained.
+    - run: "cat > /tmp/monitor_stash_verify.py <<'PY'\nimport json, sys\nd = json.load(sys.stdin)\ns = d.get('stash', {})\nassert s.get('stash_id'), 'missing stash_id'\nth = s.get('tree_hash', '')\nassert len(th) == 64, f'bad tree_hash: {th}'\nprint('ok')\nPY"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 30000
+
+outcomes:
+  - id: stash_id_present
+    description: stash result includes a non-empty stash_id and a 64-char tree_hash
+    verify:
+      command:
+        run: "./bin/monitor stash --json --note spec-test 2>&1 | python3 /tmp/monitor_stash_verify.py"
+  - id: tags_include_monitor
+    description: stash tags include the monitor-incident tag
+    verify:
+      command:
+        run: "./bin/monitor stash --json --note spec-test 2>&1 | python3 -c 'import json,sys; d=json.load(sys.stdin); tags=d.get(\"stash\",{}).get(\"tags\",[]); assert \"monitor-incident\" in tags, \"missing tag in \" + str(tags); assert any(t.startswith(\"trigger:\") for t in tags), \"missing trigger in \" + str(tags); print(\"ok\")'"
+  - id: incidents_lists
+    description: incidents command returns at least one row from the prior stash
+    verify:
+      command:
+        run: "./bin/monitor stash --json --note spec-test >/dev/null 2>&1; ./bin/monitor incidents --json 2>&1 | python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list) and len(d) >= 1, f\"expected >=1 incidents row, got {len(d) if isinstance(d, list) else d}\"; print(\"ok\")'"

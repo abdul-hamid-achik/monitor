@@ -1,0 +1,53 @@
+version: 1
+name: monitor_doctor_json
+
+intent: |
+  `monitor doctor --json` reports the availability of every ecosystem tool the
+  monitor can integrate with (codemap, fcheap, vecgrep, glyphrun, etc.).
+
+target:
+  cmd: ["./bin/monitor", "doctor", "--json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: doctor_runs
+    description: doctor command completes cleanly
+    verify:
+      process:
+        exitCode: 0
+  - id: reports_codemap
+    description: stdout reports codemap availability
+    verify:
+      command:
+        run: "./bin/monitor doctor --json | grep -q '\"codemap\"'"
+  - id: reports_tmux
+    description: stdout reports tmux availability
+    verify:
+      command:
+        run: "./bin/monitor doctor --json | grep -q '\"tmux\"'"
+  - id: reports_veclite
+    description: stdout reports veclite availability
+    verify:
+      command:
+        run: "./bin/monitor doctor --json | grep -q '\"veclite\"'"
+  - id: reports_glyphrun
+    description: stdout reports glyphrun availability
+    verify:
+      command:
+        run: "./bin/monitor doctor --json | grep -q '\"glyphrun\"'"

@@ -1,0 +1,50 @@
+version: 1
+name: monitor_profile_sample
+
+intent: |
+  `monitor profile <pid> -t sample --json` captures a sample profile of a
+  running process and returns JSON with the PID, type, timestamp, raw `sample`
+  text, and parsed top symbols. The spec spawns a detached short-lived sleep
+  process (so the wrapper shell exits immediately) and profiles it.
+
+target:
+  cmd: ["sh", "-c", "TARGET_PID=$(sh -c 'nohup sleep 30 >/dev/null 2>&1 & echo $!'); exec ./bin/monitor profile \"$TARGET_PID\" -t sample --json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 15000
+
+outcomes:
+  - id: type_sample
+    description: stdout marks the profile type as sample
+    verify:
+      command:
+        run: "P=$(sh -c 'nohup sleep 30 >/dev/null 2>&1 & echo $!'); ./bin/monitor profile \"$P\" -t sample --json 2>&1 | grep -q '\"type\":[[:space:]]*\"sample\"'"
+  - id: text_present
+    description: stdout includes the raw sample text block
+    verify:
+      command:
+        run: "P=$(sh -c 'nohup sleep 30 >/dev/null 2>&1 & echo $!'); ./bin/monitor profile \"$P\" -t sample --json 2>&1 | grep -q '\"text\"'"
+  - id: symbols_array
+    description: stdout includes the parsed symbols array
+    verify:
+      command:
+        run: "P=$(sh -c 'nohup sleep 30 >/dev/null 2>&1 & echo $!'); ./bin/monitor profile \"$P\" -t sample --json 2>&1 | grep -q '\"symbols\"'"
+  - id: clean_exit
+    description: the binary exits cleanly
+    verify:
+      command:
+        run: "P=$(sh -c 'nohup sleep 30 >/dev/null 2>&1 & echo $!'); ./bin/monitor profile \"$P\" -t sample --json >/dev/null 2>&1; [ $? -eq 0 ]"

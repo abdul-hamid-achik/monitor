@@ -2,6 +2,9 @@ version: '3'
 
 silent: false
 
+vars:
+  BINARY: bin/monitor
+
 tasks:
   default:
     desc: Show available tasks
@@ -11,142 +14,156 @@ tasks:
   build:
     desc: Build the monitor binary
     cmds:
-      - echo "Building monitor..."
-      - go build -o bin/monitor ./cmd/monitor
-      - echo "Build complete."
+      - go build -o {{.BINARY}} ./cmd/monitor
 
-  build:release:
+  release:
     desc: Build optimized release binary
     cmds:
-      - echo "Building release binary..."
-      - go build -ldflags="-s -w" -o bin/monitor ./cmd/monitor
-      - echo "Release build complete."
+      - go build -ldflags="-s -w" -o {{.BINARY}} ./cmd/monitor
 
   run:
-    desc: Run the monitor application
+    desc: Build and run the monitor TUI
     deps: [build]
     cmds:
-      - ./bin/monitor
+      - ./{{.BINARY}}
 
   dev:
-    desc: Run in development mode with auto-reload
+    desc: Development mode with auto-reload on file changes
     watch: true
     sources:
       - '**/*.go'
       - go.mod
       - go.sum
     cmds:
-      - go build -o bin/monitor ./cmd/monitor
-      - ./bin/monitor
+      - go build -o {{.BINARY}} ./cmd/monitor
+      - ./{{.BINARY}}
 
   test:
-    desc: Run tests
+    desc: Run all tests
     cmds:
-      - echo "Running tests..."
       - go test -v ./...
 
-  test:coverage:
-    desc: Run tests with coverage report
+  cover:
+    desc: Run tests and generate HTML coverage report
     cmds:
-      - echo "Running tests with coverage..."
-      - go test -v -coverprofile=coverage.out ./...
+      - go test -coverprofile=coverage.out ./...
       - go tool cover -html=coverage.out -o coverage.html
-      - 'echo "Coverage report generated: coverage.html"'
+      - 'echo "Coverage report: coverage.html"'
+
+  bench:
+    desc: Run benchmarks
+    cmds:
+      - go test -bench=. -benchmem ./...
 
   lint:
-    desc: Run linter
+    desc: Run go vet
     cmds:
-      - echo "Running linter..."
       - go vet ./...
-      - staticcheck ./...
+
+  fmt:
+    desc: Format all Go source files
+    cmds:
+      - gofmt -w .
 
   tidy:
-    desc: Tidy Go modules
+    desc: Tidy Go module dependencies
     cmds:
-      - echo "Tidying Go modules..."
       - go mod tidy
-      - echo "Go modules tidied."
 
   clean:
-    desc: Clean build artifacts
+    desc: Remove build artifacts and coverage files
     cmds:
-      - echo "Cleaning build artifacts..."
-      - rm -rf bin/monitor
-      - rm -f coverage.out coverage.html
-      - echo "Clean complete."
+      - rm -rf bin/ coverage.out coverage.html
 
   install:
-    desc: Install monitor system-wide to /usr/local/bin
-    deps: [build:release]
+    desc: Install monitor to /usr/local/bin
+    deps: [release]
     cmds:
-      - echo "Installing monitor to /usr/local/bin..."
-      - sudo cp bin/monitor /usr/local/bin/monitor
-      - echo "Installation complete."
+      - sudo cp {{.BINARY}} /usr/local/bin/monitor
 
-  uninstall:
-    desc: Uninstall monitor from system
+  remove:
+    desc: Remove monitor from /usr/local/bin
     cmds:
-      - echo "Uninstalling monitor from /usr/local/bin..."
       - sudo rm -f /usr/local/bin/monitor
-      - echo "Uninstallation complete."
 
   version:
-    desc: Show Go version and main dependencies
+    desc: Show Go and module versions
     cmds:
       - go version
-      - echo ""
-      - echo "Main dependencies:"
-      - go list -m all | grep -E "bubbletea|bubbles|lipgloss|gopsutil"
+      - go list -m all | grep -E "bubbletea|bubbles|lipgloss|gopsutil|cobra|mcp"
+
+  specs:
+    desc: Run all glyphrun behavioral specs
+    cmds:
+      - |
+        for spec in specs/*.yml; do
+          echo "--- Running $spec ---"
+          glyph run "$spec" || echo "SKIP: glyph not installed"
+          break
+        done
+      - echo "Specs complete."
+
+  snapshot:
+    desc: Emit a one-shot JSON system snapshot
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} snapshot --json
+
+  doctor:
+    desc: Run ecosystem health check
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}} doctor --json
 
   info:
     desc: Show project information
     cmds:
-      - echo "Monitor CLI - Terminal System Monitor for macOS"
-      - echo "================================================"
-      - echo ""
-      - 'echo "Binary: bin/monitor"'
-      - 'ls -lh bin/monitor 2>/dev/null || echo "Status: Not built yet"'
-      - echo ""
-      - echo "Run 'task run' to start the application"
-      - echo "Run 'task --list' to see all available tasks"
-
-  docs:
-    desc: Show documentation files
-    cmds:
-      - echo "Documentation files:"
-      - echo "  - README.md (Main documentation)"
-      - echo "  - QUICKSTART.md (Quick reference guide)"
-      - echo "  - DESIGN.md (UI mockups and architecture)"
-      - echo "  - CHANGELOG.md (Project changelog)"
-      - echo ""
-      - ls -lh *.md
-
-  all:
-    desc: Run full CI pipeline
-    deps: [tidy, lint, test, build:release]
-    cmds:
-      - echo ""
-      - echo "All checks passed!"
+      - 'echo "Monitor - local-first observability tool for macOS"'
+      - 'echo "Binary: {{.BINARY}}"'
+      - 'ls -lh {{.BINARY}} 2>/dev/null || echo "Status: not built"'
 
   help:
     desc: Show help and quick start guide
     cmds:
-      - echo "Monitor CLI - Taskfile Help"
-      - echo "============================"
+      - 'echo "Monitor CLI - Taskfile Help"'
+      - echo "=========================="
       - echo ""
       - echo "Quick Start:"
-      - echo "  task build    - Build the application"
-      - echo "  task run      - Run the application"
-      - echo "  task dev      - Development mode with watch"
-      - echo "  task clean    - Clean build artifacts"
+      - echo "  task build    — Build the application"
+      - echo "  task run      — Build and run the TUI"
+      - echo "  task dev      — Development mode with watch"
       - echo ""
-      - echo "Development:"
-      - echo "  task test     - Run tests"
-      - echo "  task lint     - Run linter"
-      - echo "  task tidy     - Tidy Go modules"
+      - echo "Testing:"
+      - echo "  task test     — Run all tests"
+      - echo "  task cover    — Generate coverage report"
+      - echo "  task bench    — Run benchmarks"
+      - echo "  task specs    — Run glyphrun behavioral specs"
+      - echo ""
+      - echo "Quality:"
+      - echo "  task lint     — Run go vet"
+      - echo "  task fmt      — Format source files"
+      - echo "  task tidy     — Tidy go modules"
+      - echo ""
+      - echo "CLI:"
+      - echo "  task snapshot — Print JSON system snapshot"
+      - echo "  task doctor   — Check ecosystem tool health"
       - echo ""
       - echo "Deployment:"
-      - echo "  task install   - Install system-wide"
-      - echo "  task uninstall - Remove from system"
+      - echo "  task install  — Install to /usr/local/bin"
+      - echo "  task remove   — Remove from /usr/local/bin"
+      - echo "  task clean    — Remove build artifacts"
       - echo ""
       - echo "Run 'task --list' for all available tasks"
+
+  check:
+    desc: Full CI pipeline (tidy, lint, test, release)
+    deps: [tidy, lint, test, release]
+    cmds:
+      - 'echo "All checks passed!"'
+
+  all:
+    desc: Alias for check — full CI pipeline
+    aliases: [check]
+    deps: [tidy, lint, test, release]
+    cmds:
+      - 'echo "All checks passed!"'

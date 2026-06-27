@@ -1,0 +1,43 @@
+version: 1
+name: monitor_kill_safety
+
+intent: |
+  `monitor kill 1` refuses to terminate PID 1 (launchd/init) without --yes and
+  exits non-zero to signal the refusal.
+
+target:
+  cmd: ["./bin/monitor", "kill", "1"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 40
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exited: true
+      timeoutMs: 10000
+
+outcomes:
+  - id: protected_process_identified
+    description: output mentions the process is protected
+    verify:
+      command:
+        run: "(./bin/monitor kill 1 2>&1 || true) | grep -qi 'protected'"
+  - id: pid_1_still_running
+    description: PID 1 must still be running
+    verify:
+      command:
+        run: "ps -p 1 -o pid= | grep -q '^ *1$'"
+  - id: refused_exit_code
+    description: the command exited with a non-zero code
+    verify:
+      command:
+        run: "! ./bin/monitor kill 1 >/dev/null 2>&1"

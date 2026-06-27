@@ -1,0 +1,56 @@
+version: 1
+name: monitor_investigate
+
+intent: |
+  `monitor investigate <pid> --json` runs the diagnostic pipeline and
+  returns JSON with the PID, start time, the ordered list of pipeline steps,
+  and a note describing the pipeline stage. The current implementation is a
+  stub that emits the documented contract. Uses PID 1 (launchd) which is
+  always present on macOS and is not killed by investigate.
+
+target:
+  cmd: ["./bin/monitor", "investigate", "1", "--json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: pid_echoed
+    description: stdout includes the investigated pid
+    verify:
+      command:
+        run: "./bin/monitor investigate 1 --json | grep -q '\"pid\":[[:space:]]*1'"
+  - id: started_at_present
+    description: stdout includes the started_at timestamp
+    verify:
+      command:
+        run: "./bin/monitor investigate 1 --json | grep -q '\"started_at\"'"
+  - id: steps_array
+    description: stdout includes a steps array naming the pipeline stages
+    verify:
+      command:
+        run: "./bin/monitor investigate 1 --json | grep -q '\"steps\"'"
+  - id: note_field
+    description: stdout includes a note describing the pipeline stage
+    verify:
+      command:
+        run: "./bin/monitor investigate 1 --json | grep -q '\"note\"'"
+  - id: clean_exit
+    description: the binary exits cleanly
+    verify:
+      process:
+        exitCode: 0

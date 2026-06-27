@@ -1,0 +1,48 @@
+version: 1
+name: monitor_watch_emits_tick
+
+intent: |
+  `monitor watch --json --once` emits exactly one NDJSON line of type "tick"
+  containing cpu, memory, and network fields, and then exits.
+
+target:
+  cmd: ["./bin/monitor", "watch", "--once", "--json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 40
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: event_type_tick
+    description: output line has type=tick
+    verify:
+      command:
+        run: "./bin/monitor watch --once --json | grep -q '\"type\":\"tick\"'"
+  - id: includes_cpu
+    description: line includes cpu object
+    verify:
+      command:
+        run: "./bin/monitor watch --once --json | grep -q '\"cpu\"'"
+  - id: includes_memory
+    description: line includes memory object
+    verify:
+      command:
+        run: "./bin/monitor watch --once --json | grep -q '\"memory\"'"
+  - id: clean_exit
+    description: exit cleanly after one event
+    verify:
+      process:
+        exitCode: 0

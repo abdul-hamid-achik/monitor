@@ -1,0 +1,69 @@
+version: 1
+name: monitor_logs_capture
+
+intent: |
+  `monitor logs capture 'sh -c ...'` ingests a command's stdout/stderr
+  into the local veclite log store, and `monitor logs search` reads
+  the same store. The end-to-end round-trip is the contract: capture
+  a line, search for it, see it come back with the right level.
+
+target:
+  cmd: ["./bin/monitor", "logs", "capture", "--help"]
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 80
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "cat > /tmp/logs_capture_verify.sh <<'SH'\n#!/bin/sh\nSENT=\"spec_capture_roundtrip_$$\"\n./bin/monitor logs capture \"echo INFO: $SENT\" >/dev/null 2>&1\n./bin/monitor logs search \"$SENT\" --json | python3 -c \"import json,sys; d=json.load(sys.stdin); assert isinstance(d,list) and len(d) >= 1; e=d[0]; assert e.get('level') == 'info'; print('ok')\"\nSH\nchmod +x /tmp/logs_capture_verify.sh"
+      timeoutMs: 5000
+    - run: "cat > /tmp/logs_capture_error.sh <<'SH'\n#!/bin/sh\nSENT=\"spec_capture_error_$$\"\n./bin/monitor logs capture \"echo ERROR: $SENT >&2\" >/dev/null 2>&1\n./bin/monitor logs search \"$SENT\" --json | python3 -c \"import json,sys; d=json.load(sys.stdin); e=[x for x in d if x.get('level') == 'error']; assert e; print('ok')\"\nSH\nchmod +x /tmp/logs_capture_error.sh"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: help_describes_capture
+    description: monitor logs capture --help explains the two modes (wrap / --pid)
+    verify:
+      command:
+        run: "./bin/monitor logs capture --help 2>&1 | grep -qE 'lsof|--pid|wrap a new command|tail an existing'"
+  - id: help_has_max_lines
+    description: monitor logs capture --help documents the --max-lines flag
+    verify:
+      command:
+        run: "./bin/monitor logs capture --help 2>&1 | grep -qE -- '--max-lines'"
+  - id: help_has_max_bytes
+    description: monitor logs capture --help documents the --max-bytes flag
+    verify:
+      command:
+        run: "./bin/monitor logs capture --help 2>&1 | grep -qE -- '--max-bytes'"
+  - id: help_has_name
+    description: monitor logs capture --help documents the --name override
+    verify:
+      command:
+        run: "./bin/monitor logs capture --help 2>&1 | grep -qE -- '--name'"
+  - id: round_trip_writes_to_store
+    description: capture writes a unique sentinel line; search finds it back
+    verify:
+      command:
+        run: "/tmp/logs_capture_verify.sh"
+  - id: level_extraction_works
+    description: "ERROR prefix on stderr line is stored as level=error"
+    verify:
+      command:
+        run: "/tmp/logs_capture_error.sh"
+  - id: clean_exit
+    description: monitor logs capture --help exits cleanly
+    verify:
+      process:
+        exitCode: 0
