@@ -11,10 +11,69 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 )
+
+// RecordScreen records the screen for `seconds` to a temp video file and
+// returns its path, using the platform's built-in recorder: `screencapture
+// -V` on macOS, ffmpeg x11grab on Linux. The resulting video can be analyzed
+// with vidtrace (`vidtrace index` / `vidtrace analyze`). It returns an error
+// when no recorder or display is available (headless / CI / no permission),
+// so callers can refuse gracefully.
+func RecordScreen(ctx context.Context, seconds int) (string, error) {
+	if seconds <= 0 {
+		seconds = 30
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		if _, err := exec.LookPath("screencapture"); err != nil {
+			return "", fmt.Errorf("screencapture not available")
+		}
+		path, err := tempRecordingPath("mov")
+		if err != nil {
+			return "", err
+		}
+		// -V N records N seconds of video; -x suppresses the capture sound.
+		if err := exec.CommandContext(ctx, "screencapture", "-x", "-V", fmt.Sprintf("%d", seconds), path).Run(); err != nil {
+			os.Remove(path)
+			return "", fmt.Errorf("screencapture: %w", err)
+		}
+		return path, nil
+	case "linux":
+		if _, err := exec.LookPath("ffmpeg"); err != nil {
+			return "", fmt.Errorf("ffmpeg not available")
+		}
+		display := os.Getenv("DISPLAY")
+		if display == "" {
+			return "", fmt.Errorf("no X11 DISPLAY for screen recording")
+		}
+		path, err := tempRecordingPath("mp4")
+		if err != nil {
+			return "", err
+		}
+		if err := exec.CommandContext(ctx, "ffmpeg", "-y", "-f", "x11grab", "-t", fmt.Sprintf("%d", seconds), "-i", display, path).Run(); err != nil {
+			os.Remove(path)
+			return "", fmt.Errorf("ffmpeg x11grab: %w", err)
+		}
+		return path, nil
+	default:
+		return "", fmt.Errorf("screen recording not supported on %s", runtime.GOOS)
+	}
+}
+
+func tempRecordingPath(ext string) (string, error) {
+	f, err := os.CreateTemp("", "monitor-rec-*."+ext)
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	f.Close()
+	return path, nil
+}
 
 // ToolStatus is the per-tool health entry returned by Status().
 type ToolStatus struct {

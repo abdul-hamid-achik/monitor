@@ -244,66 +244,9 @@ fcheap stash step (useful for sandboxed environments).`,
 			ctx, cancel := Context()
 			defer cancel()
 
-			// Capture the profile first; if the process is gone, the
-			// snapshot-only stash is still useful.
-			profile, _ := profiler.Capture(ctx, pid, profiler.ProfileHeap, "")
-
-			// Sample once and reuse it for both the process-name lookup and
-			// the bundle (avoids two back-to-back full system samples).
-			snapshot := NewCollector(0).Collect(ctx)
-			processName := ""
-			for _, p := range snapshot.Processes {
-				if p.PID == pid {
-					processName = p.Name
-					break
-				}
-			}
-
-			// Best-effort process->code correlation: resolve the profile's
-			// frames to their codemap symbols (FQN/kind).
-			correlations := correlateProfile(ctx, profile.Symbols)
-
-			req := incidents.CaptureRequest{
-				Snapshot: snapshot,
-				Profile:  profile,
-				Alert: incidents.AlertDetail{
-					Rule:    "investigate",
-					PID:     pid,
-					Process: processName,
-					Detail:  fmt.Sprintf("manual investigate of pid %d", pid),
-				},
-				Trigger: "investigate",
-				TTL:     ttl,
-			}
+			report := investigatePipeline(ctx, pid, ttl, noSave)
 			if noSave {
-				// Skip fcheap; produce a structured report instead.
-				report := map[string]any{
-					"pid":        pid,
-					"started_at": time.Now().Format(time.RFC3339),
-					"steps":      []string{"snapshot", "profile"},
-					"profile":    profile,
-					"note":       "--no-save: bundle not stashed; profile included in JSON",
-				}
-				if correlations != nil {
-					report["correlations"] = correlations
-				}
 				return WriteJSON(report)
-			}
-
-			res, err := incidents.Capture(ctx, req)
-			report := map[string]any{
-				"pid":        pid,
-				"started_at": time.Now().Format(time.RFC3339),
-				"steps":      []string{"snapshot", "profile", "stash"},
-				"stash":      res,
-				"note":       "investigation pipeline (capture + stash)",
-			}
-			if correlations != nil {
-				report["correlations"] = correlations
-			}
-			if err != nil {
-				report["stash_error"] = err.Error()
-				report["note"] = "stash failed; profile captured locally at " + res.Path
 			}
 			if JSONOutput(cmd) {
 				return WriteJSON(report)
@@ -322,6 +265,73 @@ fcheap stash step (useful for sandboxed environments).`,
 // newStashCmd is a manual incident-capture entry point. Useful when an
 // operator sees something the analyzer didn't fire on, or before/after
 // a known-good deploy.
+// investigatePipeline runs the diagnostic pipeline for pid — capture a heap
+// profile, sample the system once, correlate frames to code, and (unless
+// noSave) stash an incident bundle via fcheap. It returns the structured
+// report shared by the `monitor investigate` CLI command and the
+// monitor_investigate MCP tool, so the two surfaces stay in lock-step.
+func investigatePipeline(ctx context.Context, pid int32, ttl string, noSave bool) map[string]any {
+	// Capture the profile first; if the process is gone, the snapshot-only
+	// stash is still useful.
+	profile, _ := profiler.Capture(ctx, pid, profiler.ProfileHeap, "")
+
+	// Sample once and reuse it for the process-name lookup and the bundle.
+	snapshot := NewCollector(0).Collect(ctx)
+	processName := ""
+	for _, p := range snapshot.Processes {
+		if p.PID == pid {
+			processName = p.Name
+			break
+		}
+	}
+
+	// Best-effort process->code correlation.
+	correlations := correlateProfile(ctx, profile.Symbols)
+
+	if noSave {
+		report := map[string]any{
+			"pid":        pid,
+			"started_at": time.Now().Format(time.RFC3339),
+			"steps":      []string{"snapshot", "profile"},
+			"profile":    profile,
+			"note":       "--no-save: bundle not stashed; profile included in JSON",
+		}
+		if correlations != nil {
+			report["correlations"] = correlations
+		}
+		return report
+	}
+
+	req := incidents.CaptureRequest{
+		Snapshot: snapshot,
+		Profile:  profile,
+		Alert: incidents.AlertDetail{
+			Rule:    "investigate",
+			PID:     pid,
+			Process: processName,
+			Detail:  fmt.Sprintf("manual investigate of pid %d", pid),
+		},
+		Trigger: "investigate",
+		TTL:     ttl,
+	}
+	res, err := incidents.Capture(ctx, req)
+	report := map[string]any{
+		"pid":        pid,
+		"started_at": time.Now().Format(time.RFC3339),
+		"steps":      []string{"snapshot", "profile", "stash"},
+		"stash":      res,
+		"note":       "investigation pipeline (capture + stash)",
+	}
+	if correlations != nil {
+		report["correlations"] = correlations
+	}
+	if err != nil {
+		report["stash_error"] = err.Error()
+		report["note"] = "stash failed; profile captured locally at " + res.Path
+	}
+	return report
+}
+
 // correlateProfile resolves each profile frame's file:line to its enclosing
 // codemap symbol (FQN/kind), enriching the diagnose flow. Best-effort: it
 // returns nil when codemap isn't on PATH or there are no frames, and silently

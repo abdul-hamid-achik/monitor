@@ -118,7 +118,7 @@ func (s *Server) register() {
 	}, s.handleInvestigate)
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_record",
-		Description: "Start a vidtrace screen recording for a process. Requires `confirm: true`.",
+		Description: "Record the screen for N seconds (default 30) via the platform recorder (screencapture/ffmpeg); the result can be analyzed with vidtrace. Requires `confirm: true`.",
 	}, s.handleRecord)
 }
 
@@ -256,13 +256,13 @@ func (s *Server) handleInvestigate(ctx context.Context, _ *mcp.CallToolRequest, 
 	if s.svc.Investigate != nil {
 		return result(s.svc.Investigate(ctx, in.PID))
 	}
-	// Fall back to the same stub shape the CLI emits — keeps the surface
-	// stable for agents while the real pipeline lands.
+	// Fall back to a stable stub shape when no investigator is wired (e.g.
+	// in tests); production wires the real pipeline.
 	return result(map[string]any{
 		"pid":        in.PID,
 		"started_at": nowRFC3339(),
 		"steps":      []string{"snapshot", "profile", "search"},
-		"note":       "investigation pipeline stub; full pipeline lands in iteration 2",
+		"note":       "investigation pipeline stub (no investigator configured)",
 	})
 }
 
@@ -276,7 +276,7 @@ func (s *Server) handleRecord(ctx context.Context, _ *mcp.CallToolRequest, in *r
 		return result(map[string]any{
 			"recording": false,
 			"refused":   true,
-			"reason":    "vidtrace not installed or record service not configured",
+			"reason":    "no screen recorder available (record service not configured)",
 			"pid":       in.PID,
 		})
 	}

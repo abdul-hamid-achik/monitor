@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
 	"github.com/abdul-hamid-achik/monitor/internal/mcp"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
@@ -44,16 +45,18 @@ func newMCPServeCmd() *cobra.Command {
 					// `--pprof-addr` flag covers non-default ports.
 					return profiler.Capture(ctx, pid, ptype, "")
 				},
-				// Investigate stays a stub until the full pipeline lands; the
-				// tool returns the same shape the CLI emits today so the
-				// surface is stable for agents. The fallback is implemented
-				// inside mcp.handleInvestigate when svc.Investigate is nil.
-				//
-				// Record: no real wiring yet — vidtrace is an external CLI
-				// that would be invoked via ecosystem.TinyvaultRun-style
-				// wrappers. Leaving nil so the tool returns a structured
-				// "not configured" refusal; the agent sees the same shape
-				// regardless.
+				// Investigate runs the same real pipeline the CLI does
+				// (snapshot + profile + correlate + stash).
+				Investigate: func(ctx context.Context, pid int32) map[string]any {
+					return investigatePipeline(ctx, pid, "7d", false)
+				},
+				// Record captures a short screen recording via the platform
+				// recorder (screencapture / ffmpeg). Returns an error — turned
+				// into a structured refusal by the handler — when no recorder
+				// or display is available (headless agents).
+				Record: func(ctx context.Context, pid int32, durationSeconds int) (string, error) {
+					return ecosystem.RecordScreen(ctx, durationSeconds)
+				},
 			}
 			s := mcp.NewServer(svc)
 			if err := s.Run(ctx); err != nil {

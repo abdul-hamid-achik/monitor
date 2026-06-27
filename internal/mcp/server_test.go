@@ -74,6 +74,42 @@ func TestRequireConfirm(t *testing.T) {
 	}
 }
 
+// TestHandleInvestigateForwardsToService verifies the wired investigator is
+// used (not the nil-service stub) when confirm=true.
+func TestHandleInvestigateForwardsToService(t *testing.T) {
+	s := newTestServer(t, &Service{
+		Investigate: func(_ context.Context, pid int32) map[string]any {
+			return map[string]any{"pid": pid, "wired": true}
+		},
+	})
+	_, payload, err := s.handleInvestigate(context.Background(), nil, &investigateInput{PID: 99, Confirm: true})
+	if err != nil {
+		t.Fatalf("handleInvestigate: %v", err)
+	}
+	m, _ := payload.(map[string]any)
+	if m["wired"] != true {
+		t.Errorf("expected the wired investigator result; got %v", m)
+	}
+}
+
+// TestHandleRecordForwardsToService verifies the wired recorder is used and
+// its returned id surfaces in the payload.
+func TestHandleRecordForwardsToService(t *testing.T) {
+	s := newTestServer(t, &Service{
+		Record: func(_ context.Context, _ int32, _ int) (string, error) {
+			return "rec-123", nil
+		},
+	})
+	_, payload, err := s.handleRecord(context.Background(), nil, &recordInput{PID: 7, DurationSeconds: 5, Confirm: true})
+	if err != nil {
+		t.Fatalf("handleRecord: %v", err)
+	}
+	m, _ := payload.(map[string]any)
+	if m["recording"] != true || m["bundle_id"] != "rec-123" {
+		t.Errorf("expected the wired record result; got %v", m)
+	}
+}
+
 // TestHandleKillRefusesWithoutConfirm verifies monitor_kill requires
 // confirm=true in the typed input.
 func TestHandleKillRefusesWithoutConfirm(t *testing.T) {
