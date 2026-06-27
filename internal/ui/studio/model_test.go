@@ -255,6 +255,30 @@ func TestTabRendersWithData(t *testing.T) {
 	}
 }
 
+// TestPidRefusedMatchesCLIAndMCP locks the kill-safety invariant: the TUI
+// confirm handler must refuse BOTH protected and system PIDs, like the CLI
+// (kill.go) and MCP (server.go) — not just protected ones. Regression for the
+// divergence where a system-owned non-protected PID was killable in the TUI.
+func TestPidRefusedMatchesCLIAndMCP(t *testing.T) {
+	m := NewModel()
+	m.killConf.Processes = []collector.ProcessInfo{
+		{PID: 1, Name: "launchd", IsProtected: true, IsSystem: false},
+		{PID: 50, Name: "systemd-ish", IsProtected: false, IsSystem: true}, // system, NOT protected
+		{PID: 4242, Name: "myapp", IsProtected: false, IsSystem: false},
+	}
+	cases := map[int32]bool{
+		1:    true,  // protected -> refused
+		50:   true,  // system -> refused (the bug: this used to be killable)
+		4242: false, // ordinary user process -> killable
+		9999: false, // unknown pid (not in confirmation) -> not refused
+	}
+	for pid, want := range cases {
+		if got := m.pidRefused(pid); got != want {
+			t.Errorf("pidRefused(%d) = %v, want %v", pid, got, want)
+		}
+	}
+}
+
 func TestRenderProcessesEmpty(t *testing.T) {
 	m := NewModel()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})

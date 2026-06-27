@@ -21,7 +21,7 @@ was flagged.
 
 | Surface | How you confirm |
 |---------|-----------------|
-| **TUI** | A confirmation dialog appears (`k` = SIGTERM, `x` = SIGKILL); confirm with `y`, cancel with `n`/`esc`. Protected PIDs stay refused even at the dialog (system-owned non-protected PIDs are still killable here, unlike the CLI/MCP refusal). |
+| **TUI** | A confirmation dialog appears (`k` = SIGTERM, `x` = SIGKILL); confirm with `y`, cancel with `n`/`esc`. Protected **and** system PIDs stay refused even at the dialog, matching the CLI and MCP. |
 | **CLI** | `monitor kill <pid>` refuses protected/system PIDs; `--yes` skips **all** protection checks and will attempt even protected/system targets (the OS may still deny them). |
 | **MCP** | `monitor_kill` requires `confirm: true` in its typed input, *and* still refuses protected/system PIDs with a structured `{ "refused": true }` payload. |
 
@@ -52,5 +52,6 @@ $ monitor kill 1 --json
 (The MCP `monitor_kill` tool returns a different shape — `{ "killed": false,
 "refused": true, "reason": ..., "pid": ... }` — for the same refusal.)
 
-A protected target like `launchd` is refused identically across the CLI, TUI,
-and MCP — the protected-process classification lives in one place.
+A protected or system target like `launchd` is refused identically across the
+CLI, TUI, and MCP — the `kill.CheckSafety` classification lives in one place, so
+the three surfaces can't drift apart.

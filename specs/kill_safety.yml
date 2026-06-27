@@ -3,7 +3,10 @@ name: monitor_kill_safety
 
 intent: |
   `monitor kill 1` refuses to terminate PID 1 (launchd/init) without --yes and
-  exits non-zero to signal the refusal.
+  exits non-zero to signal the refusal. The refusal is driven by the shared
+  kill.CheckSafety classification (protected OR system) that the CLI, MCP, and
+  the studio TUI all consume — so the JSON carries both HasProtected and
+  HasSystem and the note names the unified "protected or system" gate.
 
 target:
   cmd: ["./bin/monitor", "kill", "1"]
@@ -41,3 +44,13 @@ outcomes:
     verify:
       command:
         run: "! ./bin/monitor kill 1 >/dev/null 2>&1"
+  - id: unified_gate_classification
+    description: the JSON exposes the shared protected+system classification
+    verify:
+      command:
+        run: "./bin/monitor kill 1 --json 2>&1 | grep -q 'HasSystem' && ./bin/monitor kill 1 --json 2>&1 | grep -q 'HasProtected'"
+  - id: note_names_protected_or_system
+    description: the refusal note names the unified 'protected or system' gate
+    verify:
+      command:
+        run: "./bin/monitor kill 1 --json 2>&1 | grep -qi 'protected or system'"

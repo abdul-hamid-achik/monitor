@@ -293,6 +293,19 @@ func (m Model) handleProcessKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// pidRefused reports whether pid is protected OR system per the shared safety
+// classification (kill.CheckSafety), and so must not be terminated even after
+// the confirm dialog. This matches the CLI and MCP gate (both refuse
+// HasProtected || HasSystem) so the TUI can't be the surface that drifts.
+func (m Model) pidRefused(pid int32) bool {
+	for _, p := range m.killConf.Processes {
+		if p.PID == pid {
+			return p.IsProtected || p.IsSystem
+		}
+	}
+	return false
+}
+
 func (m Model) handleKillConfirmKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.Keystroke() {
 	case "esc", "n":
@@ -303,14 +316,7 @@ func (m Model) handleKillConfirmKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "y":
 		for pid := range m.selectedPids {
-			protected := false
-			for _, p := range m.killConf.Processes {
-				if p.PID == pid && p.IsProtected {
-					protected = true
-					break
-				}
-			}
-			if !protected {
+			if !m.pidRefused(pid) {
 				_ = kill.Kill(pid, m.forceKill)
 			}
 		}
