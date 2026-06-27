@@ -40,6 +40,7 @@ Every subcommand supports `--json` for machine-readable output:
 ./bin/monitor snapshot --json | jq '.cpu'      # one-shot system snapshot
 ./bin/monitor watch --json                      # stream NDJSON metric events
 ./bin/monitor process 1234 --json               # detailed process info
+./bin/monitor tree 1234                          # process hierarchy (parent/child)
 ./bin/monitor kill 1234                           # safety-checked (refuses protected/system PIDs)
 ./bin/monitor profile 1234 --type heap --json   # heap/cpu/goroutine/sample profile
 ./bin/monitor logs capture -- mycommand          # ingest a command's logs
