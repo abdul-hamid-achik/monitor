@@ -1,0 +1,45 @@
+version: 1
+name: monitor_run
+
+intent: |
+  `monitor run <glyphrun-spec>` runs a glyphrun behavioral spec against
+  monitored services. This spec verifies the command is wired (help describes
+  it) and that invoking it without a spec argument fails with a non-zero exit
+  rather than doing nothing — without depending on glyph being installed.
+
+target:
+  cmd: ["./bin/monitor", "run", "--help"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 40
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: help_describes_glyphrun
+    description: run --help mentions running a glyphrun spec
+    verify:
+      command:
+        run: "./bin/monitor run --help | grep -qi 'glyphrun'"
+  - id: missing_spec_errors
+    description: run with no spec argument exits non-zero
+    verify:
+      command:
+        run: "! ./bin/monitor run >/dev/null 2>&1"
+  - id: clean_exit
+    description: run --help exits cleanly
+    verify:
+      process:
+        exitCode: 0

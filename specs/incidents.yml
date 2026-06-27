@@ -1,0 +1,50 @@
+version: 1
+name: monitor_incidents
+
+intent: |
+  `monitor incidents` lists recent incident stashes (via fcheap). The command
+  is wired into the CLI, documents --json, and degrades gracefully (a clean
+  error, never a panic) when fcheap isn't installed — so this spec is CI-safe
+  without fcheap on PATH.
+
+target:
+  cmd: ["./bin/monitor", "incidents", "--help"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 40
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: help_describes_incidents
+    description: incidents --help describes the incident stash listing
+    verify:
+      command:
+        run: "./bin/monitor incidents --help | grep -qi 'incident'"
+  - id: json_flag_documented
+    description: incidents documents the --json flag
+    verify:
+      command:
+        run: "./bin/monitor incidents --help | grep -q '\\-\\-json'"
+  - id: graceful_without_panic
+    description: incidents --json runs without a panic (JSON when fcheap is present, a clean error otherwise)
+    verify:
+      command:
+        run: "! ./bin/monitor incidents --json 2>&1 | grep -qiE 'panic|goroutine [0-9]+'"
+  - id: clean_exit
+    description: incidents --help exits cleanly
+    verify:
+      process:
+        exitCode: 0

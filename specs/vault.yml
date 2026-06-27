@@ -1,0 +1,46 @@
+version: 1
+name: monitor_vault
+
+intent: |
+  `monitor vault --project <p> -- <cmd>` wraps a command with `tvault run` so
+  tinyvault secrets land in the child env without entering the agent context.
+  This spec verifies the command is wired (help documents the required
+  --project flag) and that omitting --project fails clearly — without depending
+  on tinyvault being installed.
+
+target:
+  cmd: ["./bin/monitor", "vault", "--help"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 40
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: help_documents_project
+    description: vault --help documents the required --project flag
+    verify:
+      command:
+        run: "./bin/monitor vault --help | grep -q '\\-\\-project'"
+  - id: missing_project_errors
+    description: vault without --project exits non-zero with a clear message
+    verify:
+      command:
+        run: "! ./bin/monitor vault -- echo hi >/dev/null 2>&1 && ./bin/monitor vault -- echo hi 2>&1 | grep -qi 'project is required'"
+  - id: clean_exit
+    description: vault --help exits cleanly
+    verify:
+      process:
+        exitCode: 0

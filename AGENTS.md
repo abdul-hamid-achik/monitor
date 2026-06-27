@@ -135,13 +135,14 @@ monitor/
 │   └── widgets/                 # Reusable widgets (sparklines, gauges; lipgloss v2)
 │       ├── gauge.go
 │       └── gauge_test.go
-├── specs/                       # glyphrun behavioral specs (20 specs, all passing)
+├── specs/                       # glyphrun behavioral specs (23 specs, all passing)
 │   ├── baseline.yml             # save/list/delete + path-traversal guard
 │   ├── cli_help.yml
 │   ├── diff.yml                 # baseline vs live diff
 │   ├── doctor_json.yml
 │   ├── env_detection.yml
 │   ├── history.yml              # query/list on a fresh store
+│   ├── incidents.yml            # incidents --help + graceful w/o fcheap
 │   ├── investigate.yml
 │   ├── kill_safety.yml
 │   ├── logs_capture.yml
@@ -150,10 +151,12 @@ monitor/
 │   ├── process.yml              # process <pid> incl. unknown-pid error
 │   ├── profile_sample.yml       # (skipped in CI — needs macOS `sample`)
 │   ├── reload.yml
+│   ├── run.yml                  # run --help + missing-spec error
 │   ├── snapshot_json.yml
 │   ├── stash.yml                # (skipped in CI — needs fcheap)
 │   ├── studio_help.yml          # studio TUI help + bare-monitor-shows-help
 │   ├── tree.yml                 # process hierarchy
+│   ├── vault.yml                # vault --help + missing-project error
 │   ├── version.yml
 │   └── watch_tick.yml
 ├── Taskfile.yml                 # Single-word commands
