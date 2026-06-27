@@ -16,7 +16,7 @@ import (
 )
 
 func newProfileCmd() *cobra.Command {
-	var ptype string
+	var ptype, pprofAddr string
 	cmd := &cobra.Command{
 		Use:   "profile <pid>",
 		Short: "Capture a process profile (heap, cpu, goroutine)",
@@ -28,7 +28,7 @@ func newProfileCmd() *cobra.Command {
 			}
 			ctx, cancel := Context()
 			defer cancel()
-			prof, err := profiler.Capture(ctx, pid, profiler.ProfileType(ptype))
+			prof, err := profiler.Capture(ctx, pid, profiler.ProfileType(ptype), pprofAddr)
 			if err != nil {
 				return err
 			}
@@ -50,6 +50,8 @@ func newProfileCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&ptype, "type", "t", "heap", "profile type: heap, cpu, goroutine, sample")
+	cmd.Flags().StringVar(&pprofAddr, "pprof-addr", "localhost:6060",
+		"host:port of the target's net/http/pprof server (heap/cpu/goroutine only)")
 	cmd.Flags().Bool("json", false, "emit JSON output")
 	return cmd
 }
@@ -242,7 +244,7 @@ fcheap stash step (useful for sandboxed environments).`,
 
 			// Capture the profile first; if the process is gone, the
 			// snapshot-only stash is still useful.
-			profile, _ := profiler.Capture(ctx, pid, profiler.ProfileHeap)
+			profile, _ := profiler.Capture(ctx, pid, profiler.ProfileHeap, "")
 			processName := ""
 			for _, p := range NewCollector(0).Collect(ctx).Processes {
 				if p.PID == pid {

@@ -52,10 +52,15 @@ type Alert struct {
 type Collector struct {
 	opts Options
 
-	mu      sync.RWMutex
-	info    SystemInfo
-	lastNet net.IOCountersStat
-	lastDisk disk.IOCountersStat
+	// info is the in-progress sample, owned exclusively by the Collect
+	// goroutine and mutated WITHOUT mu (so slow IO doesn't block readers).
+	// published is the last consistent snapshot, swapped in under mu at the
+	// end of each Collect; Snapshot() reads only published.
+	mu        sync.RWMutex
+	info      SystemInfo
+	published SystemInfo
+	lastNet   net.IOCountersStat
+	lastDisk  disk.IOCountersStat
 
 	cpuHist    *RingBuffer[float64]
 	memHist    *RingBuffer[float64]
@@ -129,17 +134,25 @@ func (c *Collector) SetInterval(d time.Duration) {
 	c.mu.Unlock()
 }
 
-// Snapshot returns the latest SystemInfo.
+// Snapshot returns the latest published SystemInfo. It only contends with
+// the brief publish step in Collect, never with the slow lock-free sampling,
+// so the TUI render loop is never blocked by process enumeration.
 func (c *Collector) Snapshot() SystemInfo {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.info
+	return c.published
 }
 
 // Collect samples the system once and returns the SystemInfo. Subscribers
 // receive an Event built from the same sample.
+//
+// Sampling runs WITHOUT c.mu: the collect* helpers and the lastNet/lastDisk/
+// ring-buffer state they touch are owned by the single Collect goroutine
+// (Run's ticker, or a one-off CLI call), so Collect must NOT be invoked
+// concurrently on the same Collector. c.mu is taken only to publish the
+// assembled snapshot atomically, so a slow process enumeration can't block
+// Snapshot() readers.
 func (c *Collector) Collect(ctx context.Context) SystemInfo {
-	c.mu.Lock()
 	c.info.LastUpdate = time.Now()
 	c.collectCPU(ctx)
 	c.collectMemory(ctx)
@@ -148,7 +161,10 @@ func (c *Collector) Collect(ctx context.Context) SystemInfo {
 	c.collectDisk(ctx)
 	c.collectProcesses(ctx)
 	c.collectHost()
-	info := c.info
+
+	c.mu.Lock()
+	c.published = c.info
+	info := c.published
 	c.mu.Unlock()
 
 	c.subsMu.RLock()
@@ -248,7 +264,14 @@ func (c *Collector) collectMemory(ctx context.Context) {
 }
 
 func (c *Collector) collectTemperature() {
-	if hook := c.temperatureHook; hook != nil {
+	// Read the hook under the lock: sampling is otherwise lock-free, but
+	// WithTemperatureHook writes this field under c.mu, so snapshot it here
+	// to keep the lock discipline consistent even if a hook is ever
+	// installed after sampling has started.
+	c.mu.RLock()
+	hook := c.temperatureHook
+	c.mu.RUnlock()
+	if hook != nil {
 		cpuPkg, cpuCores, gpu, ane, battery, ambient, fanRPM, fanMode, source, available := hook()
 		c.info.Temperature.CPUPackage = cpuPkg
 		c.info.Temperature.CPUCores = cpuCores

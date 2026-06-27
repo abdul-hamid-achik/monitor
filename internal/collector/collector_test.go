@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestNewDefaults(t *testing.T) {
@@ -84,6 +85,29 @@ func TestPerSecond(t *testing.T) {
 	for _, c := range cases {
 		if got := perSecond(c.prev, c.cur, c.elapsed); got != c.want {
 			t.Errorf("perSecond(%d, %d, %v) = %d, want %d", c.prev, c.cur, c.elapsed, got, c.want)
+		}
+	}
+}
+
+// TestSnapshotConcurrentWithCollect spins Snapshot() while Collect() samples,
+// exercising the published/in-progress double buffer. Must be race-free under
+// -race (the whole point of taking sampling out from under the lock).
+func TestSnapshotConcurrentWithCollect(t *testing.T) {
+	c := New(Options{Interval: time.Millisecond})
+	ctx := context.Background()
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 5; i++ {
+			c.Collect(ctx)
+		}
+		close(done)
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+			_ = c.Snapshot()
 		}
 	}
 }

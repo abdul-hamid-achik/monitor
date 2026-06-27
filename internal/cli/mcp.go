@@ -40,7 +40,9 @@ func newMCPServeCmd() *cobra.Command {
 					return kill.Kill(pid, force)
 				},
 				Profile: func(ctx context.Context, pid int32, ptype profiler.ProfileType) (profiler.Profile, error) {
-					return profiler.Capture(ctx, pid, ptype)
+					// MCP profiling uses the default pprof address; the CLI
+					// `--pprof-addr` flag covers non-default ports.
+					return profiler.Capture(ctx, pid, ptype, "")
 				},
 				// Investigate stays a stub until the full pipeline lands; the
 				// tool returns the same shape the CLI emits today so the

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -45,21 +46,42 @@ type Profile struct {
 	Symbols []Symbol    `json:"symbols,omitempty"`
 }
 
-// Capture takes a profile snapshot for the given pid.
-func Capture(ctx context.Context, pid int32, t ProfileType) (Profile, error) {
+// Capture takes a profile snapshot for the given pid. For the pprof types
+// (heap/cpu/goroutine) it scrapes the net/http/pprof server at addr (default
+// "localhost:6060" when addr is ""); the caller is responsible for pointing
+// addr at the target pid's own pprof server — monitor cannot verify that the
+// process answering on that port is actually `pid`. For the macOS sample
+// type it runs `sample <pid>` and addr is ignored.
+func Capture(ctx context.Context, pid int32, t ProfileType, addr string) (Profile, error) {
 	p := Profile{PID: pid, Type: t, Taken: time.Now()}
 	if pid <= 0 {
 		return p, fmt.Errorf("invalid pid %d", pid)
 	}
 	switch t {
-	case ProfileHeap, ProfileCPU, ProfileGoroutine:
-		endpoint := pprofURL(t)
+	case ProfileHeap, ProfileGoroutine:
+		endpoint := pprofURL(addr, t)
 		text, err := httpGet(ctx, endpoint)
 		if err != nil {
 			return p, fmt.Errorf("scrape %s: %w", endpoint, err)
 		}
 		p.Text = text
 		p.Symbols = parsePprof(text)
+		return p, nil
+	case ProfileCPU:
+		// The CPU endpoint returns gzipped protobuf, not text. Save it so
+		// it's never lost and is analyzable with `go tool pprof`, then
+		// best-effort symbolicate it via the go toolchain.
+		endpoint := pprofURL(addr, t)
+		body, err := httpGet(ctx, endpoint)
+		if err != nil {
+			return p, fmt.Errorf("scrape %s: %w", endpoint, err)
+		}
+		path, werr := writeTempProfile(pid, []byte(body))
+		if werr != nil {
+			return p, fmt.Errorf("save cpu profile: %w", werr)
+		}
+		p.Path = path
+		p.Symbols = goToolPprofTop(ctx, path)
 		return p, nil
 	case ProfileSample:
 		if runtime.GOOS != "darwin" {
@@ -77,21 +99,29 @@ func Capture(ctx context.Context, pid int32, t ProfileType) (Profile, error) {
 	}
 }
 
-// pprofURL maps a ProfileType to its net/http/pprof endpoint.
+// defaultPprofAddr is the host:port scraped when Capture is given no address.
+const defaultPprofAddr = "localhost:6060"
+
+// pprofURL maps a ProfileType to its net/http/pprof endpoint at addr (host:port,
+// defaulting to localhost:6060 when empty).
 //   - CPU is served at /debug/pprof/profile (there is no /cpu handler),
 //     bounded with ?seconds=1 so the scrape can't block indefinitely. It
 //     returns protobuf, so parsePprof extracts no symbols from it.
 //   - heap/goroutine use ?debug=1 to get a TEXT dump (addr / func+off /
 //     file.go:line frames) that parsePprof can read; without it the body
 //     is gzipped protobuf and no symbols are recoverable.
-func pprofURL(t ProfileType) string {
+func pprofURL(addr string, t ProfileType) string {
+	if addr == "" {
+		addr = defaultPprofAddr
+	}
+	base := "http://" + addr + "/debug/pprof/"
 	switch t {
 	case ProfileCPU:
-		return "http://localhost:6060/debug/pprof/profile?seconds=1"
+		return base + "profile?seconds=1"
 	case ProfileHeap, ProfileGoroutine:
-		return "http://localhost:6060/debug/pprof/" + string(t) + "?debug=1"
+		return base + string(t) + "?debug=1"
 	default:
-		return "http://localhost:6060/debug/pprof/" + string(t)
+		return base + string(t)
 	}
 }
 
@@ -99,6 +129,74 @@ func pprofURL(t ProfileType) string {
 // forever when the caller passes a context without a deadline. The timeout
 // comfortably covers the bounded CPU profile (?seconds=1).
 var pprofClient = &http.Client{Timeout: 30 * time.Second}
+
+// writeTempProfile saves raw profile bytes (a CPU protobuf) to a temp file
+// and returns its path so the profile is preserved for `go tool pprof`.
+func writeTempProfile(pid int32, body []byte) (string, error) {
+	f, err := os.CreateTemp("", fmt.Sprintf("monitor-cpu-%d-*.pb.gz", pid))
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.Write(body); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+// goToolPprofTop best-effort symbolicates a saved profile via the go
+// toolchain (`go tool pprof -top -lines`). Returns nil when `go` isn't on
+// PATH or the command fails, so the caller still gets the saved profile path.
+func goToolPprofTop(ctx context.Context, path string) []Symbol {
+	if _, err := exec.LookPath("go"); err != nil {
+		return nil
+	}
+	out, err := exec.CommandContext(ctx, "go", "tool", "pprof",
+		"-top", "-lines", "-nodecount=25", path).Output()
+	if err != nil {
+		return nil
+	}
+	return parsePprofTop(string(out))
+}
+
+// parsePprofTop parses `go tool pprof -top -lines` output. Each data row is
+//
+//	<flat> <flat%> <sum%> <cum> <cum%>  <func>  <file>:<line>
+//
+// — the func and file:line are the last two whitespace fields, and the
+// leading column is a sample magnitude (starts with a digit), which lets us
+// skip the header/prose lines.
+func parsePprofTop(text string) []Symbol {
+	sc := bufio.NewScanner(strings.NewReader(text))
+	var syms []Symbol
+	seen := map[string]bool{}
+	for sc.Scan() {
+		parts := strings.Fields(sc.Text())
+		if len(parts) < 7 || parts[0] == "" || parts[0][0] < '0' || parts[0][0] > '9' {
+			continue
+		}
+		fileLine := parts[len(parts)-1]
+		fn := parts[len(parts)-2]
+		colon := strings.LastIndexByte(fileLine, ':')
+		if colon < 0 {
+			continue
+		}
+		var ln int
+		if _, err := fmt.Sscanf(fileLine[colon+1:], "%d", &ln); err != nil {
+			continue
+		}
+		if seen[fn] {
+			continue
+		}
+		seen[fn] = true
+		syms = append(syms, Symbol{Func: fn, File: fileLine[:colon], Line: ln})
+		if len(syms) >= 25 {
+			break
+		}
+	}
+	return syms
+}
 
 func httpGet(ctx context.Context, url string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)

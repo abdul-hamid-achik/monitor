@@ -7,17 +7,17 @@ import (
 
 func TestCaptureInvalidPID(t *testing.T) {
 	for _, pt := range []ProfileType{ProfileHeap, ProfileCPU, ProfileGoroutine, ProfileSample} {
-		if _, err := Capture(context.Background(), 0, pt); err == nil {
+		if _, err := Capture(context.Background(), 0, pt, ""); err == nil {
 			t.Errorf("pid 0 should error for %s", pt)
 		}
-		if _, err := Capture(context.Background(), -1, pt); err == nil {
+		if _, err := Capture(context.Background(), -1, pt, ""); err == nil {
 			t.Errorf("pid -1 should error for %s", pt)
 		}
 	}
 }
 
 func TestCaptureUnknownType(t *testing.T) {
-	if _, err := Capture(context.Background(), 1234, ProfileType("bogus")); err == nil {
+	if _, err := Capture(context.Background(), 1234, ProfileType("bogus"), ""); err == nil {
 		t.Error("unknown profile type should error")
 	}
 }
@@ -61,6 +61,29 @@ func TestParsePprofParsesDebug1Heap(t *testing.T) {
 	}
 }
 
+// TestParsePprofTopExtractsFrames uses real `go tool pprof -top -lines`
+// output (the CPU-profile symbolication path).
+func TestParsePprofTopExtractsFrames(t *testing.T) {
+	text := `File: cpuprof
+Type: cpu
+Duration: 1.11s, Total samples = 2990ms (268.25%)
+Showing nodes accounting for 2990ms, 100% of 2990ms total
+      flat  flat%   sum%        cum   cum%
+    2630ms 87.96% 87.96%     2990ms   100%  main.burn /tmp/cpuprof.go:11
+     360ms 12.04%   100%      360ms 12.04%  runtime.asyncPreempt /go/src/runtime/preempt_arm64.s:7
+`
+	syms := parsePprofTop(text)
+	if len(syms) != 2 {
+		t.Fatalf("parsePprofTop returned %d symbols, want 2; %+v", len(syms), syms)
+	}
+	if syms[0].Func != "main.burn" || syms[0].Line != 11 {
+		t.Errorf("first symbol = %+v, want main.burn :11", syms[0])
+	}
+	if syms[1].Func != "runtime.asyncPreempt" {
+		t.Errorf("second symbol = %+v, want runtime.asyncPreempt", syms[1])
+	}
+}
+
 // TestParseSampleExtractsFrames uses a real macOS `sample` call-graph dump
 // (captured from `sample <pid> 1`). The old parser matched only lines
 // starting with "0x", which real `sample` output never produces.
@@ -100,15 +123,20 @@ Sort by top of stack, same collapsed (when >= 5):
 // ProfileCPU built /debug/pprof/cpu (a 404 — net/http/pprof has no "cpu"
 // handler) instead of /debug/pprof/profile.
 func TestPprofURLMapsCPUToProfile(t *testing.T) {
+	// "" defaults to localhost:6060.
 	cases := map[ProfileType]string{
 		ProfileCPU:       "http://localhost:6060/debug/pprof/profile?seconds=1",
 		ProfileHeap:      "http://localhost:6060/debug/pprof/heap?debug=1",
 		ProfileGoroutine: "http://localhost:6060/debug/pprof/goroutine?debug=1",
 	}
 	for pt, want := range cases {
-		if got := pprofURL(pt); got != want {
-			t.Errorf("pprofURL(%s) = %q, want %q", pt, got, want)
+		if got := pprofURL("", pt); got != want {
+			t.Errorf("pprofURL(%q, %s) = %q, want %q", "", pt, got, want)
 		}
+	}
+	// A custom address is honored.
+	if got := pprofURL("10.0.0.5:7070", ProfileHeap); got != "http://10.0.0.5:7070/debug/pprof/heap?debug=1" {
+		t.Errorf("custom addr pprofURL = %q", got)
 	}
 }
 
