@@ -47,6 +47,7 @@ changes. When in doubt, follow AGENTS.md (it is more comprehensive).
 - `internal/logger/` — veclite-backed log store
 - `internal/profiler/` — pprof + sample capture
 - `internal/capture/` — process stdout/stderr → veclite log capture
+- `internal/history/` — veclite-backed persistent metric time-series (`monitor history`)
 - `internal/incidents/` — fcheap content-addressed incident stash
 - `internal/reload/` — localhost HTTP `/reload` endpoint
 - `internal/temperature/` — real SMC temperature via powermetrics (graceful fallback)

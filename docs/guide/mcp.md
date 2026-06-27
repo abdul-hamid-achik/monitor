@@ -39,8 +39,8 @@ drill down with `monitor_processes` or `monitor_doctor`.
 |------|-------------|
 | `monitor_kill` | Safely terminate a process. `force=true` sends SIGKILL instead of SIGTERM. |
 | `monitor_profile_capture` | Capture a profile for a process. `type` is one of `heap`, `cpu`, `goroutine`, `sample` (default `heap`). |
-| `monitor_investigate` | Run the diagnostic pipeline (snapshot + profile + search + correlate) for a process. |
-| `monitor_record` | Start a vidtrace screen recording for a process (`duration` in seconds, default 30). |
+| `monitor_investigate` | Run the full diagnostic pipeline for a process: capture a snapshot and heap profile, correlate hot frames to codemap symbols (with blast radius + test coverage), and stash the bundle with fcheap. |
+| `monitor_record` | Capture a real screen recording via the platform recorder (`screencapture` on macOS, `ffmpeg` x11grab on Linux) for `duration` seconds (default 30), returning a video path that vidtrace can analyze. |
 
 Each mutating tool takes a `pid` and a required `confirm` field (see below).
 
@@ -99,13 +99,35 @@ the tool:
 }
 ```
 
-### Unconfigured services
+### Graceful degradation
 
-`monitor_investigate` and `monitor_record` may not have a backing service wired
-in. When a service is unavailable the tool returns the same structured shape
-rather than failing — for example `monitor_record` reports that vidtrace is not
-installed, and `monitor_investigate` falls back to a stable stub payload so the
-agent always sees the same fields.
+`monitor_investigate` and `monitor_record` are fully wired to real
+implementations. They still degrade gracefully when the host can't satisfy the
+request, returning the same structured shape rather than failing.
+
+`monitor_investigate` runs the real pipeline: it captures a snapshot and heap
+profile, correlates the hot frames to codemap symbols (resolving each
+file:line to its enclosing function, then enriching resolved frames with blast
+radius and test coverage), and stashes the resulting bundle with fcheap. Parts
+that need an absent ecosystem tool are best-effort — for example, the
+correlation is skipped when `codemap` isn't on `PATH`, and a stash failure is
+reported in the payload while the profile is still captured locally.
+
+`monitor_record` invokes the platform recorder directly — `screencapture -V`
+on macOS or `ffmpeg -f x11grab` on Linux — and returns the path to the captured
+video, which can then be analyzed with vidtrace (`vidtrace index` /
+`vidtrace analyze`). On a headless host (no recorder binary, no X11 `DISPLAY`,
+or denied screen-capture permission) it refuses gracefully with a structured
+payload instead of erroring:
+
+```json
+{
+  "recording": false,
+  "refused": true,
+  "reason": "no screen recorder available (record service not configured)",
+  "pid": 1234
+}
+```
 
 ## Client configuration
 

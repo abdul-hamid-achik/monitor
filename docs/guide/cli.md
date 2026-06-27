@@ -17,7 +17,7 @@ The subcommands group into four purposes:
 - **Act** — change something: [`kill`](#kill).
 - **Diagnose** — capture and analyze: [`profile`](#profile),
   [`investigate`](#investigate), [`stash`](#stash), [`incidents`](#incidents),
-  [`logs`](#logs).
+  [`logs`](#logs), [`history`](#history).
 - **Ecosystem & runtime** — talk to sibling tools and the running TUI:
   [`doctor`](#doctor), [`run`](#run), [`reload`](#reload), [`mcp`](#mcp),
   [`vault`](#vault), [`v2`](#v2).
@@ -347,6 +347,91 @@ Keyword-search the captured log store.
 [
   {"timestamp": "2026-06-27T00:02:38Z", "pid": 1234, "process": "sh", "message": "WARN: bad", "level": "warn"}
 ]
+```
+
+### `history`
+
+Record and query persistent metric history. While [`watch`](#watch) streams
+live ticks, `history` persists a small set of scalar series to a local veclite
+store so you can ask "what was CPU doing an hour ago?" after the fact. Three
+subcommands: `record`, `query`, and `list`. The store defaults to
+`~/.local/share/monitor/history.veclite` (the directory is created on first
+use); override it with `--db` on any subcommand.
+
+Recorded metrics: `cpu.usage`, `mem.usage`, `mem.pressure`, `net.recv_bps`,
+`net.sent_bps`, `disk.read_bps`, `disk.write_bps`, and `load.1`.
+
+#### `history record`
+
+Sample the system on an interval and append each tick to the store. Runs until
+`SIGINT` (Ctrl-C), then prints the number of ticks recorded to stderr.
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `-i`, `--interval` | `1s` | Sampling interval. |
+| `--db` | `~/.local/share/monitor/history.veclite` | History store path. |
+
+```bash
+./bin/monitor history record                       # sample every second
+./bin/monitor history record -i 5s --db /tmp/h.veclite
+```
+
+#### `history query`
+
+Query a recorded metric over a look-back window. Takes exactly one argument —
+the metric name — and reports the matching samples plus summary stats
+(`min`/`avg`/`p95`/`max`, `first`/`last`, and `trend` = last − first).
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--since` | `1h` | Look back this far. |
+| `--db` | `~/.local/share/monitor/history.veclite` | History store path. |
+| `--json` | `false` | Emit JSON output. |
+
+```bash
+./bin/monitor history query cpu.usage --since 30m
+./bin/monitor history query mem.usage --since 6h --json | jq '.summary.p95'
+```
+
+```json
+{
+  "metric": "cpu.usage",
+  "since": "1h0m0s",
+  "summary": {
+    "count": 3600,
+    "min": 4.21,
+    "max": 92.7,
+    "avg": 27.43,
+    "p95": 71.05,
+    "first": 25.9,
+    "last": 31.2,
+    "trend": 5.3,
+    "from": "2026-06-26T23:02:38Z",
+    "to": "2026-06-27T00:02:38Z"
+  },
+  "points": [
+    {"t": "2026-06-26T23:02:38Z", "v": 25.9},
+    {"t": "2026-06-26T23:02:39Z", "v": 26.4}
+  ]
+}
+```
+
+#### `history list`
+
+List the metrics that have been recorded into the store.
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--db` | `~/.local/share/monitor/history.veclite` | History store path. |
+| `--json` | `false` | Emit JSON output. |
+
+```bash
+./bin/monitor history list
+./bin/monitor history list --json
+```
+
+```json
+["cpu.usage", "disk.read_bps", "disk.write_bps", "load.1", "mem.pressure", "mem.usage", "net.recv_bps", "net.sent_bps"]
 ```
 
 ## Ecosystem & runtime

@@ -45,7 +45,9 @@ Every subcommand supports `--json` for machine-readable output:
 ./bin/monitor logs capture -- mycommand          # ingest a command's logs
 ./bin/monitor logs search "error" --json         # keyword search the log store
 ./bin/monitor stash --json                        # capture an incident bundle to fcheap
-./bin/monitor investigate 1234 --json             # snapshot + profile + stash pipeline
+./bin/monitor investigate 1234 --json             # snapshot + profile + codemap-ranked stash
+./bin/monitor history record                       # persist metric samples over time
+./bin/monitor history query cpu.usage --since 1h --json   # time-series + trend stats
 ./bin/monitor doctor --json                       # ecosystem tool availability
 ./bin/monitor vault --project myapp -- mycommand  # run with tinyvault secrets injected
 ```
