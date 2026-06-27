@@ -51,6 +51,7 @@ MONITOR_RUN_DIR=<dir> so the child can detect it is being observed.`,
 		newMCPCmd(),
 		newV2Cmd(),
 		newVaultCmd(),
+		newHistoryCmd(),
 	)
 
 	return root
