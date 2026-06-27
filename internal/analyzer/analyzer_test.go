@@ -49,6 +49,31 @@ func TestOnAlertHookFiresPerAlert(t *testing.T) {
 	}
 }
 
+func TestDiskFillRule(t *testing.T) {
+	r := &DiskFillRule{MinUsagePercent: 90}
+	ev := collector.Event{Disk: collector.DiskInfo{Partitions: []collector.DiskPartitionInfo{
+		{MountPoint: "/", UsagePercent: 95},
+		{MountPoint: "/data", UsagePercent: 40},
+	}}}
+	alerts := r.Evaluate(ev, nil)
+	if len(alerts) != 1 || alerts[0].Rule != "disk_fill" {
+		t.Fatalf("alerts = %+v, want one disk_fill for /", alerts)
+	}
+}
+
+func TestSwapPressureRule(t *testing.T) {
+	r := &SwapPressureRule{MinSwapPercent: 50}
+	// 60% swap used -> fires.
+	ev := collector.Event{Memory: collector.MemoryInfo{SwapTotal: 1000, SwapUsed: 600}}
+	if got := r.Evaluate(ev, nil); len(got) != 1 || got[0].Rule != "swap_pressure" {
+		t.Errorf("60%% swap should fire; got %+v", got)
+	}
+	// No swap configured -> never fires.
+	if got := r.Evaluate(collector.Event{}, nil); len(got) != 0 {
+		t.Errorf("no swap should not fire; got %+v", got)
+	}
+}
+
 func TestThresholdRule(t *testing.T) {
 	r := &ThresholdRule{CPUPercent: 80, MemPercent: 90}
 	// CPU over, memory under -> one cpu_threshold alert.

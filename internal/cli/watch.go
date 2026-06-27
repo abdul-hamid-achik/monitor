@@ -61,6 +61,8 @@ the incident via internal/incidents (fcheap stash, content-addressed).`,
 			engine := analyzer.NewEngine()
 			engine.AddRule(&analyzer.CPUSpikeRule{Factor: 3.0})
 			engine.AddRule(&analyzer.RSSGrowthRule{})
+			engine.AddRule(&analyzer.DiskFillRule{})
+			engine.AddRule(&analyzer.SwapPressureRule{})
 			// Give the config.json cpu/memory alert thresholds teeth.
 			if cfg, err := config.Load(); err == nil && (cfg.CPUAlertThreshold > 0 || cfg.MemoryAlertThreshold > 0) {
 				engine.AddRule(&analyzer.ThresholdRule{CPUPercent: cfg.CPUAlertThreshold, MemPercent: cfg.MemoryAlertThreshold})
@@ -133,6 +135,8 @@ the incident via internal/incidents (fcheap stash, content-addressed).`,
 					CPU:       info.CPU,
 					Memory:    info.Memory,
 					Network:   info.Network,
+					Disk:      info.Disk,
+					Processes: info.Processes,
 				}
 				// Run analyzer so once --json + --stash still captures.
 				for _, a := range engine.Observe(ev) {
@@ -186,6 +190,8 @@ func watchLoop(ctx context.Context, c *collector.Collector, engine *analyzer.Eng
 				CPU:       info.CPU,
 				Memory:    info.Memory,
 				Network:   info.Network,
+				Disk:      info.Disk,
+				Processes: info.Processes,
 			}
 			if err := WriteNDJSON(Event{
 				Type:      "tick",

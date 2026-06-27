@@ -11,6 +11,63 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 )
 
+// DiskFillRule fires when any mounted partition's usage meets/exceeds a
+// percentage threshold (default 90%).
+type DiskFillRule struct {
+	MinUsagePercent float64
+}
+
+// Name returns the rule name.
+func (r *DiskFillRule) Name() string { return "disk_fill" }
+
+// Evaluate emits a disk_fill alert per partition over the threshold.
+func (r *DiskFillRule) Evaluate(ev collector.Event, _ *History) []collector.Alert {
+	threshold := r.MinUsagePercent
+	if threshold <= 0 {
+		threshold = 90
+	}
+	var out []collector.Alert
+	for _, p := range ev.Disk.Partitions {
+		if p.UsagePercent >= threshold {
+			out = append(out, collector.Alert{
+				Severity: "warning",
+				Rule:     "disk_fill",
+				Detail:   fmt.Sprintf("%s at %.0f%% (>= %.0f%%)", p.MountPoint, p.UsagePercent, threshold),
+			})
+		}
+	}
+	return out
+}
+
+// SwapPressureRule fires when swap usage meets/exceeds a fraction of swap total
+// (default 50%), a sign of real memory pressure.
+type SwapPressureRule struct {
+	MinSwapPercent float64
+}
+
+// Name returns the rule name.
+func (r *SwapPressureRule) Name() string { return "swap_pressure" }
+
+// Evaluate emits a swap_pressure alert when swap usage crosses the threshold.
+func (r *SwapPressureRule) Evaluate(ev collector.Event, _ *History) []collector.Alert {
+	threshold := r.MinSwapPercent
+	if threshold <= 0 {
+		threshold = 50
+	}
+	if ev.Memory.SwapTotal == 0 {
+		return nil
+	}
+	pct := float64(ev.Memory.SwapUsed) / float64(ev.Memory.SwapTotal) * 100
+	if pct >= threshold {
+		return []collector.Alert{{
+			Severity: "warning",
+			Rule:     "swap_pressure",
+			Detail:   fmt.Sprintf("swap %.0f%% used (>= %.0f%%)", pct, threshold),
+		}}
+	}
+	return nil
+}
+
 // ThresholdRule fires when overall CPU or memory usage meets/exceeds a
 // configured percentage. A threshold of 0 disables that check. This is the
 // rule that gives the config.json cpu/memory alert thresholds teeth.
