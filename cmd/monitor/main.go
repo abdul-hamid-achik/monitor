@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/http"
+	_ "net/http/pprof" // registers /debug/pprof on http.DefaultServeMux
 	"os"
 	"os/signal"
 	"syscall"
@@ -11,6 +13,12 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/reload"
 	uiv2 "github.com/abdul-hamid-achik/monitor/internal/ui/v2"
 )
+
+// pprofAddr, when set via --pprof, exposes monitor's OWN net/http/pprof
+// endpoints so the profiler / blast-radius features can target monitor itself
+// (and for debugging). Most useful with long-running modes (TUI, watch,
+// history record, mcp serve).
+var pprofAddr string
 
 // reloadServer, when set, is started by runTUI() to expose POST /reload
 // on 127.0.0.1:7351 (or the configured addr). External processes can
@@ -28,11 +36,28 @@ func init() {
 		"start a localhost HTTP /reload endpoint inside the TUI")
 	fs.StringVar(&reloadServer.addr, "reload-addr", reload.DefaultAddr,
 		"address for the /reload endpoint when --reload-server is set")
+	fs.StringVar(&pprofAddr, "pprof", "",
+		"expose monitor's own net/http/pprof on this addr (e.g. localhost:6060)")
 	_ = fs.Parse(os.Args[1:])
-	os.Args = append([]string{os.Args[0]}, stripParsedFlags(os.Args[1:], map[string]bool{"reload-addr": true}, "reload-server", "reload-addr")...)
+	os.Args = append([]string{os.Args[0]}, stripParsedFlags(os.Args[1:],
+		map[string]bool{"reload-addr": true, "pprof": true}, "reload-server", "reload-addr", "pprof")...)
+}
+
+// startPprofIfEnabled serves monitor's own pprof endpoints when --pprof is set.
+func startPprofIfEnabled() {
+	if pprofAddr == "" {
+		return
+	}
+	go func() {
+		if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "monitor: --pprof failed on %s: %v\n", pprofAddr, err)
+		}
+	}()
+	fmt.Fprintf(os.Stderr, "monitor: pprof listening on http://%s/debug/pprof/\n", pprofAddr)
 }
 
 func main() {
+	startPprofIfEnabled()
 	if shouldLaunchTUI(os.Args[1:]) {
 		runTUI()
 		return
