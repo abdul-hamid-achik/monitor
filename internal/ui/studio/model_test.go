@@ -209,6 +209,52 @@ func TestRenderEdgeCases(t *testing.T) {
 	}
 }
 
+// TestTabRendersWithData populates a full SystemInfo and asserts each tab
+// renders its data branches (the CPU per-core loop, network byte formatting,
+// and the disk-partition loop are skipped by the empty-data edge-case test).
+func TestTabRendersWithData(t *testing.T) {
+	m := NewModel()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	fm := updated.(Model)
+	fm.last.LastUpdate = time.Now()
+	fm.last.CPU = collector.CPUInfo{
+		UsagePercent: 55.5,
+		PerCoreUsage: []float64{10, 90, 45, 70},
+		CoreCount:    4, ThreadCount: 8, FrequencyMHz: 3200, LoadAvg1: 1.5,
+		History: []float64{10, 20, 30, 40, 55},
+	}
+	fm.last.Memory = collector.MemoryInfo{
+		TotalBytes: 16 << 30, UsedBytes: 8 << 30, UsagePercent: 50,
+		SwapTotal: 4 << 30, SwapUsed: 1 << 30, History: []float64{40, 45, 50},
+	}
+	fm.last.Disk = collector.DiskInfo{
+		Partitions:  []collector.DiskPartitionInfo{{MountPoint: "/spectest", UsagePercent: 73, TotalBytes: 500 << 30, UsedBytes: 365 << 30}},
+		ReadPerSec:  2 << 20,
+		WritePerSec: 1 << 20,
+	}
+	fm.last.Network = collector.NetworkInfo{
+		BytesRecvPerSec: 5 << 20, BytesSentPerSec: 2 << 20,
+		DownloadHistory: []float64{1, 2, 5}, UploadHistory: []float64{1, 1, 2},
+	}
+
+	cases := []struct {
+		view viewID
+		want string
+	}{
+		{viewCPU, "Core 0"},       // per-core bar loop
+		{viewNetwork, "Download"}, // network panel
+		{viewNetwork, "Upload"},
+		{viewDisk, "/spectest"}, // partition loop renders the mount point
+	}
+	for _, c := range cases {
+		fm.view = c.view
+		body := fm.View().Content
+		if !strings.Contains(body, c.want) {
+			t.Errorf("view %d render missing %q; got:\n%s", c.view, c.want, body)
+		}
+	}
+}
+
 func TestRenderProcessesEmpty(t *testing.T) {
 	m := NewModel()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})

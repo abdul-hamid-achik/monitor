@@ -105,8 +105,7 @@ func (s *Sparkline) Render() string {
 		return ""
 	}
 	glyphs := getSparklineGlyphs(s.Color)
-	var builders []strings.Builder
-	builders = make([]strings.Builder, s.Height)
+	builders := make([]strings.Builder, s.Height)
 
 	// Generate sparkline characters
 	full := glyphs[len(SparklineChars)-1] // █, styled
