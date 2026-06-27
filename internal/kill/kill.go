@@ -4,7 +4,6 @@ package kill
 
 import (
 	"fmt"
-	"os/user"
 	"syscall"
 
 	"github.com/shirou/gopsutil/v4/process"
@@ -17,7 +16,6 @@ type Confirmation struct {
 	Processes      []collector.ProcessInfo
 	HasProtected   bool
 	HasSystem      bool
-	RequiresSudo   bool
 	SafetyWarnings []string
 }
 
@@ -47,11 +45,6 @@ func Kill(pid int32, force bool) error {
 // CheckSafety returns a Confirmation listing warnings.
 func CheckSafety(pids []int32) Confirmation {
 	var conf Confirmation
-	cur, _ := user.Current()
-	curUID := ""
-	if cur != nil {
-		curUID = cur.Uid
-	}
 	for _, pid := range pids {
 		p, err := process.NewProcess(pid)
 		if err != nil {
@@ -72,10 +65,6 @@ func CheckSafety(pids []int32) Confirmation {
 			pi.IsSystem = true
 			conf.SafetyWarnings = append(conf.SafetyWarnings,
 				fmt.Sprintf("%s (pid %d) is owned by %s", name, pid, user))
-		}
-		// The process API doesn't expose UID; fall back to best-effort.
-		if user != "" && curUID == "" {
-			conf.RequiresSudo = true
 		}
 		conf.Processes = append(conf.Processes, pi)
 	}

@@ -99,6 +99,9 @@ func (s *Server) Start() error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.addr, err)
 	}
+	// Record the resolved address so Addr() reports the kernel-assigned
+	// port when the caller passed port 0.
+	s.addr = ln.Addr().String()
 	go func() {
 		// http.ErrServerClosed is the expected shutdown signal; ignore.
 		_ = s.srv.Serve(ln)

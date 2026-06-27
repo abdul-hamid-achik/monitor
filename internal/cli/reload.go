@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,7 +34,7 @@ The endpoint is loopback-only; remote processes cannot reach it. If
 no TUI is running, reload exits non-zero with a clear error.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			url := "http://" + addr + "/reload"
-			client := &http.Client{Timeout: 3 * time.Second}
+			client := &http.Client{Timeout: wait}
 			req, err := http.NewRequest(http.MethodPost, url, nil)
 			if err != nil {
 				return fmt.Errorf("build request: %w", err)
@@ -61,11 +60,6 @@ no TUI is running, reload exits non-zero with a clear error.`,
 		"address of the running monitor TUI's /reload endpoint")
 	cmd.Flags().DurationVar(&wait, "timeout", 3*time.Second,
 		"HTTP client timeout for the POST")
-
-	// Sentinel for staticcheck: a `reload` invocation is meaningless
-	// when no TUI is running, so we want the failure to be loud rather
-	// than swallowed. The error returned above is non-nil in that case.
-	_ = errors.New
 
 	return cmd
 }

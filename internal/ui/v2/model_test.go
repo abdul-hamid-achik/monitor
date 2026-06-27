@@ -90,6 +90,35 @@ func TestTabWrapAllDirections(t *testing.T) {
 	}
 }
 
+// TestProcessSearchCapturesNavKeys is a regression for the bug where the
+// global navigation/quit switch ran before the per-tab search handler, so
+// typing 'q' (quit), a digit (tab jump), or 'l'/'h' (tab cycle) while the
+// process search prompt was active never reached the query.
+func TestProcessSearchCapturesNavKeys(t *testing.T) {
+	for _, k := range []struct {
+		text string
+		code rune
+	}{
+		{"q", 'q'}, {"1", '1'}, {"l", 'l'}, {"h", 'h'},
+	} {
+		m := NewModel()
+		m.setupProcessTable()
+		m.view = viewProcesses
+		m.processSearch = true
+		updated, _ := m.Update(tea.KeyPressMsg(tea.Key{Text: k.text, Code: k.code}))
+		fm := updated.(Model)
+		if fm.quitting {
+			t.Errorf("typing %q while searching quit the app", k.text)
+		}
+		if fm.view != viewProcesses {
+			t.Errorf("typing %q while searching switched view to %d", k.text, fm.view)
+		}
+		if fm.searchQuery != k.text {
+			t.Errorf("typing %q while searching: searchQuery = %q, want %q", k.text, fm.searchQuery, k.text)
+		}
+	}
+}
+
 func TestTickRefreshesSnapshot(t *testing.T) {
 	m := NewModel()
 	info := m.collector.Collect(m.ctx)

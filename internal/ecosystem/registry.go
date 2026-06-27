@@ -7,11 +7,12 @@
 package ecosystem
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -36,52 +37,36 @@ type Status struct {
 	Tmux       ToolStatus `json:"tmux"`
 }
 
-var allTools = []struct {
-	bin string
-}{
-	{"codemap"},
-	{"fcheap"},
-	{"vecgrep"},
-	{"tvault"},
-	{"vidtrace"},
-	{"glyph"},
-	{"cairn"},
-	{"veclite"},
-	{"tmux"},
-}
-
-var (
-	statusOnce sync.Once
-	statusCache Status
-)
-
-// Probe returns the health of every ecosystem tool.
+// Probe returns the health of every ecosystem tool. The caller's ctx is
+// honored: cancelling it interrupts the in-flight --version probes.
 func Probe(ctx context.Context) Status {
-	_ = ctx
-	return probeAll()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return probeAll(ctx)
 }
 
-func probeAll() Status {
+func probeAll(ctx context.Context) Status {
 	var s Status
-	s.Codemap = probe("codemap")
-	s.Fcheap = probe("fcheap")
-	s.Vecgrep = probe("vecgrep")
-	s.Tinyvault = probe("tvault")
-	s.Vidtrace = probe("vidtrace")
-	s.Glyphrun = probe("glyph")
-	s.Cairntrace = probe("cairn")
-	s.Veclite = probe("veclite")
-	s.Tmux = probe("tmux")
+	s.Codemap = probe(ctx, "codemap")
+	s.Fcheap = probe(ctx, "fcheap")
+	s.Vecgrep = probe(ctx, "vecgrep")
+	s.Tinyvault = probe(ctx, "tvault")
+	s.Vidtrace = probe(ctx, "vidtrace")
+	s.Glyphrun = probe(ctx, "glyph")
+	s.Cairntrace = probe(ctx, "cairn")
+	s.Veclite = probe(ctx, "veclite")
+	s.Tmux = probe(ctx, "tmux")
 	return s
 }
 
-func probe(bin string) ToolStatus {
+func probe(ctx context.Context, bin string) ToolStatus {
 	path, err := exec.LookPath(bin)
 	if err != nil {
 		return ToolStatus{Note: bin + " not on PATH"}
 	}
 	st := ToolStatus{Available: true, Path: path}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	if out, err := exec.CommandContext(ctx, bin, "--version").CombinedOutput(); err == nil {
 		st.Version = strings.TrimSpace(firstLine(string(out)))
@@ -92,11 +77,15 @@ func probe(bin string) ToolStatus {
 // RunGlyphrun shells out to `glyph run <spec>`. The run directory will be
 // MONITOR_RUN_DIR for any child processes the spec spawns.
 func RunGlyphrun(ctx context.Context, spec string) ([]byte, error) {
-	return run(ctx, "glyph", "run", "--format", "json", spec)
+	return runJSON(ctx, "glyph", "run", "--format", "json", spec)
 }
 
-// TinyvaultRun wraps a command with tvault run so secrets land in env without
-// appearing in the agent context. Returns the merged env as JSON for tests.
+// TinyvaultRun wraps a command with `tvault run` so secrets land in the
+// child's environment without appearing in the agent context. The command
+// runs under `env`: with no args it dumps the injected environment as
+// KEY=value lines; with a command it execs that command (env passes the
+// secrets through). Output is raw bytes (KEY=value text or the command's
+// own output), not JSON.
 func TinyvaultRun(ctx context.Context, project string, args ...string) ([]byte, error) {
 	full := append([]string{"run", "--project", project, "--", "env"}, args...)
 	return run(ctx, "tvault", full...)
@@ -132,7 +121,7 @@ func StashSave(ctx context.Context, path, name string, tags []string, ttl string
 	if ttl != "" {
 		args = append(args, "--ttl", ttl)
 	}
-	out, err := run(ctx, "fcheap", args...)
+	out, err := runJSON(ctx, "fcheap", args...)
 	if err != nil {
 		return StashSaveResult{}, &Wrap{Cmd: "fcheap save", Err: err, Output: string(out)}
 	}
@@ -155,7 +144,7 @@ func StashList(ctx context.Context, tags []string) ([]StashListEntry, error) {
 	for _, t := range tags {
 		args = append(args, "--tag", t)
 	}
-	out, err := run(ctx, "fcheap", args...)
+	out, err := runJSON(ctx, "fcheap", args...)
 	if err != nil {
 		return nil, &Wrap{Cmd: "fcheap list", Err: err, Output: string(out)}
 	}
@@ -175,7 +164,7 @@ type StashInfoEntry struct {
 }
 
 func StashInfo(ctx context.Context, id string) (StashInfoEntry, error) {
-	out, err := run(ctx, "fcheap", "info", id, "--json")
+	out, err := runJSON(ctx, "fcheap", "info", id, "--json")
 	if err != nil {
 		return StashInfoEntry{}, &Wrap{Cmd: "fcheap info", Err: err, Output: string(out)}
 	}
@@ -186,6 +175,23 @@ func run(ctx context.Context, bin string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	out, err := cmd.CombinedOutput()
 	return out, err
+}
+
+// runJSON runs a command expected to emit JSON on stdout, capturing stdout
+// and stderr SEPARATELY so a warning/progress line on stderr can't corrupt
+// the JSON handed to decodeJSON. On failure the error carries stderr.
+func runJSON(ctx context.Context, bin string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, bin, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if se := strings.TrimSpace(stderr.String()); se != "" {
+			return stdout.Bytes(), fmt.Errorf("%s: %w (stderr: %s)", bin, err, se)
+		}
+		return stdout.Bytes(), fmt.Errorf("%s: %w", bin, err)
+	}
+	return stdout.Bytes(), nil
 }
 
 // decodeJSON unmarshals out, wrapping parse errors with the command name.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strconv"
 	"testing"
 )
 
@@ -61,6 +62,43 @@ func TestRootCommandHasSubcommands(t *testing.T) {
 	for _, name := range want {
 		if !have[name] {
 			t.Errorf("missing subcommand %q", name)
+		}
+	}
+}
+
+// TestProcessCmdFindsCurrentPID is a regression for the bug where
+// `monitor process <pid>` read the empty zero-value Snapshot() instead of
+// calling Collect(ctx), so it returned "pid N not found" for every PID —
+// including ones that exist. The test process's own PID must be found.
+func TestProcessCmdFindsCurrentPID(t *testing.T) {
+	old := os.Stdout
+	_, w, _ := os.Pipe()
+	os.Stdout = w
+
+	cmd := newProcessCmd()
+	cmd.SetArgs([]string{strconv.Itoa(os.Getpid())})
+	err := cmd.Execute()
+
+	_ = w.Close()
+	os.Stdout = old
+	if err != nil {
+		t.Fatalf("process <own pid> should be found, got: %v", err)
+	}
+}
+
+func TestParsePID(t *testing.T) {
+	good := map[string]int32{"1": 1, "123": 123, "2147483647": 2147483647}
+	for in, want := range good {
+		got, err := parsePID(in)
+		if err != nil || got != want {
+			t.Errorf("parsePID(%q) = (%d, %v), want (%d, nil)", in, got, err, want)
+		}
+	}
+	// trailing garbage, non-positive, overflow, and whitespace must all fail
+	// (fmt.Sscanf "%d" silently accepted "123abc" → wrong-process targeting).
+	for _, bad := range []string{"123abc", "abc", "0", "-1", "", " 12", "12 ", "1.5", "99999999999999"} {
+		if got, err := parsePID(bad); err == nil {
+			t.Errorf("parsePID(%q) = (%d, nil), want an error", bad, got)
 		}
 	}
 }

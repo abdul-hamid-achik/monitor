@@ -42,3 +42,9 @@ coverage.txt
 
 # Taskfile
 Taskfile~
+
+# Glyphrun run artifacts
+.glyphrun/
+
+# Backup files
+*.bak

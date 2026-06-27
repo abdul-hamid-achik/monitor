@@ -9,6 +9,7 @@ package logger
 
 import (
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -32,7 +33,6 @@ type Store struct {
 	db       *veclite.DB
 	collName string
 	path     string
-	shared   bool
 }
 
 const defaultCollection = "logs"
@@ -44,7 +44,7 @@ func OpenStore(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, path: path, shared: true, collName: defaultCollection}
+	s := &Store{db: db, path: path, collName: defaultCollection}
 	if err := s.ensureCollection(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -61,7 +61,7 @@ func OpenReadOnly(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db, path: path, shared: true, collName: defaultCollection}, nil
+	return &Store{db: db, path: path, collName: defaultCollection}, nil
 }
 
 func (s *Store) ensureCollection() error {
@@ -97,11 +97,14 @@ func (s *Store) Append(e Entry) error {
 	return err
 }
 
-// Search scans recent records whose Content or raw payload contains the query.
-// veclite's high-level SearchText requires an embedder; we use a simple linear
-// scan over Find() (no embedder required). For local TUI/CLI use the volume is
-// small enough that this is acceptable.
-func (s *Store) Search(query, mode string, limit int) ([]Entry, error) {
+// Search scans records whose message or raw payload contains the query
+// (case-insensitive substring), returns them newest-first, and caps at
+// limit (default 50). veclite's high-level SearchText requires an embedder;
+// we use a simple linear scan over Find(). Locked for the duration so the
+// nil check and db access are atomic with Append/Close.
+func (s *Store) Search(query string, limit int) ([]Entry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.db == nil {
 		return nil, errors.New("store not open")
 	}
@@ -109,12 +112,16 @@ func (s *Store) Search(query, mode string, limit int) ([]Entry, error) {
 		limit = 50
 	}
 	coll := s.db.Collection(defaultCollection)
-	// Pull the most recent records first; Find returns ordered by insertion.
 	res, err := coll.Find()
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Entry, 0, limit)
+	// Find() iterates veclite's record map in arbitrary (non-insertion)
+	// order, so collect ALL matches, sort newest-first, then truncate.
+	// Breaking at `limit` mid-scan would return a non-deterministic subset
+	// that can silently drop the most recent matches. Non-nil so an empty
+	// result marshals as `[]`, not `null`.
+	matches := make([]Entry, 0, limit)
 	for _, rec := range res {
 		if rec == nil {
 			continue
@@ -124,12 +131,15 @@ func (s *Store) Search(query, mode string, limit int) ([]Entry, error) {
 			!strings.Contains(strings.ToLower(e.Raw), strings.ToLower(query)) {
 			continue
 		}
-		out = append(out, e)
-		if len(out) >= limit {
-			break
-		}
+		matches = append(matches, e)
 	}
-	return out, nil
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].Timestamp.After(matches[j].Timestamp)
+	})
+	if len(matches) > limit {
+		matches = matches[:limit]
+	}
+	return matches, nil
 }
 
 func entryFromRecord(rec *veclite.Record) Entry {

@@ -100,7 +100,7 @@ func TestIngestCapturesStdoutAndStderr(t *testing.T) {
 	// Search for "hello-out" and "hello-err" — they should both be
 	// in the store regardless of the keyword case.
 	for _, want := range []string{"hello-out", "hello-err", "plain line"} {
-		entries, err := store.Search(want, "keyword", 10)
+		entries, err := store.Search(want, 10)
 		if err != nil {
 			t.Fatalf("search %q: %v", want, err)
 		}
@@ -131,6 +131,42 @@ func TestIngestRespectsMaxLines(t *testing.T) {
 	res := r.Run(context.Background(), src)
 	if res.Lines != 10 {
 		t.Errorf("Lines = %d, want 10", res.Lines)
+	}
+}
+
+// TestRunCommandCapDoesNotDeadlock is a regression for the cap deadlock:
+// a process that keeps producing output past the MaxLines cap used to
+// wedge on a full OS pipe (ingest stopped reading, the child blocked on
+// write, and cmd.Wait hung forever). Hitting the cap must now kill the
+// child and let Run return promptly.
+func TestRunCommandCapDoesNotDeadlock(t *testing.T) {
+	dir := t.TempDir()
+	store, err := logger.OpenStore(dbPathFor(t, dir))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	// An infinite producer of reasonably long lines — far more than the
+	// ~64KiB pipe buffer once it runs past the cap.
+	src := Source{
+		Command: "sh",
+		Args:    []string{"sh", "-c", "while true; do echo 'regression-line-padded-out-to-fill-the-pipe-buffer-faster-0123456789'; done"},
+		Name:    "cap-deadlock",
+	}
+	r := NewRunner(store)
+	r.MaxLines = 10
+
+	done := make(chan Result, 1)
+	go func() { done <- r.Run(context.Background(), src) }()
+
+	select {
+	case res := <-done:
+		if res.Lines < 10 {
+			t.Errorf("Lines = %d, want >= 10", res.Lines)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run did not return after hitting the cap — deadlocked on a full pipe")
 	}
 }
 
@@ -184,7 +220,7 @@ func TestTailFileFollowsNewLines(t *testing.T) {
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
-		r.tailFile(ctx, Source{Name: "tail", Level: "info"}, path, false)
+		r.tailFile(ctx, Source{Name: "tail", Level: "info"}, path)
 		close(done)
 	}()
 
@@ -224,7 +260,7 @@ func TestDiscoverLogFilesFiltersBySuffix(t *testing.T) {
 	// shells out; the lsof-output parsing is verified by the
 	// looksLikeLogPath tests above. This placeholder documents that
 	// path; the real lsof integration is covered by the live
-	// integration test in specs/log_capture.yml.
+	// integration test in specs/logs_capture.yml.
 }
 
 // TestRunDispatchesOnSourceShape verifies the dispatch table picks
@@ -265,7 +301,7 @@ func TestLevelParityOnStderr(t *testing.T) {
 	if res.Err != nil {
 		t.Fatalf("Run: %v", res.Err)
 	}
-	entries, err := store.Search("plain stderr", "keyword", 10)
+	entries, err := store.Search("plain stderr", 10)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}

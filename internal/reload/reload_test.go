@@ -249,3 +249,22 @@ func TestServerStartFailsOnPortConflict(t *testing.T) {
 		t.Fatalf("Start should fail when port is in use; got nil error")
 	}
 }
+
+// TestAddrResolvesPortZero is a regression for Addr() echoing the
+// configured address: a caller passing port 0 was told to hit port 0
+// instead of the kernel-assigned port.
+func TestAddrResolvesPortZero(t *testing.T) {
+	s := NewServer("127.0.0.1:0", &fakeReloader{})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Shutdown(context.Background())
+
+	_, port, err := net.SplitHostPort(s.Addr())
+	if err != nil {
+		t.Fatalf("Addr() = %q is not host:port: %v", s.Addr(), err)
+	}
+	if port == "0" || port == "" {
+		t.Errorf("Addr() = %q still reports port 0; want the resolved port", s.Addr())
+	}
+}

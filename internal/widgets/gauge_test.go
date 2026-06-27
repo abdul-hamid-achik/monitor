@@ -42,6 +42,91 @@ func TestBarGaugeRender(t *testing.T) {
 	}
 }
 
+func TestGetMinMax(t *testing.T) {
+	if mn, mx := getMinMax(nil); mn != 0 || mx != 1 {
+		t.Errorf("getMinMax(nil) = (%v,%v), want (0,1)", mn, mx)
+	}
+	if mn, mx := getMinMax([]float64{3, -2, 7, 0}); mn != -2 || mx != 7 {
+		t.Errorf("getMinMax = (%v,%v), want (-2,7)", mn, mx)
+	}
+}
+
+func TestSampleData(t *testing.T) {
+	if got := sampleData([]float64{1, 2, 3}, 0); got != nil {
+		t.Errorf("sampleData width<=0 = %v, want nil", got)
+	}
+	if got := sampleData([]float64{1, 2, 3}, 10); len(got) != 3 {
+		t.Errorf("sampleData len<=width should pass through; got %v", got)
+	}
+	if got := sampleData([]float64{1, 2, 3, 4, 5, 6}, 3); len(got) != 3 {
+		t.Errorf("sampleData downsample len = %d, want 3", len(got))
+	}
+}
+
+// TestSparklineEdgeCases ensures the divide-by-zero / bounds guards hold:
+// empty, constant (max==min), negative, and zero Width/Height must not panic.
+func TestSparklineEdgeCases(t *testing.T) {
+	for i, s := range []*Sparkline{
+		{Data: nil, Width: 10, Height: 3},
+		{Data: []float64{5, 5, 5}, Width: 10, Height: 3},
+		{Data: []float64{-3, -1, -2}, Width: 10, Height: 3},
+		{Data: []float64{1, 2, 3}, Width: 0, Height: 3},
+		{Data: []float64{1, 2, 3}, Width: 10, Height: 0},
+	} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("case %d: Render panicked: %v", i, r)
+				}
+			}()
+			_ = s.Render()
+		}()
+	}
+}
+
+// TestMultiSparklineRendersWithZeroMin is a regression for the global-min
+// bug: a series whose minimum is 0 must not be discarded, and Render must
+// produce one line per series without panicking.
+func TestMultiSparklineRendersWithZeroMin(t *testing.T) {
+	m := &MultiSparkline{Width: 10, Data: [][]float64{{0, 5}, {10, 20}}}
+	out := m.Render()
+	if out == "" {
+		t.Error("MultiSparkline.Render returned empty for non-empty data")
+	}
+}
+
+// TestSparklineFillScalesToHeight is a regression for the fill count being
+// tied to the fixed 0-8 glyph scale instead of Height: a single column at
+// 50% of a Height=4 sparkline must fill 2 of 4 rows, not all 4.
+func TestSparklineFillScalesToHeight(t *testing.T) {
+	s := &Sparkline{Data: []float64{5}, Min: 0, Max: 10, Width: 1, Height: 4, AutoScale: false}
+	lines := strings.Split(s.Render(), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("got %d lines, want 4", len(lines))
+	}
+	filled := 0
+	for _, ln := range lines {
+		if strings.ContainsAny(ln, "▁▂▃▄▅▆▇█") {
+			filled++
+		}
+	}
+	if filled != 2 {
+		t.Errorf("filled %d of 4 rows for a 50%% value, want 2\noutput:\n%q", filled, s.Render())
+	}
+}
+
+func TestMiniGaugeEdgeCases(t *testing.T) {
+	for _, g := range []*MiniGauge{
+		{Value: 50, Max: 0, Width: 10},    // Max=0 must not divide by zero
+		{Value: 250, Max: 100, Width: 10}, // over 100 clamps
+		{Value: -5, Max: 100, Width: 10},  // negative clamps to 0
+	} {
+		if g.Render() == "" {
+			t.Errorf("MiniGauge.Render returned empty for %+v", g)
+		}
+	}
+}
+
 func TestBarGaugeColorFunc(t *testing.T) {
 	bg := NewBarGauge()
 	bg.Value = 90

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -34,9 +35,9 @@ Usage:
   monitor vault --project myapp -- /usr/local/bin/myapp --port 8080
   monitor vault --project myapp -- env   # debug: show injected env
 
-The command and its args (after the -- separator) are passed through
-to tvault run verbatim. tvault resolves the project's secrets and
-injects them as environment variables; the agent calling this
+The command and its args (after the -- separator) are run under ` + "`env`" + `
+via tvault run, so tvault resolves the project's secrets and injects
+them as environment variables for the command; the agent calling this
 subcommand never sees the secret values.
 
 Requires: tvault binary on $PATH and a tinyvault project with secrets
@@ -75,5 +76,5 @@ configured for the given project name.`,
 
 // tvaultAvailable checks if the tvault binary is on $PATH.
 func tvaultAvailable() bool {
-	return ecosystem.Probe(nil).Tinyvault.Available
+	return ecosystem.Probe(context.Background()).Tinyvault.Available
 }

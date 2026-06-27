@@ -19,9 +19,9 @@ func newKillCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var pids []int32
 			for _, a := range args {
-				var p int32
-				if _, err := fmt.Sscanf(a, "%d", &p); err != nil || p <= 0 {
-					return fmt.Errorf("invalid pid %q", a)
+				p, err := parsePID(a)
+				if err != nil {
+					return err
 				}
 				pids = append(pids, p)
 			}
@@ -81,16 +81,15 @@ func newProcessCmd() *cobra.Command {
 		Short: "Print detailed process information",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var pid int32
-			if _, err := fmt.Sscanf(args[0], "%d", &pid); err != nil {
-				return fmt.Errorf("invalid pid %q", args[0])
+			pid, err := parsePID(args[0])
+			if err != nil {
+				return err
 			}
 			c := NewCollector(0)
 			ctx, cancel := Context()
 			defer cancel()
-			c.SetProcessInterval(0) // refresh immediately
-			_ = ctx
-			for _, p := range c.Snapshot().Processes {
+			info := c.Collect(ctx) // sample once; Snapshot() is empty until Collect runs
+			for _, p := range info.Processes {
 				if p.PID == pid {
 					if JSONOutput(cmd) {
 						return WriteJSON(p)

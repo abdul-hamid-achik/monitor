@@ -2,8 +2,40 @@ package ecosystem
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
+
+func TestDecodeJSON(t *testing.T) {
+	type rec struct {
+		Name string `json:"name"`
+	}
+	got, err := decodeJSON[rec]([]byte(`{"name":"x"}`), "cmd")
+	if err != nil || got.Name != "x" {
+		t.Fatalf("decodeJSON valid = (%+v, %v)", got, err)
+	}
+	gotS, err := decodeJSON[[]rec]([]byte(`[{"name":"a"},{"name":"b"}]`), "cmd")
+	if err != nil || len(gotS) != 2 {
+		t.Fatalf("decodeJSON slice = (%+v, %v)", gotS, err)
+	}
+
+	// Malformed JSON must surface a *Wrap carrying the command and raw output,
+	// and Unwrap must chain to the underlying json error.
+	_, err = decodeJSON[rec]([]byte(`{bad`), "fcheap save")
+	if err == nil {
+		t.Fatal("expected an error on malformed JSON")
+	}
+	var w *Wrap
+	if !errors.As(err, &w) {
+		t.Fatalf("error should be *Wrap; got %T", err)
+	}
+	if w.Cmd != "fcheap save" || w.Output != "{bad" {
+		t.Errorf("Wrap = {Cmd:%q Output:%q}, want {fcheap save, {bad}", w.Cmd, w.Output)
+	}
+	if w.Unwrap() == nil {
+		t.Error("Wrap.Unwrap() should return the underlying json error")
+	}
+}
 
 func TestProbeRunsEvenWithMissingTools(t *testing.T) {
 	// Probe must never panic and must return a Status struct.

@@ -130,12 +130,13 @@ func (r *CPUSpikeRule) Name() string { return "cpu_spike" }
 
 // Evaluate returns an alert per process whose CPU% exceeds factor*50 (placeholder baseline).
 func (r *CPUSpikeRule) Evaluate(ev collector.Event, _ *History) []collector.Alert {
-	if r.Factor <= 0 {
-		r.Factor = 3.0
+	factor := r.Factor // local default — don't mutate shared rule state under concurrent Observe
+	if factor <= 0 {
+		factor = 3.0
 	}
 	var out []collector.Alert
 	for _, p := range ev.Processes {
-		if p.CPUPercent > r.Factor*50 {
+		if p.CPUPercent > factor*50 {
 			out = append(out, collector.Alert{
 				Severity: "warning",
 				Rule:     r.Name(),
@@ -149,8 +150,12 @@ func (r *CPUSpikeRule) Evaluate(ev collector.Event, _ *History) []collector.Aler
 }
 
 // RSSGrowthRule detects monotonic RSS growth across the history window.
+// The threshold is bytes-per-SAMPLE: the regression runs against the sample
+// index, not wall-clock time, so at the collector's default 1s tick it is
+// effectively bytes-per-second. (A true per-second slope would need the
+// sample timestamps threaded into the regression — see BACKLOG.)
 type RSSGrowthRule struct {
-	MinBytesPerSec uint64
+	MinBytesPerSample uint64
 }
 
 // Name returns the rule name.
@@ -158,8 +163,9 @@ func (r *RSSGrowthRule) Name() string { return "rss_growth" }
 
 // Evaluate returns alerts for processes with sustained RSS growth.
 func (r *RSSGrowthRule) Evaluate(ev collector.Event, h *History) []collector.Alert {
-	if r.MinBytesPerSec == 0 {
-		r.MinBytesPerSec = 50_000 // ~50KB/s
+	minGrowth := r.MinBytesPerSample // local default — don't mutate shared rule state
+	if minGrowth == 0 {
+		minGrowth = 50_000 // ~50KB per sample
 	}
 	var out []collector.Alert
 	for _, p := range ev.Processes {
@@ -168,7 +174,7 @@ func (r *RSSGrowthRule) Evaluate(ev collector.Event, h *History) []collector.Ale
 			continue
 		}
 		slope, r2 := linearRegression(samples)
-		if slope > float64(r.MinBytesPerSec) && r2 > 0.7 {
+		if slope > float64(minGrowth) && r2 > 0.7 {
 			out = append(out, collector.Alert{
 				Severity: "warning",
 				Rule:     r.Name(),
@@ -181,7 +187,8 @@ func (r *RSSGrowthRule) Evaluate(ev collector.Event, h *History) []collector.Ale
 	return out
 }
 
-// linearRegression returns slope and R² for y over x=0..n-1.
+// linearRegression returns slope (per sample — dy per unit index) and R²
+// for y over x=0..n-1.
 func linearRegression(y []uint64) (slope, r2 float64) {
 	n := float64(len(y))
 	if n < 2 {

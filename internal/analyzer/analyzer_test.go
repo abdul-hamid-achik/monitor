@@ -14,6 +14,41 @@ func TestEngineObservesWithoutRules(t *testing.T) {
 	}
 }
 
+// TestOnAlertHookFiresPerAlert covers the incidents integration point: the
+// hook must fire exactly once per alert, with matching data, and SetOnAlert(nil)
+// must disable it.
+func TestOnAlertHookFiresPerAlert(t *testing.T) {
+	e := NewEngine()
+	e.AddRule(&CPUSpikeRule{Factor: 1}) // threshold = 50%
+	var got []collector.Alert
+	e.SetOnAlert(func(_ collector.Event, a collector.Alert) { got = append(got, a) })
+
+	ev := collector.Event{
+		Timestamp: time.Now(),
+		Processes: []collector.ProcessInfo{
+			{PID: 1, Name: "hot", CPUPercent: 90},
+			{PID: 2, Name: "cool", CPUPercent: 5},
+		},
+	}
+	alerts := e.Observe(ev)
+	if len(alerts) != 1 {
+		t.Fatalf("Observe returned %d alerts, want 1", len(alerts))
+	}
+	if len(got) != 1 {
+		t.Fatalf("hook fired %d times, want 1 (once per alert)", len(got))
+	}
+	if got[0].PID != 1 || got[0].Rule != "cpu_spike" {
+		t.Errorf("hook alert = %+v, want PID 1 / cpu_spike", got[0])
+	}
+
+	e.SetOnAlert(nil)
+	got = nil
+	e.Observe(ev)
+	if len(got) != 0 {
+		t.Errorf("hook fired %d times after SetOnAlert(nil), want 0", len(got))
+	}
+}
+
 func TestCPUSpikeRule(t *testing.T) {
 	r := &CPUSpikeRule{Factor: 2.0}
 	e := NewEngine()
@@ -49,7 +84,7 @@ func TestCPUSpikeRule(t *testing.T) {
 }
 
 func TestRSSGrowthRule(t *testing.T) {
-	r := &RSSGrowthRule{MinBytesPerSec: 1}
+	r := &RSSGrowthRule{MinBytesPerSample: 1}
 	e := NewEngine()
 	e.AddRule(r)
 

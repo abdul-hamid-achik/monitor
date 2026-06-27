@@ -123,48 +123,34 @@ monitor/
 │   ├── profiler/                # NEW: pprof + sample profiling
 │   │   ├── profiler.go
 │   │   └── profiler_test.go
-│   ├── system/                  # ORIGINAL: legacy collector (kept for TUI compat)
-│   │   ├── collector.go
-│   │   ├── kill.go
-│   │   ├── ringbuffer.go
-│   │   ├── types.go
-│   │   └── *_test.go
-│   ├── ui/                      # TUI v1 (Bubble Tea v1, default bare `monitor`)
-│   │   ├── app.go               # 862 lines — router + chrome (header, status, dispatch)
-│   │   ├── chrome.go            # NewModel, settings persistence, status helpers, temp labels
-│   │   ├── app_test.go          # 21 unit tests, all green
-│   │   ├── styles.go
-│   │   ├── tab_overview.go
-│   │   ├── tab_cpu.go
-│   │   ├── tab_memory.go
-│   │   ├── tab_disk.go
-│   │   ├── tab_network.go
-│   │   ├── tab_processes.go
-│   │   ├── tab_temperature.go
-│   │   ├── tab_settings.go
-│   │   └── v2/                  # TUI v2 prototype (`monitor v2`) — charm.land/*
-│   │       ├── model.go         # tea.View, tea.KeyPressMsg, lipgloss/v2
-│   │       ├── run.go           # entry point
-│   │       └── model_test.go    # 6 v2 unit tests, all green
-│   └── widgets/                 # Reusable widgets (sparklines, gauges)
+│   ├── ui/v2/                   # The TUI (Bubble Tea v2 — charm.land/bubbletea/v2 + lipgloss/v2)
+│   │   ├── model.go             # Model, tea.View, tea.KeyPressMsg, tab router, header, status bar, Overview/Temperature/Settings tabs
+│   │   ├── run.go               # entry point (bare `monitor` and `monitor v2`)
+│   │   ├── cpu.go               # CPU tab
+│   │   ├── memory.go            # Memory tab
+│   │   ├── disk.go              # Disk tab
+│   │   ├── network.go           # Network tab
+│   │   ├── processes.go         # Processes tab (bubbles/v2 table)
+│   │   └── model_test.go        # v2 unit tests
+│   └── widgets/                 # Reusable widgets (sparklines, gauges; lipgloss v2)
 │       ├── gauge.go
 │       └── gauge_test.go
-├── specs/                       # glyphrun behavioral specs (13 specs, 51 outcomes)
+├── specs/                       # glyphrun behavioral specs (15 specs, all passing)
 │   ├── cli_help.yml
-│   ├── snapshot_json.yml
 │   ├── doctor_json.yml
-│   ├── kill_safety.yml
-│   ├── watch_tick.yml
-│   ├── version.yml
 │   ├── env_detection.yml
-│   ├── profile_sample.yml
-│   ├── logs_search.yml
 │   ├── investigate.yml
-│   ├── v2_help.yml
+│   ├── kill_safety.yml
+│   ├── logs_capture.yml
+│   ├── logs_search.yml
 │   ├── mcp_handshake.yml
-│   └── stash.yml
+│   ├── profile_sample.yml
 │   ├── reload.yml
-│   └── logs_capture.yml
+│   ├── snapshot_json.yml
+│   ├── stash.yml
+│   ├── v2_help.yml
+│   ├── version.yml
+│   └── watch_tick.yml
 ├── Taskfile.yml                 # Single-word commands
 ├── AGENTS.md                    # This file
 ├── CLAUDE.md                    # Claude Code companion
@@ -320,16 +306,17 @@ Adding a new spec: copy an existing one, adjust intent + target + outcomes.
 
 | Package | Import |
 |---------|--------|
-| Bubble Tea v1 | `github.com/charmbracelet/bubbletea` (current); v2 port pending |
-| Bubbles | `github.com/charmbracelet/bubbles` |
-| Lipgloss | `github.com/charmbracelet/lipgloss` |
+| Bubble Tea v2 | `charm.land/bubbletea/v2` (the only TUI runtime) |
+| Bubbles v2 | `charm.land/bubbles/v2` (table widget in the Processes tab) |
+| Lipgloss v2 | `charm.land/lipgloss/v2` (TUI styling + `internal/widgets`) |
 | gopsutil | `github.com/shirou/gopsutil/v4` |
 | Cobra | `github.com/spf13/cobra` |
 | MCP SDK | `github.com/modelcontextprotocol/go-sdk/mcp` |
 | Veclite | `github.com/abdul-hamid-achik/veclite` |
 | Clipboard | `github.com/atotto/clipboard` |
 
-Future: port to `charm.land/bubbletea/v2` and split `app.go` per tab.
+The binary links a single lipgloss (`charm.land/lipgloss/v2`) — both the TUI
+and `internal/widgets` are on v2.
 
 ---
 

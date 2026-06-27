@@ -41,15 +41,74 @@ Duration: 1s
 	}
 }
 
+// TestParsePprofParsesDebug1Heap feeds real /debug/pprof/heap?debug=1 text
+// (tab-separated "# 0xADDR func+0xOFF /path/file.go:LINE" frames). The old
+// parser only saw protobuf on the wire and returned nothing.
+func TestParsePprofParsesDebug1Heap(t *testing.T) {
+	text := "heap profile: 3: 4128 [3: 4129] @ heap/1048576\n" +
+		"1: 32 [1: 32] @ 0x10461a9cc 0x10461b688\n" +
+		"#\t0x10461a9cb\tsyscall.anyToSockaddr+0x9b\t/go/src/syscall/syscall_bsd.go:257\n" +
+		"#\t0x10461b687\tsyscall.Getpeername+0x77\t/go/src/syscall/syscall_unix.go:309\n"
+	syms := parsePprof(text)
+	if len(syms) < 2 {
+		t.Fatalf("parsePprof returned %d symbols, want >= 2", len(syms))
+	}
+	if syms[0].Func != "syscall.anyToSockaddr" {
+		t.Errorf("func = %q, want syscall.anyToSockaddr (the +0x offset should be stripped)", syms[0].Func)
+	}
+	if syms[0].Line != 257 {
+		t.Errorf("line = %d, want 257", syms[0].Line)
+	}
+}
+
+// TestParseSampleExtractsFrames uses a real macOS `sample` call-graph dump
+// (captured from `sample <pid> 1`). The old parser matched only lines
+// starting with "0x", which real `sample` output never produces.
 func TestParseSampleExtractsFrames(t *testing.T) {
-	text := `Sample analysis of process 1234:
-  0x1000  main.workLoop
-  0x2000  main.handler
-  0x3000  main.parse
+	text := `Call graph:
+    869 Thread_331472   DispatchQueue_1: com.apple.main-thread  (serial)
+      869 start  (in dyld) + 6992  [0x1804abe00]
+        869 ???  (in sleep)  load address 0x1048e0000 + 0x740  [0x1048e0740]
+          869 nanosleep  (in libsystem_c.dylib) + 220  [0x180705cc0]
+            869 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x180829308]
+
+Sort by top of stack, same collapsed (when >= 5):
+        __semwait_signal  (in libsystem_kernel.dylib)        869
 `
 	syms := parseSample(text)
-	if len(syms) < 3 {
-		t.Fatalf("parseSample returned %d symbols, want >= 3", len(syms))
+	byName := map[string]Symbol{}
+	for _, s := range syms {
+		byName[s.Func] = s
+	}
+	for _, want := range []string{"start", "nanosleep", "__semwait_signal"} {
+		if _, ok := byName[want]; !ok {
+			t.Errorf("parseSample missing frame %q; got %+v", want, syms)
+		}
+	}
+	if s, ok := byName["nanosleep"]; ok && s.File != "libsystem_c.dylib" {
+		t.Errorf("nanosleep image = %q, want libsystem_c.dylib", s.File)
+	}
+	// The Thread header line must not be parsed as a frame.
+	for _, bad := range []string{"Thread_331472", "DispatchQueue_1:"} {
+		if _, ok := byName[bad]; ok {
+			t.Errorf("parseSample wrongly parsed header token %q as a frame", bad)
+		}
+	}
+}
+
+// TestPprofURLMapsCPUToProfile is a regression for the bug where
+// ProfileCPU built /debug/pprof/cpu (a 404 — net/http/pprof has no "cpu"
+// handler) instead of /debug/pprof/profile.
+func TestPprofURLMapsCPUToProfile(t *testing.T) {
+	cases := map[ProfileType]string{
+		ProfileCPU:       "http://localhost:6060/debug/pprof/profile?seconds=1",
+		ProfileHeap:      "http://localhost:6060/debug/pprof/heap?debug=1",
+		ProfileGoroutine: "http://localhost:6060/debug/pprof/goroutine?debug=1",
+	}
+	for pt, want := range cases {
+		if got := pprofURL(pt); got != want {
+			t.Errorf("pprofURL(%s) = %q, want %q", pt, got, want)
+		}
 	}
 }
 

@@ -85,7 +85,6 @@ type Source struct {
 	current Reading
 	cancel  context.CancelFunc
 	cmd     *exec.Cmd
-	started bool
 }
 
 // New constructs a Source and immediately starts the powermetrics
@@ -121,12 +120,14 @@ func (s *Source) Latest() Reading {
 	return s.current
 }
 
-// Started reports whether the powermetrics subprocess was successfully
-// launched. Useful for tests and for surfacing in the UI status bar.
+// Started reports whether the source is delivering real powermetrics data
+// (not the estimated fallback). Launching the subprocess isn't enough —
+// `sudo -n` can succeed then exit immediately with no usable output — so
+// this keys off whether a powermetrics line has actually been parsed.
 func (s *Source) Started() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.started
+	return s.current.Source == KindPowermetrics
 }
 
 // Close stops the powermetrics subprocess (if any) and releases resources.
@@ -190,7 +191,6 @@ func (s *Source) start(ctx context.Context) error {
 
 	s.mu.Lock()
 	s.cmd = cmd
-	s.started = true
 	s.mu.Unlock()
 
 	go s.consume(stdout)
@@ -210,48 +210,62 @@ func (s *Source) consume(r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	// powermetrics lines are short; 1 MiB is plenty.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// acc accumulates ONLY fields actually parsed from powermetrics; it
+	// starts at the zero Reading (NOT the Estimate seed) so a field the
+	// stream never emits (e.g. Battery on Apple Silicon) stays 0 instead
+	// of bleeding an estimated value into a record stamped Source=powermetrics.
+	var acc Reading
 	for scanner.Scan() {
 		line := scanner.Text()
 		partial, ok := parseLine(line)
 		if !ok {
 			continue
 		}
+		// Carry each newly parsed (non-zero) field into the accumulator so
+		// later lines in a block don't wipe earlier ones, and values persist
+		// across sample blocks.
+		if partial.CPUPackage != 0 {
+			acc.CPUPackage = partial.CPUPackage
+		}
+		if partial.CPUCores != 0 {
+			acc.CPUCores = partial.CPUCores
+		}
+		if partial.GPU != 0 {
+			acc.GPU = partial.GPU
+		}
+		if partial.ANE != 0 {
+			acc.ANE = partial.ANE
+		}
+		if partial.Battery != 0 {
+			acc.Battery = partial.Battery
+		}
+		if partial.Ambient != 0 {
+			acc.Ambient = partial.Ambient
+		}
+		if partial.FanRPM != 0 {
+			acc.FanRPM = partial.FanRPM
+		}
+		if partial.FanMode != "" {
+			acc.FanMode = partial.FanMode
+		}
+		acc.Source = KindPowermetrics
+		acc.Available = true
+		acc.Timestamp = time.Now()
 		s.mu.Lock()
-		// Merge: copy any zero-valued field in `partial` from s.current.
-		// parseLine returns a Reading with only one field populated;
-		// without merge, the second line in a block would wipe the first.
-		if partial.CPUPackage == 0 {
-			partial.CPUPackage = s.current.CPUPackage
-		}
-		if partial.CPUCores == 0 {
-			partial.CPUCores = s.current.CPUCores
-		}
-		if partial.GPU == 0 {
-			partial.GPU = s.current.GPU
-		}
-		if partial.ANE == 0 {
-			partial.ANE = s.current.ANE
-		}
-		if partial.Battery == 0 {
-			partial.Battery = s.current.Battery
-		}
-		if partial.Ambient == 0 {
-			partial.Ambient = s.current.Ambient
-		}
-		if partial.FanRPM == 0 {
-			partial.FanRPM = s.current.FanRPM
-		}
-		if partial.FanMode == "" {
-			partial.FanMode = s.current.FanMode
-		}
-		partial.Source = KindPowermetrics
-		partial.Available = true
-		partial.Timestamp = time.Now()
-		s.current = partial
+		s.current = acc
 		s.mu.Unlock()
 	}
 	if err := scanner.Err(); err != nil && s.opts.Logf != nil {
 		s.opts.Logf("temperature: powermetrics stream ended: %v", err)
+	}
+	// Reap the child so it doesn't linger as a zombie and the stdout pipe
+	// fds are released. Safe to call here: the scanner loop above has
+	// drained stdout, and Close()/ctx-cancel only signals — it never Waits.
+	s.mu.Lock()
+	cmd := s.cmd
+	s.mu.Unlock()
+	if cmd != nil {
+		_ = cmd.Wait()
 	}
 }
 

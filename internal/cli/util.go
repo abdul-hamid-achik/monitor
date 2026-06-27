@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -14,6 +15,18 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/temperature"
 )
+
+// parsePID parses a positive PID from s, rejecting trailing garbage and
+// non-positive values. Unlike fmt.Sscanf("%d"), strconv.ParseInt fails on
+// "123abc" instead of silently returning 123, so a typo'd argument can't
+// quietly target the wrong process.
+func parsePID(s string) (int32, error) {
+	v, err := strconv.ParseInt(s, 10, 32)
+	if err != nil || v <= 0 {
+		return 0, fmt.Errorf("invalid pid %q", s)
+	}
+	return int32(v), nil
+}
 
 // disableTemperatureSource, when true, skips wiring the powermetrics
 // subprocess and falls back to the estimation heuristic. Exposed via a
@@ -74,14 +87,4 @@ func NewCollector(interval time.Duration) *collector.Collector {
 // Context returns a context cancelled on SIGINT/SIGTERM.
 func Context() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-}
-
-// MustPositiveInt returns the int value of a flag or exits.
-func MustPositiveInt(cmd *cobra.Command, name string) int {
-	v, _ := cmd.Flags().GetInt(name)
-	if v <= 0 {
-		fmt.Fprintf(os.Stderr, "--%s must be > 0\n", name)
-		os.Exit(2)
-	}
-	return v
 }

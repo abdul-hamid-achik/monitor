@@ -82,8 +82,8 @@ func NewServer(svc *Service) *Server {
 	impl := &mcp.Implementation{Name: "monitor", Version: "0.3.0"}
 	opts := &mcp.ServerOptions{
 		Instructions: "monitor is an agent-harnessable local observability tool. " +
-			"Call monitor_snapshot first to orient, then drill down with monitor_process " +
-			"or monitor_alerts. All tools return JSON. Mutating tools (monitor_kill, " +
+			"Call monitor_snapshot first to orient, then drill down with monitor_processes " +
+			"or monitor_doctor. All tools return JSON. Mutating tools (monitor_kill, " +
 			"monitor_profile_capture, monitor_investigate, monitor_record) require the " +
 			"typed 'confirm: true' field in their input before they will run.",
 	}
@@ -158,11 +158,17 @@ type recordInput struct {
 // -- Handlers ------------------------------------------------------------
 
 func (s *Server) handleSnapshot(_ context.Context, _ *mcp.CallToolRequest, _ *snapshotInput) (*mcp.CallToolResult, any, error) {
+	if s.svc.Snapshots == nil {
+		return result(map[string]any{"error": "snapshot service not configured"})
+	}
 	info := s.svc.Snapshots()
 	return result(info)
 }
 
 func (s *Server) handleProcesses(_ context.Context, _ *mcp.CallToolRequest, _ *processesInput) (*mcp.CallToolResult, any, error) {
+	if s.svc.Snapshots == nil {
+		return result(map[string]any{"error": "snapshot service not configured"})
+	}
 	info := s.svc.Snapshots()
 	return result(info.Processes)
 }
@@ -171,18 +177,15 @@ func (s *Server) handleDoctor(ctx context.Context, _ *mcp.CallToolRequest, _ *pr
 	return result(ecosystem.Probe(ctx))
 }
 
-// requireConfirm returns a structured refusal when the agent forgot to
-// confirm. Mirrors the CLI's "refused" error so agent harnesses can
-// detect the failure mode uniformly across the surface.
-func requireConfirm(confirm bool) (map[string]any, error) {
+// requireConfirm returns an error when the agent forgot to confirm. Mirrors
+// the CLI's "refused" error so agent harnesses detect the failure mode
+// uniformly across the surface; each handler builds its own per-tool
+// refusal payload from the error string.
+func requireConfirm(confirm bool) error {
 	if confirm {
-		return nil, nil
+		return nil
 	}
-	return map[string]any{
-		"killed":   false,
-		"refused":  true,
-		"requires": "set confirm=true in the typed input to acknowledge the destructive action",
-	}, fmt.Errorf("refused: confirm=true required")
+	return fmt.Errorf("refused: confirm=true required")
 }
 
 // handleKill implements monitor_kill. It runs a safety check first and
@@ -190,20 +193,22 @@ func requireConfirm(confirm bool) (map[string]any, error) {
 // when the agent forgot to confirm), so the harness can inspect the reason
 // before retrying with confirm=true.
 func (s *Server) handleKill(ctx context.Context, _ *mcp.CallToolRequest, in *killInput) (*mcp.CallToolResult, any, error) {
-	if _, err := requireConfirm(in.Confirm); err != nil {
+	if err := requireConfirm(in.Confirm); err != nil {
 		return result(map[string]any{"killed": false, "refused": true, "reason": err.Error(), "pid": in.PID})
 	}
 	if s.svc.Kill == nil {
 		return result(map[string]any{"killed": false, "refused": true, "reason": "kill service not configured", "pid": in.PID})
 	}
 	conf := kill.CheckSafety([]int32{in.PID})
-	if conf.HasProtected {
+	if conf.HasProtected || conf.HasSystem {
+		// Mirror the CLI, which refuses both protected and system-owned
+		// PIDs. There is no override path through this tool.
 		return result(map[string]any{
-			"killed":     false,
-			"refused":    true,
-			"reason":     "protected process; refuse without explicit override (call with confirm=true after re-checking)",
-			"pid":        in.PID,
-			"safety":     conf,
+			"killed":  false,
+			"refused": true,
+			"reason":  "refused: target is a protected or system-owned process; this tool cannot terminate it",
+			"pid":     in.PID,
+			"safety":  conf,
 		})
 	}
 	if err := s.svc.Kill(in.PID, in.Force); err != nil {
@@ -221,7 +226,7 @@ func (s *Server) handleKill(ctx context.Context, _ *mcp.CallToolRequest, in *kil
 // "heap" if the agent omits the type. Returns a structured refusal when
 // the profile service is not wired.
 func (s *Server) handleProfileCapture(ctx context.Context, _ *mcp.CallToolRequest, in *profileInput) (*mcp.CallToolResult, any, error) {
-	if _, err := requireConfirm(in.Confirm); err != nil {
+	if err := requireConfirm(in.Confirm); err != nil {
 		return result(map[string]any{"captured": false, "refused": true, "reason": err.Error(), "pid": in.PID})
 	}
 	if s.svc.Profile == nil {
@@ -245,7 +250,7 @@ func (s *Server) handleProfileCapture(ctx context.Context, _ *mcp.CallToolReques
 // stable stub shape the CLI uses today so consumers always see the same
 // fields (pid, started_at, steps, note).
 func (s *Server) handleInvestigate(ctx context.Context, _ *mcp.CallToolRequest, in *investigateInput) (*mcp.CallToolResult, any, error) {
-	if _, err := requireConfirm(in.Confirm); err != nil {
+	if err := requireConfirm(in.Confirm); err != nil {
 		return result(map[string]any{"refused": true, "reason": err.Error(), "pid": in.PID})
 	}
 	if s.svc.Investigate != nil {
@@ -264,7 +269,7 @@ func (s *Server) handleInvestigate(ctx context.Context, _ *mcp.CallToolRequest, 
 // handleRecord implements monitor_record. Defaults to 30s. Returns a
 // refusal if vidtrace is unavailable or the record service isn't wired.
 func (s *Server) handleRecord(ctx context.Context, _ *mcp.CallToolRequest, in *recordInput) (*mcp.CallToolResult, any, error) {
-	if _, err := requireConfirm(in.Confirm); err != nil {
+	if err := requireConfirm(in.Confirm); err != nil {
 		return result(map[string]any{"recording": false, "refused": true, "reason": err.Error(), "pid": in.PID})
 	}
 	if s.svc.Record == nil {

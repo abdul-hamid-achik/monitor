@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -52,7 +53,7 @@ func Capture(ctx context.Context, pid int32, t ProfileType) (Profile, error) {
 	}
 	switch t {
 	case ProfileHeap, ProfileCPU, ProfileGoroutine:
-		endpoint := fmt.Sprintf("http://localhost:6060/debug/pprof/%s", t)
+		endpoint := pprofURL(t)
 		text, err := httpGet(ctx, endpoint)
 		if err != nil {
 			return p, fmt.Errorf("scrape %s: %w", endpoint, err)
@@ -76,12 +77,35 @@ func Capture(ctx context.Context, pid int32, t ProfileType) (Profile, error) {
 	}
 }
 
+// pprofURL maps a ProfileType to its net/http/pprof endpoint.
+//   - CPU is served at /debug/pprof/profile (there is no /cpu handler),
+//     bounded with ?seconds=1 so the scrape can't block indefinitely. It
+//     returns protobuf, so parsePprof extracts no symbols from it.
+//   - heap/goroutine use ?debug=1 to get a TEXT dump (addr / func+off /
+//     file.go:line frames) that parsePprof can read; without it the body
+//     is gzipped protobuf and no symbols are recoverable.
+func pprofURL(t ProfileType) string {
+	switch t {
+	case ProfileCPU:
+		return "http://localhost:6060/debug/pprof/profile?seconds=1"
+	case ProfileHeap, ProfileGoroutine:
+		return "http://localhost:6060/debug/pprof/" + string(t) + "?debug=1"
+	default:
+		return "http://localhost:6060/debug/pprof/" + string(t)
+	}
+}
+
+// pprofClient bounds a scrape so a hung/slow pprof endpoint can't stall
+// forever when the caller passes a context without a deadline. The timeout
+// comfortably covers the bounded CPU profile (?seconds=1).
+var pprofClient = &http.Client{Timeout: 30 * time.Second}
+
 func httpGet(ctx context.Context, url string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := pprofClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -121,6 +145,11 @@ func parsePprof(text string) []Symbol {
 				break
 			}
 			fn := parts[i-1]
+			// strip a trailing program-counter offset like "+0x9b" that the
+			// pprof ?debug=1 text format appends to the function name.
+			if plus := strings.LastIndexByte(fn, '+'); plus > 0 && strings.HasPrefix(fn[plus+1:], "0x") {
+				fn = fn[:plus]
+			}
 			// skip percentage tokens like "40%" or "100ms"
 			if strings.HasSuffix(fn, "%") || strings.HasSuffix(fn, "ms") || strings.HasSuffix(fn, "s") {
 				fn = "unknown"
@@ -139,26 +168,33 @@ func parsePprof(text string) []Symbol {
 	return syms
 }
 
-// parseSample extracts frames from `sample` output.
+// sampleFrameRe matches a macOS `sample` call-graph frame line, e.g.
+//
+//	"          869 nanosleep  (in libsystem_c.dylib) + 220  [0x180705cc0]"
+//
+// Group 1 is the function name, group 2 the containing image. The required
+// leading sample count anchors it so the Thread header line (ends in
+// "(serial)", no "(in …)"), the "Sort by top of stack" rows (no leading
+// count), and the Binary Images table (different shape) are all excluded.
+var sampleFrameRe = regexp.MustCompile(`^\s*\d+\s+(.+?)\s+\(in\s+([^)]+)\)`)
+
+// parseSample extracts the unique stack frames from macOS `sample` output.
 func parseSample(text string) []Symbol {
 	sc := bufio.NewScanner(strings.NewReader(text))
 	var syms []Symbol
 	seen := map[string]bool{}
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if !strings.HasPrefix(line, "0x") {
+		m := sampleFrameRe.FindStringSubmatch(sc.Text())
+		if m == nil {
 			continue
 		}
-		parts := strings.Fields(line)
-		if len(parts) < 2 {
-			continue
-		}
-		fn := parts[len(parts)-1]
-		if seen[fn] {
+		fn := strings.TrimSpace(m[1])
+		if fn == "" || seen[fn] {
 			continue
 		}
 		seen[fn] = true
-		syms = append(syms, Symbol{Func: fn})
+		// File carries the containing image (sample has no file:line info).
+		syms = append(syms, Symbol{Func: fn, File: strings.TrimSpace(m[2])})
 		if len(syms) >= 25 {
 			break
 		}

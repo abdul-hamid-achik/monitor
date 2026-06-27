@@ -100,9 +100,10 @@ func (m *Model) updateProcessTable() {
 			truncateStr(p.User, 12),
 		})
 	}
-	if len(rows) > 0 {
-		m.processTable.SetRows(rows)
-	}
+	// Always set rows — an empty slice is valid and clears stale rows so
+	// a filter that matches nothing renders the empty-state message
+	// instead of the previously displayed processes.
+	m.processTable.SetRows(rows)
 }
 
 func (m Model) filteredProcesses() []collector.ProcessInfo {

@@ -150,10 +150,6 @@ sleep 1
 	})
 	defer ts.Close()
 
-	if !ts.Started() {
-		t.Fatalf("Started() should be true with a working fake binary; logs=%v", logged)
-	}
-
 	// Wait for the streaming goroutine to parse at least one line.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -167,6 +163,16 @@ sleep 1
 			}
 			if r.ANE != 50.00 {
 				t.Errorf("ANE=%v, want 50.00", r.ANE)
+			}
+			// Regression for the estimate-bleed fix: the fake stream never
+			// emits a Battery reading, so it must stay 0 — not carry the
+			// Estimate(0) seed (~38) into a Source=powermetrics record.
+			if r.Battery != 0 {
+				t.Errorf("Battery=%v, want 0 (un-emitted field must not bleed the estimate)", r.Battery)
+			}
+			// Started() now means "live data flowing", true only after parse.
+			if !ts.Started() {
+				t.Error("Started() should be true once powermetrics data has arrived")
 			}
 			return // success
 		}

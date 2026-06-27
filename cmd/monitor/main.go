@@ -32,11 +32,10 @@ func init() {
 	fs.StringVar(&reloadServer.addr, "reload-addr", reload.DefaultAddr,
 		"address for the /reload endpoint when --reload-server is set")
 	_ = fs.Parse(os.Args[1:])
-	os.Args = append([]string{os.Args[0]}, stripParsedFlags(os.Args[1:], "reload-server", "reload-addr")...)
+	os.Args = append([]string{os.Args[0]}, stripParsedFlags(os.Args[1:], map[string]bool{"reload-addr": true}, "reload-server", "reload-addr")...)
 }
 
 func main() {
-	os.Args = append([]string{os.Args[0]}, os.Args[1:]...)
 	if shouldLaunchTUI(os.Args[1:]) {
 		runTUI()
 		return
@@ -56,11 +55,12 @@ func shouldLaunchTUI(args []string) bool {
 	if first == "--version" || first == "version" {
 		return false
 	}
-	switch first {
-	case "snapshot", "watch", "process", "kill", "profile",
-		"investigate", "stash", "incidents", "logs", "doctor",
-		"run", "reload", "mcp", "vault", "v2":
-		return false
+	// Derive the known-subcommand set from the registry so dispatch can
+	// never drift from the AddCommand list in internal/cli/root.go.
+	for _, name := range cli.SubcommandNames() {
+		if first == name {
+			return false
+		}
 	}
 	if len(first) > 0 && first[0] == '-' {
 		return false
@@ -103,12 +103,14 @@ func blockOnSignalIfReloadEnabled() {
 	<-sigCh
 }
 
-// stripParsedFlags removes occurrences of the named flags (and the
-// value that follows them when present) from a flag tail. Lets a
-// custom FlagSet share argv with cobra without cobra rejecting the
-// flags. Flag names are stored without the leading "--", so we strip
-// the prefix before lookup. The "--" arg terminator is also dropped.
-func stripParsedFlags(args []string, names ...string) []string {
+// stripParsedFlags removes occurrences of the named flags (and the value
+// that follows a value-taking flag in "--flag value" form) from a flag
+// tail. Lets a custom FlagSet share argv with cobra without cobra rejecting
+// the flags. valueTaking names the flags that consume a following token;
+// any other named flag is a bool and is stripped as a single token (so
+// `monitor --reload-server snapshot` keeps `snapshot`). Flag names are
+// stored without the leading "--". The "--" arg terminator is also dropped.
+func stripParsedFlags(args []string, valueTaking map[string]bool, names ...string) []string {
 	set := make(map[string]bool, len(names))
 	for _, n := range names {
 		set[n] = true
@@ -125,7 +127,9 @@ func stripParsedFlags(args []string, names ...string) []string {
 		}
 		name, _, hasValue := splitFlag(a)
 		if name != "" && set[name] {
-			if !hasValue {
+			// Only a value-taking flag in "--flag value" form (no "=")
+			// consumes the next token; a bool flag is a single token.
+			if !hasValue && valueTaking[name] {
 				skipNext = true
 			}
 			continue

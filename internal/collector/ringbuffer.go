@@ -8,8 +8,13 @@ type RingBuffer[T any] struct {
 	size     int
 }
 
-// NewRingBuffer creates a new ring buffer with the given capacity.
+// NewRingBuffer creates a new ring buffer with the given capacity. A
+// capacity below 1 is clamped to 1 so Push never divides by zero or
+// indexes out of range on an exported zero/negative-capacity buffer.
 func NewRingBuffer[T any](capacity int) *RingBuffer[T] {
+	if capacity < 1 {
+		capacity = 1
+	}
 	return &RingBuffer[T]{
 		data:     make([]T, capacity),
 		capacity: capacity,

@@ -126,7 +126,20 @@ func (r *Runner) Run(ctx context.Context, src Source) Result {
 // runCommand spawns src.Command, captures stdout+stderr, and ingests
 // line-by-line. The process is killed when ctx is canceled.
 func (r *Runner) runCommand(ctx context.Context, src Source) Result {
-	cmd := exec.CommandContext(ctx, src.Command, src.Args[1:]...)
+	// Derive a cancelable context so reaching the MaxLines/MaxBytes cap
+	// actively kills the child. Otherwise the ingest goroutines stop
+	// reading, the OS pipe fills, the child blocks on write(), and the
+	// cmd.Wait() below hangs forever.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// src.Args[0] is the program name (argv convention); the rest are real
+	// args. Guard the slice so a caller that sets Command but leaves Args
+	// empty gets a clean error instead of a slice-bounds panic.
+	var rest []string
+	if len(src.Args) > 1 {
+		rest = src.Args[1:]
+	}
+	cmd := exec.CommandContext(ctx, src.Command, rest...)
 	cmd.Dir = src.Dir
 	if len(src.Env) > 0 {
 		cmd.Env = append(os.Environ(), src.Env...)
@@ -145,10 +158,27 @@ func (r *Runner) runCommand(ctx context.Context, src Source) Result {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); r.ingest(ctx, stdout, src, false) }()
-	go func() { defer wg.Done(); r.ingest(ctx, stderr, src, true) }()
+	go func() {
+		defer wg.Done()
+		r.ingest(ctx, stdout, src, false)
+		if r.capReached() {
+			cancel()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		r.ingest(ctx, stderr, src, true)
+		if r.capReached() {
+			cancel()
+		}
+	}()
 	wg.Wait()
 	runErr := cmd.Wait()
+	if r.capReached() {
+		// Hitting the cap is a clean stop; the kill we triggered above is
+		// expected, not a failure.
+		runErr = nil
+	}
 
 	res := Result{Err: runErr}
 	r.mu.Lock()
@@ -175,7 +205,7 @@ func (r *Runner) runTailPID(ctx context.Context, src Source) Result {
 		wg.Add(1)
 		go func(path string) {
 			defer wg.Done()
-			r.tailFile(ctx, src, path, false)
+			r.tailFile(ctx, src, path)
 		}(f)
 	}
 	wg.Wait()
@@ -232,7 +262,7 @@ func looksLikeLogPath(p string) bool {
 
 // tailFile opens path at EOF and reads new lines as they're appended.
 // It honors ctx for shutdown and stops when r.capReached() returns true.
-func (r *Runner) tailFile(ctx context.Context, src Source, path string, _ bool) {
+func (r *Runner) tailFile(ctx context.Context, src Source, path string) {
 	f, err := os.Open(path)
 	if err != nil {
 		// Silently skip; the file may have been rotated away between
@@ -302,8 +332,6 @@ func (r *Runner) appendLine(src Source, raw string, isStderr bool) {
 	r.mu.Lock()
 	r.lines++
 	r.bytes += int64(len(line)) + 1 // +1 for the newline we trimmed
-	reached := (r.MaxLines > 0 && r.lines >= r.MaxLines) ||
-		(r.MaxBytes > 0 && r.bytes >= r.MaxBytes)
 	r.mu.Unlock()
 	if r.store != nil {
 		_ = r.store.Append(logger.Entry{
@@ -313,9 +341,6 @@ func (r *Runner) appendLine(src Source, raw string, isStderr bool) {
 			Message: message,
 			Raw:     line,
 		})
-	}
-	if reached {
-		// Caller checks capReached; we just record it.
 	}
 }
 

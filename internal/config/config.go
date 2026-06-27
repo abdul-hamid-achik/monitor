@@ -114,5 +114,30 @@ func (s *Settings) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	// Write to a temp file in the same directory, then rename. os.Rename is
+	// atomic, so a crash or full disk mid-write can't leave a truncated
+	// config.json that Load would silently discard in favor of defaults.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.json")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
 }

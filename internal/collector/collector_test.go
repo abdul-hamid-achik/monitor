@@ -65,11 +65,55 @@ func TestSubscribeCalledOnEachTick(t *testing.T) {
 	}
 }
 
-func TestSetProcessInterval(t *testing.T) {
+// TestPerSecond covers the rate math extracted from collectNetwork/Disk —
+// the path where the "rates always 0" bug lived, plus the elapsed==0 and
+// counter-wrap edge cases.
+func TestPerSecond(t *testing.T) {
+	cases := []struct {
+		prev, cur uint64
+		elapsed   float64
+		want      uint64
+	}{
+		{0, 1000, 1.0, 1000},    // 1000 bytes in 1s
+		{1000, 3000, 2.0, 1000}, // 2000 bytes in 2s
+		{1000, 1000, 1.0, 0},    // no change
+		{0, 1000, 0, 0},         // elapsed 0 → no divide-by-zero
+		{0, 1000, -1, 0},        // negative elapsed → 0
+		{5000, 1000, 1.0, 0},    // counter reset/wrap → 0, no underflow
+	}
+	for _, c := range cases {
+		if got := perSecond(c.prev, c.cur, c.elapsed); got != c.want {
+			t.Errorf("perSecond(%d, %d, %v) = %d, want %d", c.prev, c.cur, c.elapsed, got, c.want)
+		}
+	}
+}
+
+func TestSetInterval(t *testing.T) {
 	c := New(Options{})
-	c.SetProcessInterval(0) // no-op for invalid
-	c.SetProcessInterval(250_000_000)
+	c.SetInterval(0) // no-op for invalid
+	c.SetInterval(250_000_000)
 	if c.opts.Interval != 250_000_000 {
 		t.Errorf("interval = %v, want 250ms", c.opts.Interval)
 	}
+}
+
+// TestSubscribeCancelStopsCallbacks is a regression for the bug where the
+// cancel func returned by Subscribe was a no-op, so unsubscribed callbacks
+// kept firing on every tick.
+func TestSubscribeCancelStopsCallbacks(t *testing.T) {
+	c := New(Options{Interval: 1_000_000})
+	ctx := context.Background()
+	var got int
+	cancel := c.Subscribe(func(Event) { got++ })
+	c.Collect(ctx)
+	if got != 1 {
+		t.Fatalf("after subscribe + 1 tick: got %d, want 1", got)
+	}
+	cancel()
+	c.Collect(ctx)
+	c.Collect(ctx)
+	if got != 1 {
+		t.Errorf("after cancel + 2 ticks: got %d, want 1 (callback must not fire)", got)
+	}
+	cancel() // double cancel must be harmless
 }

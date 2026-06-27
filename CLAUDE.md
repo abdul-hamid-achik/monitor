@@ -44,14 +44,16 @@ changes. When in doubt, follow AGENTS.md (it is more comprehensive).
 - `internal/analyzer/` — anomaly detection rules
 - `internal/logger/` — veclite-backed log store
 - `internal/profiler/` — pprof + sample capture
+- `internal/capture/` — process stdout/stderr → veclite log capture
+- `internal/incidents/` — fcheap content-addressed incident stash
+- `internal/reload/` — localhost HTTP `/reload` endpoint
+- `internal/temperature/` — real SMC temperature via powermetrics (graceful fallback)
 - `internal/ecosystem/` — CLI wrappers for codemap, fcheap, tvault, etc.
 - `internal/mcp/` — MCP stdio server
 - `internal/kill/` — safe process termination
-- `internal/system/` — legacy collector (still used by `internal/ui/`)
-- `internal/ui/` — TUI v1 (Bubble Tea v1; available via `monitor v1`)
-- `internal/ui/v2/` — TUI v2 (Bubble Tea v2; **default** bare `monitor`;
-  all 8 tabs with full interactivity)
-- `internal/widgets/` — sparklines, gauges
+- `internal/ui/v2/` — the TUI (Bubble Tea v2 / charm.land; **default** bare
+  `monitor`; all 8 tabs with full interactivity). v1 has been removed.
+- `internal/widgets/` — sparklines, gauges (lipgloss v2)
 - `internal/config/` — JSON settings at ~/.config/monitor/config.json
 - `specs/` — glyphrun behavioral specs
 - `cmd/monitor/main.go` — entry point; dispatches CLI vs TUI
@@ -75,7 +77,8 @@ changes. When in doubt, follow AGENTS.md (it is more comprehensive).
 
 ## Things to avoid
 
-- Don't port Bubble Tea v1 → v2 (planned; out of scope — see BACKLOG)
+- Don't reintroduce Bubble Tea v1 — the v1 TUI and `internal/system/` were
+  removed; the only TUI is `internal/ui/v2/` on `charm.land/*`
 - Don't add new dependencies without checking existing patterns first
 - Don't run the TUI in tests (it requires a real terminal)
 - Don't call `cobra.Execute()` from tests (use `Root().Commands()` to inspect)
@@ -133,7 +136,7 @@ for spec in specs/*.yml; do ~/projects/glyphrun/bin/glyph spec verify "$spec"; d
 - Using `WithSharedRead(true)` on the veclite writer (only readers can)
 - Forgetting `*mcp.CallToolRequest` as second arg in MCP tool handlers
 - Calling `cobra --version` in tests (calls `os.Exit`)
-- Re-deriving types from `internal/system/` instead of using `internal/collector/`
+- Re-deriving metric types instead of using `internal/collector/` (the canonical source)
 
 ## When stuck
 

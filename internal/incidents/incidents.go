@@ -6,9 +6,11 @@
 //     process, and the alert detail that triggered the capture.
 //  2. Serialize the bundle to a temp dir under a stable layout.
 //  3. Compute a sha256 tree-hash of the bundle's contents.
-//  4. Shell out to `fcheap save` with the tree-hash as a tag. Identical
-//     bundles (same incident captured twice) get the same stash ID and
-//     don't double-fill the vault.
+//  4. Shell out to `fcheap save` with the tree-hash as a tag. The tag is
+//     content-addressed over the bundle bytes, so two byte-identical
+//     bundles dedup to the same stash ID. Note that snapshots and profiles
+//     embed wall-clock timestamps, so in practice each real capture differs
+//     and gets a distinct ID — dedup is incidental, not guaranteed.
 //
 // The package degrades gracefully: when fcheap is missing or save fails
 // for any reason, Capture returns the error but does not panic; callers
@@ -74,6 +76,14 @@ type CaptureResult struct {
 	Note       string    `json:"note,omitempty"`
 }
 
+// stashSave and hasFcheap are the fcheap save entry point and availability
+// check as package vars, so tests can stub the success / save-failure paths
+// without a real fcheap binary.
+var (
+	stashSave = ecosystem.StashSave
+	hasFcheap = fcheapAvailable
+)
+
 // Capture builds the bundle, computes the tree-hash, and shells out to
 // `fcheap save`. The temp directory is created with `t.TempDir`-style
 // semantics (caller does not need to clean up; Capture removes it on
@@ -95,11 +105,16 @@ func Capture(ctx context.Context, req CaptureRequest) (CaptureResult, error) {
 	cleanup := func() { _ = os.RemoveAll(dir) }
 
 	if err := writeBundle(dir, &req); err != nil {
+		// A half-written bundle has no forensic value — clean it up. (The
+		// fcheap-missing / save-failed paths below intentionally keep the
+		// dir so the caller can recover a complete bundle.)
+		cleanup()
 		return CaptureResult{}, fmt.Errorf("write bundle: %w", err)
 	}
 
 	treeHash, sizeBytes, err := computeTreeHash(dir)
 	if err != nil {
+		cleanup()
 		return CaptureResult{}, fmt.Errorf("compute tree-hash: %w", err)
 	}
 
@@ -120,7 +135,7 @@ func Capture(ctx context.Context, req CaptureRequest) (CaptureResult, error) {
 	// Check fcheap availability first; the wrappers return a Wrap on
 	// every failure so we can distinguish "binary missing" from
 	// "save failed".
-	if !fcheapAvailable(ctx) {
+	if !hasFcheap() {
 		// Don't clean up the temp dir — caller can pick it up.
 		return CaptureResult{
 			StashID:   "",
@@ -133,7 +148,7 @@ func Capture(ctx context.Context, req CaptureRequest) (CaptureResult, error) {
 		}, fmt.Errorf("fcheap not on PATH")
 	}
 
-	res, err := ecosystem.StashSave(ctx, dir, name, tags, req.TTL)
+	res, err := stashSave(ctx, dir, name, tags, req.TTL)
 	if err != nil {
 		return CaptureResult{
 			TreeHash:  treeHash,
@@ -164,24 +179,32 @@ func Search(ctx context.Context, tags []string) ([]ecosystem.StashListEntry, err
 	return ecosystem.StashList(ctx, all)
 }
 
-// fcheapAvailable shells out once to check whether fcheap is on PATH.
-// We avoid a hard dependency on the probe cache so a freshly installed
-// tool is picked up immediately.
-func fcheapAvailable(ctx context.Context) bool {
+// fcheapAvailable reports whether fcheap is on PATH. It resolves the binary
+// via exec.LookPath (a PATH scan, no subprocess), bypassing the probe cache
+// so a freshly installed tool is picked up immediately.
+func fcheapAvailable() bool {
 	_, err := exec.LookPath("fcheap")
 	return err == nil
 }
 
 // writeBundle serializes the request into a stable file layout under dir:
 //
-//	manifest.json   — CaptureRequest as JSON (the single source of truth)
-//	snapshot.json   — copy of req.Snapshot
-//	profile.json    — copy of req.Profile (when non-empty)
+//	manifest.json   — lightweight header (trigger / alert / ttl)
+//	snapshot.json   — req.Snapshot
+//	profile.json    — req.Profile (when non-empty)
 //
-// The tree-hash is computed over a sorted concatenation of the file
-// contents, so the layout is stable regardless of map ordering.
+// The heavy Snapshot/Profile payloads live ONLY in their own files (the
+// manifest used to embed the whole CaptureRequest, double-serializing them
+// and doubling the hash input). The tree-hash is computed over a sorted
+// concatenation of the file contents, so the layout is stable regardless of
+// map ordering.
 func writeBundle(dir string, req *CaptureRequest) error {
-	if err := writeJSON(filepath.Join(dir, "manifest.json"), req); err != nil {
+	manifest := struct {
+		Trigger string      `json:"trigger"`
+		Alert   AlertDetail `json:"alert,omitempty"`
+		TTL     string      `json:"ttl,omitempty"`
+	}{Trigger: req.Trigger, Alert: req.Alert, TTL: req.TTL}
+	if err := writeJSON(filepath.Join(dir, "manifest.json"), manifest); err != nil {
 		return err
 	}
 	if err := writeJSON(filepath.Join(dir, "snapshot.json"), req.Snapshot); err != nil {

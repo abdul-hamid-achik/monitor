@@ -5,7 +5,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 // Sparkline renders a sparkline graph from data points
@@ -109,27 +109,38 @@ func (s *Sparkline) Render() string {
 	builders = make([]strings.Builder, s.Height)
 
 	// Generate sparkline characters
+	full := glyphs[len(SparklineChars)-1] // █, styled
 	for x := 0; x < len(sampled) && x < s.Width; x++ {
 		value := sampled[x]
 		normalized := (value - min) / (max - min)
-
-		// Map to character index (0-8)
-		charIndex := int(normalized * float64(len(SparklineChars)-1))
-		if charIndex < 0 {
-			charIndex = 0
+		if normalized < 0 {
+			normalized = 0
 		}
-		if charIndex >= len(SparklineChars) {
-			charIndex = len(SparklineChars) - 1
+		if normalized > 1 {
+			normalized = 1
 		}
 
-		styledChar := glyphs[charIndex]
+		// Scale the fill to Height (not the fixed 0-8 glyph scale): the
+		// bottom `fullRows` rows are full blocks, and the next row up uses a
+		// partial glyph for the fractional remainder. This keeps mid-range
+		// values distinguishable at any Height (Height=1 == a classic
+		// single-row sparkline glyph).
+		exact := normalized * float64(s.Height)
+		fullRows := int(exact)
+		partialIdx := int((exact - float64(fullRows)) * float64(len(SparklineChars)-1))
+		if partialIdx >= len(SparklineChars) {
+			partialIdx = len(SparklineChars) - 1
+		}
 
-		// Fill from bottom up
+		// Fill from bottom up.
 		for y := 0; y < s.Height; y++ {
 			lineIndex := s.Height - 1 - y
-			if y < charIndex {
-				builders[lineIndex].WriteString(styledChar)
-			} else {
+			switch {
+			case y < fullRows:
+				builders[lineIndex].WriteString(full)
+			case y == fullRows && partialIdx > 0:
+				builders[lineIndex].WriteString(glyphs[partialIdx])
+			default:
 				builders[lineIndex].WriteByte(' ')
 			}
 		}
@@ -238,12 +249,22 @@ func (m *MultiSparkline) Render() string {
 		return ""
 	}
 
-	// Calculate global min/max if not set
+	// Calculate global min/max if not explicitly set. Seed from the first
+	// non-empty series, then take the unconditional min/max — comparing
+	// against a zero starting value would discard a true global minimum of 0.
 	min, max := m.Min, m.Max
 	if max == 0 {
+		seeded := false
 		for _, data := range m.Data {
+			if len(data) == 0 {
+				continue
+			}
 			dMin, dMax := getMinMax(data)
-			if dMin < min || min == 0 {
+			if !seeded {
+				min, max, seeded = dMin, dMax, true
+				continue
+			}
+			if dMin < min {
 				min = dMin
 			}
 			if dMax > max {

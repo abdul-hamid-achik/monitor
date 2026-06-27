@@ -22,9 +22,9 @@ func newProfileCmd() *cobra.Command {
 		Short: "Capture a process profile (heap, cpu, goroutine)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var pid int32
-			if _, err := fmt.Sscanf(args[0], "%d", &pid); err != nil {
-				return fmt.Errorf("invalid pid %q", args[0])
+			pid, err := parsePID(args[0])
+			if err != nil {
+				return err
 			}
 			ctx, cancel := Context()
 			defer cancel()
@@ -199,7 +199,7 @@ func newLogsSearchCmd() *cobra.Command {
 				return fmt.Errorf("open log store: %w", err)
 			}
 			defer store.Close()
-			results, err := store.Search(args[0], "keyword", limit)
+			results, err := store.Search(args[0], limit)
 			if err != nil {
 				return err
 			}
@@ -219,7 +219,7 @@ func newLogsSearchCmd() *cobra.Command {
 
 func newInvestigateCmd() *cobra.Command {
 	var (
-		ttl   string
+		ttl    string
 		noSave bool
 	)
 	cmd := &cobra.Command{
@@ -233,9 +233,9 @@ Pass --no-save to capture the bundle into a temp dir but skip the
 fcheap stash step (useful for sandboxed environments).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var pid int32
-			if _, err := fmt.Sscanf(args[0], "%d", &pid); err != nil {
-				return fmt.Errorf("invalid pid %q", args[0])
+			pid, err := parsePID(args[0])
+			if err != nil {
+				return err
 			}
 			ctx, cancel := Context()
 			defer cancel()

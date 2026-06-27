@@ -64,8 +64,9 @@ type Collector struct {
 	diskRHist   *RingBuffer[float64]
 	diskWHist   *RingBuffer[float64]
 
-	subsMu sync.RWMutex
-	subs   []Subscriber
+	subsMu   sync.RWMutex
+	subs     map[int]Subscriber
+	subsNext int
 
 	// temperatureHook, if set, overrides the default CPU-load estimation
 	// for temperature readings. It returns the package-internal Reading
@@ -86,6 +87,7 @@ func New(opts Options) *Collector {
 	}
 	return &Collector{
 		opts:       opts,
+		subs:       make(map[int]Subscriber),
 		cpuHist:    NewRingBuffer[float64](opts.HistorySize),
 		memHist:    NewRingBuffer[float64](opts.HistorySize),
 		netDownHist: NewRingBuffer[float64](opts.HistorySize),
@@ -95,34 +97,30 @@ func New(opts Options) *Collector {
 	}
 }
 
-// Subscribe registers fn to receive every tick. Returns a cancel func.
+// Subscribe registers fn to receive every tick. The returned func
+// unsubscribes it; funcs aren't comparable in Go, so subscribers are keyed
+// by an opaque token and the cancel closure deletes that key. Calling the
+// cancel more than once is harmless.
 func (c *Collector) Subscribe(fn Subscriber) func() {
 	c.subsMu.Lock()
 	defer c.subsMu.Unlock()
-	c.subs = append(c.subs, fn)
+	if c.subs == nil {
+		c.subs = make(map[int]Subscriber)
+	}
+	id := c.subsNext
+	c.subsNext++
+	c.subs[id] = fn
 	return func() {
 		c.subsMu.Lock()
 		defer c.subsMu.Unlock()
-		for i, s := range c.subs {
-			if &s == &fn || // pointer compare won't work for funcs; fallback to nil-check
-				false {
-				_ = i
-			}
-		}
-		// funcs aren't comparable; rebuild slice without fn by identity-less filter
-		// (use a generation counter to avoid O(n^2) — for now keep it simple)
-		out := c.subs[:0]
-		for _, s := range c.subs {
-			// We can't compare funcs reliably; identity removal is best-effort.
-			out = append(out, s)
-		}
-		c.subs = out
+		delete(c.subs, id)
 	}
 }
 
-// SetProcessInterval changes how often the process list is refreshed. The
-// change takes effect on the next Collect call.
-func (c *Collector) SetProcessInterval(d time.Duration) {
+// SetInterval changes the tick interval used by Run. It only affects a
+// ticker started AFTER this call — Run reads the interval once at startup
+// and does not reset an already-running ticker. Values <= 0 are ignored.
+func (c *Collector) SetInterval(d time.Duration) {
 	if d <= 0 {
 		return
 	}
@@ -171,7 +169,10 @@ func (c *Collector) Collect(ctx context.Context) SystemInfo {
 
 // Run blocks until ctx is cancelled, calling Collect on every Interval tick.
 func (c *Collector) Run(ctx context.Context) error {
-	t := time.NewTicker(c.opts.Interval)
+	c.mu.RLock()
+	interval := c.opts.Interval
+	c.mu.RUnlock()
+	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
 		select {
@@ -226,7 +227,13 @@ func (c *Collector) collectMemory(ctx context.Context) {
 	c.info.Memory.AvailableBytes = vm.Available
 	c.info.Memory.UsagePercent = vm.UsedPercent
 	c.info.Memory.AppMemory = vm.Used
-	c.info.Memory.CacheMemory = vm.Total - vm.Used - vm.Free
+	// Guard the unsigned subtraction: on some platforms Used+Free can
+	// transiently exceed Total, which would wrap to a near-2^64 value.
+	if vm.Total > vm.Used+vm.Free {
+		c.info.Memory.CacheMemory = vm.Total - vm.Used - vm.Free
+	} else {
+		c.info.Memory.CacheMemory = 0
+	}
 	if vm.Total > 0 {
 		c.info.Memory.MemoryPressure = float64(vm.Used) / float64(vm.Total) * 100
 	}
@@ -288,6 +295,17 @@ func (c *Collector) WithTemperatureHook(hook func() (float64, float64, float64, 
 	c.temperatureHook = hook
 }
 
+// perSecond converts a monotonic byte-counter delta into a per-second rate.
+// It returns 0 when elapsed <= 0 (no divide-by-zero) or when the counter
+// went backwards (interface reset / wrap), which would otherwise underflow
+// the unsigned subtraction into a near-2^64 bogus rate.
+func perSecond(prev, cur uint64, elapsed float64) uint64 {
+	if elapsed <= 0 || cur < prev {
+		return 0
+	}
+	return uint64(float64(cur-prev) / elapsed)
+}
+
 func (c *Collector) collectNetwork(ctx context.Context) {
 	counters, err := net.IOCountersWithContext(ctx, false)
 	if err != nil || len(counters) == 0 {
@@ -295,32 +313,26 @@ func (c *Collector) collectNetwork(ctx context.Context) {
 	}
 	cur := counters[0]
 	now := time.Now()
-	c.info.Network.BytesSent = cur.BytesSent
-	c.info.Network.BytesRecv = cur.BytesRecv
-	c.info.Network.PacketsSent = cur.PacketsSent
-	c.info.Network.PacketsRecv = cur.PacketsRecv
-	c.lastNet = cur
-	c.info.Network.LastUpdate = now
-	// first-sample: no previous bytes, so no rate yet
-	if c.netDownHist.Len() == 0 {
+	// Compute per-second rates against the PREVIOUS sample before
+	// overwriting lastNet/LastUpdate. The first sample (LastUpdate zero)
+	// has no previous counters, so it seeds a 0 into the history.
+	if !c.info.Network.LastUpdate.IsZero() {
+		if elapsed := now.Sub(c.info.Network.LastUpdate).Seconds(); elapsed > 0 {
+			c.info.Network.BytesSentPerSec = perSecond(c.lastNet.BytesSent, cur.BytesSent, elapsed)
+			c.info.Network.BytesRecvPerSec = perSecond(c.lastNet.BytesRecv, cur.BytesRecv, elapsed)
+			c.netDownHist.Push(float64(c.info.Network.BytesRecvPerSec))
+			c.netUpHist.Push(float64(c.info.Network.BytesSentPerSec))
+		}
+	} else {
 		c.netDownHist.Push(0)
 		c.netUpHist.Push(0)
-		c.info.Network.DownloadHistory = c.netDownHist.ToSlice()
-		c.info.Network.UploadHistory = c.netUpHist.ToSlice()
-		return
-	}
-	if elapsed := now.Sub(c.info.Network.LastUpdate).Seconds(); elapsed > 0 {
-		c.info.Network.BytesSentPerSec = uint64(float64(cur.BytesSent-c.lastNet.BytesSent) / elapsed)
-		c.info.Network.BytesRecvPerSec = uint64(float64(cur.BytesRecv-c.lastNet.BytesRecv) / elapsed)
-		c.netDownHist.Push(float64(c.info.Network.BytesRecvPerSec))
-		c.netUpHist.Push(float64(c.info.Network.BytesSentPerSec))
-		c.info.Network.DownloadHistory = c.netDownHist.ToSlice()
-		c.info.Network.UploadHistory = c.netUpHist.ToSlice()
 	}
 	c.info.Network.BytesSent = cur.BytesSent
 	c.info.Network.BytesRecv = cur.BytesRecv
 	c.info.Network.PacketsSent = cur.PacketsSent
 	c.info.Network.PacketsRecv = cur.PacketsRecv
+	c.info.Network.DownloadHistory = c.netDownHist.ToSlice()
+	c.info.Network.UploadHistory = c.netUpHist.ToSlice()
 	c.lastNet = cur
 	c.info.Network.LastUpdate = now
 }
@@ -359,8 +371,8 @@ func (c *Collector) collectDisk(ctx context.Context) {
 		if !c.info.Disk.LastUpdate.IsZero() {
 			elapsed := time.Since(c.info.Disk.LastUpdate).Seconds()
 			if elapsed > 0 {
-				c.info.Disk.ReadPerSec = uint64(float64(read-c.lastDisk.ReadBytes) / elapsed)
-				c.info.Disk.WritePerSec = uint64(float64(write-c.lastDisk.WriteBytes) / elapsed)
+				c.info.Disk.ReadPerSec = perSecond(c.lastDisk.ReadBytes, read, elapsed)
+				c.info.Disk.WritePerSec = perSecond(c.lastDisk.WriteBytes, write, elapsed)
 				c.diskRHist.Push(float64(c.info.Disk.ReadPerSec))
 				c.diskWHist.Push(float64(c.info.Disk.WritePerSec))
 				c.info.Disk.ReadHistory = c.diskRHist.ToSlice()

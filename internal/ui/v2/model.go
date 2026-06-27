@@ -144,11 +144,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showKillConfirm {
 			return m.handleKillConfirmKeys(msg)
 		}
-		if msg.Keystroke() == "esc" && m.processSearch {
-			m.processSearch = false
-			m.searchQuery = ""
-			m.updateProcessTable()
-			return m, nil
+		// While the process search prompt is active, every keystroke is
+		// search input — route it to the per-tab handler BEFORE the global
+		// navigation/quit shortcuts, so typing 'q', 'l', a digit, etc.
+		// edits the query instead of quitting or switching tabs.
+		if m.processSearch {
+			return m.handleProcessKeys(msg)
 		}
 		switch msg.Keystroke() {
 		case "q", "ctrl+c", "esc":

@@ -56,6 +56,18 @@ MONITOR_RUN_DIR=<dir> so the child can detect it is being observed.`,
 	return root
 }
 
+// SubcommandNames returns the names and aliases of every registered
+// subcommand. The entry point (cmd/monitor) uses it for CLI-vs-TUI dispatch
+// so that list can't drift from the AddCommand registrations above.
+func SubcommandNames() []string {
+	var names []string
+	for _, c := range Root().Commands() {
+		names = append(names, c.Name())
+		names = append(names, c.Aliases...)
+	}
+	return names
+}
+
 // Execute runs the root command and exits with a non-zero status on failure.
 func Execute() {
 	if err := Root().Execute(); err != nil {

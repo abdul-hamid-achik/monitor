@@ -3,6 +3,7 @@ package incidents
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,8 +11,73 @@ import (
 	"testing"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 )
+
+// TestCaptureSuccessRemovesTempDir stubs the save path and asserts the result
+// is mapped and the temp bundle dir is cleaned up on success.
+func TestCaptureSuccessRemovesTempDir(t *testing.T) {
+	origHas, origSave := hasFcheap, stashSave
+	defer func() { hasFcheap, stashSave = origHas, origSave }()
+
+	hasFcheap = func() bool { return true }
+	var savedDir string
+	stashSave = func(_ context.Context, dir, _ string, _ []string, _ string) (ecosystem.StashSaveResult, error) {
+		savedDir = dir
+		return ecosystem.StashSaveResult{ID: "stash-123", Path: "/vault/stash-123", SizeBytes: 4096}, nil
+	}
+
+	res, err := Capture(context.Background(), CaptureRequest{
+		Snapshot: collector.SystemInfo{Hostname: "test"},
+		Trigger:  "manual",
+	})
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if res.StashID != "stash-123" || res.Path != "/vault/stash-123" || res.SizeBytes != 4096 {
+		t.Errorf("result not mapped from save: %+v", res)
+	}
+	if savedDir == "" {
+		t.Fatal("stashSave never received a dir")
+	}
+	if _, statErr := os.Stat(savedDir); !os.IsNotExist(statErr) {
+		t.Errorf("temp dir %s should be removed on success; stat err = %v", savedDir, statErr)
+	}
+}
+
+// TestCaptureSaveFailureKeepsBundle asserts a save failure keeps the local
+// bundle (for forensics) and reports the error in the Note.
+func TestCaptureSaveFailureKeepsBundle(t *testing.T) {
+	origHas, origSave := hasFcheap, stashSave
+	defer func() { hasFcheap, stashSave = origHas, origSave }()
+
+	hasFcheap = func() bool { return true }
+	stashSave = func(_ context.Context, _, _ string, _ []string, _ string) (ecosystem.StashSaveResult, error) {
+		return ecosystem.StashSaveResult{}, fmt.Errorf("disk full")
+	}
+
+	res, err := Capture(context.Background(), CaptureRequest{
+		Snapshot: collector.SystemInfo{Hostname: "test"},
+		Trigger:  "manual",
+	})
+	if err == nil {
+		t.Fatal("expected an error when stashSave fails")
+	}
+	if res.StashID != "" {
+		t.Errorf("StashID should be empty on failure; got %q", res.StashID)
+	}
+	if !strings.Contains(res.Note, "disk full") {
+		t.Errorf("Note should mention the failure; got %q", res.Note)
+	}
+	if res.Path == "" {
+		t.Fatal("Path should be populated on failure")
+	}
+	if _, statErr := os.Stat(filepath.Join(res.Path, "manifest.json")); statErr != nil {
+		t.Errorf("bundle should be kept on save failure: %v", statErr)
+	}
+	_ = os.RemoveAll(res.Path)
+}
 
 // TestComputeTreeHashStable verifies that the same bundle produces the
 // same hash regardless of file creation order (the sort step is what

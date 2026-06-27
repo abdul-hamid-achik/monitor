@@ -6,8 +6,54 @@ import (
 	"testing"
 	"time"
 
+	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 )
+
+func TestHandleSnapshotWithStubService(t *testing.T) {
+	s := newTestServer(t, &Service{
+		Snapshots: func() collector.SystemInfo { return collector.SystemInfo{Hostname: "test-host"} },
+	})
+	_, payload, err := s.handleSnapshot(context.Background(), nil, &snapshotInput{})
+	if err != nil {
+		t.Fatalf("handleSnapshot: %v", err)
+	}
+	// result() JSON-roundtrips into a generic map.
+	m, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", payload)
+	}
+	if m["hostname"] != "test-host" {
+		t.Errorf("hostname = %v, want test-host", m["hostname"])
+	}
+}
+
+// TestReadHandlersRefuseNilSnapshots is a regression for the read handlers
+// dereferencing a nil Snapshots service: they must return a structured error
+// instead of panicking.
+func TestReadHandlersRefuseNilSnapshots(t *testing.T) {
+	s := newTestServer(t, &Service{}) // Snapshots is nil
+	calls := map[string]func() (any, error){
+		"snapshot": func() (any, error) {
+			_, p, err := s.handleSnapshot(context.Background(), nil, &snapshotInput{})
+			return p, err
+		},
+		"processes": func() (any, error) {
+			_, p, err := s.handleProcesses(context.Background(), nil, &processesInput{})
+			return p, err
+		},
+	}
+	for name, call := range calls {
+		p, err := call()
+		if err != nil {
+			t.Errorf("%s: unexpected hard error %v", name, err)
+		}
+		m, ok := p.(map[string]any)
+		if !ok || m["error"] == nil {
+			t.Errorf("%s: want a structured error payload, got %T (%v)", name, p, p)
+		}
+	}
+}
 
 func newTestServer(t *testing.T, svc *Service) *Server {
 	t.Helper()
@@ -17,26 +63,14 @@ func newTestServer(t *testing.T, svc *Service) *Server {
 	return NewServer(svc)
 }
 
-// TestRequireConfirm asserts the confirm gate: nil payload + nil error
-// when confirmed, structured refusal payload + error otherwise.
+// TestRequireConfirm asserts the confirm gate: nil error when confirmed,
+// an error otherwise (handlers build their own refusal payload from it).
 func TestRequireConfirm(t *testing.T) {
-	payload, err := requireConfirm(true)
-	if err != nil {
+	if err := requireConfirm(true); err != nil {
 		t.Fatalf("confirm=true should not error; got %v", err)
 	}
-	if payload != nil {
-		t.Fatalf("confirm=true should return nil payload; got %v", payload)
-	}
-
-	payload, err = requireConfirm(false)
-	if err == nil {
+	if err := requireConfirm(false); err == nil {
 		t.Fatalf("confirm=false should error")
-	}
-	if payload == nil {
-		t.Fatalf("confirm=false should return a structured refusal payload")
-	}
-	if refused, _ := payload["refused"].(bool); !refused {
-		t.Fatalf("refusal payload should set refused=true; got %v", payload)
 	}
 }
 
