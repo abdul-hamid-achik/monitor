@@ -1,13 +1,14 @@
 package main
 
 import (
-	"flag"
 	"fmt"
+	"net"
 	"net/http"
-	_ "net/http/pprof" // registers /debug/pprof on http.DefaultServeMux
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/abdul-hamid-achik/monitor/internal/cli"
 	"github.com/abdul-hamid-achik/monitor/internal/reload"
@@ -31,29 +32,44 @@ var reloadServer struct {
 }
 
 func init() {
-	fs := flag.NewFlagSet("monitor", flag.ContinueOnError)
-	fs.BoolVar(&reloadServer.enabled, "reload-server", false,
-		"start a localhost HTTP /reload endpoint inside the TUI")
-	fs.StringVar(&reloadServer.addr, "reload-addr", reload.DefaultAddr,
-		"address for the /reload endpoint when --reload-server is set")
-	fs.StringVar(&pprofAddr, "pprof", "",
-		"expose monitor's own net/http/pprof on this addr (e.g. localhost:6060)")
-	_ = fs.Parse(os.Args[1:])
-	os.Args = append([]string{os.Args[0]}, stripParsedFlags(os.Args[1:],
-		map[string]bool{"reload-addr": true, "pprof": true}, "reload-server", "reload-addr", "pprof")...)
+	reloadServer.addr = reload.DefaultAddr
+	os.Args = append([]string{os.Args[0]}, extractGlobalFlags(os.Args[1:])...)
 }
 
 // startPprofIfEnabled serves monitor's own pprof endpoints when --pprof is set.
+// It uses a dedicated mux (not the process-global DefaultServeMux) and an
+// http.Server with a ReadHeaderTimeout, and warns when bound to a non-loopback
+// address since /debug/pprof/cmdline exposes the process argv.
 func startPprofIfEnabled() {
 	if pprofAddr == "" {
 		return
 	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	if host, _, err := net.SplitHostPort(pprofAddr); err == nil && !isLoopback(host) {
+		fmt.Fprintf(os.Stderr, "monitor: warning: --pprof on non-loopback %s exposes /debug/pprof (incl. cmdline argv)\n", pprofAddr)
+	}
+	srv := &http.Server{Addr: pprofAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
-		if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "monitor: --pprof failed on %s: %v\n", pprofAddr, err)
 		}
 	}()
 	fmt.Fprintf(os.Stderr, "monitor: pprof listening on http://%s/debug/pprof/\n", pprofAddr)
+}
+
+// isLoopback reports whether host (the host portion of an addr, "" for a
+// wildcard bind like ":6060") refers only to the loopback interface.
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func main() {
@@ -126,38 +142,44 @@ func blockOnSignalIfReloadEnabled() {
 	<-sigCh
 }
 
-// stripParsedFlags removes occurrences of the named flags (and the value
-// that follows a value-taking flag in "--flag value" form) from a flag
-// tail. Lets a custom FlagSet share argv with cobra without cobra rejecting
-// the flags. valueTaking names the flags that consume a following token;
-// any other named flag is a bool and is stripped as a single token (so
-// `monitor --reload-server snapshot` keeps `snapshot`). Flag names are
-// stored without the leading "--". The "--" arg terminator is also dropped.
-func stripParsedFlags(args []string, valueTaking map[string]bool, names ...string) []string {
-	set := make(map[string]bool, len(names))
-	for _, n := range names {
-		set[n] = true
-	}
-	out := args[:0]
-	skipNext := false
-	for _, a := range args {
-		if skipNext {
-			skipNext = false
-			continue
-		}
+// extractGlobalFlags scans the FULL argument tail for monitor's
+// position-independent global flags — --pprof, --reload-addr (value-taking)
+// and --reload-server (bool) — setting their package vars and returning the
+// remaining args for cobra. Unlike flag.Parse it does not stop at the first
+// non-flag token, so `monitor watch --pprof :6060` is honored (the documented
+// primary use) rather than silently dropped. Supports --flag=value and
+// --flag value; everything after a bare "--" is passed through verbatim so
+// cobra's positional separator (e.g. `monitor vault -- cmd`) still works.
+func extractGlobalFlags(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		if a == "--" {
-			continue
+			out = append(out, args[i:]...)
+			break
 		}
-		name, _, hasValue := splitFlag(a)
-		if name != "" && set[name] {
-			// Only a value-taking flag in "--flag value" form (no "=")
-			// consumes the next token; a bool flag is a single token.
-			if !hasValue && valueTaking[name] {
-				skipNext = true
+		name, value, hasValue := splitFlag(a)
+		switch name {
+		case "pprof":
+			if hasValue {
+				pprofAddr = value
+			} else if i+1 < len(args) {
+				pprofAddr = args[i+1]
+				i++
 			}
-			continue
+		case "reload-addr":
+			if hasValue {
+				reloadServer.addr = value
+			} else if i+1 < len(args) {
+				reloadServer.addr = args[i+1]
+				i++
+			}
+		case "reload-server":
+			// Bool flag: bare form enables; --reload-server=false disables.
+			reloadServer.enabled = !hasValue || (value == "true" || value == "1")
+		default:
+			out = append(out, a)
 		}
-		out = append(out, a)
 	}
 	return out
 }

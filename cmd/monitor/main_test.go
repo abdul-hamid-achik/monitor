@@ -33,53 +33,93 @@ func TestShouldLaunchTUI(t *testing.T) {
 	}
 }
 
-func TestStripParsedFlags(t *testing.T) {
-	valueTaking := map[string]bool{"reload-addr": true}
+func TestExtractGlobalFlags(t *testing.T) {
 	cases := []struct {
-		name string
-		args []string
-		want []string
+		name       string
+		args       []string
+		want       []string
+		wantPprof  string
+		wantReload bool
+		wantAddr   string
 	}{
 		{
-			// Regression: the boolean --reload-server must NOT consume the
-			// following subcommand token.
-			name: "bool flag keeps following subcommand",
-			args: []string{"--reload-server", "snapshot"},
-			want: []string{"snapshot"},
+			// The boolean --reload-server must NOT consume the next token.
+			name:       "bool flag keeps following subcommand",
+			args:       []string{"--reload-server", "snapshot"},
+			want:       []string{"snapshot"},
+			wantReload: true,
 		},
 		{
-			name: "value flag consumes its value",
-			args: []string{"--reload-addr", "127.0.0.1:9000", "snapshot"},
-			want: []string{"snapshot"},
+			name:     "value flag consumes its value",
+			args:     []string{"--reload-addr", "127.0.0.1:9000", "snapshot"},
+			want:     []string{"snapshot"},
+			wantAddr: "127.0.0.1:9000",
 		},
 		{
-			name: "value flag with = is a single token",
-			args: []string{"--reload-addr=127.0.0.1:9000", "snapshot"},
-			want: []string{"snapshot"},
+			name:      "value flag with = is a single token",
+			args:      []string{"--pprof=localhost:6060", "snapshot"},
+			want:      []string{"snapshot"},
+			wantPprof: "localhost:6060",
 		},
 		{
-			name: "bool then value flag then subcommand",
-			args: []string{"--reload-server", "--reload-addr", "x", "watch"},
-			want: []string{"watch"},
+			// Regression: a global flag AFTER a subcommand is honored, not
+			// silently dropped (flag.Parse used to stop at "watch").
+			name:      "global flag after subcommand is honored",
+			args:      []string{"watch", "--pprof", ":6060"},
+			want:      []string{"watch"},
+			wantPprof: ":6060",
 		},
 		{
-			name: "-- terminator is dropped",
-			args: []string{"--", "kill", "1"},
-			want: []string{"kill", "1"},
+			name: "-- passes through verbatim for cobra",
+			args: []string{"vault", "--", "mycommand", "--pprof", "x"},
+			want: []string{"vault", "--", "mycommand", "--pprof", "x"},
 		},
 		{
 			name: "unrelated flags pass through",
 			args: []string{"snapshot", "--json"},
 			want: []string{"snapshot", "--json"},
 		},
+		{
+			name: "reload-server=false disables",
+			args: []string{"--reload-server=false", "snapshot"},
+			want: []string{"snapshot"},
+		},
 	}
 	for _, tc := range cases {
-		// stripParsedFlags reuses the backing array (args[:0]); copy so a
-		// case can't clobber the next.
-		in := append([]string(nil), tc.args...)
-		got := stripParsedFlags(in, valueTaking, "reload-server", "reload-addr")
+		pprofAddr = ""
+		reloadServer.enabled = false
+		reloadServer.addr = ""
+		got := extractGlobalFlags(append([]string(nil), tc.args...))
 		if !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("%s: stripParsedFlags(%v) = %v, want %v", tc.name, tc.args, got, tc.want)
+			t.Errorf("%s: remainder = %v, want %v", tc.name, got, tc.want)
+		}
+		if pprofAddr != tc.wantPprof {
+			t.Errorf("%s: pprofAddr = %q, want %q", tc.name, pprofAddr, tc.wantPprof)
+		}
+		if reloadServer.enabled != tc.wantReload {
+			t.Errorf("%s: reloadServer.enabled = %v, want %v", tc.name, reloadServer.enabled, tc.wantReload)
+		}
+		if reloadServer.addr != tc.wantAddr {
+			t.Errorf("%s: reloadServer.addr = %q, want %q", tc.name, reloadServer.addr, tc.wantAddr)
+		}
+	}
+}
+
+func TestIsLoopback(t *testing.T) {
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"localhost", true},
+		{"127.0.0.1", true},
+		{"::1", true},
+		{"", false}, // ":6060" wildcard bind
+		{"0.0.0.0", false},
+		{"192.168.1.5", false},
+	}
+	for _, tc := range cases {
+		if got := isLoopback(tc.host); got != tc.want {
+			t.Errorf("isLoopback(%q) = %v, want %v", tc.host, got, tc.want)
 		}
 	}
 }

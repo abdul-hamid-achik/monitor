@@ -13,6 +13,10 @@ import (
 // DefaultRoot is the cgroup v2 unified hierarchy mount point.
 const DefaultRoot = "/sys/fs/cgroup"
 
+// selfCgroupPath locates the calling process's cgroup. A var so tests can
+// point it at a fixture.
+var selfCgroupPath = "/proc/self/cgroup"
+
 // Limits is the set of cgroup v2 limits in effect for the current process.
 type Limits struct {
 	Active     bool    `json:"active"`
@@ -21,8 +25,50 @@ type Limits struct {
 	CPUQuota   float64 `json:"cpu_quota_cores,omitempty"`
 }
 
-// Read reads cgroup v2 limits from the default root.
-func Read() Limits { return ReadFrom(DefaultRoot) }
+// Read reads cgroup v2 limits for the current process. It resolves the
+// process's own cgroup from /proc/self/cgroup and reads the leaf, walking up
+// to the nearest ancestor that actually configures a limit. This finds
+// systemd service limits (MemoryMax=/CPUQuota=) and works under
+// --cgroupns=host, while still handling the Docker default (where the process
+// sits at the namespace root, so leaf == DefaultRoot).
+func Read() Limits {
+	rel := parseSelfCgroupRel(readFile(selfCgroupPath))
+	for _, dir := range cgroupDirs(DefaultRoot, rel) {
+		if l := ReadFrom(dir); l.Active {
+			return l
+		}
+	}
+	return Limits{}
+}
+
+// parseSelfCgroupRel extracts the cgroup v2 relative path from /proc/self/cgroup
+// content. The unified (v2) entry is the line beginning "0::"; e.g.
+// "0::/system.slice/foo.service" -> "/system.slice/foo.service". Returns "" when
+// absent (non-Linux, or cgroup v1 only).
+func parseSelfCgroupRel(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(line, "0::") {
+			return strings.TrimPrefix(line, "0::")
+		}
+	}
+	return ""
+}
+
+// cgroupDirs returns the directories to probe for limits, from the process's
+// own leaf cgroup up to root. With an empty/"/" rel (Docker default) it is just
+// [root].
+func cgroupDirs(root, rel string) []string {
+	rel = strings.Trim(rel, "/")
+	if rel == "" {
+		return []string{root}
+	}
+	parts := strings.Split(rel, "/")
+	dirs := make([]string, 0, len(parts)+1)
+	for i := len(parts); i >= 0; i-- {
+		dirs = append(dirs, filepath.Join(append([]string{root}, parts[:i]...)...))
+	}
+	return dirs
+}
 
 // ReadFrom reads cgroup v2 limits from root. Active is true only when a memory
 // or CPU limit is actually configured (memory.max / cpu.max not "max").

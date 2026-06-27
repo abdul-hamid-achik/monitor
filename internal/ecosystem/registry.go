@@ -252,8 +252,8 @@ func StashSave(ctx context.Context, path, name string, tags []string, ttl string
 
 // StashListEntry mirrors the JSON row of `fcheap list --json`.
 type StashListEntry struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
 	Tags      []string `json:"tags,omitempty"`
 	Tool      string   `json:"tool,omitempty"`
 	CreatedAt string   `json:"created_at"`
@@ -275,13 +275,13 @@ func StashList(ctx context.Context, tags []string) ([]StashListEntry, error) {
 
 // StashInfoEntry shells out to `fcheap info <id> --json` for metadata.
 type StashInfoEntry struct {
-	ID        string   `json:"id"`
-	Name      string   `json:"name"`
-	Tags      []string `json:"tags,omitempty"`
-	Tool      string   `json:"tool,omitempty"`
-	CreatedAt string   `json:"created_at"`
-	Path      string   `json:"path,omitempty"`
-	SizeBytes int64    `json:"size_bytes,omitempty"`
+	ID        string           `json:"id"`
+	Name      string           `json:"name"`
+	Tags      []string         `json:"tags,omitempty"`
+	Tool      string           `json:"tool,omitempty"`
+	CreatedAt string           `json:"created_at"`
+	Path      string           `json:"path,omitempty"`
+	SizeBytes int64            `json:"size_bytes,omitempty"`
 	Manifest  []map[string]any `json:"manifest,omitempty"`
 }
 

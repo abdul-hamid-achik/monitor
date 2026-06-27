@@ -109,7 +109,10 @@ Use 'monitor history list' to see which metrics have been recorded.`,
 			}
 			store, err := history.OpenReadOnly(path)
 			if err != nil {
-				return fmt.Errorf("open history store (run 'monitor history record' first?): %w", err)
+				return fmt.Errorf("open history store: %w\n"+
+					"(no store yet? run 'monitor history record' first. "+
+					"a recorder already running? it holds an exclusive lock — "+
+					"stop it before querying, or query a copied --db path)", err)
 			}
 			defer store.Close()
 
@@ -152,7 +155,10 @@ func newHistoryListCmd() *cobra.Command {
 			}
 			store, err := history.OpenReadOnly(path)
 			if err != nil {
-				return fmt.Errorf("open history store (run 'monitor history record' first?): %w", err)
+				return fmt.Errorf("open history store: %w\n"+
+					"(no store yet? run 'monitor history record' first. "+
+					"a recorder already running? it holds an exclusive lock — "+
+					"stop it before querying, or query a copied --db path)", err)
 			}
 			defer store.Close()
 			metrics, err := store.Metrics()

@@ -29,11 +29,11 @@ func newKillCmd() *cobra.Command {
 			if !skipConfirm && (conf.HasProtected || conf.HasSystem) {
 				if JSONOutput(cmd) {
 					return WriteJSON(map[string]any{
-						"killed":         false,
-						"confirmation":   conf,
-						"protected":      conf.HasProtected,
+						"killed":          false,
+						"confirmation":    conf,
+						"protected":       conf.HasProtected,
 						"safety_warnings": conf.SafetyWarnings,
-						"note":           "protected or system process; pass --yes to override",
+						"note":            "protected or system process; pass --yes to override",
 					})
 				}
 				fmt.Println("Refusing to kill protected/system processes without --yes:")

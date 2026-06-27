@@ -12,6 +12,7 @@ import (
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/config"
+	"github.com/abdul-hamid-achik/monitor/internal/history"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
 	"github.com/abdul-hamid-achik/monitor/internal/temperature"
 )
@@ -33,9 +34,9 @@ const (
 )
 
 type Model struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	collector *collector.Collector
+	ctx         context.Context
+	cancel      context.CancelFunc
+	collector   *collector.Collector
 	unsubscribe func()
 
 	width, height int
@@ -65,11 +66,34 @@ type Model struct {
 
 	settingsCursor int
 	settingsSaved  bool
+
+	// Trends-tab data, cached off the render path. The history store is opened
+	// and scanned in Update (throttled), never in View(), so a frame never does
+	// blocking disk I/O. trendsErr=="norec" means no store exists yet.
+	trends    []trendSeries
+	trendsErr string
+	trendsAt  time.Time
+}
+
+type trendSeries struct {
+	metric string
+	pts    []history.Point
 }
 
 func NewModel() Model {
 	ctx, cancel := context.WithCancel(context.Background())
-	c := collector.New(collector.Options{Interval: time.Second, HistorySize: 60})
+
+	// Load the user's saved settings (falls back to defaults on any error) so
+	// the persisted UpdateInterval drives the collector's sample rate.
+	settings, err := config.Load()
+	if err != nil || settings == nil {
+		settings = config.Default()
+	}
+	interval := settings.UpdateInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+	c := collector.New(collector.Options{Interval: interval, HistorySize: 60})
 
 	ts := temperature.New(ctx, temperature.Options{
 		Interval: 5 * time.Second,
@@ -84,12 +108,6 @@ func NewModel() Model {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("#3B4252")).
 		Padding(0, 1)
-
-	// Load the user's saved settings (falls back to defaults on any error).
-	settings, err := config.Load()
-	if err != nil || settings == nil {
-		settings = config.Default()
-	}
 
 	m := Model{
 		ctx:          ctx,
@@ -110,16 +128,25 @@ func NewModel() Model {
 		tabInactive: lipgloss.NewStyle().Foreground(lipgloss.Color("#4C566A")).Padding(0, 1),
 	}
 	m.setupProcessTable()
+	// Register the collector subscription here (on the model that is actually
+	// run) so m.unsubscribe is persisted and the quit-time cleanup can fire.
+	// Init() has a value receiver, so assigning there would be discarded.
+	m.unsubscribe = c.Subscribe(func(ev collector.Event) {})
 	return m
 }
 
 func (m Model) Init() tea.Cmd {
-	m.unsubscribe = m.collector.Subscribe(func(ev collector.Event) {})
 	return tea.Batch(m.tickCmd(), m.startCollectorCmd())
 }
 
 func (m Model) tickCmd() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+	// Honor the user's UpdateInterval; re-read each tick so a live change in
+	// Settings takes effect on the next tick.
+	interval := time.Second
+	if m.settings != nil && m.settings.UpdateInterval > 0 {
+		interval = m.settings.UpdateInterval
+	}
+	return tea.Tick(interval, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
@@ -150,6 +177,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.last = m.collector.Snapshot()
 		if m.view == viewProcesses {
 			m.updateProcessTable()
+		}
+		// Refresh the Trends cache off the render path, throttled to every 5s
+		// while the tab is visible, so View() never blocks on disk I/O.
+		if m.view == viewTrends && (m.trendsAt.IsZero() || time.Since(m.trendsAt) > 5*time.Second) {
+			m.refreshTrends()
 		}
 		return m, m.tickCmd()
 	case tea.KeyPressMsg:
@@ -286,10 +318,27 @@ func (m Model) render() string {
 	default:
 		content = "Unknown view"
 	}
+	cpuMark, memMark := m.thresholdMarks()
 	status := m.statusStyle.Width(m.width).Render(
-		fmt.Sprintf(" CPU %.1f%%  │  Mem %.1f%%  │  Update %s  │  1-9: tabs  │  q: quit ",
-			m.last.CPU.UsagePercent, m.last.Memory.UsagePercent, m.last.LastUpdate.Format("15:04:05")))
+		fmt.Sprintf(" CPU %.1f%%%s  │  Mem %.1f%%%s  │  Update %s  │  1-9: tabs  │  q: quit ",
+			m.last.CPU.UsagePercent, cpuMark, m.last.Memory.UsagePercent, memMark, m.last.LastUpdate.Format("15:04:05")))
 	return strings.Join([]string{header, content, status}, "\n")
+}
+
+// thresholdMarks returns a "!" for CPU / memory when the live value meets or
+// exceeds the configured alert threshold (0 disables the check), giving the
+// Settings tab's threshold rows a visible effect.
+func (m Model) thresholdMarks() (cpu, mem string) {
+	if m.settings == nil {
+		return "", ""
+	}
+	if m.settings.CPUAlertThreshold > 0 && m.last.CPU.UsagePercent >= m.settings.CPUAlertThreshold {
+		cpu = "!"
+	}
+	if m.settings.MemoryAlertThreshold > 0 && m.last.Memory.UsagePercent >= m.settings.MemoryAlertThreshold {
+		mem = "!"
+	}
+	return cpu, mem
 }
 
 func (m Model) renderHeader() string {
@@ -394,7 +443,7 @@ func (m Model) renderOverview() string {
 		m.titleStyle.Render(memTitle) + "\n\n" +
 			m.renderGauge(mem.UsagePercent, m.width/2-10) +
 			fmt.Sprintf("\n  %s / %s  │  swap %s", collector.FormatBytes(mem.UsedBytes), collector.FormatBytes(mem.TotalBytes), collector.FormatBytes(mem.SwapUsed)))
-	netPanel := m.panelStyle.Width(m.width-4).Render(
+	netPanel := m.panelStyle.Width(m.width - 4).Render(
 		m.titleStyle.Render(" Network ") + "\n\n" +
 			fmt.Sprintf("  ↓ %s/s    ↑ %s/s", collector.FormatBytes(net.BytesRecvPerSec), collector.FormatBytes(net.BytesSentPerSec)) +
 			fmt.Sprintf("\n  Total: ↓ %s    ↑ %s", collector.FormatBytes(net.BytesRecv), collector.FormatBytes(net.BytesSent)))
@@ -443,6 +492,15 @@ func (m Model) renderSettings() string {
 	return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Settings ") + "\n\n" + body + footer)
 }
 
+// formatTemp renders a Celsius reading honoring the configured TemperatureUnit
+// (°C default, °F when the user selected Fahrenheit in Settings).
+func (m Model) formatTemp(c float64) string {
+	if m.settings != nil && m.settings.TemperatureUnit == "F" {
+		return fmt.Sprintf("%5.1f°F", c*9/5+32)
+	}
+	return fmt.Sprintf("%5.1f°C", c)
+}
+
 func (m Model) renderTemperature() string {
 	if m.last.LastUpdate.IsZero() {
 		return m.panelStyle.Render(m.titleStyle.Render(" Temperature ") + "\n\nWaiting for first tick…")
@@ -450,11 +508,11 @@ func (m Model) renderTemperature() string {
 	temp := m.last.Temperature
 	badge := tempBadge(temp.Source)
 	rows := []string{
-		fmt.Sprintf("  CPU Package:  %5.1f°C  %s%s", temp.CPUPackage, gaugeLabel(temp.CPUPackage), badge),
-		fmt.Sprintf("  CPU Cores:    %5.1f°C  %s%s", temp.CPUCores, gaugeLabel(temp.CPUCores), badge),
-		fmt.Sprintf("  GPU:          %5.1f°C  %s%s", temp.GPU, gaugeLabel(temp.GPU), badge),
-		fmt.Sprintf("  ANE:          %5.1f°C  %s%s", temp.ANE, gaugeLabel(temp.ANE), badge),
-		fmt.Sprintf("  Battery:      %5.1f°C  %s%s", temp.Battery, gaugeLabel(temp.Battery), badge),
+		fmt.Sprintf("  CPU Package:  %s  %s%s", m.formatTemp(temp.CPUPackage), gaugeLabel(temp.CPUPackage), badge),
+		fmt.Sprintf("  CPU Cores:    %s  %s%s", m.formatTemp(temp.CPUCores), gaugeLabel(temp.CPUCores), badge),
+		fmt.Sprintf("  GPU:          %s  %s%s", m.formatTemp(temp.GPU), gaugeLabel(temp.GPU), badge),
+		fmt.Sprintf("  ANE:          %s  %s%s", m.formatTemp(temp.ANE), gaugeLabel(temp.ANE), badge),
+		fmt.Sprintf("  Battery:      %s  %s%s", m.formatTemp(temp.Battery), gaugeLabel(temp.Battery), badge),
 	}
 	fan := "  Fan telemetry unavailable on Apple Silicon (SMC keys restricted)"
 	if temp.FanRPM > 0 || temp.FanMode != "" {

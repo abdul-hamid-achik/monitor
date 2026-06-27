@@ -150,7 +150,7 @@ type investigateInput struct {
 
 // recordInput is the typed input for monitor_record.
 type recordInput struct {
-	PID             int32 `json:"pid"               jsonschema:"the PID to record"`
+	PID             int32 `json:"pid"               jsonschema:"PID for context/labeling only — the recorder captures the WHOLE screen, not just this process"`
 	DurationSeconds int   `json:"duration,omitempty" jsonschema:"recording duration in seconds (default 30)"`
 	Confirm         bool  `json:"confirm"           jsonschema:"must be true; confirms intent to start a screen recording"`
 }
@@ -290,6 +290,7 @@ func (s *Server) handleRecord(ctx context.Context, _ *mcp.CallToolRequest, in *r
 	return result(map[string]any{
 		"recording":  true,
 		"pid":        in.PID,
+		"scope":      "whole_screen", // pid does NOT scope the capture
 		"duration_s": in.DurationSeconds,
 		"bundle_id":  id,
 	})

@@ -1,6 +1,7 @@
 package history
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -71,6 +72,54 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	}
 	if !pts[0].Timestamp.Equal(ts) {
 		t.Errorf("reloaded timestamp = %v, want %v (round-trip)", pts[0].Timestamp, ts)
+	}
+}
+
+// TestAppendIsDurableBeforeClose is the regression for the durability finding:
+// Append must flush each batch to disk immediately, so a SIGKILL/crash before
+// Close loses at most the in-flight tick rather than the whole recording
+// session. veclite's default syncOnWrite is off, so before Append called
+// db.Sync() the on-disk file stayed frozen at the last clean Close.
+//
+// We assert the invariant by snapshotting the live (still-open) DB file to a
+// second path and opening that copy read-only — it must already contain the
+// just-appended sample. (veclite holds an exclusive lock on the writer's path,
+// so a second handle on the *same* path is intentionally not possible; the copy
+// stands in for "what a post-crash reader would recover from disk".)
+func TestAppendIsDurableBeforeClose(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "h.veclite")
+	w, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open writer: %v", err)
+	}
+	defer w.Close()
+
+	ts := time.Now().Add(-time.Minute).Truncate(time.Second)
+	if err := w.Append(Sample{Timestamp: ts, Metric: "cpu.usage", Value: 73}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	// Copy the on-disk file WITHOUT closing the writer, then open the copy.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read live db file: %v", err)
+	}
+	copyPath := filepath.Join(dir, "snapshot.veclite")
+	if err := os.WriteFile(copyPath, raw, 0o644); err != nil {
+		t.Fatalf("write snapshot copy: %v", err)
+	}
+	r, err := OpenReadOnly(copyPath)
+	if err != nil {
+		t.Fatalf("OpenReadOnly(copy): %v", err)
+	}
+	defer r.Close()
+	pts, err := r.Query("cpu.usage", ts.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(pts) != 1 || pts[0].Value != 73 {
+		t.Fatalf("on-disk snapshot = %+v, want one value 73 (Append must sync before Close)", pts)
 	}
 }
 

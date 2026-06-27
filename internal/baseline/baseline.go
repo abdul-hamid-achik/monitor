@@ -10,8 +10,25 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
+
+// validName rejects baseline names that would escape the baseline directory or
+// collide with the ".baseline-*" temp prefix. The name becomes a filename
+// (<name>.json), so it must be a single path component with no separators,
+// no "."/".." and no leading dot.
+func validName(name string) error {
+	if name == "" {
+		return fmt.Errorf("baseline name is empty")
+	}
+	if name == "." || name == ".." || filepath.Base(name) != name ||
+		strings.ContainsRune(name, '/') || strings.ContainsRune(name, filepath.Separator) ||
+		strings.HasPrefix(name, ".") {
+		return fmt.Errorf("invalid baseline name %q (no path separators or leading dot)", name)
+	}
+	return nil
+}
 
 // ProcSnap is a process as recorded in a baseline.
 type ProcSnap struct {
@@ -41,6 +58,9 @@ type Baseline struct {
 
 // Save writes b to dir/<name>.json atomically (temp file + rename).
 func Save(dir string, b *Baseline) error {
+	if err := validName(b.Name); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -72,6 +92,9 @@ func Save(dir string, b *Baseline) error {
 
 // Load reads the named baseline from dir.
 func Load(dir, name string) (*Baseline, error) {
+	if err := validName(name); err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(filepath.Join(dir, name+".json"))
 	if err != nil {
 		return nil, err
@@ -105,6 +128,9 @@ func List(dir string) ([]string, error) {
 
 // Delete removes the named baseline from dir.
 func Delete(dir, name string) error {
+	if err := validName(name); err != nil {
+		return err
+	}
 	return os.Remove(filepath.Join(dir, name+".json"))
 }
 
@@ -205,7 +231,21 @@ func sortProcChanges(p []ProcChange) {
 }
 
 func sortListeners(l []Listener) {
-	sort.Slice(l, func(i, j int) bool { return l[i].Port < l[j].Port })
+	sort.Slice(l, func(i, j int) bool {
+		// Port, then proto/pid/process tiebreakers so listeners that share a
+		// port (e.g. tcp+udp, or the same port across PIDs/IP families) order
+		// deterministically and diff output stays stable.
+		if l[i].Port != l[j].Port {
+			return l[i].Port < l[j].Port
+		}
+		if l[i].Proto != l[j].Proto {
+			return l[i].Proto < l[j].Proto
+		}
+		if l[i].PID != l[j].PID {
+			return l[i].PID < l[j].PID
+		}
+		return l[i].Process < l[j].Process
+	})
 }
 
 func absI64(v int64) int64 {

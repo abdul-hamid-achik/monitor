@@ -31,14 +31,14 @@ type Subscriber func(Event)
 
 // Event is what subscribers receive.
 type Event struct {
-	Timestamp time.Time      `json:"timestamp"`
-	Hostname  string         `json:"hostname"`
-	CPU       CPUInfo        `json:"cpu"`
-	Memory    MemoryInfo     `json:"memory"`
-	Network   NetworkInfo    `json:"network"`
-	Disk      DiskInfo       `json:"disk"`
-	Processes []ProcessInfo  `json:"processes"`
-	Alert     *Alert         `json:"alert,omitempty"`
+	Timestamp time.Time     `json:"timestamp"`
+	Hostname  string        `json:"hostname"`
+	CPU       CPUInfo       `json:"cpu"`
+	Memory    MemoryInfo    `json:"memory"`
+	Network   NetworkInfo   `json:"network"`
+	Disk      DiskInfo      `json:"disk"`
+	Processes []ProcessInfo `json:"processes"`
+	Alert     *Alert        `json:"alert,omitempty"`
 }
 
 // Alert is an optional analyzer finding attached to an Event.
@@ -64,8 +64,8 @@ type Collector struct {
 	lastNet   net.IOCountersStat
 	lastDisk  disk.IOCountersStat
 
-	cpuHist    *RingBuffer[float64]
-	memHist    *RingBuffer[float64]
+	cpuHist     *RingBuffer[float64]
+	memHist     *RingBuffer[float64]
 	netDownHist *RingBuffer[float64]
 	netUpHist   *RingBuffer[float64]
 	diskRHist   *RingBuffer[float64]
@@ -93,10 +93,10 @@ func New(opts Options) *Collector {
 		opts.HistorySize = 60
 	}
 	return &Collector{
-		opts:       opts,
-		subs:       make(map[int]Subscriber),
-		cpuHist:    NewRingBuffer[float64](opts.HistorySize),
-		memHist:    NewRingBuffer[float64](opts.HistorySize),
+		opts:        opts,
+		subs:        make(map[int]Subscriber),
+		cpuHist:     NewRingBuffer[float64](opts.HistorySize),
+		memHist:     NewRingBuffer[float64](opts.HistorySize),
 		netDownHist: NewRingBuffer[float64](opts.HistorySize),
 		netUpHist:   NewRingBuffer[float64](opts.HistorySize),
 		diskRHist:   NewRingBuffer[float64](opts.HistorySize),
@@ -159,6 +159,10 @@ func (c *Collector) Collect(ctx context.Context) SystemInfo {
 	c.collectCPU(ctx)
 	c.collectMemory(ctx)
 	c.collectCgroup()
+	// Push the memory sparkline AFTER any cgroup override so the plotted
+	// history matches the reported UsagePercent.
+	c.memHist.Push(c.info.Memory.UsagePercent)
+	c.info.Memory.History = c.memHist.ToSlice()
 	c.collectTemperature()
 	c.collectNetwork(ctx)
 	c.collectDisk(ctx)
@@ -261,8 +265,9 @@ func (c *Collector) collectMemory(ctx context.Context) {
 		c.info.Memory.SwapUsed = swap.Used
 		c.info.Memory.SwapFree = swap.Free
 	}
-	c.memHist.Push(c.info.Memory.UsagePercent)
-	c.info.Memory.History = c.memHist.ToSlice()
+	// History is pushed after collectCgroup (in Collect) so the sparkline plots
+	// the final UsagePercent — container-relative inside a memory-limited
+	// cgroup, host-relative otherwise — matching the headline value.
 	c.info.Memory.LastUpdate = time.Now()
 }
 
@@ -289,6 +294,11 @@ func (c *Collector) collectCgroup() {
 		c.info.Memory.AvailableBytes = free
 		c.info.Memory.UsagePercent = float64(l.MemCurrent) / float64(l.MemLimit) * 100
 		c.info.Memory.MemoryPressure = c.info.Memory.UsagePercent
+		// Rescale the App/Cache breakdown to the container too; otherwise these
+		// keep host-scale values (vm.Used can be many GB) that exceed the
+		// overridden TotalBytes (the limit) and render a nonsensical split.
+		c.info.Memory.AppMemory = l.MemCurrent
+		c.info.Memory.CacheMemory = 0
 	}
 }
 

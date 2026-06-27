@@ -143,9 +143,33 @@ func (m *Model) compareProcesses(a, b collector.ProcessInfo) int {
 	}
 }
 
-func cmpFloat64(a, b float64) int { if a < b { return -1 }; if a > b { return 1 }; return 0 }
-func cmpUint64(a, b uint64) int    { if a < b { return -1 }; if a > b { return 1 }; return 0 }
-func cmpInt32(a, b int32) int      { if a < b { return -1 }; if a > b { return 1 }; return 0 }
+func cmpFloat64(a, b float64) int {
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+func cmpUint64(a, b uint64) int {
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+func cmpInt32(a, b int32) int {
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
 
 func (m Model) selectedRowPID() (int32, bool) {
 	row := m.processTable.SelectedRow()
@@ -204,13 +228,21 @@ func (m Model) handleProcessKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case msg.Keystroke() == " ":
 		pid, ok := m.selectedRowPID()
-		if !ok { return m, nil }
-		if m.selectedPids[pid] { delete(m.selectedPids, pid) } else { m.selectedPids[pid] = true }
+		if !ok {
+			return m, nil
+		}
+		if m.selectedPids[pid] {
+			delete(m.selectedPids, pid)
+		} else {
+			m.selectedPids[pid] = true
+		}
 		m.updateProcessTable()
 		return m, nil
 	case key.Matches(msg, procKeys.Kill):
 		if len(m.selectedPids) == 0 {
-			if pid, ok := m.selectedRowPID(); ok { m.selectedPids[pid] = true }
+			if pid, ok := m.selectedRowPID(); ok {
+				m.selectedPids[pid] = true
+			}
 		}
 		if len(m.selectedPids) > 0 {
 			m.forceKill = false
@@ -220,7 +252,9 @@ func (m Model) handleProcessKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, procKeys.ForceKill):
 		if len(m.selectedPids) == 0 {
-			if pid, ok := m.selectedRowPID(); ok { m.selectedPids[pid] = true }
+			if pid, ok := m.selectedRowPID(); ok {
+				m.selectedPids[pid] = true
+			}
 		}
 		if len(m.selectedPids) > 0 {
 			m.forceKill = true
@@ -229,16 +263,28 @@ func (m Model) handleProcessKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case key.Matches(msg, procKeys.SortCPU):
-		if m.sortBy == "cpu" { m.sortAsc = !m.sortAsc } else { m.sortBy = "cpu"; m.sortAsc = false }
+		if m.sortBy == "cpu" {
+			m.sortAsc = !m.sortAsc
+		} else {
+			m.sortBy = "cpu"
+			m.sortAsc = false
+		}
 		m.updateProcessTable()
 		return m, nil
 	case key.Matches(msg, procKeys.SortMem):
-		if m.sortBy == "memory" { m.sortAsc = !m.sortAsc } else { m.sortBy = "memory"; m.sortAsc = false }
+		if m.sortBy == "memory" {
+			m.sortAsc = !m.sortAsc
+		} else {
+			m.sortBy = "memory"
+			m.sortAsc = false
+		}
 		m.updateProcessTable()
 		return m, nil
 	case key.Matches(msg, procKeys.Search):
 		m.processSearch = !m.processSearch
-		if !m.processSearch { m.searchQuery = "" }
+		if !m.processSearch {
+			m.searchQuery = ""
+		}
 		m.updateProcessTable()
 		return m, nil
 	}
@@ -259,7 +305,10 @@ func (m Model) handleKillConfirmKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		for pid := range m.selectedPids {
 			protected := false
 			for _, p := range m.killConf.Processes {
-				if p.PID == pid && p.IsProtected { protected = true; break }
+				if p.PID == pid && p.IsProtected {
+					protected = true
+					break
+				}
 			}
 			if !protected {
 				_ = kill.Kill(pid, m.forceKill)
@@ -305,12 +354,18 @@ func (m Model) renderProcesses() string {
 func (m Model) renderKillConfirmation() string {
 	var lines []string
 	killType := "TERMINATE (SIGTERM)"
-	if m.forceKill { killType = "FORCE KILL (SIGKILL)" }
+	if m.forceKill {
+		killType = "FORCE KILL (SIGKILL)"
+	}
 	lines = append(lines, fmt.Sprintf("⚠️  %s CONFIRMATION", killType), "")
 	lines = append(lines, fmt.Sprintf("  You are about to terminate %d process(es):", len(m.killConf.Processes)), "")
 	for _, p := range m.killConf.Processes {
 		safety := "✓ OK"
-		if p.IsProtected { safety = "🛓 CRITICAL" } else if p.IsSystem { safety = "⚠️  CAUTION" }
+		if p.IsProtected {
+			safety = "🛓 CRITICAL"
+		} else if p.IsSystem {
+			safety = "⚠️  CAUTION"
+		}
 		lines = append(lines, fmt.Sprintf("    PID %d: %s (%s)", p.PID, p.Name, safety))
 	}
 	lines = append(lines, "")
@@ -324,8 +379,12 @@ func (m Model) renderKillConfirmation() string {
 }
 
 func truncateStr(s string, maxLen int) string {
-	if maxLen <= 3 { return s }
+	if maxLen <= 3 {
+		return s
+	}
 	runes := []rune(s)
-	if len(runes) <= maxLen { return s }
+	if len(runes) <= maxLen {
+		return s
+	}
 	return string(runes[:maxLen-3]) + "..."
 }

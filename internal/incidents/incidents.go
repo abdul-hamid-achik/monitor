@@ -67,13 +67,13 @@ type AlertDetail struct {
 
 // CaptureResult is what Capture returns.
 type CaptureResult struct {
-	StashID    string    `json:"stash_id"`
-	TreeHash   string    `json:"tree_hash"`
-	Path       string    `json:"path"`
-	SizeBytes  int64     `json:"size_bytes"`
-	Tags       []string  `json:"tags"`
-	CreatedAt  time.Time `json:"created_at"`
-	Note       string    `json:"note,omitempty"`
+	StashID   string    `json:"stash_id"`
+	TreeHash  string    `json:"tree_hash"`
+	Path      string    `json:"path"`
+	SizeBytes int64     `json:"size_bytes"`
+	Tags      []string  `json:"tags"`
+	CreatedAt time.Time `json:"created_at"`
+	Note      string    `json:"note,omitempty"`
 }
 
 // stashSave and hasFcheap are the fcheap save entry point and availability

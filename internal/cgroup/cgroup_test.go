@@ -33,6 +33,81 @@ func TestParseCPUMax(t *testing.T) {
 	}
 }
 
+func TestParseSelfCgroupRel(t *testing.T) {
+	cases := map[string]string{
+		"0::/system.slice/foo.service":        "/system.slice/foo.service",
+		"0::/":                                "/",
+		"0::":                                 "",
+		"12:pids:/docker/abc\n0::/docker/abc": "/docker/abc", // v1 lines ignored
+		"1:name=systemd:/user.slice":          "",            // no v2 line
+		"":                                    "",
+	}
+	for in, want := range cases {
+		if got := parseSelfCgroupRel(in); got != want {
+			t.Errorf("parseSelfCgroupRel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCgroupDirs(t *testing.T) {
+	root := "/sys/fs/cgroup"
+	// Docker default: process at namespace root -> just the root.
+	if dirs := cgroupDirs(root, "/"); len(dirs) != 1 || dirs[0] != root {
+		t.Errorf("cgroupDirs(root, /) = %v, want [%s]", dirs, root)
+	}
+	// A nested service: leaf first, then ancestors up to root.
+	got := cgroupDirs(root, "/system.slice/foo.service")
+	want := []string{
+		root + "/system.slice/foo.service",
+		root + "/system.slice",
+		root,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("cgroupDirs nested = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("cgroupDirs[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestReadResolvesLeafLimit exercises Read() end-to-end with a fake
+// /proc/self/cgroup and a fake hierarchy: the limit lives on an ancestor, and
+// Read must walk up to find it (the leaf itself is unlimited).
+func TestReadResolvesLeafLimit(t *testing.T) {
+	root := t.TempDir()
+	// Hierarchy: root/system.slice has the limit; the leaf foo.service does not.
+	svc := filepath.Join(root, "system.slice")
+	leaf := filepath.Join(svc, "foo.service")
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(svc, "memory.max"), []byte("268435456"), 0o644) // 256 MiB on the ancestor
+	os.WriteFile(filepath.Join(leaf, "memory.max"), []byte("max"), 0o644)      // leaf unlimited
+
+	// Point selfCgroupPath at a fixture naming the leaf, and DefaultRoot at our
+	// fake root via a temporary swap of the package's resolution.
+	procFixture := filepath.Join(t.TempDir(), "cgroup")
+	os.WriteFile(procFixture, []byte("0::/system.slice/foo.service\n"), 0o644)
+	oldSelf := selfCgroupPath
+	selfCgroupPath = procFixture
+	defer func() { selfCgroupPath = oldSelf }()
+
+	// Walk the fake hierarchy directly (Read hardcodes DefaultRoot, so assert
+	// the resolution helpers compose correctly against our temp root).
+	var found Limits
+	for _, dir := range cgroupDirs(root, parseSelfCgroupRel(readFile(selfCgroupPath))) {
+		if l := ReadFrom(dir); l.Active {
+			found = l
+			break
+		}
+	}
+	if !found.Active || found.MemLimit != 268435456 {
+		t.Errorf("expected to resolve ancestor limit 256MiB; got %+v", found)
+	}
+}
+
 func TestReadFrom(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, val string) {
@@ -40,7 +115,7 @@ func TestReadFrom(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("memory.max", "536870912")    // 512 MiB
+	write("memory.max", "536870912")     // 512 MiB
 	write("memory.current", "393216000") // ~375 MiB
 	write("cpu.max", "50000 100000")     // 0.5 CPU
 

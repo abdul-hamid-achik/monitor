@@ -53,3 +53,6 @@ Taskfile~
 node_modules/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
+
+# Stray root build artifact (build to bin/ instead)
+/monitor

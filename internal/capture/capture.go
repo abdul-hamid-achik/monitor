@@ -83,9 +83,9 @@ type Runner struct {
 	// mu protects the running counter and result fields so a caller
 	// reading Result concurrently with a running capture gets a
 	// consistent snapshot.
-	mu     sync.Mutex
-	lines  int
-	bytes  int64
+	mu    sync.Mutex
+	lines int
+	bytes int64
 }
 
 // NewRunner returns a Runner that writes to store. The caller must

@@ -99,7 +99,7 @@ func TestNewWithoutSudoFallsBackToEstimate(t *testing.T) {
 	// Point both binaries at paths that don't exist on PATH to force the
 	// fallback. We use a guaranteed-missing path so the test is hermetic.
 	ts := New(context.Background(), Options{
-		Bin: filepath.Join(t.TempDir(), "no-such-powermetrics"),
+		Bin:  filepath.Join(t.TempDir(), "no-such-powermetrics"),
 		SUDO: filepath.Join(t.TempDir(), "no-such-sudo"),
 	})
 	defer ts.Close()
@@ -144,9 +144,9 @@ sleep 1
 
 	var logged []string
 	ts := New(context.Background(), Options{
-		Bin:     bin,
-		SUDO:    sudo,
-		Logf:    func(format string, args ...any) { logged = append(logged, format) },
+		Bin:  bin,
+		SUDO: sudo,
+		Logf: func(format string, args ...any) { logged = append(logged, format) },
 	})
 	defer ts.Close()
 

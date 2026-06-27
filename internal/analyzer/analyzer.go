@@ -163,8 +163,8 @@ func (e *Engine) Observe(ev collector.Event) []collector.Alert {
 
 // History is a per-process sliding window of memory and CPU samples.
 type History struct {
-	mu     sync.RWMutex
-	maxLen int
+	mu      sync.RWMutex
+	maxLen  int
 	samples []sample
 }
 
@@ -301,7 +301,7 @@ func linearRegression(y []uint64) (slope, r2 float64) {
 	slope = (n*sxy - sx*sy) / denom
 	mean := sy / n
 	ssTot := syy - n*mean*mean
-	ssRes := syy - slope*sxy - (sy - slope*sx)*mean
+	ssRes := syy - slope*sxy - (sy-slope*sx)*mean
 	if ssTot == 0 {
 		return slope, 0
 	}

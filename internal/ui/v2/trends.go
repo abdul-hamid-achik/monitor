@@ -9,25 +9,55 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/widgets"
 )
 
-// renderTrends shows longer-range sparklines from the persistent history store
-// (populated by `monitor history record`), beyond the in-memory tick window.
-func (m Model) renderTrends() string {
+// refreshTrends loads longer-range history (populated by `monitor history
+// record`) into the Model's cache. It performs blocking disk I/O (open + scan
+// + close), so it MUST be called from Update — never from View()/renderTrends.
+// It is throttled by the tickMsg handler to avoid re-opening the store every
+// frame.
+func (m *Model) refreshTrends() {
 	path, err := history.DefaultPath()
 	if err != nil {
-		return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Trends ") + "\n\n" + err.Error())
+		m.trendsErr = err.Error()
+		m.trends = nil
+		m.trendsAt = time.Now()
+		return
 	}
 	store, err := history.OpenReadOnly(path)
 	if err != nil {
-		return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Trends ") + "\n\n" +
-			"No recorded history yet.\nRun `monitor history record` to capture metrics over time.")
+		// No store yet, or a recorder holds the writer lock. Either way there's
+		// nothing to plot right now.
+		m.trendsErr = "norec"
+		m.trends = nil
+		m.trendsAt = time.Now()
+		return
 	}
 	defer store.Close()
 
 	since := time.Now().Add(-time.Hour)
-	var panels []string
+	series := make([]trendSeries, 0, 2)
 	for _, metric := range []string{"cpu.usage", "mem.usage"} {
 		pts, _ := store.Query(metric, since)
-		panels = append(panels, m.trendPanel(metric, pts))
+		series = append(series, trendSeries{metric: metric, pts: pts})
+	}
+	m.trends = series
+	m.trendsErr = ""
+	m.trendsAt = time.Now()
+}
+
+// renderTrends formats the cached trend series. Pure: no I/O (see refreshTrends).
+func (m Model) renderTrends() string {
+	switch {
+	case m.trendsErr == "norec":
+		return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Trends ") + "\n\n" +
+			"No recorded history yet.\nRun `monitor history record` to capture metrics over time.")
+	case m.trendsErr != "":
+		return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Trends ") + "\n\n" + m.trendsErr)
+	case m.trends == nil:
+		return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Trends ") + "\n\nLoading…")
+	}
+	var panels []string
+	for _, s := range m.trends {
+		panels = append(panels, m.trendPanel(s.metric, s.pts))
 	}
 	return strings.Join(panels, "\n")
 }

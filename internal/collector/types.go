@@ -4,17 +4,17 @@ import "time"
 
 // CPUInfo holds CPU usage statistics.
 type CPUInfo struct {
-	UsagePercent   float64    `json:"usage_percent"`
-	PerCoreUsage   []float64  `json:"per_core_usage"`
-	FrequencyMHz   float64    `json:"frequency_mhz"`
-	CoreCount      int        `json:"core_count"`
-	ThreadCount    int        `json:"thread_count"`
-	LoadAvg1       float64    `json:"load_avg_1"`
-	LoadAvg5       float64    `json:"load_avg_5"`
-	LoadAvg15      float64    `json:"load_avg_15"`
-	History        []float64  `json:"history"`
+	UsagePercent   float64     `json:"usage_percent"`
+	PerCoreUsage   []float64   `json:"per_core_usage"`
+	FrequencyMHz   float64     `json:"frequency_mhz"`
+	CoreCount      int         `json:"core_count"`
+	ThreadCount    int         `json:"thread_count"`
+	LoadAvg1       float64     `json:"load_avg_1"`
+	LoadAvg5       float64     `json:"load_avg_5"`
+	LoadAvg15      float64     `json:"load_avg_15"`
+	History        []float64   `json:"history"`
 	PerCoreHistory [][]float64 `json:"per_core_history,omitempty"`
-	LastUpdate     time.Time  `json:"last_update"`
+	LastUpdate     time.Time   `json:"last_update"`
 }
 
 // MemoryInfo holds RAM and swap statistics.
@@ -39,17 +39,17 @@ type MemoryInfo struct {
 
 // TemperatureInfo holds sensor readings (estimated on non-SMC builds).
 type TemperatureInfo struct {
-	CPUPackage float64    `json:"cpu_package"`
-	CPUCores   float64    `json:"cpu_cores"`
-	GPU        float64    `json:"gpu"`
-	ANE        float64    `json:"ane"`
-	Battery    float64    `json:"battery"`
-	Ambient    float64    `json:"ambient"`
-	FanRPM     int        `json:"fan_rpm"`
-	FanMode    string     `json:"fan_mode"`
-	History    []float64  `json:"history"`
-	LastUpdate time.Time  `json:"last_update"`
-	Available  bool       `json:"available"`
+	CPUPackage float64   `json:"cpu_package"`
+	CPUCores   float64   `json:"cpu_cores"`
+	GPU        float64   `json:"gpu"`
+	ANE        float64   `json:"ane"`
+	Battery    float64   `json:"battery"`
+	Ambient    float64   `json:"ambient"`
+	FanRPM     int       `json:"fan_rpm"`
+	FanMode    string    `json:"fan_mode"`
+	History    []float64 `json:"history"`
+	LastUpdate time.Time `json:"last_update"`
+	Available  bool      `json:"available"`
 	// Source names the data origin: "estimated" (CPU-load heuristic) or
 	// "powermetrics" (real SMC readings via sudo powermetrics). Lets
 	// callers badge the UI and lets JSON consumers distinguish synthetic
@@ -95,8 +95,8 @@ type DiskInfo struct {
 
 // ProcessInfo describes one OS process.
 type ProcessInfo struct {
-	PID           int32  `json:"pid"`
-	Name          string `json:"name"`
+	PID           int32   `json:"pid"`
+	Name          string  `json:"name"`
 	CPUPercent    float64 `json:"cpu_percent"`
 	Memory        uint64  `json:"memory"`
 	MemoryPercent float64 `json:"memory_percent"`
@@ -121,21 +121,21 @@ type CgroupInfo struct {
 }
 
 type SystemInfo struct {
-	CPU                 CPUInfo        `json:"cpu"`
-	Memory              MemoryInfo     `json:"memory"`
-	Cgroup              CgroupInfo     `json:"cgroup"`
+	CPU                 CPUInfo         `json:"cpu"`
+	Memory              MemoryInfo      `json:"memory"`
+	Cgroup              CgroupInfo      `json:"cgroup"`
 	Temperature         TemperatureInfo `json:"temperature"`
-	Network             NetworkInfo    `json:"network"`
-	Disk                DiskInfo       `json:"disk"`
-	Processes           []ProcessInfo  `json:"processes"`
-	ProcessesLastUpdate time.Time      `json:"processes_last_update"`
-	Hostname            string         `json:"hostname"`
-	OS                  string         `json:"os"`
-	Platform            string         `json:"platform"`
-	Kernel              string         `json:"kernel"`
-	Uptime              uint64         `json:"uptime"`
-	BootTime            uint64         `json:"boot_time"`
-	LastUpdate          time.Time      `json:"last_update"`
+	Network             NetworkInfo     `json:"network"`
+	Disk                DiskInfo        `json:"disk"`
+	Processes           []ProcessInfo   `json:"processes"`
+	ProcessesLastUpdate time.Time       `json:"processes_last_update"`
+	Hostname            string          `json:"hostname"`
+	OS                  string          `json:"os"`
+	Platform            string          `json:"platform"`
+	Kernel              string          `json:"kernel"`
+	Uptime              uint64          `json:"uptime"`
+	BootTime            uint64          `json:"boot_time"`
+	LastUpdate          time.Time       `json:"last_update"`
 }
 
 // ProtectedProcessNames are macOS processes monitor will not kill.

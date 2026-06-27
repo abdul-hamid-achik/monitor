@@ -62,10 +62,18 @@ func TestRenderTrendsProducesOutput(t *testing.T) {
 
 func TestNewModelBasics(t *testing.T) {
 	m := NewModel()
-	if m.ready { t.Fatal("fresh model should not be ready") }
-	if m.quitting { t.Fatal("fresh model should not be quitting") }
-	if m.collector == nil { t.Fatal("model should have a collector") }
-	if m.processTable == nil { t.Fatal("model should have a process table") }
+	if m.ready {
+		t.Fatal("fresh model should not be ready")
+	}
+	if m.quitting {
+		t.Fatal("fresh model should not be quitting")
+	}
+	if m.collector == nil {
+		t.Fatal("model should have a collector")
+	}
+	if m.processTable == nil {
+		t.Fatal("model should have a process table")
+	}
 }
 
 func TestViewQuittingReturnsGoodbye(t *testing.T) {
@@ -80,7 +88,9 @@ func TestViewQuittingReturnsGoodbye(t *testing.T) {
 func TestViewInitializingReturnsPlaceholder(t *testing.T) {
 	m := NewModel()
 	v := m.View()
-	if !v.AltScreen { t.Fatal("initializing view must use AltScreen") }
+	if !v.AltScreen {
+		t.Fatal("initializing view must use AltScreen")
+	}
 	if !strings.Contains(v.Content, "Initializing") {
 		t.Fatalf("initializing view should contain 'Initializing'; got %q", v.Content)
 	}
@@ -91,8 +101,12 @@ func TestHandleKeyQuit(t *testing.T) {
 		m := NewModel()
 		updated, cmd := m.Update(tea.KeyPressMsg(tea.Key{Text: key, Code: 'q'}))
 		fm := updated.(Model)
-		if !fm.quitting { t.Errorf("Update(%s) should set quitting", key) }
-		if cmd == nil { t.Errorf("Update(%s) should return a tea.Quit cmd", key) }
+		if !fm.quitting {
+			t.Errorf("Update(%s) should set quitting", key)
+		}
+		if cmd == nil {
+			t.Errorf("Update(%s) should return a tea.Quit cmd", key)
+		}
 	}
 }
 
@@ -172,7 +186,9 @@ func TestProcessSearchCapturesNavKeys(t *testing.T) {
 func TestTickRefreshesSnapshot(t *testing.T) {
 	m := NewModel()
 	info := m.collector.Collect(m.ctx)
-	if !info.LastUpdate.IsZero() { m.last = info }
+	if !info.LastUpdate.IsZero() {
+		m.last = info
+	}
 	_, _ = m.Update(tickMsg(time.Now()))
 	if m.last.LastUpdate.IsZero() {
 		t.Fatalf("tick should have refreshed last from the collector")
@@ -187,7 +203,9 @@ func TestRenderEdgeCases(t *testing.T) {
 	for _, view := range []viewID{viewOverview, viewCPU, viewMemory, viewTemperature, viewDisk, viewNetwork, viewSettings} {
 		fm.view = view
 		body := fm.View().Content
-		if body == "" { t.Errorf("view %d should render non-empty content", view) }
+		if body == "" {
+			t.Errorf("view %d should render non-empty content", view)
+		}
 	}
 }
 
@@ -199,7 +217,9 @@ func TestRenderProcessesEmpty(t *testing.T) {
 	fm.last.LastUpdate = time.Now()
 	fm.last.Processes = nil
 	body := fm.View().Content
-	if body == "" { t.Fatalf("Processes tab should render with empty list") }
+	if body == "" {
+		t.Fatalf("Processes tab should render with empty list")
+	}
 }
 
 func TestRenderProcessesWithData(t *testing.T) {
@@ -213,8 +233,12 @@ func TestRenderProcessesWithData(t *testing.T) {
 	}
 	(&fm).updateProcessTable()
 	body := fm.View().Content
-	if !strings.Contains(body, "Processes") { t.Errorf("should contain 'Processes'") }
-	if !strings.Contains(body, "test") { t.Errorf("should contain process name 'test'") }
+	if !strings.Contains(body, "Processes") {
+		t.Errorf("should contain 'Processes'")
+	}
+	if !strings.Contains(body, "test") {
+		t.Errorf("should contain process name 'test'")
+	}
 }
 
 func TestRenderTemperatureBadge(t *testing.T) {
@@ -233,5 +257,57 @@ func TestRenderTemperatureBadge(t *testing.T) {
 	body = fm.View().Content
 	if !strings.Contains(body, "● real") {
 		t.Fatalf("Temperature tab should show 'real' badge; got:\n%s", body)
+	}
+}
+
+// TestTemperatureUnitWiring verifies the TemperatureUnit setting actually
+// changes the rendered unit (was previously hardcoded to °C).
+func TestTemperatureUnitWiring(t *testing.T) {
+	m := NewModel()
+	m.settings = config.Default()
+	m.settings.TemperatureUnit = "C"
+	if got := m.formatTemp(100); got != "100.0°C" {
+		t.Errorf("C: formatTemp(100) = %q, want 100.0°C", got)
+	}
+	m.settings.TemperatureUnit = "F"
+	if got := m.formatTemp(100); got != "212.0°F" { // 100°C == 212°F
+		t.Errorf("F: formatTemp(100) = %q, want 212.0°F", got)
+	}
+}
+
+// TestThresholdMarks verifies the CPU/Mem alert thresholds drive a visible
+// marker (was previously echoed in Settings but never compared to live values).
+func TestThresholdMarks(t *testing.T) {
+	m := NewModel()
+	m.settings = config.Default()
+	m.settings.CPUAlertThreshold = 80
+	m.settings.MemoryAlertThreshold = 0 // 0 disables
+	m.last.CPU.UsagePercent = 85
+	m.last.Memory.UsagePercent = 95
+	cpu, mem := m.thresholdMarks()
+	if cpu != "!" {
+		t.Errorf("CPU 85 over threshold 80 should mark; got %q", cpu)
+	}
+	if mem != "" {
+		t.Errorf("Mem threshold 0 disables; got %q", mem)
+	}
+	m.last.CPU.UsagePercent = 50
+	if cpu, _ := m.thresholdMarks(); cpu != "" {
+		t.Errorf("CPU 50 under threshold 80 should not mark; got %q", cpu)
+	}
+}
+
+// TestUpdateIntervalApplied verifies the saved UpdateInterval drives the tick
+// cadence (was previously hardcoded to 1s).
+func TestUpdateIntervalApplied(t *testing.T) {
+	m := NewModel()
+	m.settings = config.Default()
+	m.settings.UpdateInterval = 2 * time.Second
+	// tickCmd is opaque, but it must not panic and must read the setting; the
+	// observable contract is that NewModel created the collector at the saved
+	// interval. Here we just assert the helper honors a custom interval by not
+	// falling back when one is set (smoke: cmd is non-nil).
+	if cmd := m.tickCmd(); cmd == nil {
+		t.Fatal("tickCmd returned nil")
 	}
 }

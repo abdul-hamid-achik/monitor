@@ -29,7 +29,7 @@ server.
 ### 1. Interactive TUI
 
 ```bash
-./bin/monitor          # launches the Bubble Tea v2 TUI (8 tabs)
+./bin/monitor          # launches the Bubble Tea v2 TUI (9 tabs)
 ```
 
 ### 2. CLI + JSON (for scripts and agents)
@@ -101,7 +101,7 @@ sudo cp bin/monitor /usr/local/bin/
 | `q` / `Ctrl+C` | Quit |
 | `→` / `Tab` / `l` | Next tab |
 | `←` / `Shift+Tab` / `h` | Previous tab |
-| `1`–`8` | Jump to a tab (Overview, CPU, Memory, Temperature, Disk, Network, Processes, Settings) |
+| `1`–`9` | Jump to a tab (Overview, CPU, Memory, Temperature, Disk, Network, Processes, Settings, Trends) |
 | `/` | Search processes |
 | `Space` | Toggle process selection |
 | `Ctrl+A` / `Ctrl+D` | Select all / clear selection |
@@ -113,7 +113,8 @@ keys above.
 
 ### Tabs
 
-Overview, CPU, Memory, Temperature, Disk, Network, Processes, and Settings.
+Overview, CPU, Memory, Temperature, Disk, Network, Processes, Settings, and
+Trends (longer-range sparklines from `monitor history record`).
 Settings are read from `~/.config/monitor/config.json` (written atomically).
 
 ## Safety features

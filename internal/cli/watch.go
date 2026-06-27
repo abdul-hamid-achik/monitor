@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -20,15 +21,15 @@ import (
 //
 // Schema fields are stable; do not reorder without a migration note.
 type Event struct {
-	Type      string                 `json:"type"`
-	Timestamp time.Time              `json:"timestamp"`
-	CPU       *collector.CPUInfo     `json:"cpu,omitempty"`
-	Memory    *collector.MemoryInfo  `json:"memory,omitempty"`
-	Network   *collector.NetworkInfo `json:"network,omitempty"`
-	Hostname  string                 `json:"hostname,omitempty"`
-	Alert     *collector.Alert       `json:"alert,omitempty"`
+	Type      string                   `json:"type"`
+	Timestamp time.Time                `json:"timestamp"`
+	CPU       *collector.CPUInfo       `json:"cpu,omitempty"`
+	Memory    *collector.MemoryInfo    `json:"memory,omitempty"`
+	Network   *collector.NetworkInfo   `json:"network,omitempty"`
+	Hostname  string                   `json:"hostname,omitempty"`
+	Alert     *collector.Alert         `json:"alert,omitempty"`
 	Stash     *incidents.CaptureResult `json:"stash,omitempty"`
-	StashErr  string                 `json:"stash_error,omitempty"`
+	StashErr  string                   `json:"stash_error,omitempty"`
 }
 
 func newWatchCmd() *cobra.Command {
@@ -69,11 +70,17 @@ the incident via internal/incidents (fcheap stash, content-addressed).`,
 			}
 
 			// Each enabled sink is one alert handler; all run in goroutines so
-			// the watch loop never blocks on I/O.
+			// the watch loop never blocks on I/O. A WaitGroup tracks every
+			// in-flight delivery so the command can drain them before exiting
+			// (otherwise `watch --once --stash/--webhook/--notify` would return
+			// and kill the still-running goroutines mid-delivery).
+			var wg sync.WaitGroup
 			var handlers []func(ev collector.Event, a collector.Alert)
 			if stash {
 				handlers = append(handlers, func(ev collector.Event, a collector.Alert) {
+					wg.Add(1)
 					go func(ev collector.Event, a collector.Alert) {
+						defer wg.Done()
 						ctx2, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 						defer cancel()
 						res, err := incidents.Capture(ctx2, incidents.CaptureRequest{
@@ -99,7 +106,9 @@ the incident via internal/incidents (fcheap stash, content-addressed).`,
 			if webhookURL != "" {
 				client := &http.Client{Timeout: 10 * time.Second}
 				handlers = append(handlers, func(_ collector.Event, a collector.Alert) {
+					wg.Add(1)
 					go func(a collector.Alert) {
+						defer wg.Done()
 						ctx2, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 						defer cancel()
 						if err := notify.Webhook(ctx2, client, webhookURL, a); err != nil {
@@ -110,7 +119,9 @@ the incident via internal/incidents (fcheap stash, content-addressed).`,
 			}
 			if notifyDesktop {
 				handlers = append(handlers, func(_ collector.Event, a collector.Alert) {
+					wg.Add(1)
 					go func(a collector.Alert) {
+						defer wg.Done()
 						ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 						defer cancel()
 						if err := notify.Desktop(ctx2, a); err != nil {
@@ -149,7 +160,7 @@ the incident via internal/incidents (fcheap stash, content-addressed).`,
 						return err
 					}
 				}
-				return WriteNDJSON(Event{
+				err := WriteNDJSON(Event{
 					Type:      "tick",
 					Timestamp: info.LastUpdate,
 					CPU:       &info.CPU,
@@ -157,8 +168,15 @@ the incident via internal/incidents (fcheap stash, content-addressed).`,
 					Network:   &info.Network,
 					Hostname:  info.Hostname,
 				})
+				// Drain any alert deliveries spawned above before exiting,
+				// otherwise --once would abandon them mid-flight.
+				wg.Wait()
+				return err
 			}
-			return watchLoop(ctx, c, engine, interval)
+			err := watchLoop(ctx, c, engine, interval)
+			// On shutdown (ctx cancel), let the final tick's deliveries finish.
+			wg.Wait()
+			return err
 		},
 	}
 	cmd.Flags().DurationVarP(&interval, "interval", "i", time.Second, "tick interval")
@@ -231,10 +249,10 @@ func init() {
 // tree; PID-specific profiles are bundled separately).
 func eventToSystemInfo(ev collector.Event) collector.SystemInfo {
 	return collector.SystemInfo{
-		CPU:         ev.CPU,
-		Memory:      ev.Memory,
-		Network:     ev.Network,
-		Hostname:    ev.Hostname,
-		LastUpdate:  ev.Timestamp,
+		CPU:        ev.CPU,
+		Memory:     ev.Memory,
+		Network:    ev.Network,
+		Hostname:   ev.Hostname,
+		LastUpdate: ev.Timestamp,
 	}
 }

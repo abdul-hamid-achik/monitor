@@ -8,6 +8,10 @@ export default defineConfig({
   lastUpdated: true,
   cleanUrls: true,
 
+  // Served as a GitHub Pages project site at /monitor/. Override with
+  // DOCS_BASE=/ for a root deploy (e.g. a custom domain or Vercel).
+  base: process.env.DOCS_BASE ?? '/monitor/',
+
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },

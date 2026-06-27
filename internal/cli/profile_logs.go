@@ -328,7 +328,13 @@ func investigatePipeline(ctx context.Context, pid int32, ttl string, noSave bool
 	}
 	if err != nil {
 		report["stash_error"] = err.Error()
-		report["note"] = "stash failed; profile captured locally at " + res.Path
+		// res.Path is empty when Capture failed before writing the local
+		// bundle; don't dangle a path that points nowhere.
+		if res.Path != "" {
+			report["note"] = "stash failed; profile captured locally at " + res.Path
+		} else {
+			report["note"] = "stash failed; no local bundle written"
+		}
 	}
 	return report
 }
@@ -352,14 +358,23 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol) []map[string]
 		if s.Weight > 0 {
 			entry["weight_pct"] = s.Weight
 		}
-		if sym, err := ecosystem.CodemapSymbolAt(ctx, s.File, s.Line); err == nil {
+		// Bound each codemap subprocess so one slow/hung invocation can't stall
+		// the whole pipeline (and hang the stdio MCP server, whose ctx has no
+		// deadline). Mirrors ecosystem.probe()'s per-call timeout.
+		symCtx, symCancel := context.WithTimeout(ctx, 5*time.Second)
+		sym, err := ecosystem.CodemapSymbolAt(symCtx, s.File, s.Line)
+		symCancel()
+		if err == nil {
 			entry["resolution"] = sym.Resolution
 			if sym.FQN != "" {
 				entry["fqn"] = sym.FQN
 				entry["kind"] = sym.Kind
 				// Enrich resolved frames with blast radius + test coverage,
 				// turning the frame list into a "fix this first" ranking.
-				if imp, ierr := ecosystem.CodemapImpactAt(ctx, s.File, s.Line, 0); ierr == nil && imp.Found {
+				impCtx, impCancel := context.WithTimeout(ctx, 5*time.Second)
+				imp, ierr := ecosystem.CodemapImpactAt(impCtx, s.File, s.Line, 0)
+				impCancel()
+				if ierr == nil && imp.Found {
 					blast := len(imp.BlastRadius)
 					entry["callers"] = len(imp.DirectCallers)
 					entry["blast"] = blast
@@ -378,8 +393,23 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol) []map[string]
 		}
 		out = append(out, entry)
 	}
-	// Highest score (hot x blast) first.
-	sort.Slice(out, func(i, j int) bool { return correlationScore(out[i]) > correlationScore(out[j]) })
+	// Highest score (hot x blast) first. Stable with a file:line tiebreaker so
+	// equal-score frames (common for heap/goroutine profiles, which carry no
+	// per-frame weight) rank deterministically across runs.
+	sort.SliceStable(out, func(i, j int) bool {
+		si, sj := correlationScore(out[i]), correlationScore(out[j])
+		if si != sj {
+			return si > sj
+		}
+		fi, _ := out[i]["file"].(string)
+		fj, _ := out[j]["file"].(string)
+		if fi != fj {
+			return fi < fj
+		}
+		li, _ := out[i]["line"].(int)
+		lj, _ := out[j]["line"].(int)
+		return li < lj
+	})
 	return out
 }
 

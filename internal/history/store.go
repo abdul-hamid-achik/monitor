@@ -3,9 +3,18 @@
 // the durable counterpart to the collector's in-memory ring buffers.
 //
 // The recorder (`monitor history record`) and the query (`monitor history
-// <metric>`) typically run as separate processes, so timestamps are stored as
+// <metric>`) run as separate processes, so timestamps are stored as
 // Unix-nanoseconds (which round-trip through veclite's on-disk serialization
 // reliably) rather than as time.Time values.
+//
+// Concurrency model: the writer (Open) holds an exclusive file lock for the
+// whole recording session, and OpenReadOnly takes a shared lock — the two are
+// mutually exclusive, so a query CANNOT open the store while a recorder is
+// actively running (it gets a lock error, surfaced with guidance). To keep the
+// on-disk snapshot current and bound crash-loss to a single tick, Append flushes
+// each batch with db.Sync() (veclite's default syncOnWrite is off). A reader
+// opened once the recorder has released the lock therefore sees every synced
+// sample, not just those from the last clean Close.
 package history
 
 import (
@@ -20,6 +29,12 @@ import (
 )
 
 const collection = "metrics"
+
+// maxRecords caps the recorder's collection so a long-running `monitor history
+// record` can't grow memory/disk without bound. veclite evicts oldest-first
+// (fifo) once the cap is hit. At the default 1s interval × 8 metrics/tick that
+// is ~36 hours of history; higher intervals stretch proportionally.
+const maxRecords = 1_000_000
 
 // DefaultPath returns the default history store path
 // (~/.local/share/monitor/history.veclite), creating the directory.
@@ -85,7 +100,13 @@ func (s *Store) ensureCollection() error {
 	if s.db.HasCollection(collection) {
 		return nil
 	}
-	_, err := s.db.CreateCollection(collection)
+	// Bound the collection at creation so the recorder self-prunes oldest
+	// samples instead of growing forever. (Applies to newly-created stores;
+	// pre-existing collections keep their prior unbounded config.)
+	_, err := s.db.CreateCollection(collection, veclite.WithMemoryLimits(veclite.MemoryConfig{
+		MaxRecords:     maxRecords,
+		EvictionPolicy: "fifo",
+	}))
 	return err
 }
 
@@ -111,7 +132,23 @@ func (s *Store) Append(samples ...Sample) error {
 			return err
 		}
 	}
-	return nil
+	// Flush this batch to disk so (a) a SIGKILL/crash bounds data loss to one
+	// tick rather than the whole session, and (b) a concurrent OpenReadOnly
+	// querier in another process sees freshly recorded samples. veclite's
+	// default syncOnWrite is off, so without this the on-disk file stays frozen
+	// at the last clean Close.
+	return s.db.Sync()
+}
+
+// Sync flushes pending writes to disk. No-op (returns nil) on a read-only or
+// closed store.
+func (s *Store) Sync() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return nil
+	}
+	return s.db.Sync()
 }
 
 // Query returns the samples for metric at or after `since`, oldest-first.
@@ -124,23 +161,29 @@ func (s *Store) Query(metric string, since time.Time) ([]Point, error) {
 	if !s.db.HasCollection(collection) {
 		return nil, nil // nothing recorded yet
 	}
-	res, err := s.db.Collection(collection).Find()
+	// Push the metric-name and time-window predicates into Find so veclite
+	// never clones records for other metrics / older than the window.
+	res, err := s.db.Collection(collection).Find(
+		veclite.Equal("metric", metric),
+		veclite.FilterFunc(func(r *veclite.Record) bool {
+			if r == nil || r.Payload == nil {
+				return false
+			}
+			return !payloadTime(r.Payload["ts"]).Before(since)
+		}),
+	)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Point, 0)
+	out := make([]Point, 0, len(res))
 	for _, rec := range res {
 		if rec == nil || rec.Payload == nil {
 			continue
 		}
-		if m, _ := rec.Payload["metric"].(string); m != metric {
-			continue
-		}
-		t := payloadTime(rec.Payload["ts"])
-		if t.Before(since) {
-			continue
-		}
-		out = append(out, Point{Timestamp: t, Value: payloadFloat(rec.Payload["value"])})
+		out = append(out, Point{
+			Timestamp: payloadTime(rec.Payload["ts"]),
+			Value:     payloadFloat(rec.Payload["value"]),
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp.Before(out[j].Timestamp) })
 	return out, nil

@@ -1,9 +1,40 @@
 package baseline
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+// TestRejectsUnsafeNames guards the path-traversal fix: Save/Load/Delete must
+// refuse names that would escape the baseline directory or collide with the
+// ".baseline-*" temp prefix, and must NOT create/remove any file when they do.
+func TestRejectsUnsafeNames(t *testing.T) {
+	dir := t.TempDir()
+	// A real file outside the baseline dir that a traversal name could target.
+	outside := filepath.Join(dir, "secret.json")
+	if err := os.WriteFile(outside, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bdir := filepath.Join(dir, "baselines")
+
+	for _, name := range []string{"", ".", "..", "../secret", "a/b", ".hidden", "../../etc/passwd"} {
+		if err := Save(bdir, &Baseline{Name: name}); err == nil {
+			t.Errorf("Save(%q) succeeded, want rejection", name)
+		}
+		if _, err := Load(bdir, name); err == nil {
+			t.Errorf("Load(%q) succeeded, want rejection", name)
+		}
+		if err := Delete(bdir, name); err == nil {
+			t.Errorf("Delete(%q) succeeded, want rejection", name)
+		}
+	}
+	// The outside file must be untouched by the rejected operations.
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("outside file was disturbed: %v", err)
+	}
+}
 
 func TestSaveLoadListDelete(t *testing.T) {
 	dir := t.TempDir()
@@ -51,12 +82,12 @@ func TestCompute(t *testing.T) {
 	newB := &Baseline{
 		Name: "new", CPUUsage: 25, MemUsage: 55, Load1: 2.5,
 		Processes: map[int32]ProcSnap{
-			1: {Name: "keep", Memory: 1010},  // +10, below threshold
+			1: {Name: "keep", Memory: 1010},   // +10, below threshold
 			2: {Name: "grow", Memory: 200000}, // big growth
 			4: {Name: "new", Memory: 4000},    // appeared
 		},
 		Listeners: []Listener{
-			{Proto: "tcp", Port: 5432, PID: 1, Process: "pg"}, // unchanged
+			{Proto: "tcp", Port: 5432, PID: 1, Process: "pg"},  // unchanged
 			{Proto: "tcp", Port: 6060, PID: 4, Process: "new"}, // new
 		},
 	}
