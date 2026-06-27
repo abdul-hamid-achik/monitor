@@ -48,6 +48,9 @@ Every subcommand supports `--json` for machine-readable output:
 ./bin/monitor investigate 1234 --json             # snapshot + profile + codemap-ranked stash
 ./bin/monitor history record                       # persist metric samples over time
 ./bin/monitor history query cpu.usage --since 1h --json   # time-series + trend stats
+./bin/monitor baseline save pre-deploy             # capture a labeled snapshot
+./bin/monitor diff pre-deploy                       # what changed since the baseline
+./bin/monitor watch --webhook https://… --notify    # POST/desktop-notify on each alert
 ./bin/monitor doctor --json                       # ecosystem tool availability
 ./bin/monitor vault --project myapp -- mycommand  # run with tinyvault secrets injected
 ```

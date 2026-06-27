@@ -48,6 +48,9 @@ changes. When in doubt, follow AGENTS.md (it is more comprehensive).
 - `internal/profiler/` — pprof + sample capture
 - `internal/capture/` — process stdout/stderr → veclite log capture
 - `internal/history/` — veclite-backed persistent metric time-series (`monitor history`)
+- `internal/baseline/` — labeled snapshots + diff (`monitor baseline` / `monitor diff`)
+- `internal/notify/` — outbound alert sinks (webhook + desktop notifications)
+- `internal/cgroup/` — cgroup v2 limit parsing (container-aware memory)
 - `internal/incidents/` — fcheap content-addressed incident stash
 - `internal/reload/` — localhost HTTP `/reload` endpoint
 - `internal/temperature/` — real SMC temperature via powermetrics (graceful fallback)
