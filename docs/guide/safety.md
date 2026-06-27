@@ -21,8 +21,8 @@ was flagged.
 
 | Surface | How you confirm |
 |---------|-----------------|
-| **TUI** | A confirmation dialog appears (`k` = SIGTERM, `x` = SIGKILL); protected/system PIDs stay refused even at the dialog. |
-| **CLI** | `monitor kill <pid>` refuses protected/system PIDs; `--yes` skips the protection checks for non-protected targets. |
+| **TUI** | A confirmation dialog appears (`k` = SIGTERM, `x` = SIGKILL); confirm with `y`, cancel with `n`/`esc`. Protected PIDs stay refused even at the dialog (system-owned non-protected PIDs are still killable here, unlike the CLI/MCP refusal). |
+| **CLI** | `monitor kill <pid>` refuses protected/system PIDs; `--yes` skips **all** protection checks and will attempt even protected/system targets (the OS may still deny them). |
 | **MCP** | `monitor_kill` requires `confirm: true` in its typed input, *and* still refuses protected/system PIDs with a structured `{ "refused": true }` payload. |
 
 ## SIGTERM vs SIGKILL
@@ -40,11 +40,17 @@ cleanly. Force-kill (`SIGKILL`) is always an explicit, separate action:
 $ monitor kill 1 --json
 {
   "killed": false,
-  "refused": true,
-  "reason": "launchd (pid 1) is a protected system process",
-  "pid": 1
+  "protected": true,
+  "safety_warnings": [
+    "launchd (pid 1) is a protected system process"
+  ],
+  "note": "protected or system process; pass --yes to override",
+  "confirmation": { "HasProtected": true, "HasSystem": false }
 }
 ```
 
-The same target is refused identically through the TUI and the MCP tool — the
-classification lives in one place, so the three surfaces can't drift apart.
+(The MCP `monitor_kill` tool returns a different shape — `{ "killed": false,
+"refused": true, "reason": ..., "pid": ... }` — for the same refusal.)
+
+A protected target like `launchd` is refused identically across the CLI, TUI,
+and MCP — the protected-process classification lives in one place.

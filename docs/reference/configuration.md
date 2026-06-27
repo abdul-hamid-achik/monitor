@@ -74,10 +74,13 @@ Monitor is deliberately forgiving here:
 ## Temperature source flag
 
 Separate from the config file, a persistent CLI flag controls how temperature
-is read. It is available on **every** subcommand (and on the bare TUI):
+is read. It is a persistent flag, so it is available on **every** subcommand,
+including the TUI (`monitor studio`):
 
 ```bash
-monitor --no-temperature-source
+monitor studio --no-temperature-source
+# or for a one-shot:
+monitor snapshot --no-temperature-source
 ```
 
 By default Monitor wires a `powermetrics`-backed temperature source so readings

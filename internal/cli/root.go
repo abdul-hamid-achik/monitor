@@ -22,8 +22,8 @@ Run the interactive TUI with 'monitor studio'. Every view is also a JSON CLI
 command (snapshot, watch, process, tree, history, diff, ...) and an MCP stdio
 server ('monitor mcp serve'), so scripts and agents get the same data.
 
-When the monitor launches a child process or spec, it sets MONITOR=1 and
-MONITOR_RUN_DIR=<dir> so the child can detect it is being observed.`,
+When the monitor launches a child process or spec, it sets MONITOR=1 so the
+child can detect it is being observed.`,
 		SilenceUsage:  true,
 		SilenceErrors: false,
 		Version:       Version,

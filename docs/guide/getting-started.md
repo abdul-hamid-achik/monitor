@@ -83,11 +83,11 @@ matches how you want to use it:
 
 ### 1. The TUI
 
-The default experience: a live, themed dashboard with sortable processes,
-multi-select, and safety-checked termination.
+A live, themed dashboard with sortable processes, multi-select, and
+safety-checked termination. Launch it with the `studio` subcommand:
 
 ```bash
-./bin/monitor
+./bin/monitor studio
 ```
 
 → See [The TUI](/guide/tui) for the full tab and keyboard reference.

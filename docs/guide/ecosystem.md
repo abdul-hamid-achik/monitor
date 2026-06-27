@@ -174,9 +174,8 @@ is observing them.
 ```
 
 Monitor invokes `glyph run --format json <spec>`. When Monitor launches a child
-process or spec it also sets `MONITOR=1` and `MONITOR_RUN_DIR=<dir>` in the
-child's environment, so the spec (or any process it spawns) can detect that it
-is being observed.
+process or spec it sets `MONITOR=1` in the child's environment, so the spec (or
+any process it spawns) can detect that it is being observed.
 
 ## Code correlation with codemap
 

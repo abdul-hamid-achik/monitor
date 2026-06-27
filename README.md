@@ -57,8 +57,8 @@ Every subcommand supports `--json` for machine-readable output:
 ./bin/monitor vault --project myapp -- mycommand  # run with tinyvault secrets injected
 ```
 
-When Monitor launches a child process or spec it sets `MONITOR=1` and
-`MONITOR_RUN_DIR=<dir>` so the child can detect it is being observed.
+When Monitor launches a child process or spec it sets `MONITOR=1` so the child
+can detect it is being observed.
 
 ### 3. MCP server (for AI agents)
 

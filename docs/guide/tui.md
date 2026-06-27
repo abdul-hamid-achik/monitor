@@ -48,13 +48,13 @@ selected row:
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` | Select a setting row |
+| `↑` / `↓` (or `k` / `j`) | Select a setting row |
 | `Enter` / `Space` | Cycle the selected value forward |
-| `-` | Cycle the selected value back |
+| `-` (or `_`) | Cycle the selected value back |
 | `s` | Save the current settings to the config file |
 
 Because `h`/`l` and the arrow keys `←`/`→` remain bound to tab navigation,
-row selection uses `↑`/`↓` and value editing uses `Enter`/`Space`/`-`. Changes
+row selection uses `↑`/`↓` (or `k`/`j`) and value editing uses `Enter`/`Space`/`-`. Changes
 are held in memory until you press `s`, which writes them to the
 [config file](/reference/configuration) at `~/.config/monitor/config.json`; a
 `✓ saved` marker confirms the write.
@@ -109,7 +109,8 @@ You can act on either a single highlighted row or a multi-row selection:
 
 1. **Select** rows with `Space` (toggling each one), `Ctrl+A` (select all
    filtered rows), or `Ctrl+D` (clear). Selected rows are marked with a `▸`
-   and the tab title shows the count, e.g. `Processes - 3 selected`.
+   and the Processes panel heading shows the count, e.g.
+   `Processes - 3 selected │ k:kill x:force-kill`.
 2. **Kill** with `k` (SIGTERM) or `x` (SIGKILL). If you haven't explicitly
    selected anything, the currently highlighted row is used.
 3. A **confirmation dialog** appears, listing each target PID and a safety

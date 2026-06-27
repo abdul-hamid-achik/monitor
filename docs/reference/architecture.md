@@ -48,7 +48,7 @@ monitor/
 | Package | Role |
 |---------|------|
 | `internal/collector` | Pub/sub metric collector — publishes an `Event` on every tick; the canonical pattern other packages follow. Holds the metric types (`CPUInfo`, `MemoryInfo`, `ProcessInfo`, ...) and a generic ring buffer. |
-| `internal/cli` | Cobra subcommands (`snapshot`, `watch`, `process`, `kill`, `profile`, `logs`, `investigate`, `doctor`, `mcp`, `v2`) plus the `--json` output helpers. |
+| `internal/cli` | Cobra subcommands (`snapshot`, `watch`, `process`, `kill`, `profile`, `logs`, `investigate`, `doctor`, `mcp`, `studio`) plus the `--json` output helpers. |
 | `internal/mcp` | MCP stdio server: 7 tools (3 read-only, 4 mutating) over the standard Model Context Protocol transport, with confirm-gated mutation. |
 | `internal/analyzer` | Pluggable anomaly rules — `CPUSpikeRule` (CPU% over a baseline factor) and `RSSGrowthRule` (linear regression on the RSS ring buffer). |
 | `internal/capture` | Log capture pipeline — pumps a child process's stdout/stderr into the veclite log store. |

@@ -20,7 +20,7 @@ hero:
 features:
   - icon: 📊
     title: Real-time TUI
-    details: CPU, Memory, Temperature, Network, Disk, and Processes across 8 tabs, built on Bubble Tea v2 with a Nord theme.
+    details: CPU, Memory, Temperature, Disk, Network, and Processes across 9 tabs (plus Overview, Settings, and Trends), built on Bubble Tea v2 with a Nord theme.
   - icon: 🤖
     title: Agent-harnessable
     details: Every view is also a --json CLI command and an MCP stdio tool, so scripts and AI agents see exactly what you see.

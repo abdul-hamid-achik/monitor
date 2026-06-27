@@ -13,8 +13,9 @@ ecosystem health, and — with explicit confirmation — take action.
 
 The server speaks MCP over **stdio** using newline-delimited JSON-RPC. It does
 not open a port; the agent harness launches `monitor mcp serve` as a child
-process and talks to it over stdin/stdout. There are no flags — just run the
-subcommand and connect.
+process and talks to it over stdin/stdout. The serve subcommand takes no flags
+of its own — just run it and connect. (The global `--no-temperature-source`
+flag still applies and forces the CPU-load temperature fallback.)
 
 ## Tools
 

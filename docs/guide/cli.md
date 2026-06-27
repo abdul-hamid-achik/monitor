@@ -22,14 +22,14 @@ The subcommands group into four purposes:
   [`diff`](#diff).
 - **Ecosystem & runtime** — talk to sibling tools and the running TUI:
   [`doctor`](#doctor), [`run`](#run), [`reload`](#reload), [`mcp`](#mcp),
-  [`vault`](#vault), [`v2`](#v2).
+  [`vault`](#vault), [`studio`](#studio).
 
 ## Global flags
 
 | Flag | Effect |
 |------|--------|
 | `--no-temperature-source` | Skip `powermetrics`; use the CPU-load estimation fallback (no sudo required). Persistent — available under every subcommand. |
-| `--json` | Emit JSON (or NDJSON for [`watch`](#watch)) to stdout. Supported by every subcommand except [`run`](#run), [`reload`](#reload), [`mcp`](#mcp), [`vault`](#vault), and [`v2`](#v2). |
+| `--json` | Emit JSON (or NDJSON for [`watch`](#watch)) to stdout. Supported by every subcommand except [`run`](#run), [`reload`](#reload), [`mcp`](#mcp), [`vault`](#vault), and [`studio`](#studio). |
 | `--pprof <addr>` | Expose Monitor's **own** `net/http/pprof` on `addr` (e.g. `localhost:6060`). Off by default. |
 | `--version` | Print the version and exit. |
 
@@ -56,16 +56,15 @@ Monitor's own profiler at it to capture Monitor profiling Monitor:
 
 ### Observed-child environment
 
-When Monitor launches a child process or spec, it sets two environment
-variables so the child can detect that it is being observed:
+When Monitor launches a child process or spec, it sets `MONITOR=1` in the
+child's environment so the child can detect that it is being observed:
 
 ```
 MONITOR=1
-MONITOR_RUN_DIR=<dir>
 ```
 
-A child that already sees `MONITOR_RUN_DIR` will not have `MONITOR` re-set, so
-nested invocations don't clobber the outer run directory.
+When a richer parent (e.g. glyphrun) already exports `MONITOR_RUN_DIR`, Monitor
+leaves `MONITOR` alone, so nested invocations don't clobber the outer run.
 
 ## Inspect
 
