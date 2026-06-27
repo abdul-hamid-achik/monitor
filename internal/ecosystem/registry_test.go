@@ -55,6 +55,19 @@ func TestSymbolAtDecode(t *testing.T) {
 	}
 }
 
+// TestImpactDecode locks the Impact struct tags against the real
+// `codemap impact --json` shape (only the array counts matter to callers).
+func TestImpactDecode(t *testing.T) {
+	js := `{"symbol":"Collect","found":true,"direct_callers":[1,2,3],"blast_radius":[1,2,3,4,5],"tests":[1],"untested":false}`
+	imp, err := decodeJSON[Impact]([]byte(js), "codemap impact")
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !imp.Found || len(imp.DirectCallers) != 3 || len(imp.BlastRadius) != 5 || len(imp.Tests) != 1 || imp.Untested {
+		t.Errorf("decoded = %+v", imp)
+	}
+}
+
 func TestProbeRunsEvenWithMissingTools(t *testing.T) {
 	// Probe must never panic and must return a Status struct.
 	st := Probe(context.Background())

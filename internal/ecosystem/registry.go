@@ -185,6 +185,34 @@ func CodemapSymbolAt(ctx context.Context, file string, line int) (SymbolAt, erro
 	return decodeJSON[SymbolAt](out, "codemap symbol-at")
 }
 
+// Impact is the result of `codemap impact --at <file>:<line> --json`: the
+// blast radius (transitive callers) and test coverage of the enclosing
+// symbol. The caller/blast/test slices are kept raw — only their counts
+// matter here.
+type Impact struct {
+	Symbol        string            `json:"symbol"`
+	Found         bool              `json:"found"`
+	DirectCallers []json.RawMessage `json:"direct_callers"`
+	BlastRadius   []json.RawMessage `json:"blast_radius"`
+	Tests         []json.RawMessage `json:"tests"`
+	Untested      bool              `json:"untested"`
+}
+
+// CodemapImpactAt computes the blast radius (transitive callers) and test
+// coverage for the symbol enclosing file:line, via `codemap impact --at`.
+// depth bounds the blast-radius hops (0 uses codemap's default).
+func CodemapImpactAt(ctx context.Context, file string, line, depth int) (Impact, error) {
+	args := []string{"impact", "--at", fmt.Sprintf("%s:%d", file, line), "--json"}
+	if depth > 0 {
+		args = append(args, "--depth", fmt.Sprintf("%d", depth))
+	}
+	out, err := runJSON(ctx, "codemap", args...)
+	if err != nil {
+		return Impact{}, err
+	}
+	return decodeJSON[Impact](out, "codemap impact")
+}
+
 // -- fcheap wrappers -------------------------------------------------------
 //
 // monitor uses fcheap as its incident-stash vault. Each alert (or manual

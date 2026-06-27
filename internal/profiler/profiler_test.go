@@ -79,6 +79,9 @@ Showing nodes accounting for 2990ms, 100% of 2990ms total
 	if syms[0].Func != "main.burn" || syms[0].Line != 11 {
 		t.Errorf("first symbol = %+v, want main.burn :11", syms[0])
 	}
+	if syms[0].Weight != 87.96 {
+		t.Errorf("first symbol weight = %v, want 87.96 (the flat%%)", syms[0].Weight)
+	}
 	if syms[1].Func != "runtime.asyncPreempt" {
 		t.Errorf("second symbol = %+v, want runtime.asyncPreempt", syms[1])
 	}

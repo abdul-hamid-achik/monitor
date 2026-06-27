@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -348,16 +349,45 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol) []map[string]
 			continue
 		}
 		entry := map[string]any{"func": s.Func, "file": s.File, "line": s.Line}
+		if s.Weight > 0 {
+			entry["weight_pct"] = s.Weight
+		}
 		if sym, err := ecosystem.CodemapSymbolAt(ctx, s.File, s.Line); err == nil {
 			entry["resolution"] = sym.Resolution
 			if sym.FQN != "" {
 				entry["fqn"] = sym.FQN
 				entry["kind"] = sym.Kind
+				// Enrich resolved frames with blast radius + test coverage,
+				// turning the frame list into a "fix this first" ranking.
+				if imp, ierr := ecosystem.CodemapImpactAt(ctx, s.File, s.Line, 0); ierr == nil && imp.Found {
+					blast := len(imp.BlastRadius)
+					entry["callers"] = len(imp.DirectCallers)
+					entry["blast"] = blast
+					entry["tests"] = len(imp.Tests)
+					entry["untested"] = imp.Untested
+					// Score = runtime cost x blast radius. Frames that are both
+					// hot AND central rank highest. Without a per-frame weight
+					// (heap profiles), rank by blast radius alone.
+					if s.Weight > 0 {
+						entry["score"] = s.Weight * float64(blast)
+					} else {
+						entry["score"] = float64(blast)
+					}
+				}
 			}
 		}
 		out = append(out, entry)
 	}
+	// Highest score (hot x blast) first.
+	sort.Slice(out, func(i, j int) bool { return correlationScore(out[i]) > correlationScore(out[j]) })
 	return out
+}
+
+func correlationScore(m map[string]any) float64 {
+	if v, ok := m["score"].(float64); ok {
+		return v
+	}
+	return 0
 }
 
 func newStashCmd() *cobra.Command {

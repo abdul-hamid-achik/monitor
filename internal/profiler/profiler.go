@@ -34,6 +34,10 @@ type Symbol struct {
 	File   string `json:"file"`
 	Line   int    `json:"line"`
 	Source string `json:"source,omitempty"`
+	// Weight is the frame's share of the profile as a percentage (the pprof
+	// "flat%"), when available (CPU profiles). 0 for formats without a
+	// per-frame cost (e.g. the heap ?debug=1 dump).
+	Weight float64 `json:"weight,omitempty"`
 }
 
 // Profile is the result of a capture.
@@ -190,7 +194,10 @@ func parsePprofTop(text string) []Symbol {
 			continue
 		}
 		seen[fn] = true
-		syms = append(syms, Symbol{Func: fn, File: fileLine[:colon], Line: ln})
+		// flat% is the 2nd column, e.g. "87.96%".
+		var weight float64
+		fmt.Sscanf(strings.TrimSuffix(parts[1], "%"), "%g", &weight)
+		syms = append(syms, Symbol{Func: fn, File: fileLine[:colon], Line: ln, Weight: weight})
 		if len(syms) >= 25 {
 			break
 		}
