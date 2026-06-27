@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/abdul-hamid-achik/monitor/internal/cgroup"
+
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
@@ -156,6 +158,7 @@ func (c *Collector) Collect(ctx context.Context) SystemInfo {
 	c.info.LastUpdate = time.Now()
 	c.collectCPU(ctx)
 	c.collectMemory(ctx)
+	c.collectCgroup()
 	c.collectTemperature()
 	c.collectNetwork(ctx)
 	c.collectDisk(ctx)
@@ -261,6 +264,32 @@ func (c *Collector) collectMemory(ctx context.Context) {
 	c.memHist.Push(c.info.Memory.UsagePercent)
 	c.info.Memory.History = c.memHist.ToSlice()
 	c.info.Memory.LastUpdate = time.Now()
+}
+
+// collectCgroup reads cgroup v2 limits and, when a memory limit is set (a
+// container), re-reports memory against the limit instead of host RAM so usage
+// reflects the container rather than the whole machine. No-op on the host /
+// macOS (Active=false).
+func (c *Collector) collectCgroup() {
+	l := cgroup.Read()
+	c.info.Cgroup = CgroupInfo{
+		Limited:       l.Active,
+		MemLimitBytes: l.MemLimit,
+		MemUsageBytes: l.MemCurrent,
+		CPUQuotaCores: l.CPUQuota,
+	}
+	if l.MemLimit > 0 {
+		free := uint64(0)
+		if l.MemLimit > l.MemCurrent {
+			free = l.MemLimit - l.MemCurrent
+		}
+		c.info.Memory.TotalBytes = l.MemLimit
+		c.info.Memory.UsedBytes = l.MemCurrent
+		c.info.Memory.FreeBytes = free
+		c.info.Memory.AvailableBytes = free
+		c.info.Memory.UsagePercent = float64(l.MemCurrent) / float64(l.MemLimit) * 100
+		c.info.Memory.MemoryPressure = c.info.Memory.UsagePercent
+	}
 }
 
 func (c *Collector) collectTemperature() {

@@ -111,9 +111,19 @@ type ProcessInfo struct {
 }
 
 // SystemInfo aggregates all metric families.
+// CgroupInfo reports cgroup v2 limits when running inside a limited cgroup
+// (a Linux container). Limited is false on the host and on macOS.
+type CgroupInfo struct {
+	Limited       bool    `json:"limited"`
+	MemLimitBytes uint64  `json:"mem_limit_bytes,omitempty"`
+	MemUsageBytes uint64  `json:"mem_usage_bytes,omitempty"`
+	CPUQuotaCores float64 `json:"cpu_quota_cores,omitempty"`
+}
+
 type SystemInfo struct {
 	CPU                 CPUInfo        `json:"cpu"`
 	Memory              MemoryInfo     `json:"memory"`
+	Cgroup              CgroupInfo     `json:"cgroup"`
 	Temperature         TemperatureInfo `json:"temperature"`
 	Network             NetworkInfo    `json:"network"`
 	Disk                DiskInfo       `json:"disk"`

@@ -386,8 +386,12 @@ func (m Model) renderOverview() string {
 		m.titleStyle.Render(" CPU ") + "\n\n" +
 			m.renderGauge(cpu.UsagePercent, m.width/2-10) +
 			fmt.Sprintf("\n  %.2f GHz  │  %d cores  │  %d threads", cpu.FrequencyMHz/1000, cpu.CoreCount, cpu.ThreadCount))
+	memTitle := " Memory "
+	if m.last.Cgroup.Limited && m.last.Cgroup.MemLimitBytes > 0 {
+		memTitle = " Memory [cgroup limit] "
+	}
 	memPanel := m.panelStyle.Width(m.width/2 - 2).Render(
-		m.titleStyle.Render(" Memory ") + "\n\n" +
+		m.titleStyle.Render(memTitle) + "\n\n" +
 			m.renderGauge(mem.UsagePercent, m.width/2-10) +
 			fmt.Sprintf("\n  %s / %s  │  swap %s", collector.FormatBytes(mem.UsedBytes), collector.FormatBytes(mem.TotalBytes), collector.FormatBytes(mem.SwapUsed)))
 	netPanel := m.panelStyle.Width(m.width-4).Render(
