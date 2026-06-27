@@ -45,12 +45,17 @@ outcomes:
       command:
         run: "! ./bin/monitor kill 1 >/dev/null 2>&1"
   - id: unified_gate_classification
-    description: the JSON exposes the shared protected+system classification
+    description: the JSON exposes the shared protected+system classification (snake_case)
     verify:
       command:
-        run: "./bin/monitor kill 1 --json 2>&1 | grep -q 'HasSystem' && ./bin/monitor kill 1 --json 2>&1 | grep -q 'HasProtected'"
-  - id: note_names_protected_or_system
-    description: the refusal note names the unified 'protected or system' gate
+        run: "./bin/monitor kill 1 --json 2>&1 | grep -q 'has_system' && ./bin/monitor kill 1 --json 2>&1 | grep -q 'has_protected'"
+  - id: refusal_uses_refused_and_reason
+    description: CLI refusal payload matches MCP (refused:true + reason)
+    verify:
+      command:
+        run: "./bin/monitor kill 1 --json 2>&1 | grep -q '\"refused\": true' && ./bin/monitor kill 1 --json 2>&1 | grep -qi '\"reason\"'"
+  - id: reason_names_protected_or_system
+    description: the refusal reason names the unified 'protected or system' gate
     verify:
       command:
         run: "./bin/monitor kill 1 --json 2>&1 | grep -qi 'protected or system'"

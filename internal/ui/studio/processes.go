@@ -306,6 +306,17 @@ func (m Model) pidRefused(pid int32) bool {
 	return false
 }
 
+// procName returns the process name for pid from the kill confirmation, or a
+// "pid N" fallback.
+func (m Model) procName(pid int32) string {
+	for _, p := range m.killConf.Processes {
+		if p.PID == pid && p.Name != "" {
+			return p.Name
+		}
+	}
+	return fmt.Sprintf("pid %d", pid)
+}
+
 func (m Model) handleKillConfirmKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.Keystroke() {
 	case "esc", "n":
@@ -315,10 +326,20 @@ func (m Model) handleKillConfirmKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.updateProcessTable()
 		return m, nil
 	case "y":
+		var spared []string
 		for pid := range m.selectedPids {
-			if !m.pidRefused(pid) {
-				_ = kill.Kill(pid, m.forceKill)
+			if m.pidRefused(pid) {
+				spared = append(spared, m.procName(pid))
+				continue
 			}
+			_ = kill.Kill(pid, m.forceKill)
+		}
+		// Report spared PIDs in the status bar — parity with the CLI's refusal
+		// line and the MCP refused payload (don't silently skip them).
+		if len(spared) > 0 {
+			sort.Strings(spared)
+			m.killNotice = fmt.Sprintf("Spared %d protected/system process(es): %s", len(spared), strings.Join(spared, ", "))
+			m.killNoticeTicks = 4
 		}
 		m.showKillConfirm = false
 		m.selectedPids = make(map[int32]bool)

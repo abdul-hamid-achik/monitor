@@ -13,12 +13,14 @@
 //	monitor_kill            safely terminate a process (uses internal/kill)
 //	monitor_profile_capture capture a heap/cpu/goroutine/sample profile
 //	monitor_investigate     run the diagnostic pipeline for a process
-//	monitor_record          start a vidtrace screen recording for a process
+//	monitor_record          capture a whole-screen recording via the platform
+//	                        recorder (screencapture/ffmpeg) for vidtrace to analyze
 //
-// All mutating tools refuse to run without the confirm flag set, mirroring
-// the CLI's --yes convention. This keeps the MCP surface safe for agents
-// to call: the agent must explicitly assert intent before anything changes
-// on the host.
+// All mutating tools refuse to run without the confirm flag set. This is an
+// MCP-side safety gate so an agent must explicitly assert intent before
+// anything changes on the host. (On the CLI only `monitor kill` has a `--yes`
+// gate; `monitor profile`/`investigate` run ungated — the MCP surface is
+// deliberately stricter.)
 package mcp
 
 import (
@@ -85,7 +87,10 @@ func NewServer(svc *Service) *Server {
 			"Call monitor_snapshot first to orient, then drill down with monitor_processes " +
 			"or monitor_doctor. All tools return JSON. Mutating tools (monitor_kill, " +
 			"monitor_profile_capture, monitor_investigate, monitor_record) require the " +
-			"typed 'confirm: true' field in their input before they will run.",
+			"typed 'confirm: true' field in their input before they will run. " +
+			"confirm:true is necessary but not sufficient for monitor_kill: it still " +
+			"refuses protected or system-owned processes and returns " +
+			"{killed:false, refused:true, reason}.",
 	}
 	s.srv = mcp.NewServer(impl, opts)
 	s.register()
@@ -114,7 +119,7 @@ func (s *Server) register() {
 	}, s.handleProfileCapture)
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_investigate",
-		Description: "Run the diagnostic pipeline (snapshot + profile + search + correlate) for a process. Requires `confirm: true`.",
+		Description: "Run the diagnostic pipeline (snapshot + profile + correlate + stash) for a process. Requires `confirm: true`.",
 	}, s.handleInvestigate)
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_record",
@@ -201,8 +206,8 @@ func (s *Server) handleKill(ctx context.Context, _ *mcp.CallToolRequest, in *kil
 	}
 	conf := kill.CheckSafety([]int32{in.PID})
 	if conf.HasProtected || conf.HasSystem {
-		// Mirror the CLI, which refuses both protected and system-owned
-		// PIDs. There is no override path through this tool.
+		// The CLI refuses protected/system PIDs unless --yes is passed; this
+		// tool is stricter and has NO override path (confirm:true is not enough).
 		return result(map[string]any{
 			"killed":  false,
 			"refused": true,
@@ -237,32 +242,38 @@ func (s *Server) handleProfileCapture(ctx context.Context, _ *mcp.CallToolReques
 	}
 	prof, err := s.svc.Profile(ctx, in.PID, profiler.ProfileType(in.Type))
 	if err != nil {
-		return result(map[string]any{"captured": false, "error": err.Error(), "pid": in.PID, "type": in.Type})
+		return result(map[string]any{"captured": false, "error": err.Error(), "pid": in.PID})
 	}
 	return result(map[string]any{
 		"captured": true,
+		"pid":      in.PID,
 		"profile":  prof,
 	})
 }
 
 // handleInvestigate implements monitor_investigate. If the service has
 // wired a real investigator it forwards the call; otherwise it returns the
-// stable stub shape the CLI uses today so consumers always see the same
-// fields (pid, started_at, steps, note).
+// stable stub shape. An "investigated" boolean is added so the tool carries a
+// success/refusal discriminator like kill/profile/record (killed/captured/
+// recording). The boolean is injected here, MCP-side, so the CLI's shared
+// investigatePipeline output is unchanged.
 func (s *Server) handleInvestigate(ctx context.Context, _ *mcp.CallToolRequest, in *investigateInput) (*mcp.CallToolResult, any, error) {
 	if err := requireConfirm(in.Confirm); err != nil {
-		return result(map[string]any{"refused": true, "reason": err.Error(), "pid": in.PID})
+		return result(map[string]any{"investigated": false, "refused": true, "reason": err.Error(), "pid": in.PID})
 	}
 	if s.svc.Investigate != nil {
-		return result(s.svc.Investigate(ctx, in.PID))
+		out := s.svc.Investigate(ctx, in.PID)
+		out["investigated"] = true
+		return result(out)
 	}
 	// Fall back to a stable stub shape when no investigator is wired (e.g.
-	// in tests); production wires the real pipeline.
+	// in tests); production wires the real pipeline (snapshot + profile + stash).
 	return result(map[string]any{
-		"pid":        in.PID,
-		"started_at": nowRFC3339(),
-		"steps":      []string{"snapshot", "profile", "search"},
-		"note":       "investigation pipeline stub (no investigator configured)",
+		"investigated": true,
+		"pid":          in.PID,
+		"started_at":   nowRFC3339(),
+		"steps":        []string{"snapshot", "profile", "stash"},
+		"note":         "investigation pipeline stub (no investigator configured)",
 	})
 }
 

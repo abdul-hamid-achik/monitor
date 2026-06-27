@@ -67,6 +67,12 @@ type Model struct {
 	settingsCursor int
 	settingsSaved  bool
 
+	// killNotice is a transient status-bar message (e.g. when a confirmed kill
+	// spared protected/system PIDs), shown for killNoticeTicks ticks so the TUI
+	// reports the refusal like the CLI/MCP do instead of silently sparing them.
+	killNotice      string
+	killNoticeTicks int
+
 	// Trends-tab data, cached off the render path. The history store is opened
 	// and scanned in Update (throttled), never in View(), so a frame never does
 	// blocking disk I/O. trendsErr=="norec" means no store exists yet.
@@ -177,6 +183,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.last = m.collector.Snapshot()
 		if m.view == viewProcesses {
 			m.updateProcessTable()
+		}
+		// Expire the transient kill notice after a few ticks.
+		if m.killNoticeTicks > 0 {
+			m.killNoticeTicks--
+			if m.killNoticeTicks == 0 {
+				m.killNotice = ""
+			}
 		}
 		// Refresh the Trends cache off the render path, throttled to every 5s
 		// while the tab is visible, so View() never blocks on disk I/O.
@@ -318,10 +331,15 @@ func (m Model) render() string {
 	default:
 		content = "Unknown view"
 	}
-	cpuMark, memMark := m.thresholdMarks()
-	status := m.statusStyle.Width(m.width).Render(
-		fmt.Sprintf(" CPU %.1f%%%s  │  Mem %.1f%%%s  │  Update %s  │  1-9: tabs  │  q: quit ",
-			m.last.CPU.UsagePercent, cpuMark, m.last.Memory.UsagePercent, memMark, m.last.LastUpdate.Format("15:04:05")))
+	statusText := ""
+	if m.killNotice != "" {
+		statusText = " ⚠ " + m.killNotice + " "
+	} else {
+		cpuMark, memMark := m.thresholdMarks()
+		statusText = fmt.Sprintf(" CPU %.1f%%%s  │  Mem %.1f%%%s  │  Update %s  │  1-9: tabs  │  q: quit ",
+			m.last.CPU.UsagePercent, cpuMark, m.last.Memory.UsagePercent, memMark, m.last.LastUpdate.Format("15:04:05"))
+	}
+	status := m.statusStyle.Width(m.width).Render(statusText)
 	return strings.Join([]string{header, content, status}, "\n")
 }
 

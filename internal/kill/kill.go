@@ -11,12 +11,14 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 )
 
-// Confirmation is the result of a safety check.
+// Confirmation is the result of a safety check. JSON tags keep it snake_case,
+// matching the embedded collector.ProcessInfo and the rest of the JSON surface
+// (it is serialized verbatim by both `monitor kill --json` and MCP monitor_kill).
 type Confirmation struct {
-	Processes      []collector.ProcessInfo
-	HasProtected   bool
-	HasSystem      bool
-	SafetyWarnings []string
+	Processes      []collector.ProcessInfo `json:"processes"`
+	HasProtected   bool                    `json:"has_protected"`
+	HasSystem      bool                    `json:"has_system"`
+	SafetyWarnings []string                `json:"safety_warnings"`
 }
 
 // Kill sends SIGTERM (or SIGKILL with force=true) to the given PID.
@@ -53,8 +55,8 @@ func CheckSafety(pids []int32) Confirmation {
 		name, _ := p.Name()
 		user, _ := p.Username()
 		pi := collector.ProcessInfo{PID: pid, Name: name, User: user}
-		isProtected := collector.ProtectedProcessNames[name] || pid == 1 || pid < 100
-		isSystem := user == "root" || user == "_mbsetupuser"
+		isProtected := collector.IsProtectedProcess(name, pid)
+		isSystem := collector.IsSystemProcess(user)
 		if isProtected {
 			conf.HasProtected = true
 			pi.IsProtected = true

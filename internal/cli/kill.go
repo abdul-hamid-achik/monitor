@@ -28,12 +28,15 @@ func newKillCmd() *cobra.Command {
 			conf := kill.CheckSafety(pids)
 			if !skipConfirm && (conf.HasProtected || conf.HasSystem) {
 				if JSONOutput(cmd) {
+					// Field names mirror MCP monitor_kill: refused/reason for the
+					// refusal, "safety" for the kill.Confirmation object.
 					return WriteJSON(map[string]any{
 						"killed":          false,
-						"confirmation":    conf,
+						"refused":         true,
+						"reason":          "protected or system process; pass --yes to override",
+						"safety":          conf,
 						"protected":       conf.HasProtected,
 						"safety_warnings": conf.SafetyWarnings,
-						"note":            "protected or system process; pass --yes to override",
 					})
 				}
 				fmt.Println("Refusing to kill protected/system processes without --yes:")
@@ -43,17 +46,21 @@ func newKillCmd() *cobra.Command {
 				return fmt.Errorf("refused")
 			}
 			results := make([]map[string]any, 0, len(pids))
+			allKilled := true
 			for _, pid := range pids {
 				err := kill.Kill(pid, force)
 				r := map[string]any{"pid": pid, "killed": err == nil}
 				if err != nil {
 					r["error"] = err.Error()
+					allKilled = false
 				}
 				results = append(results, r)
 			}
 			if JSONOutput(cmd) {
+				// killed reflects ACTUAL success (every signal sent), matching
+				// MCP semantics — not merely that the command dispatched.
 				return WriteJSON(map[string]any{
-					"killed":  true,
+					"killed":  allKilled,
 					"results": results,
 				})
 			}

@@ -279,6 +279,47 @@ func TestPidRefusedMatchesCLIAndMCP(t *testing.T) {
 	}
 }
 
+// TestKillConfirmNoticeOnSpared verifies the TUI reports spared protected/
+// system PIDs in a transient notice (parity with the CLI refusal line / MCP
+// refused payload) rather than silently skipping them. Both selected PIDs are
+// refused, so no real process is signaled.
+func TestKillConfirmNoticeOnSpared(t *testing.T) {
+	m := NewModel()
+	m.showKillConfirm = true
+	m.killConf.Processes = []collector.ProcessInfo{
+		{PID: 1, Name: "launchd", IsProtected: true},
+		{PID: 50, Name: "sysd", IsSystem: true},
+	}
+	m.selectedPids = map[int32]bool{1: true, 50: true}
+
+	updated, _ := m.Update(tea.KeyPressMsg(tea.Key{Text: "y", Code: 'y'}))
+	fm := updated.(Model)
+	if fm.killNotice == "" {
+		t.Fatal("confirming a kill of only protected/system PIDs should set a notice")
+	}
+	if !strings.Contains(fm.killNotice, "launchd") || !strings.Contains(fm.killNotice, "Spared 2") {
+		t.Errorf("notice = %q, want spared count + process names", fm.killNotice)
+	}
+	if fm.killNoticeTicks <= 0 {
+		t.Error("notice should have a positive tick countdown")
+	}
+	// The notice appears in the rendered status bar.
+	fm.ready = true
+	fm.width, fm.height = 120, 40
+	if !strings.Contains(fm.View().Content, "Spared 2") {
+		t.Error("status bar should show the spared notice")
+	}
+	// And clears after its ticks elapse.
+	n := fm.killNoticeTicks + 1
+	for i := 0; i < n; i++ {
+		u, _ := fm.Update(tickMsg(time.Now()))
+		fm = u.(Model)
+	}
+	if fm.killNotice != "" {
+		t.Errorf("notice should clear after its ticks; still %q", fm.killNotice)
+	}
+}
+
 func TestRenderProcessesEmpty(t *testing.T) {
 	m := NewModel()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})

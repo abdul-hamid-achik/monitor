@@ -164,3 +164,16 @@ var CriticalProcessNames = map[string]bool{
 	"kernel_task": true,
 	"init":        true,
 }
+
+// IsProtectedProcess is the single definition of "protected" shared by the
+// collector (which serializes it as is_protected) and the kill safety gate, so
+// the value shown on every read surface matches what kill will actually refuse.
+// pid 1 and the low PID range are kernel/early-boot processes.
+func IsProtectedProcess(name string, pid int32) bool {
+	return ProtectedProcessNames[name] || pid == 1 || pid < 100
+}
+
+// IsSystemProcess is the single definition of "system-owned", shared the same way.
+func IsSystemProcess(user string) bool {
+	return user == "root" || user == "_mbsetupuser"
+}
