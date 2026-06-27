@@ -54,6 +54,7 @@ MONITOR_RUN_DIR=<dir> so the child can detect it is being observed.`,
 		newHistoryCmd(),
 		newBaselineCmd(),
 		newDiffCmd(),
+		newTreeCmd(),
 	)
 
 	return root

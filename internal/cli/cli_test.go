@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 )
 
@@ -115,6 +116,39 @@ func TestParsePID(t *testing.T) {
 		if got, err := parsePID(bad); err == nil {
 			t.Errorf("parsePID(%q) = (%d, nil), want an error", bad, got)
 		}
+	}
+}
+
+func TestBuildForest(t *testing.T) {
+	procs := []collector.ProcessInfo{
+		{PID: 1, Name: "init", Parent: 0},
+		{PID: 10, Name: "shell", Parent: 1},
+		{PID: 20, Name: "child", Parent: 10},
+		{PID: 30, Name: "orphan", Parent: 999}, // parent absent -> a root
+	}
+	roots := buildForest(procs, 0)
+	if len(roots) != 2 {
+		t.Fatalf("roots = %d, want 2 (init + orphan)", len(roots))
+	}
+	var init1 *treeNode
+	for _, r := range roots {
+		if r.PID == 1 {
+			init1 = r
+		}
+	}
+	if init1 == nil || len(init1.Children) != 1 || init1.Children[0].PID != 10 {
+		t.Fatalf("init subtree = %+v", init1)
+	}
+	if len(init1.Children[0].Children) != 1 || init1.Children[0].Children[0].PID != 20 {
+		t.Error("pid 20 should nest under shell 10")
+	}
+	// Subtree rooted at a specific pid.
+	sub := buildForest(procs, 10)
+	if len(sub) != 1 || sub[0].PID != 10 || len(sub[0].Children) != 1 {
+		t.Errorf("subtree at 10 = %+v", sub)
+	}
+	if len(buildForest(procs, 12345)) != 0 {
+		t.Error("subtree at a missing pid should be empty")
 	}
 }
 

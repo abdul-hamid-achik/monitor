@@ -476,6 +476,9 @@ func (c *Collector) processInfo(ctx context.Context, p *process.Process) (Proces
 		pi.User = u
 		pi.IsSystem = u == "root" || u == "_mbsetupuser"
 	}
+	if ppid, err := p.PpidWithContext(ctx); err == nil {
+		pi.Parent = ppid
+	}
 	pi.IsProtected = ProtectedProcessNames[pi.Name] || pi.PID == 1
 	return pi, nil
 }
