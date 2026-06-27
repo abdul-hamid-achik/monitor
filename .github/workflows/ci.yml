@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        run: go test -race -count=1 ./...
+
+      - name: build
+        run: go build -o bin/monitor ./cmd/monitor
+
+  specs:
+    name: glyphrun specs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Install glyph (glyphrun)
+        run: |
+          go install github.com/abdul-hamid-achik/glyphrun/cmd/glyph@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Build monitor
+        run: go build -o bin/monitor ./cmd/monitor
+
+      - name: Run specs
+        # stash.yml is excluded: it asserts a real fcheap stash_id, and fcheap
+        # is a Homebrew-distributed tool not available on CI runners. Every
+        # other spec exercises only the monitor binary (tools degrade
+        # gracefully when absent).
+        run: |
+          fail=0
+          for spec in specs/*.yml; do
+            case "$spec" in */stash.yml) echo "skip $spec (needs fcheap)"; continue ;; esac
+            result=$(glyph run "$spec" --format json | python3 -c "import sys, json; print(json.load(sys.stdin).get('status', ''))")
+            if [ "$result" = "passed" ]; then
+              echo "PASS $spec"
+            else
+              echo "FAIL $spec ($result)"
+              fail=1
+            fi
+          done
+          exit $fail
