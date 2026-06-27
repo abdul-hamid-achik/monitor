@@ -1,0 +1,52 @@
+version: 1
+name: monitor_history
+
+intent: |
+  `monitor history query/list` read the persistent metric store. Against a fresh
+  (empty) --db path, query returns a valid JSON summary with count 0 and list is
+  empty — proving the OpenReadOnly + Summarize + JSON paths work without a
+  recorder holding the store.
+
+target:
+  cmd: ["./bin/monitor", "history", "query", "cpu.usage", "--db", "/tmp/glyph_history_spec.veclite", "--json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "rm -f /tmp/glyph_history_spec.veclite"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: query_json_summary
+    description: query emits a JSON summary object
+    verify:
+      command:
+        run: "./bin/monitor history query cpu.usage --db /tmp/glyph_history_spec.veclite --json | grep -q '\"summary\"'"
+  - id: empty_store_zero_count
+    description: an empty store reports count 0 (no panic, clean JSON)
+    verify:
+      command:
+        run: "./bin/monitor history query cpu.usage --db /tmp/glyph_history_spec.veclite --json | grep -q '\"count\": 0'"
+  - id: help_lists_subcommands
+    description: history --help lists record, query, and list
+    verify:
+      command:
+        run: "./bin/monitor history --help | grep -q record && ./bin/monitor history --help | grep -q query && ./bin/monitor history --help | grep -q list"
+  - id: clean_exit
+    description: query exits cleanly
+    verify:
+      process:
+        exitCode: 0

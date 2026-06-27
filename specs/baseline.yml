@@ -1,0 +1,58 @@
+version: 1
+name: monitor_baseline
+
+intent: |
+  `monitor baseline save/list/delete` capture and manage labeled system
+  snapshots (JSON files under ~/.local/share/monitor/baselines). This also
+  proves the path-traversal guard: a name containing `..` or a separator is
+  rejected without writing any file.
+
+target:
+  cmd: ["./bin/monitor", "baseline", "save", "glyph-spec-baseline", "--json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    # Start from a clean slate (ignore "not found").
+    - run: "./bin/monitor baseline delete glyph-spec-baseline 2>/dev/null || true"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 15000
+
+outcomes:
+  - id: save_reports_name
+    description: save echoes the baseline name
+    verify:
+      command:
+        run: "./bin/monitor baseline save glyph-spec-baseline --json | grep -q 'glyph-spec-baseline'"
+  - id: list_includes_it
+    description: list shows the saved baseline
+    verify:
+      command:
+        run: "./bin/monitor baseline list | grep -q 'glyph-spec-baseline'"
+  - id: rejects_path_traversal
+    description: a traversal name is refused (security guard, no file written)
+    verify:
+      command:
+        run: "./bin/monitor baseline save ../evil 2>&1 | grep -qi 'invalid baseline name'"
+  - id: delete_removes_it
+    description: delete removes the baseline from the list
+    verify:
+      command:
+        run: "./bin/monitor baseline delete glyph-spec-baseline && ! ./bin/monitor baseline list | grep -q 'glyph-spec-baseline'"
+  - id: clean_exit
+    description: save exits cleanly
+    verify:
+      process:
+        exitCode: 0

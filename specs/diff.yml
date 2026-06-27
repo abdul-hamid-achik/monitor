@@ -1,0 +1,57 @@
+version: 1
+name: monitor_diff
+
+intent: |
+  `monitor diff <baseline>` compares the live system against a saved baseline,
+  reporting new/gone/changed processes and listeners plus metric deltas. The
+  JSON output carries `from`/`to` and the change arrays.
+
+target:
+  cmd: ["./bin/monitor", "diff", "glyph-spec-diff", "--json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    # diff needs an existing baseline to compare the live system against.
+    - run: "./bin/monitor baseline save glyph-spec-diff >/dev/null"
+      timeoutMs: 15000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 15000
+
+outcomes:
+  - id: diff_json_has_from
+    description: diff JSON names the baseline it compared from
+    verify:
+      command:
+        run: "./bin/monitor diff glyph-spec-diff --json | grep -q '\"from\"'"
+  - id: diff_json_has_change_arrays
+    description: diff JSON includes the process change arrays
+    verify:
+      command:
+        run: "./bin/monitor diff glyph-spec-diff --json | grep -qE '\"new_procs\"|\"changed_procs\"'"
+  - id: mem_threshold_flag
+    description: diff documents the --mem-threshold flag
+    verify:
+      command:
+        run: "./bin/monitor diff --help | grep -q 'mem-threshold'"
+  - id: cleanup_baseline
+    description: remove the spec baseline
+    verify:
+      command:
+        run: "./bin/monitor baseline delete glyph-spec-diff"
+  - id: clean_exit
+    description: diff exits cleanly
+    verify:
+      process:
+        exitCode: 0

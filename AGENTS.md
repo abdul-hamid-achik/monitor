@@ -135,7 +135,7 @@ monitor/
 │   └── widgets/                 # Reusable widgets (sparklines, gauges; lipgloss v2)
 │       ├── gauge.go
 │       └── gauge_test.go
-├── specs/                       # glyphrun behavioral specs (15 specs, all passing)
+├── specs/                       # glyphrun behavioral specs (19 specs, all passing)
 │   ├── cli_help.yml
 │   ├── doctor_json.yml
 │   ├── env_detection.yml

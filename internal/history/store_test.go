@@ -123,6 +123,50 @@ func TestAppendIsDurableBeforeClose(t *testing.T) {
 	}
 }
 
+// TestMetricsReturnsDistinctSortedNames covers Metrics(): it must return each
+// recorded metric name once, sorted, regardless of how many samples each has.
+func TestMetricsReturnsDistinctSortedNames(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.veclite")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now()
+	// Two metrics, the first recorded several times.
+	for i := 0; i < 3; i++ {
+		if err := s.Append(Sample{Timestamp: now.Add(time.Duration(i) * time.Second), Metric: "mem.usage", Value: float64(i)}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	if err := s.Append(Sample{Timestamp: now, Metric: "cpu.usage", Value: 1}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	got, err := s.Metrics()
+	if err != nil {
+		t.Fatalf("Metrics: %v", err)
+	}
+	want := []string{"cpu.usage", "mem.usage"} // distinct + sorted
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("Metrics() = %v, want %v", got, want)
+	}
+}
+
+// TestMetricsEmptyStore: Metrics on a store with no collection is nil, not a panic.
+func TestMetricsEmptyStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.veclite")
+	r, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	defer r.Close()
+	if names, err := r.Metrics(); err != nil || len(names) != 0 {
+		t.Errorf("Metrics() on empty store = %v, %v; want empty, nil", names, err)
+	}
+}
+
 func TestSummarize(t *testing.T) {
 	if s := Summarize(nil); s.Count != 0 {
 		t.Errorf("empty summarize count = %d, want 0", s.Count)

@@ -1,0 +1,54 @@
+version: 1
+name: monitor_tree
+
+intent: |
+  `monitor tree [pid]` prints the process hierarchy as an indented forest, or
+  as a nested JSON array with --json. This proves the ProcessInfo.Parent (ppid)
+  wiring and buildForest produce a valid tree rooted at the given pid.
+
+target:
+  cmd: ["./bin/monitor", "tree", "1", "--json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: json_is_array
+    description: tree --json emits a JSON array
+    verify:
+      command:
+        run: "./bin/monitor tree 1 --json | head -c1 | grep -q '\\['"
+  - id: root_is_pid1
+    description: the forest is rooted at pid 1
+    verify:
+      command:
+        run: "./bin/monitor tree 1 --json | grep -q '\"pid\": 1'"
+  - id: has_children
+    description: pid 1 has a children array
+    verify:
+      command:
+        run: "./bin/monitor tree 1 --json | grep -q '\"children\"'"
+  - id: human_tree_renders
+    description: the human form renders the process tree
+    verify:
+      command:
+        run: "./bin/monitor tree 1 | grep -qE 'launchd|systemd|[0-9]+'"
+  - id: clean_exit
+    description: tree --json exits cleanly
+    verify:
+      process:
+        exitCode: 0
