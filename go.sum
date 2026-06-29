@@ -8,6 +8,8 @@ github.com/abdul-hamid-achik/veclite v0.20.0 h1:rO9PqS7GZQ3k+NlvVTd/bFukAXmHM2l7
 github.com/abdul-hamid-achik/veclite v0.20.0/go.mod h1:cQBeYc0293ZwccYVROgR264n0Os+ORzo+aHjs8kaVts=
 github.com/abdul-hamid-achik/veclite v0.22.0 h1:lVRYjRZtROrUmDT19Ihls9KvtNeOhh6QHoqd/7lY9EE=
 github.com/abdul-hamid-achik/veclite v0.22.0/go.mod h1:cQBeYc0293ZwccYVROgR264n0Os+ORzo+aHjs8kaVts=
+github.com/abdul-hamid-achik/veclite v0.22.1 h1:OJOdYT/modxrbr7Mw8+6Vhrzny1q8zyj3dGG/GJT0M0=
+github.com/abdul-hamid-achik/veclite v0.22.1/go.mod h1:cQBeYc0293ZwccYVROgR264n0Os+ORzo+aHjs8kaVts=
 github.com/aymanbagabas/go-udiff v0.4.1 h1:OEIrQ8maEeDBXQDoGCbbTTXYJMYRCRO1fnodZ12Gv5o=
 github.com/aymanbagabas/go-udiff v0.4.1/go.mod h1:0L9PGwj20lrtmEMeyw4WKJ/TMyDtvAoK9bf2u/mNo3w=
 github.com/charmbracelet/colorprofile v0.4.3 h1:QPa1IWkYI+AOB+fE+mg/5/4HRMZcaXex9t5KX76i20Q=
