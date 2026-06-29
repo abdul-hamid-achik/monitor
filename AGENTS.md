@@ -218,9 +218,11 @@ with `refused: true` and a `reason`.
 
 ### Logger (`internal/logger`)
 
-veclite-backed log store. TUI holds the writer lock; CLI search uses
-`OpenReadOnly` with `WithSharedRead(true)` + `WithReadOnly(true)` so concurrent
-queries don't block collection. The `/reload` HTTP endpoint in `internal/reload` (POST /reload on 127.0.0.1:7351) signals external processes that data has changed; `monitor --reload-server` starts it and `monitor reload` posts to it.
+veclite-backed log store. The TUI holds the exclusive writer lock; CLI search
+uses `OpenReadOnly` with `WithSharedRead(true)` + `WithReadOnly(true)`, which
+is lock-free (no flock) — concurrent queries never block collection, and the
+TUI's writer lock never blocks a search. Readers see a point-in-time snapshot;
+the `/reload` HTTP endpoint in `internal/reload` (POST /reload on 127.0.0.1:7351) signals external processes that data has changed; `monitor --reload-server` starts it and `monitor reload` posts to it.
 
 ### Profiler (`internal/profiler`)
 
