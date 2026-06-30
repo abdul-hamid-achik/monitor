@@ -22,7 +22,7 @@ export default defineConfig({
 
   sitemap: { hostname: 'https://monitorcli.dev' },
   themeConfig: {
-    logo: '/logo.svg',
+    logo: { src: '/logo.svg', dark: '/logo-dark.svg' },
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
       { text: 'Reference', link: '/reference/architecture' },
