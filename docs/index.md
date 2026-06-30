@@ -11,7 +11,7 @@ hero:
       link: /guide/getting-started
     - theme: alt
       text: CLI Reference
-      link: /reference/cli
+      link: /guide/cli
     - theme: alt
       text: View on GitHub
       link: https://github.com/abdul-hamid-achik/monitor

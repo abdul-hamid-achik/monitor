@@ -3,5 +3,8 @@
   "framework": "vitepress",
   "buildCommand": "cd docs && npm install && npm run build",
   "outputDirectory": "docs/.vitepress/dist",
-  "cleanUrls": true
+  "cleanUrls": true,
+  "rewrites": [
+    { "source": "/(.*)?", "destination": "/$1.html" }
+  ]
 }

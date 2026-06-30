@@ -12,7 +12,17 @@ export default defineConfig({
   // DOCS_BASE=/ for a root deploy (e.g. a custom domain or Vercel).
   base: process.env.DOCS_BASE ?? '/monitor/',
 
+
+  head: [
+    ['link', { rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }],
+    ['link', { rel: 'icon', type: 'image/x-icon', href: '/favicon.ico' }],
+    ['link', { rel: 'apple-touch-icon', sizes: '180x180', href: '/apple-touch-icon.png' }],
+    ['meta', { name: 'description', content: 'monitor documentation site.' }],
+  ],
+
+  sitemap: { hostname: 'https://monitorcli.dev' },
   themeConfig: {
+    logo: '/logo.svg',
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
       { text: 'Reference', link: '/reference/architecture' },
