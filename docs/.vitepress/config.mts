@@ -23,6 +23,14 @@ export default defineConfig({
   sitemap: { hostname: 'https://monitorcli.dev' },
   themeConfig: {
     logo: { src: '/logo.svg', dark: '/logo-dark.svg' },
+
+    notFound: {
+      code: '404',
+      title: 'PAGE NOT FOUND',
+      quote:
+        'No signal on this route — it is not in the process tree. Head back and keep watching what matters.',
+      linkText: 'Take me home',
+    },
     nav: [
       { text: 'Guide', link: '/guide/getting-started' },
       { text: 'Reference', link: '/reference/architecture' },
