@@ -1,0 +1,11 @@
+.git/
+bin/
+node_modules/
+reports/
+docs/guide/
+docs/reference/
+docs/.vitepress/cache/
+specs/
+fixtures/
+*.log
+.DS_Store

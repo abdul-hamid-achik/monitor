@@ -56,3 +56,4 @@ docs/.vitepress/dist/
 
 # Stray root build artifact (build to bin/ instead)
 /monitor
+.vercel
