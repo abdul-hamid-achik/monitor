@@ -8,9 +8,9 @@ export default defineConfig({
   lastUpdated: true,
   cleanUrls: true,
 
-  // Served as a GitHub Pages project site at /monitor/. Override with
-  // DOCS_BASE=/ for a root deploy (e.g. a custom domain or Vercel).
-  base: process.env.DOCS_BASE ?? '/monitor/',
+  // Root deploy (the monitorcli.dev custom domain on Vercel). Set
+  // DOCS_BASE=/monitor/ to build for a GitHub Pages project site instead.
+  base: process.env.DOCS_BASE ?? '/',
 
 
   head: [
@@ -56,7 +56,10 @@ export default defineConfig({
         },
         {
           text: 'Operations',
-          items: [{ text: 'Process Safety', link: '/guide/safety' }],
+          items: [
+            { text: 'Anomaly Detection', link: '/guide/anomaly-detection' },
+            { text: 'Process Safety', link: '/guide/safety' },
+          ],
         },
       ],
       '/reference/': [

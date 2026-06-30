@@ -123,8 +123,8 @@ Alerts come from the built-in analyzer. Four rules always run, and watch feeds
 the analyzer the full event — including per-partition `Disk` and the
 `Processes` list — so the per-process rules fire too:
 
-- `cpu_spike` — a process's CPU jumps to ~3x its rolling baseline.
-- `rss_growth` — a process's resident memory keeps climbing.
+- `cpu_spike` — a process's CPU exceeds 3× a fixed 50% baseline (≈150% CPU).
+- `rss_growth` — a process's resident memory keeps climbing (linear-regression slope with R² confidence).
 - `disk_fill` — any mounted partition's usage is `>= 90%`.
 - `swap_pressure` — swap used is `>= 50%` of swap total (real memory pressure).
 
@@ -154,8 +154,8 @@ are logged to stderr and never stall the stream.
 
 ```json
 {"type":"tick","timestamp":"2026-06-27T00:02:38Z","cpu":{"usage_percent":25.9},"memory":{"usage_percent":68.1},"hostname":"host"}
-{"type":"alert","timestamp":"2026-06-27T00:02:41Z","alert":{"rule":"cpu_spike","severity":"warning","pid":1133,"process":"node","detail":"3.1x baseline"}}
-{"type":"alert","timestamp":"2026-06-27T00:02:44Z","alert":{"rule":"cpu_threshold","severity":"warning","detail":"cpu 91.2% >= 90%"}}
+{"type":"alert","timestamp":"2026-06-27T00:02:41Z","alert":{"rule":"cpu_spike","severity":"warning","pid":1133,"process":"node","detail":"cpu spike"}}
+{"type":"alert","timestamp":"2026-06-27T00:02:44Z","alert":{"rule":"cpu_threshold","severity":"warning","detail":"CPU 91% >= threshold 90%"}}
 ```
 
 ### `process`

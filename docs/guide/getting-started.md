@@ -123,5 +123,7 @@ mutating tools gated on `confirm: true`.
 - [The TUI](/guide/tui) — tabs, keyboard shortcuts, and mouse navigation.
 - [CLI Reference](/guide/cli) — the full JSON command surface.
 - [MCP Server](/guide/mcp) — the agent-facing tool surface.
+- [Anomaly Detection](/guide/anomaly-detection) — the rules behind `watch`
+  alerts, and how to configure thresholds.
 - [Ecosystem Integration](/guide/ecosystem) — fcheap, tinyvault, glyphrun,
   codemap, and friends.

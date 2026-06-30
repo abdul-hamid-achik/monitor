@@ -48,9 +48,9 @@ monitor/
 | Package | Role |
 |---------|------|
 | `internal/collector` | Pub/sub metric collector — publishes an `Event` on every tick; the canonical pattern other packages follow. Holds the metric types (`CPUInfo`, `MemoryInfo`, `ProcessInfo`, ...) and a generic ring buffer. |
-| `internal/cli` | Cobra subcommands (`snapshot`, `watch`, `process`, `kill`, `profile`, `logs`, `investigate`, `doctor`, `mcp`, `studio`) plus the `--json` output helpers. |
+| `internal/cli` | Cobra subcommands (`snapshot`, `watch`, `process`, `tree`, `kill`, `profile`, `investigate`, `stash`, `incidents`, `logs`, `history`, `baseline`, `diff`, `doctor`, `run`, `reload`, `mcp`, `vault`, `studio`) plus the `--json` output helpers. |
 | `internal/mcp` | MCP stdio server: 7 tools (3 read-only, 4 mutating) over the standard Model Context Protocol transport, with confirm-gated mutation. |
-| `internal/analyzer` | Pluggable anomaly rules — `CPUSpikeRule` (CPU% over a baseline factor) and `RSSGrowthRule` (linear regression on the RSS ring buffer). |
+| `internal/analyzer` | Pluggable anomaly rules — `CPUSpikeRule` (CPU% over a fixed baseline factor), `RSSGrowthRule` (linear regression on the RSS ring buffer), `DiskFillRule`, `SwapPressureRule`, and a config-driven `ThresholdRule` (the `cpu_alert_threshold` / `memory_alert_threshold` settings). |
 | `internal/capture` | Log capture pipeline — pumps a child process's stdout/stderr into the veclite log store. |
 | `internal/logger` | veclite-backed log store with keyword search; the TUI holds the writer, CLI search opens read-only with shared-read. |
 | `internal/profiler` | Process profiling — scrapes `net/http/pprof` over HTTP for Go processes, and runs macOS `sample` for any process. |
