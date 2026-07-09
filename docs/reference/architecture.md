@@ -25,7 +25,7 @@ monitor/
 ├── internal/
 │   ├── collector/             # pub/sub metric collector (canonical pattern)
 │   ├── cli/                   # cobra subcommands (snapshot, watch, kill, ...)
-│   ├── mcp/                   # MCP stdio server (7 tools, confirm-gated)
+│   ├── mcp/                   # MCP stdio server (8 tools, confirm-gated)
 │   ├── analyzer/              # anomaly rules (CPU spike, RSS growth)
 │   ├── capture/               # process stdout/stderr → veclite log store
 │   ├── logger/                # veclite-backed log store + keyword search
@@ -49,12 +49,12 @@ monitor/
 |---------|------|
 | `internal/collector` | Pub/sub metric collector — publishes an `Event` on every tick; the canonical pattern other packages follow. Holds the metric types (`CPUInfo`, `MemoryInfo`, `ProcessInfo`, ...) and a generic ring buffer. |
 | `internal/cli` | Cobra subcommands (`snapshot`, `watch`, `process`, `tree`, `kill`, `profile`, `investigate`, `stash`, `incidents`, `logs`, `history`, `baseline`, `diff`, `doctor`, `run`, `reload`, `mcp`, `vault`, `studio`) plus the `--json` output helpers. |
-| `internal/mcp` | MCP stdio server: 7 tools (3 read-only, 4 mutating) over the standard Model Context Protocol transport, with confirm-gated mutation. |
-| `internal/analyzer` | Pluggable anomaly rules — `CPUSpikeRule` (CPU% over a fixed baseline factor), `RSSGrowthRule` (linear regression on the RSS ring buffer), `DiskFillRule`, `SwapPressureRule`, and a config-driven `ThresholdRule` (the `cpu_alert_threshold` / `memory_alert_threshold` settings). |
+| `internal/mcp` | MCP stdio server: 8 tools (4 read-only, 4 mutating) over the standard Model Context Protocol transport, with confirm-gated mutation. |
+| `internal/analyzer` | Pluggable anomaly rules — `CPUSpikeRule` (CPU% over a fixed baseline factor), `RSSGrowthRule` (linear regression on the RSS ring buffer), `DiskFillRule`, `SwapPressureRule`, and a config-driven `ThresholdRule` (the `cpu_alert_threshold` / `memory_alert_threshold` settings). Every rule attaches a `Diagnosis` (summary, evidence, confidence, next actions) when it can interpret the signal; cross-signal correlation over the per-PID history (`internal/analyzer/diagnosis.go`) classifies memory-leak / hot-loop / load / GC-pressure patterns for `monitor_analyze` and `watch` alerts alike. |
 | `internal/capture` | Log capture pipeline — pumps a child process's stdout/stderr into the veclite log store. |
 | `internal/logger` | veclite-backed log store with keyword search; the TUI holds the writer, CLI search opens read-only with shared-read. |
 | `internal/profiler` | Process profiling — scrapes `net/http/pprof` over HTTP for Go processes, and runs macOS `sample` for any process. |
-| `internal/incidents` | Content-addressed incident stash — bundles a snapshot, tree-hashes it, and saves it to fcheap (with a no-fcheap fallback). |
+| `internal/incidents` | Content-addressed incident stash — bundles a snapshot, tree-hashes it, and saves it to fcheap (with a no-fcheap fallback). Bundles embed the triggering alert's `Diagnosis`; a failed fcheap archive retains the bundle in a durable local registry, recoverable later via `monitor incidents resume-stash`. |
 | `internal/reload` | Localhost HTTP `/reload` endpoint (POST on `127.0.0.1:7351`) signalling external processes that data changed. |
 | `internal/temperature` | Real SMC temperature via `sudo powermetrics`, with a transparent CPU-load estimate fallback and a `real`/`est` source badge. |
 | `internal/ecosystem` | CLI wrappers for the surrounding tools (codemap, fcheap, tinyvault, glyphrun, ...); `Status(ctx)` returns aggregate health for `doctor`. |
@@ -88,7 +88,8 @@ the streaming CLI, the analyzer, the MCP surface, and log capture:
 - **CLI** (`internal/cli`) reads a single `Event` for `snapshot`, or streams
   NDJSON for `watch`.
 - **MCP** (`internal/mcp`) answers `monitor_snapshot` / `monitor_processes`
-  from the same data, and routes mutating tools through `internal/kill` and
+  from the same data, samples a short window through `internal/analyzer` for
+  `monitor_analyze`, and routes mutating tools through `internal/kill` and
   `internal/profiler`.
 - **Analyzer, capture, incidents** observe events to flag anomalies, ingest
   logs, and assemble incident bundles.

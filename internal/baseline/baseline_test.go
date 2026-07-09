@@ -46,6 +46,10 @@ func TestSaveLoadListDelete(t *testing.T) {
 		Load1:      1.2,
 		Processes:  map[int32]ProcSnap{100: {Name: "node", Memory: 1000}},
 		Listeners:  []Listener{{Proto: "tcp", Port: 8080, PID: 100, Process: "node"}},
+		SwapUsed:   10,
+		SwapTotal:  20,
+		DiskUsed:   30,
+		DiskTotal:  40,
 	}
 	if err := Save(dir, b); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -60,6 +64,9 @@ func TestSaveLoadListDelete(t *testing.T) {
 	}
 	if got.CPUUsage != 12.5 || got.Processes[100].Name != "node" || len(got.Listeners) != 1 {
 		t.Errorf("round-trip mismatch: %+v", got)
+	}
+	if got.SwapUsed != 10 || got.SwapTotal != 20 || got.DiskUsed != 30 || got.DiskTotal != 40 {
+		t.Errorf("swap/disk round-trip mismatch: %+v", got)
 	}
 	if err := Delete(dir, "pre-deploy"); err != nil {
 		t.Fatalf("Delete: %v", err)

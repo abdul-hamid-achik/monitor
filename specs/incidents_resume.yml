@@ -1,0 +1,60 @@
+version: 1
+name: monitor_incidents_resume
+
+intent: |
+  `monitor incidents resume-stash <id|path>` re-attempts fcheap archival of a
+  bundle retained after a failed capture. The subcommand is wired under
+  `incidents` (alias `incident`), documents --json, and fails cleanly (a
+  non-panic error) for an unknown id — CI-safe without fcheap on PATH.
+
+target:
+  cmd: ["./bin/monitor", "incidents", "resume-stash", "--help"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 40
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: help_describes_resume
+    description: resume-stash --help explains re-attempted archival
+    verify:
+      command:
+        run: "./bin/monitor incidents resume-stash --help | grep -qi 'archival'"
+  - id: json_flag_documented
+    description: resume-stash documents the --json flag
+    verify:
+      command:
+        run: "./bin/monitor incidents resume-stash --help | grep -q '\\-\\-json'"
+  - id: alias_works
+    description: the singular `incident` alias resolves to the same command
+    verify:
+      command:
+        run: "./bin/monitor incident resume-stash --help | grep -qi 'archival'"
+  - id: unknown_id_fails_cleanly
+    description: an unknown id exits non-zero without a panic
+    verify:
+      command:
+        run: "./bin/monitor incidents resume-stash no_such_id_000 --json; test $? -ne 0 && ! ./bin/monitor incidents resume-stash no_such_id_000 --json 2>&1 | grep -qiE 'panic|goroutine [0-9]+'"
+  - id: pending_lists
+    description: incidents pending runs and exits 0 with no registry present
+    verify:
+      command:
+        run: "XDG_STATE_HOME=$(mktemp -d) ./bin/monitor incidents pending --json"
+  - id: clean_exit
+    description: resume-stash --help exits cleanly
+    verify:
+      process:
+        exitCode: 0

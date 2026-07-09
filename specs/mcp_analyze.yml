@@ -1,0 +1,51 @@
+version: 1
+name: monitor_mcp_analyze
+
+intent: |
+  `monitor mcp serve` exposes a read-only `monitor_analyze` tool: sample the
+  system for `window_seconds` (default 10, min 4, max 60; no confirm gate),
+  run the analyzer's diagnosis engine over the window, and return Diagnosis
+  objects (summary, evidence, confidence, next_actions). The `diagnoses`
+  array is always present in the payload — empty is a valid, healthy answer.
+
+target:
+  cmd: ["sh", "-c", "{ printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_analyze\",\"arguments\":{\"window_seconds\":4}}}'; sleep 8; } | ./bin/monitor mcp serve 2>&1 | tail -2"]
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 80
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exited: true
+      timeoutMs: 30000
+
+outcomes:
+  - id: tool_listed
+    description: tools/list includes monitor_analyze
+    verify:
+      command:
+        run: "{ printf '%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}'; sleep 0.3; } | ./bin/monitor mcp serve 2>&1 | head -10 | grep -q '\"name\":\"monitor_analyze\"'"
+  - id: window_seconds_echoed
+    description: tools/call monitor_analyze echoes the (clamped) window_seconds
+    verify:
+      command:
+        # The tool blocks for the ~4s window plus handshake/process overhead,
+        # past the 5s default command-verify timeout, so this one needs an
+        # explicit budget.
+        run: "{ printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_analyze\",\"arguments\":{\"window_seconds\":4}}}'; sleep 8; } | ./bin/monitor mcp serve 2>&1 | tail -2 | grep -q 'window_seconds'"
+        timeoutMs: 20000
+  - id: diagnoses_returned
+    description: tools/call monitor_analyze always returns a diagnoses array (possibly empty)
+    verify:
+      command:
+        run: "{ printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_analyze\",\"arguments\":{\"window_seconds\":4}}}'; sleep 8; } | ./bin/monitor mcp serve 2>&1 | tail -2 | grep -q 'diagnoses'"
+        timeoutMs: 20000

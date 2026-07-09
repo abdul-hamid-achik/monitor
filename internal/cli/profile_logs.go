@@ -31,9 +31,18 @@ func newProfileCmd() *cobra.Command {
 			}
 			ctx, cancel := Context()
 			defer cancel()
-			prof, err := profiler.Capture(ctx, pid, profiler.ProfileType(ptype), pprofAddr)
+			pt := profiler.ProfileType(ptype)
+			if pt != profiler.ProfileSample && !cmd.Flags().Changed("pprof-addr") {
+				if own, detail := profiler.VerifyListenerOwnership(ctx, pid, pprofAddr); own != profiler.OwnershipOwned {
+					return fmt.Errorf("refusing to scrape %s for pid %d: %s (pass --pprof-addr explicitly to assert the endpoint is correct, or use -t sample)", pprofAddr, pid, detail)
+				}
+			}
+			prof, err := profiler.Capture(ctx, pid, pt, pprofAddr)
 			if err != nil {
 				return err
+			}
+			if rec := prof.VerifyArtifact(); !rec.Verified {
+				return fmt.Errorf("profile captured no usable artifact: %s", rec.Limitation)
 			}
 			if JSONOutput(cmd) {
 				return WriteJSON(prof)
@@ -54,7 +63,8 @@ func newProfileCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&ptype, "type", "t", "heap", "profile type: heap, cpu, goroutine, sample")
 	cmd.Flags().StringVar(&pprofAddr, "pprof-addr", "localhost:6060",
-		"host:port of the target's net/http/pprof server (heap/cpu/goroutine only)")
+		"host:port of the target's net/http/pprof server (heap/cpu/goroutine only); "+
+			"passing this flag explicitly asserts the endpoint belongs to the target pid and skips the ownership check")
 	cmd.Flags().Bool("json", false, "emit JSON output")
 	return cmd
 }
@@ -263,82 +273,6 @@ fcheap stash step (useful for sandboxed environments).`,
 	return cmd
 }
 
-// newStashCmd is a manual incident-capture entry point. Useful when an
-// operator sees something the analyzer didn't fire on, or before/after
-// a known-good deploy.
-// investigatePipeline runs the diagnostic pipeline for pid — capture a heap
-// profile, sample the system once, correlate frames to code, and (unless
-// noSave) stash an incident bundle via fcheap. It returns the structured
-// report shared by the `monitor investigate` CLI command and the
-// monitor_investigate MCP tool, so the two surfaces stay in lock-step.
-func investigatePipeline(ctx context.Context, pid int32, ttl string, noSave bool) map[string]any {
-	// Capture the profile first; if the process is gone, the snapshot-only
-	// stash is still useful.
-	profile, _ := profiler.Capture(ctx, pid, profiler.ProfileHeap, "")
-
-	// Sample once and reuse it for the process-name lookup and the bundle.
-	snapshot := NewCollector(0).Collect(ctx)
-	processName := ""
-	for _, p := range snapshot.Processes {
-		if p.PID == pid {
-			processName = p.Name
-			break
-		}
-	}
-
-	// Best-effort process->code correlation.
-	correlations := correlateProfile(ctx, profile.Symbols)
-
-	if noSave {
-		report := map[string]any{
-			"pid":        pid,
-			"started_at": time.Now().Format(time.RFC3339),
-			"steps":      []string{"snapshot", "profile"},
-			"profile":    profile,
-			"note":       "--no-save: bundle not stashed; profile included in JSON",
-		}
-		if correlations != nil {
-			report["correlations"] = correlations
-		}
-		return report
-	}
-
-	req := incidents.CaptureRequest{
-		Snapshot: snapshot,
-		Profile:  profile,
-		Alert: incidents.AlertDetail{
-			Rule:    "investigate",
-			PID:     pid,
-			Process: processName,
-			Detail:  fmt.Sprintf("manual investigate of pid %d", pid),
-		},
-		Trigger: "investigate",
-		TTL:     ttl,
-	}
-	res, err := incidents.Capture(ctx, req)
-	report := map[string]any{
-		"pid":        pid,
-		"started_at": time.Now().Format(time.RFC3339),
-		"steps":      []string{"snapshot", "profile", "stash"},
-		"stash":      res,
-		"note":       "investigation pipeline (capture + stash)",
-	}
-	if correlations != nil {
-		report["correlations"] = correlations
-	}
-	if err != nil {
-		report["stash_error"] = err.Error()
-		// res.Path is empty when Capture failed before writing the local
-		// bundle; don't dangle a path that points nowhere.
-		if res.Path != "" {
-			report["note"] = "stash failed; profile captured locally at " + res.Path
-		} else {
-			report["note"] = "stash failed; no local bundle written"
-		}
-	}
-	return report
-}
-
 // correlateProfile resolves each profile frame's file:line to its enclosing
 // codemap symbol (FQN/kind), enriching the diagnose flow. Best-effort: it
 // returns nil when codemap isn't on PATH or there are no frames, and silently
@@ -420,6 +354,9 @@ func correlationScore(m map[string]any) float64 {
 	return 0
 }
 
+// newStashCmd is a manual incident-capture entry point. Useful when an
+// operator sees something the analyzer didn't fire on, or before/after
+// a known-good deploy.
 func newStashCmd() *cobra.Command {
 	var (
 		note string
@@ -458,6 +395,9 @@ that downstream search can pick up via fcheap analyze.`,
 				if res.Path != "" {
 					report["local_path"] = res.Path
 				}
+				if res.RegistryID != "" {
+					report["registry_id"] = res.RegistryID
+				}
 			}
 			if JSONOutput(cmd) {
 				return WriteJSON(report)
@@ -470,36 +410,5 @@ that downstream search can pick up via fcheap analyze.`,
 	cmd.Flags().Bool("json", false, "emit JSON output")
 	cmd.Flags().StringVar(&note, "note", "", "free-form note for downstream search")
 	cmd.Flags().StringVar(&ttl, "ttl", "7d", "TTL for the stash (fcheap --ttl)")
-	return cmd
-}
-
-// newIncidentsCmd lists recent monitor incident stashes. Wraps
-// fcheap list with the monitor-incident tag pre-applied.
-func newIncidentsCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "incidents",
-		Short: "List recent monitor incident stashes",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			ctx, cancel := Context()
-			defer cancel()
-			entries, err := incidents.Search(ctx, nil)
-			if err != nil {
-				return err
-			}
-			if JSONOutput(cmd) {
-				return WriteJSON(entries)
-			}
-			if len(entries) == 0 {
-				fmt.Println("No monitor incident stashes found.")
-				return nil
-			}
-			fmt.Printf("Recent incident stashes (%d):\n", len(entries))
-			for _, e := range entries {
-				fmt.Printf("  %s  %s  %s\n", e.CreatedAt, e.ID, e.Name)
-			}
-			return nil
-		},
-	}
-	cmd.Flags().Bool("json", false, "emit JSON output")
 	return cmd
 }

@@ -146,6 +146,14 @@ line) to the given URL; a non-2xx response is logged to stderr. `--notify`
 shells out to `osascript` on macOS or `notify-send` on Linux; delivery failures
 are logged to stderr and never stall the stream.
 
+When the analyzer attaches a diagnosis to a per-process alert (see
+`monitor_analyze` in the [MCP reference](/guide/mcp)), it rides along on every
+sink: the webhook payload gains a `diagnosis` object, the desktop notification
+body swaps the terse rule detail for the diagnosis summary and appends the
+confidence level, and the fcheap bundle's `manifest.json` carries it too
+(tagged `confidence:<level>` for search). All additive — consumers that
+ignore the new key see no change.
+
 ```bash
 ./bin/monitor watch --json | jq -c 'select(.type=="tick")'
 ./bin/monitor watch --json --stash --stash-ttl 24h
@@ -154,7 +162,7 @@ are logged to stderr and never stall the stream.
 
 ```json
 {"type":"tick","timestamp":"2026-06-27T00:02:38Z","cpu":{"usage_percent":25.9},"memory":{"usage_percent":68.1},"hostname":"host"}
-{"type":"alert","timestamp":"2026-06-27T00:02:41Z","alert":{"rule":"cpu_spike","severity":"warning","pid":1133,"process":"node","detail":"cpu spike"}}
+{"type":"alert","timestamp":"2026-06-27T00:02:41Z","alert":{"rule":"cpu_spike","severity":"warning","pid":1133,"process":"node","detail":"cpu spike","diagnosis":{"summary":"node pinned a core for 45s while RSS stayed flat — consistent with a hot loop","evidence":["cpu 150% for 45s","rss flat"],"confidence":"medium","next_actions":["monitor profile 1133 --type cpu","monitor investigate 1133"]}}}
 {"type":"alert","timestamp":"2026-06-27T00:02:44Z","alert":{"rule":"cpu_threshold","severity":"warning","detail":"CPU 91% >= threshold 90%"}}
 ```
 
@@ -243,6 +251,13 @@ is gated by the same safety check used by the TUI and the MCP server:
 `Dock`, …) and **system** (root-owned) processes are refused unless you pass
 `--yes`.
 
+The kill is **verified**, not just dispatched: after sending the signal,
+`kill` polls for up to ~2 seconds to observe whether the process actually
+exited, and reports one of three outcomes — `terminated`, `still_running`, or
+`unknown` (state couldn't be checked) — alongside `waited_ms`. A process that
+survives `SIGTERM` is reported as `still_running` with a `next_action`
+suggesting `--force`; `kill` never escalates to `SIGKILL` on its own.
+
 | Flag | Default | Effect |
 |------|---------|--------|
 | `--force` | `false` | Send `SIGKILL` instead of `SIGTERM`. |
@@ -267,14 +282,29 @@ structured refusal instead of acting:
 }
 ```
 
-A successful kill reports per-PID results:
+A successful kill reports per-PID results. `killed` at both the top level and
+per-PID reflects the **verified** outcome (`terminated`), not merely that a
+signal was sent:
 
 ```json
 {
   "killed": true,
   "results": [
-    {"pid": 1234, "killed": true},
+    {"pid": 1234, "killed": true, "outcome": "terminated", "signal": "SIGTERM", "waited_ms": 84},
     {"pid": 5678, "killed": false, "error": "process not found"}
+  ]
+}
+```
+
+A process that ignores `SIGTERM` reports `still_running` with a suggested
+next action instead of a false `killed:true`:
+
+```json
+{
+  "killed": false,
+  "results": [
+    {"pid": 9012, "killed": false, "outcome": "still_running", "signal": "SIGTERM", "waited_ms": 2003,
+     "next_action": "process ignored SIGTERM; if termination is required, retry with force (CLI: --force, MCP: force:true) to send SIGKILL"}
   ]
 }
 ```
@@ -287,10 +317,19 @@ Capture a process profile. `heap`, `cpu`, and `goroutine` are scraped from the
 target's `net/http/pprof` server; `sample` uses macOS `sample`. Heap and
 goroutine profiles are symbolicated; CPU profiles are returned as raw protobuf.
 
+Before scraping the default pprof address, `profile` checks that the LISTEN
+socket at `--pprof-addr` actually belongs to the target pid (via connection
+enumeration) and refuses otherwise — an unrelated process could be listening
+on `localhost:6060`, and monitor won't silently profile the wrong thing.
+Passing `--pprof-addr` explicitly asserts you know the endpoint is correct
+and skips the check; `-t sample` needs no pprof endpoint at all. A capture
+that produces no usable data (empty file, or no text/symbols) is also
+refused rather than reported as a hollow success.
+
 | Flag | Default | Effect |
 |------|---------|--------|
 | `-t`, `--type` | `heap` | Profile type: `heap`, `cpu`, `goroutine`, `sample`. |
-| `--pprof-addr` | `localhost:6060` | `host:port` of the target's pprof server (heap/cpu/goroutine only). |
+| `--pprof-addr` | `localhost:6060` | `host:port` of the target's pprof server (heap/cpu/goroutine only). Passing this flag explicitly asserts the endpoint belongs to the target pid and skips the ownership check. |
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
@@ -312,9 +351,17 @@ goroutine profiles are symbolicated; CPU profiles are returned as raw protobuf.
 
 ### `investigate`
 
-Run the diagnostic pipeline for a process: capture the current system snapshot
-plus a heap profile, bundle them into a content-addressed fcheap stash, and
-print the stash ID so the bundle can be searched or restored later.
+Run the diagnostic pipeline for a process: snapshot -> profile -> correlate ->
+stash, bundling the result into a content-addressed fcheap stash and printing
+the stash ID so the bundle can be searched or restored later.
+
+The profile step is ownership-gated the same way `profile` is: it only trusts
+a `localhost:6060` pprof heap scrape when the LISTEN socket is proven to
+belong to the target pid, falling back to macOS `sample` otherwise. Each
+pipeline stage reports a typed result — `{step, status, limitation, recovery}`
+with `status` one of `ok`/`failed`/`skipped` — and the top-level `verdict` is
+`"complete"` only when every step succeeded, `"partial"` otherwise. An empty
+or unverified profile is never stashed.
 
 | Flag | Default | Effect |
 |------|---------|--------|
@@ -331,9 +378,16 @@ print the stash ID so the bundle can be searched or restored later.
 {
   "pid": 1234,
   "started_at": "2026-06-27T00:02:38Z",
-  "steps": ["snapshot", "profile", "stash"],
-  "stash": {"id": "fcheap-abc123", "path": "/tmp/monitor-incident-..."},
-  "note": "investigation pipeline (capture + stash)"
+  "steps": [
+    {"step": "snapshot", "status": "ok"},
+    {"step": "profile", "status": "ok"},
+    {"step": "correlate", "status": "ok"},
+    {"step": "stash", "status": "ok"}
+  ],
+  "verdict": "complete",
+  "profile_method": "pprof_heap",
+  "stash": {"stash_id": "fcheap-abc123", "path": "/tmp/monitor-incident-..."},
+  "note": "investigation pipeline complete (profile and stash verified)"
 }
 ```
 
@@ -356,7 +410,7 @@ operations, or manual incident triage. The trigger tag is `manual`.
 ```json
 {
   "started_at": "2026-06-27T00:02:38Z",
-  "stash": {"id": "fcheap-def456", "path": "/tmp/monitor-incident-..."}
+  "stash": {"stash_id": "fcheap-def456", "path": "/tmp/monitor-incident-..."}
 }
 ```
 
@@ -364,7 +418,8 @@ operations, or manual incident triage. The trigger tag is `manual`.
 
 List recent monitor incident stashes (the bundles produced by [`watch
 --stash`](#watch), [`investigate`](#investigate), and [`stash`](#stash)). Wraps
-`fcheap list` with the monitor-incident tag pre-applied.
+`fcheap list` with the monitor-incident tag pre-applied. `incident` (singular)
+is an alias for the whole command tree.
 
 | Flag | Default | Effect |
 |------|---------|--------|
@@ -379,6 +434,35 @@ List recent monitor incident stashes (the bundles produced by [`watch
 [
   {"id": "fcheap-def456", "name": "manual snapshot", "created_at": "2026-06-27T00:02:38Z"}
 ]
+```
+
+When fcheap archival fails (fcheap missing, disk full, ...), the bundle isn't
+lost: it's persisted into a durable local registry under
+`$XDG_STATE_HOME/monitor/incidents` (falling back to
+`~/.local/state/monitor/incidents`) instead of the ephemeral temp dir the
+capture started in, and the failed `stash`/`investigate` result carries a
+`registry_id` you can hand to `resume-stash`.
+
+#### `incidents pending`
+
+List bundles retained in the local registry — the ones still waiting to be
+archived.
+
+```bash
+./bin/monitor incidents pending --json
+```
+
+#### `incidents resume-stash`
+
+Re-attempt `fcheap save` for a bundle that failed to archive. Accepts a
+registry ID from `incidents pending`, a registry entry directory, or a path to
+a bare retained bundle directory. On success the local copy is removed; on
+failure the bundle is kept and the attempt (and error) is recorded for the
+next try.
+
+```bash
+./bin/monitor incidents resume-stash abc123def456
+./bin/monitor incident resume-stash abc123def456 --json
 ```
 
 ### `logs`
@@ -610,6 +694,19 @@ The `--json` output is the `Diff` struct: `cpu_delta` / `mem_delta` are
 percentage-point shifts, `load1_delta` is the load-average shift, and each
 process change carries `old_mem` / `new_mem` / `mem_delta` in bytes.
 
+Deltas that clear both an absolute floor and a relative-change threshold
+(so a 10MB process doubling doesn't scream, but a 1GB process doubling does)
+get a **verdict**: a human- and agent-readable interpretation with a summary,
+supporting evidence, a confidence level (`medium`/`high` — a two-sample diff
+never earns `low`, since below-threshold means no verdict at all), and
+suggested next actions. Verdicts cover total RSS, memory, swap, CPU, load1,
+disk, process count, and the biggest individual process movers (capped at 3).
+Human output prints a `verdicts:` section after the process/listener changes;
+JSON output carries them under `verdicts` (omitted entirely when nothing was
+significant). Baselines saved before this feature carry no swap/disk data, so
+diffs against them silently skip swap and disk verdicts rather than reporting
+a false spike.
+
 ```json
 {
   "from": "pre-deploy",
@@ -631,6 +728,25 @@ process change carries `old_mem` / `new_mem` / `mem_delta` in bytes.
   ],
   "gone_listeners": [
     {"proto": "tcp", "port": 8079, "pid": 4099, "process": "myapp"}
+  ]
+}
+```
+
+When a delta clears its threshold, each `verdicts` entry has the same shape
+as an alert's `diagnosis`, plus the `metric` it interprets (and `pid` for a
+per-process `proc_rss` verdict):
+
+```json
+{
+  "verdicts": [
+    {
+      "metric": "proc_rss",
+      "pid": 1133,
+      "summary": "node (pid 1133) RSS +50% vs baseline (was 256.0 MB, now 384.0 MB) — investigate",
+      "evidence": ["was 256.0 MB, now 384.0 MB (Δ +128.0 MB)", "significant: |Δ| >= 256.0 MB and >= 50% of this process's baseline RSS"],
+      "confidence": "medium",
+      "next_actions": ["monitor profile 1133 --type heap", "monitor investigate 1133"]
+    }
   ]
 }
 ```
@@ -707,10 +823,11 @@ Run an MCP stdio server exposing Monitor's data. The single subcommand,
 ./bin/monitor mcp serve
 ```
 
-The server exposes seven tools — three read-only (`monitor_snapshot`,
-`monitor_processes`, `monitor_doctor`) and four mutating (`monitor_kill`,
-`monitor_profile_capture`, `monitor_investigate`, `monitor_record`). Every
-mutating tool requires `confirm: true` in its typed input. See the
+The server exposes eight tools — four read-only (`monitor_snapshot`,
+`monitor_processes`, `monitor_doctor`, `monitor_analyze`) and four mutating
+(`monitor_kill`, `monitor_profile_capture`, `monitor_investigate`,
+`monitor_record`). Every mutating tool requires `confirm: true` in its typed
+input; `monitor_analyze` is read-only and has no confirm gate. See the
 [MCP Server](/guide/mcp) guide for the full tool surface and confirmation
 model.
 

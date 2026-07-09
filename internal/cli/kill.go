@@ -48,17 +48,29 @@ func newKillCmd() *cobra.Command {
 			results := make([]map[string]any, 0, len(pids))
 			allKilled := true
 			for _, pid := range pids {
-				err := kill.Kill(pid, force)
-				r := map[string]any{"pid": pid, "killed": err == nil}
+				res, err := kill.KillVerified(pid, force)
+				killed := err == nil && res.Outcome == kill.OutcomeTerminated
+				if !killed {
+					allKilled = false
+				}
+				r := map[string]any{
+					"pid":       pid,
+					"killed":    killed,
+					"outcome":   string(res.Outcome),
+					"signal":    res.Signal,
+					"waited_ms": res.WaitedMs,
+				}
 				if err != nil {
 					r["error"] = err.Error()
-					allKilled = false
+				}
+				if res.NextAction != "" {
+					r["next_action"] = res.NextAction
 				}
 				results = append(results, r)
 			}
 			if JSONOutput(cmd) {
-				// killed reflects ACTUAL success (every signal sent), matching
-				// MCP semantics — not merely that the command dispatched.
+				// killed reflects VERIFIED termination of every target, not
+				// merely that signals were dispatched.
 				return WriteJSON(map[string]any{
 					"killed":  allKilled,
 					"results": results,
@@ -66,11 +78,17 @@ func newKillCmd() *cobra.Command {
 			}
 			for _, r := range results {
 				pid := r["pid"]
-				err, _ := r["error"].(string)
-				if err != "" {
-					fmt.Printf("pid %v: error: %s\n", pid, err)
-				} else {
-					fmt.Printf("pid %v: killed\n", pid)
+				if errStr, _ := r["error"].(string); errStr != "" {
+					fmt.Printf("pid %v: error: %s\n", pid, errStr)
+					continue
+				}
+				switch r["outcome"] {
+				case string(kill.OutcomeTerminated):
+					fmt.Printf("pid %v: terminated (%s after %vms)\n", pid, r["signal"], r["waited_ms"])
+				case string(kill.OutcomeStillRunning):
+					fmt.Printf("pid %v: %s sent but process is still running after %vms\n  next: %s\n", pid, r["signal"], r["waited_ms"], r["next_action"])
+				default:
+					fmt.Printf("pid %v: %s sent; outcome unknown\n  next: %s\n", pid, r["signal"], r["next_action"])
 				}
 			}
 			return nil

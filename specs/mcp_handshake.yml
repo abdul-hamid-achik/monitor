@@ -4,7 +4,7 @@ name: monitor_mcp_handshake
 intent: |
   `monitor mcp serve` runs an MCP stdio server. The handshake spec verifies:
   1. The server responds to `initialize` with the expected serverInfo + capabilities.
-  2. `tools/list` enumerates the read-only tools (snapshot, processes, doctor)
+  2. `tools/list` enumerates the read-only tools (snapshot, processes, doctor, analyze)
      AND the mutating tools (kill, profile_capture, investigate, record).
   3. The mutating tools' typed input schemas require a `confirm: true` field.
 
@@ -68,6 +68,11 @@ outcomes:
     verify:
       command:
         run: "{ printf '%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}'; sleep 0.3; } | ./bin/monitor mcp serve 2>&1 | head -10 | grep -q '\"name\":\"monitor_snapshot\"'"
+  - id: tool_monitor_analyze_listed
+    description: tools/list includes the read-only monitor_analyze tool
+    verify:
+      command:
+        run: "{ printf '%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}'; sleep 0.3; } | ./bin/monitor mcp serve 2>&1 | head -10 | grep -q '\"name\":\"monitor_analyze\"'"
   - id: kill_schema_requires_confirm
     description: monitor_kill inputSchema marks confirm as required
     verify:

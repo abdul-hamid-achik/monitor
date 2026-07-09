@@ -116,6 +116,14 @@ the resulting stash. Flags:
 This lists recent monitor stashes, with the `monitor-incident` tag pre-applied
 so you only see Monitor's own captures, not every fcheap stash on the system.
 
+If fcheap was missing or the archive failed when an incident was captured,
+the bundle is retained locally (in a durable registry, not the ephemeral
+temp dir the capture started in) and the failed `stash`/`investigate` result
+carries a `registry_id`. `monitor incidents pending` lists what's still
+waiting, and `monitor incidents resume-stash <id-or-path>` retries the
+archive once fcheap is back — evidence survives a restart instead of being
+lost with the temp dir. See the [CLI Reference](./cli#incidents).
+
 ### Stash-on-alert during `watch`
 
 [`monitor watch`](./cli.md) can capture an incident automatically every time the

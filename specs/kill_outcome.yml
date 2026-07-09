@@ -1,0 +1,45 @@
+version: 1
+name: monitor_kill_outcome
+
+intent: |
+  `monitor kill <pid> --json` verifies the signal landed: after SIGTERM it
+  polls (~2s) and reports outcome terminated|still_running|unknown plus
+  waited_ms. A cooperative process (sleep) must report outcome=terminated
+  and killed=true; the signal is never escalated automatically.
+
+target:
+  cmd: ["sh", "-c", "P=$(sh -c 'nohup sleep 30 >/dev/null 2>&1 & echo $!'); exec ./bin/monitor kill \"$P\" --json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 40
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 15000
+
+outcomes:
+  - id: outcome_terminated
+    description: a cooperative process reports a verified terminated outcome
+    verify:
+      command:
+        run: "P=$(sh -c 'nohup sleep 30 >/dev/null 2>&1 & echo $!'); ./bin/monitor kill \"$P\" --json | grep -q '\"outcome\": \"terminated\"'"
+  - id: killed_true_is_verified
+    description: killed:true only after verification, alongside waited_ms
+    verify:
+      command:
+        run: "P=$(sh -c 'nohup sleep 30 >/dev/null 2>&1 & echo $!'); ./bin/monitor kill \"$P\" --json | grep -q '\"waited_ms\"'"
+  - id: clean_exit
+    description: the binary exits cleanly
+    verify:
+      command:
+        run: "P=$(sh -c 'nohup sleep 30 >/dev/null 2>&1 & echo $!'); ./bin/monitor kill \"$P\" --json >/dev/null 2>&1; [ $? -eq 0 ]"

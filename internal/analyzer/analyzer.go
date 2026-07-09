@@ -5,6 +5,7 @@ package analyzer
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 	"time"
 
@@ -153,6 +154,22 @@ func (e *Engine) Observe(ev collector.Event) []collector.Alert {
 	for _, r := range rules {
 		out = append(out, r.Evaluate(ev, e.hist)...)
 	}
+
+	// Interpretation layer (sprint 4.1): attach a cross-signal Diagnosis to
+	// per-process alerts so downstream consumers (watch NDJSON, webhooks,
+	// incidents) carry the "why", not just the "what". Runs before the
+	// onAlert hook so stash/webhook deliveries see the enriched alert.
+	// Additive: Diagnosis stays nil when the window is too short or no
+	// pattern matches; system-wide alerts (PID 0) are never enriched.
+	for i := range out {
+		if out[i].PID == 0 {
+			continue
+		}
+		if d, ok := e.DiagnosePID(out[i].PID); ok {
+			out[i].Diagnosis = &d
+		}
+	}
+
 	if hook != nil {
 		for _, a := range out {
 			hook(ev, a)
@@ -169,9 +186,10 @@ type History struct {
 }
 
 type sample struct {
-	ts       time.Time
-	memByPID map[int32]uint64
-	cpuByPID map[int32]float64
+	ts        time.Time
+	memByPID  map[int32]uint64
+	cpuByPID  map[int32]float64
+	nameByPID map[int32]string
 }
 
 // NewHistory creates a history with the given capacity.
@@ -184,10 +202,11 @@ func NewHistory(max int) *History {
 
 // Push records one sample.
 func (h *History) Push(ev collector.Event) {
-	s := sample{ts: ev.Timestamp, memByPID: map[int32]uint64{}, cpuByPID: map[int32]float64{}}
+	s := sample{ts: ev.Timestamp, memByPID: map[int32]uint64{}, cpuByPID: map[int32]float64{}, nameByPID: map[int32]string{}}
 	for _, p := range ev.Processes {
 		s.memByPID[p.PID] = p.Memory
 		s.cpuByPID[p.PID] = p.CPUPercent
+		s.nameByPID[p.PID] = p.Name
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -208,6 +227,76 @@ func (h *History) RSSForPID(pid int32) []uint64 {
 		}
 	}
 	return out
+}
+
+// CPUForPID returns the recent CPU% samples for a PID. It is index-aligned
+// with RSSForPID: Push records both maps from the same ProcessInfo entry, so
+// a PID present in one sample's memByPID is present in its cpuByPID too.
+func (h *History) CPUForPID(pid int32) []float64 {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := make([]float64, 0, len(h.samples))
+	for _, s := range h.samples {
+		if v, ok := s.cpuByPID[pid]; ok {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// SeriesForPID returns the PID's timestamps, RSS and CPU samples in one
+// aligned pass: index i of each slice comes from the same collector tick.
+// Ticks where the PID was absent are skipped in all three slices.
+func (h *History) SeriesForPID(pid int32) (ts []time.Time, rss []uint64, cpu []float64) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, s := range h.samples {
+		m, ok := s.memByPID[pid]
+		if !ok {
+			continue
+		}
+		ts = append(ts, s.ts)
+		rss = append(rss, m)
+		cpu = append(cpu, s.cpuByPID[pid])
+	}
+	return ts, rss, cpu
+}
+
+// PIDs returns the PIDs present in the MOST RECENT sample, sorted ascending
+// for deterministic Diagnose output. Exited processes are not diagnosed.
+func (h *History) PIDs() []int32 {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if len(h.samples) == 0 {
+		return nil
+	}
+	last := h.samples[len(h.samples)-1]
+	out := make([]int32, 0, len(last.memByPID))
+	for pid := range last.memByPID {
+		out = append(out, pid)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// Len returns the number of samples currently held.
+func (h *History) Len() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.samples)
+}
+
+// nameForPID returns the most recent process name recorded for pid, or ""
+// when the PID has never been seen.
+func (h *History) nameForPID(pid int32) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for i := len(h.samples) - 1; i >= 0; i-- {
+		if n, ok := h.samples[i].nameByPID[pid]; ok && n != "" {
+			return n
+		}
+	}
+	return ""
 }
 
 // CPUSpikeRule flags processes whose CPU% is N times their baseline.
@@ -232,7 +321,7 @@ func (r *CPUSpikeRule) Evaluate(ev collector.Event, _ *History) []collector.Aler
 				Rule:     r.Name(),
 				PID:      p.PID,
 				Process:  p.Name,
-				Detail:   "cpu spike",
+				Detail:   fmt.Sprintf("cpu spike: %.0f%% (>= %.0f%%)", p.CPUPercent, factor*50),
 			})
 		}
 	}
@@ -270,7 +359,8 @@ func (r *RSSGrowthRule) Evaluate(ev collector.Event, h *History) []collector.Ale
 				Rule:     r.Name(),
 				PID:      p.PID,
 				Process:  p.Name,
-				Detail:   "suspected memory leak",
+				Detail: fmt.Sprintf("suspected memory leak: RSS +%s/sample over %d samples (R²=%.2f)",
+					collector.FormatBytes(uint64(slope)), len(samples), r2),
 			})
 		}
 	}
@@ -278,8 +368,18 @@ func (r *RSSGrowthRule) Evaluate(ev collector.Event, h *History) []collector.Ale
 }
 
 // linearRegression returns slope (per sample — dy per unit index) and R²
-// for y over x=0..n-1.
+// for y over x=0..n-1. Thin adapter over linearRegressionF for RSS series.
 func linearRegression(y []uint64) (slope, r2 float64) {
+	f := make([]float64, len(y))
+	for i, v := range y {
+		f[i] = float64(v)
+	}
+	return linearRegressionF(f)
+}
+
+// linearRegressionF is the float64 core; CPU% series use it directly.
+// A constant series returns r2 == 0 (ssTot == 0 guard), as before.
+func linearRegressionF(y []float64) (slope, r2 float64) {
 	n := float64(len(y))
 	if n < 2 {
 		return 0, 0
@@ -287,7 +387,7 @@ func linearRegression(y []uint64) (slope, r2 float64) {
 	var sx, sy, sxx, sxy, syy float64
 	for i, v := range y {
 		xi := float64(i)
-		yi := float64(v)
+		yi := v
 		sx += xi
 		sy += yi
 		sxx += xi * xi

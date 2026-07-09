@@ -14,7 +14,10 @@
 //
 // The package degrades gracefully: when fcheap is missing or save fails
 // for any reason, Capture returns the error but does not panic; callers
-// can decide whether to surface it as a status-bar warning.
+// can decide whether to surface it as a status-bar warning. Failed
+// archivals are additionally persisted into a durable local registry
+// under $XDG_STATE_HOME/monitor/incidents and can be re-attempted with
+// `monitor incidents resume-stash`.
 package incidents
 
 import (
@@ -46,6 +49,11 @@ type CaptureRequest struct {
 	// Alert describes the alert rule that triggered this capture, if
 	// any. Empty for manual captures.
 	Alert AlertDetail `json:"alert,omitempty"`
+	// Diagnosis is the analyzer's interpretation of why the alert fired
+	// (summary, evidence, confidence, next actions). nil when no
+	// interpretation is available. Serialized into manifest.json and
+	// tagged confidence:<level> so fcheap search can filter on it.
+	Diagnosis *Diagnosis `json:"diagnosis,omitempty"`
 	// Trigger is a free-form label for manual captures (e.g. "manual",
 	// "doctor", "on-quit"). Defaults to "manual" when empty.
 	Trigger string `json:"trigger,omitempty"`
@@ -65,6 +73,18 @@ type AlertDetail struct {
 	Detail   string `json:"detail,omitempty"`
 }
 
+// Diagnosis mirrors analyzer.Diagnosis (Sprint 4.1) field-for-field so the
+// bundle schema stays decoupled from analyzer internals — the same pattern
+// AlertDetail uses for collector.Alert. It explains WHY an incident fired:
+// human-readable summary, the evidence lines behind it, a confidence level,
+// and suggested next actions for an agent.
+type Diagnosis struct {
+	Summary     string   `json:"summary,omitempty"`
+	Evidence    []string `json:"evidence,omitempty"`
+	Confidence  string   `json:"confidence,omitempty"` // "low" | "medium" | "high"
+	NextActions []string `json:"next_actions,omitempty"`
+}
+
 // CaptureResult is what Capture returns.
 type CaptureResult struct {
 	StashID   string    `json:"stash_id"`
@@ -74,6 +94,10 @@ type CaptureResult struct {
 	Tags      []string  `json:"tags"`
 	CreatedAt time.Time `json:"created_at"`
 	Note      string    `json:"note,omitempty"`
+	// RegistryID is set when fcheap archival failed and the bundle was
+	// persisted into the local registry ($XDG_STATE_HOME/monitor/incidents).
+	// Retry with `monitor incidents resume-stash <RegistryID>`.
+	RegistryID string `json:"registry_id,omitempty"`
 }
 
 // stashSave and hasFcheap are the fcheap save entry point and availability
@@ -91,7 +115,8 @@ var (
 //
 // On any fcheap failure, Capture returns the underlying error AND the
 // tree-hash so callers can still surface the incident in their own
-// UI (e.g. "investigation failed; bundle at /tmp/monitor-XYZ").
+// UI (e.g. "investigation failed; bundle registered locally; resume with
+// `monitor incidents resume-stash <id>`").
 func Capture(ctx context.Context, req CaptureRequest) (CaptureResult, error) {
 	if req.Trigger == "" {
 		req.Trigger = "manual"
@@ -118,17 +143,7 @@ func Capture(ctx context.Context, req CaptureRequest) (CaptureResult, error) {
 		return CaptureResult{}, fmt.Errorf("compute tree-hash: %w", err)
 	}
 
-	tags := []string{
-		"monitor-incident",
-		"trigger:" + req.Trigger,
-		"snapshot:" + treeHash[:12],
-	}
-	if req.Alert.Rule != "" {
-		tags = append(tags, "alert:"+req.Alert.Rule)
-		if req.Alert.PID > 0 {
-			tags = append(tags, fmt.Sprintf("pid:%d", req.Alert.PID))
-		}
-	}
+	tags := buildTags(req.Trigger, req.Alert, req.Diagnosis, treeHash)
 
 	name := fmt.Sprintf("monitor-%s-%s", req.Trigger, treeHash[:12])
 
@@ -136,28 +151,13 @@ func Capture(ctx context.Context, req CaptureRequest) (CaptureResult, error) {
 	// every failure so we can distinguish "binary missing" from
 	// "save failed".
 	if !hasFcheap() {
-		// Don't clean up the temp dir — caller can pick it up.
-		return CaptureResult{
-			StashID:   "",
-			TreeHash:  treeHash,
-			Path:      dir,
-			SizeBytes: sizeBytes,
-			Tags:      tags,
-			CreatedAt: time.Now(),
-			Note:      "fcheap not on PATH; bundle saved locally only",
-		}, fmt.Errorf("fcheap not on PATH")
+		saveErr := fmt.Errorf("fcheap not on PATH")
+		return registerFailedCapture(dir, treeHash, sizeBytes, tags, name, &req, saveErr)
 	}
 
 	res, err := stashSave(ctx, dir, name, tags, req.TTL)
 	if err != nil {
-		return CaptureResult{
-			TreeHash:  treeHash,
-			Path:      dir,
-			SizeBytes: sizeBytes,
-			Tags:      tags,
-			CreatedAt: time.Now(),
-			Note:      "fcheap save failed; bundle kept locally: " + err.Error(),
-		}, err
+		return registerFailedCapture(dir, treeHash, sizeBytes, tags, name, &req, err)
 	}
 	cleanup() // success — drop the temp dir; fcheap owns the bytes now.
 
@@ -169,6 +169,66 @@ func Capture(ctx context.Context, req CaptureRequest) (CaptureResult, error) {
 		Tags:      tags,
 		CreatedAt: time.Now(),
 	}, nil
+}
+
+// buildTags builds the fcheap tag set for a bundle. Shared by Capture and
+// LoadEntry (bare-bundle resume) so re-attempted saves carry identical tags.
+func buildTags(trigger string, alert AlertDetail, diag *Diagnosis, treeHash string) []string {
+	tags := []string{
+		"monitor-incident",
+		"trigger:" + trigger,
+		"snapshot:" + treeHash[:12],
+	}
+	if alert.Rule != "" {
+		tags = append(tags, "alert:"+alert.Rule)
+		if alert.PID > 0 {
+			tags = append(tags, fmt.Sprintf("pid:%d", alert.PID))
+		}
+	}
+	if diag != nil && diag.Confidence != "" {
+		tags = append(tags, "confidence:"+diag.Confidence)
+	}
+	return tags
+}
+
+// registerFailedCapture persists the retained bundle into the durable
+// registry so it survives reboots and tmp cleaning, and maps it into the
+// CaptureResult the caller surfaces. When registration itself fails the
+// temp bundle is left in place (the pre-registry behavior) and the Note
+// says so. The original archival error is always the returned error.
+func registerFailedCapture(dir, treeHash string, sizeBytes int64, tags []string, name string, req *CaptureRequest, saveErr error) (CaptureResult, error) {
+	entry := RegistryEntry{
+		SchemaVersion: registrySchemaVersion,
+		ID:            treeHash[:12],
+		TreeHash:      treeHash,
+		Name:          name,
+		SizeBytes:     sizeBytes,
+		Tags:          tags,
+		TTL:           req.TTL,
+		Trigger:       req.Trigger,
+		CreatedAt:     time.Now(),
+		LastError:     saveErr.Error(),
+	}
+	reg, regErr := register(dir, entry)
+	if regErr != nil {
+		return CaptureResult{
+			TreeHash:  treeHash,
+			Path:      dir,
+			SizeBytes: sizeBytes,
+			Tags:      tags,
+			CreatedAt: time.Now(),
+			Note:      fmt.Sprintf("fcheap archival failed (%v); registry unavailable (%v); bundle kept at %s", saveErr, regErr, dir),
+		}, saveErr
+	}
+	return CaptureResult{
+		TreeHash:   treeHash,
+		Path:       reg.BundlePath,
+		SizeBytes:  sizeBytes,
+		Tags:       tags,
+		CreatedAt:  time.Now(),
+		RegistryID: reg.ID,
+		Note:       fmt.Sprintf("fcheap archival failed (%v); bundle registered locally as %s — run `monitor incidents resume-stash %s` to retry", saveErr, reg.ID, reg.ID),
+	}, saveErr
 }
 
 // Search returns the list of stashes matching the given tags. Convenience
@@ -187,9 +247,18 @@ func fcheapAvailable() bool {
 	return err == nil
 }
 
+// bundleManifest is the manifest.json schema — the lightweight bundle
+// header. Package-level so writeBundle and LoadEntry (registry.go) share it.
+type bundleManifest struct {
+	Trigger   string      `json:"trigger"`
+	Alert     AlertDetail `json:"alert,omitempty"`
+	TTL       string      `json:"ttl,omitempty"`
+	Diagnosis *Diagnosis  `json:"diagnosis,omitempty"`
+}
+
 // writeBundle serializes the request into a stable file layout under dir:
 //
-//	manifest.json   — lightweight header (trigger / alert / ttl)
+//	manifest.json   — lightweight header (trigger / alert / ttl / diagnosis)
 //	snapshot.json   — req.Snapshot
 //	profile.json    — req.Profile (when non-empty)
 //
@@ -197,13 +266,10 @@ func fcheapAvailable() bool {
 // manifest used to embed the whole CaptureRequest, double-serializing them
 // and doubling the hash input). The tree-hash is computed over a sorted
 // concatenation of the file contents, so the layout is stable regardless of
-// map ordering.
+// map ordering. Note the diagnosis intentionally participates in the
+// tree-hash (it is part of the evidence).
 func writeBundle(dir string, req *CaptureRequest) error {
-	manifest := struct {
-		Trigger string      `json:"trigger"`
-		Alert   AlertDetail `json:"alert,omitempty"`
-		TTL     string      `json:"ttl,omitempty"`
-	}{Trigger: req.Trigger, Alert: req.Alert, TTL: req.TTL}
+	manifest := bundleManifest{Trigger: req.Trigger, Alert: req.Alert, TTL: req.TTL, Diagnosis: req.Diagnosis}
 	if err := writeJSON(filepath.Join(dir, "manifest.json"), manifest); err != nil {
 		return err
 	}

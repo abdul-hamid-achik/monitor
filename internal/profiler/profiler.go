@@ -53,8 +53,9 @@ type Profile struct {
 // Capture takes a profile snapshot for the given pid. For the pprof types
 // (heap/cpu/goroutine) it scrapes the net/http/pprof server at addr (default
 // "localhost:6060" when addr is ""); the caller is responsible for pointing
-// addr at the target pid's own pprof server — monitor cannot verify that the
-// process answering on that port is actually `pid`. For the macOS sample
+// addr at the target pid's own pprof server — callers that need proof the
+// endpoint belongs to pid should call VerifyListenerOwnership first (the
+// investigate pipeline and the MCP profile tool do). For the macOS sample
 // type it runs `sample <pid>` and addr is ignored.
 func Capture(ctx context.Context, pid int32, t ProfileType, addr string) (Profile, error) {
 	p := Profile{PID: pid, Type: t, Taken: time.Now()}
@@ -103,8 +104,8 @@ func Capture(ctx context.Context, pid int32, t ProfileType, addr string) (Profil
 	}
 }
 
-// defaultPprofAddr is the host:port scraped when Capture is given no address.
-const defaultPprofAddr = "localhost:6060"
+// DefaultPprofAddr is the host:port scraped when Capture is given no address.
+const DefaultPprofAddr = "localhost:6060"
 
 // pprofURL maps a ProfileType to its net/http/pprof endpoint at addr (host:port,
 // defaulting to localhost:6060 when empty).
@@ -116,7 +117,7 @@ const defaultPprofAddr = "localhost:6060"
 //     is gzipped protobuf and no symbols are recoverable.
 func pprofURL(addr string, t ProfileType) string {
 	if addr == "" {
-		addr = defaultPprofAddr
+		addr = DefaultPprofAddr
 	}
 	base := "http://" + addr + "/debug/pprof/"
 	switch t {

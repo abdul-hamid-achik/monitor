@@ -4,7 +4,14 @@ name: monitor_diff
 intent: |
   `monitor diff <baseline>` compares the live system against a saved baseline,
   reporting new/gone/changed processes and listeners plus metric deltas. The
-  JSON output carries `from`/`to` and the change arrays.
+  JSON output carries `from`/`to` and the change arrays. Significant deltas
+  additionally get a verdict (summary, evidence, confidence, next actions)
+  under `verdicts` in JSON, or a "verdicts:" section in human output.
+  `verdicts` follows the same additive pattern as an alert's `diagnosis`:
+  present only when something crossed a threshold, omitted (not `[]`) when
+  the diff is quiet — so `diff_json_has_verdicts` below diffs two crafted
+  fixture baselines with a deliberate 50-point memory swing instead of the
+  live system, which would rarely move enough to trigger a verdict on its own.
 
 target:
   cmd: ["./bin/monitor", "diff", "glyph-spec-diff", "--json"]
@@ -22,6 +29,12 @@ preconditions:
     # diff needs an existing baseline to compare the live system against.
     - run: "./bin/monitor baseline save glyph-spec-diff >/dev/null"
       timeoutMs: 15000
+    # Two hand-written fixture baselines with a deliberate 50-point memory
+    # swing (well past the 10-point MemPoints threshold) so the verdicts
+    # outcome below is deterministic instead of depending on the live
+    # system happening to drift enough between two baseline captures.
+    - run: "mkdir -p \"$HOME/.local/share/monitor/baselines\" && printf '%s' '{\"name\":\"glyph-spec-diff-lo\",\"captured_at\":\"2026-01-01T00:00:00Z\",\"cpu_usage\":5,\"mem_usage\":10,\"load1\":0.1,\"processes\":{},\"listeners\":[],\"disk_used\":100000000,\"disk_total\":1000000000}' > \"$HOME/.local/share/monitor/baselines/glyph-spec-diff-lo.json\" && printf '%s' '{\"name\":\"glyph-spec-diff-hi\",\"captured_at\":\"2026-01-01T00:05:00Z\",\"cpu_usage\":5,\"mem_usage\":60,\"load1\":0.1,\"processes\":{},\"listeners\":[],\"disk_used\":100000000,\"disk_total\":1000000000}' > \"$HOME/.local/share/monitor/baselines/glyph-spec-diff-hi.json\""
+      timeoutMs: 5000
 
 steps:
   - wait:
@@ -45,6 +58,21 @@ outcomes:
     verify:
       command:
         run: "./bin/monitor diff --help | grep -q 'mem-threshold'"
+  - id: verdicts_documented
+    description: diff help documents the verdict lines on significant deltas
+    verify:
+      command:
+        run: "./bin/monitor diff --help | grep -qi 'verdict'"
+  - id: diff_json_has_verdicts
+    description: a diff with a significant delta carries a Diagnosis-shaped verdicts array
+    verify:
+      command:
+        run: "./bin/monitor diff glyph-spec-diff-lo glyph-spec-diff-hi --json | grep -q '\"verdicts\"'"
+  - id: cleanup_diff_verdict_fixtures
+    description: remove the two crafted fixture baselines
+    verify:
+      command:
+        run: "./bin/monitor baseline delete glyph-spec-diff-lo; ./bin/monitor baseline delete glyph-spec-diff-hi"
   - id: cleanup_baseline
     description: remove the spec baseline
     verify:

@@ -20,6 +20,9 @@ import (
 // Event is the NDJSON event type emitted by `monitor watch --json`.
 //
 // Schema fields are stable; do not reorder without a migration note.
+// Additive nested fields are allowed: since sprint 4.1, "alert" objects may
+// carry an optional "diagnosis" {summary, evidence, confidence, next_actions}
+// built by the analyzer; consumers must ignore keys they don't know.
 type Event struct {
 	Type      string                   `json:"type"`
 	Timestamp time.Time                `json:"timestamp"`
@@ -75,11 +78,11 @@ the incident via internal/incidents (fcheap stash, content-addressed).`,
 			// (otherwise `watch --once --stash/--webhook/--notify` would return
 			// and kill the still-running goroutines mid-delivery).
 			var wg sync.WaitGroup
-			var handlers []func(ev collector.Event, a collector.Alert)
+			var handlers []func(ev collector.Event, a collector.Alert, d *incidents.Diagnosis)
 			if stash {
-				handlers = append(handlers, func(ev collector.Event, a collector.Alert) {
+				handlers = append(handlers, func(ev collector.Event, a collector.Alert, d *incidents.Diagnosis) {
 					wg.Add(1)
-					go func(ev collector.Event, a collector.Alert) {
+					go func(ev collector.Event, a collector.Alert, d *incidents.Diagnosis) {
 						defer wg.Done()
 						ctx2, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 						defer cancel()
@@ -92,48 +95,50 @@ the incident via internal/incidents (fcheap stash, content-addressed).`,
 								Process:  a.Process,
 								Detail:   a.Detail,
 							},
-							Trigger: "alert",
-							TTL:     stashTTL,
+							Diagnosis: d,
+							Trigger:   "alert",
+							TTL:       stashTTL,
 						})
 						ev2 := Event{Type: "stash", Timestamp: time.Now(), Stash: &res}
 						if err != nil {
 							ev2.StashErr = err.Error()
 						}
 						_ = WriteNDJSON(ev2)
-					}(ev, a)
+					}(ev, a, d)
 				})
 			}
 			if webhookURL != "" {
 				client := &http.Client{Timeout: 10 * time.Second}
-				handlers = append(handlers, func(_ collector.Event, a collector.Alert) {
+				handlers = append(handlers, func(_ collector.Event, a collector.Alert, d *incidents.Diagnosis) {
 					wg.Add(1)
-					go func(a collector.Alert) {
+					go func(a collector.Alert, nd *notify.Diagnosis) {
 						defer wg.Done()
 						ctx2, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 						defer cancel()
-						if err := notify.Webhook(ctx2, client, webhookURL, a); err != nil {
+						if err := notify.Webhook(ctx2, client, webhookURL, a, nd); err != nil {
 							fmt.Fprintf(os.Stderr, "monitor: webhook failed: %v\n", err)
 						}
-					}(a)
+					}(a, toNotifyDiagnosis(d))
 				})
 			}
 			if notifyDesktop {
-				handlers = append(handlers, func(_ collector.Event, a collector.Alert) {
+				handlers = append(handlers, func(_ collector.Event, a collector.Alert, d *incidents.Diagnosis) {
 					wg.Add(1)
-					go func(a collector.Alert) {
+					go func(a collector.Alert, nd *notify.Diagnosis) {
 						defer wg.Done()
 						ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 						defer cancel()
-						if err := notify.Desktop(ctx2, a); err != nil {
+						if err := notify.Desktop(ctx2, a, nd); err != nil {
 							fmt.Fprintf(os.Stderr, "monitor: desktop notify failed: %v\n", err)
 						}
-					}(a)
+					}(a, toNotifyDiagnosis(d))
 				})
 			}
 			if len(handlers) > 0 {
 				engine.SetOnAlert(func(ev collector.Event, a collector.Alert) {
+					d := diagnosisOf(a)
 					for _, h := range handlers {
-						h(ev, a)
+						h(ev, a, d)
 					}
 				})
 			}
@@ -254,5 +259,34 @@ func eventToSystemInfo(ev collector.Event) collector.SystemInfo {
 		Network:    ev.Network,
 		Hostname:   ev.Hostname,
 		LastUpdate: ev.Timestamp,
+	}
+}
+
+// diagnosisOf extracts the analyzer's diagnosis for an alert as the
+// incidents.Diagnosis mirror. nil when the alert carries no diagnosis.
+func diagnosisOf(a collector.Alert) *incidents.Diagnosis {
+	if a.Diagnosis == nil {
+		return nil
+	}
+	return &incidents.Diagnosis{
+		Summary:     a.Diagnosis.Summary,
+		Evidence:    a.Diagnosis.Evidence,
+		Confidence:  a.Diagnosis.Confidence,
+		NextActions: a.Diagnosis.NextActions,
+	}
+}
+
+// toNotifyDiagnosis converts the incidents-side mirror into notify's. Both
+// mirror analyzer.Diagnosis; the field copy keeps the two packages' JSON
+// schemas independently stable.
+func toNotifyDiagnosis(d *incidents.Diagnosis) *notify.Diagnosis {
+	if d == nil {
+		return nil
+	}
+	return &notify.Diagnosis{
+		Summary:     d.Summary,
+		Evidence:    d.Evidence,
+		Confidence:  d.Confidence,
+		NextActions: d.NextActions,
 	}
 }

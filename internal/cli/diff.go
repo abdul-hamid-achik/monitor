@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -34,6 +35,7 @@ func captureBaseline(ctx context.Context, name string, info collector.SystemInfo
 	for _, p := range info.Processes {
 		procs[p.PID] = baseline.ProcSnap{Name: p.Name, Memory: p.Memory, CPUPercent: p.CPUPercent}
 	}
+	diskUsed, diskTotal := rootPartition(info.Disk.Partitions)
 	return &baseline.Baseline{
 		Name:       name,
 		CapturedAt: time.Now(),
@@ -42,7 +44,30 @@ func captureBaseline(ctx context.Context, name string, info collector.SystemInfo
 		Load1:      info.CPU.LoadAvg1,
 		Processes:  procs,
 		Listeners:  gatherListeners(ctx, procs),
+		SwapUsed:   info.Memory.SwapUsed,
+		SwapTotal:  info.Memory.SwapTotal,
+		DiskUsed:   diskUsed,
+		DiskTotal:  diskTotal,
 	}
+}
+
+// rootPartition returns used/total bytes for "/" or, failing that, the
+// largest mounted partition; zeros when no partitions were collected.
+func rootPartition(parts []collector.DiskPartitionInfo) (used, total uint64) {
+	var best *collector.DiskPartitionInfo
+	for i := range parts {
+		p := &parts[i]
+		if p.MountPoint == "/" {
+			return p.UsedBytes, p.TotalBytes
+		}
+		if best == nil || p.TotalBytes > best.TotalBytes {
+			best = p
+		}
+	}
+	if best != nil {
+		return best.UsedBytes, best.TotalBytes
+	}
+	return 0, 0
 }
 
 // gatherListeners returns the TCP listening sockets, best-effort (some may be
@@ -155,7 +180,9 @@ func newDiffCmd() *cobra.Command {
 		Short: "Diff the live system (or a second baseline) against a saved baseline",
 		Long: `diff compares a saved baseline against the live system, reporting new/gone
 processes, per-process memory changes, new/gone listening ports, and the
-shift in CPU / memory / load.
+shift in CPU / memory / load. Significant deltas (relative change AND
+absolute floor) get a verdict line with confidence and next actions; with
+--json they appear under "verdicts".
 
   monitor diff pre-deploy               # pre-deploy  -> live
   monitor diff pre-deploy post-deploy   # pre-deploy  -> post-deploy`,
@@ -180,10 +207,11 @@ shift in CPU / memory / load.
 				to = captureBaseline(ctx, "live", NewCollector(0).Collect(ctx))
 			}
 			d := baseline.Compute(from, to, uint64(memKB)*1024)
+			d.Verdicts = baseline.ComputeVerdicts(from, to, d, baseline.DefaultThresholds())
 			if JSONOutput(cmd) {
 				return WriteJSON(d)
 			}
-			printDiff(d)
+			printDiff(os.Stdout, d)
 			return nil
 		},
 	}
@@ -192,25 +220,37 @@ shift in CPU / memory / load.
 	return cmd
 }
 
-func printDiff(d baseline.Diff) {
-	fmt.Printf("%s -> %s  (cpu %+.1f%%  mem %+.1f%%  load1 %+.2f)\n", d.From, d.To, d.CPUDelta, d.MemDelta, d.Load1Delta)
+func printDiff(w io.Writer, d baseline.Diff) {
+	fmt.Fprintf(w, "%s -> %s  (cpu %+.1f%%  mem %+.1f%%  load1 %+.2f)\n", d.From, d.To, d.CPUDelta, d.MemDelta, d.Load1Delta)
 	for _, p := range d.NewProcs {
-		fmt.Printf("  + proc  %s (pid %d)  %s\n", p.Name, p.PID, collector.FormatBytes(p.NewMem))
+		fmt.Fprintf(w, "  + proc  %s (pid %d)  %s\n", p.Name, p.PID, collector.FormatBytes(p.NewMem))
 	}
 	for _, p := range d.GoneProcs {
-		fmt.Printf("  - proc  %s (pid %d)  %s\n", p.Name, p.PID, collector.FormatBytes(p.OldMem))
+		fmt.Fprintf(w, "  - proc  %s (pid %d)  %s\n", p.Name, p.PID, collector.FormatBytes(p.OldMem))
 	}
 	for _, p := range d.ChangedProcs {
-		fmt.Printf("  ~ proc  %s (pid %d)  %s  (%s -> %s)\n", p.Name, p.PID, signedBytes(p.MemDelta), collector.FormatBytes(p.OldMem), collector.FormatBytes(p.NewMem))
+		fmt.Fprintf(w, "  ~ proc  %s (pid %d)  %s  (%s -> %s)\n", p.Name, p.PID, signedBytes(p.MemDelta), collector.FormatBytes(p.OldMem), collector.FormatBytes(p.NewMem))
 	}
 	for _, l := range d.NewListeners {
-		fmt.Printf("  + port  %s :%d (pid %d %s)\n", l.Proto, l.Port, l.PID, l.Process)
+		fmt.Fprintf(w, "  + port  %s :%d (pid %d %s)\n", l.Proto, l.Port, l.PID, l.Process)
 	}
 	for _, l := range d.GoneListeners {
-		fmt.Printf("  - port  %s :%d (pid %d %s)\n", l.Proto, l.Port, l.PID, l.Process)
+		fmt.Fprintf(w, "  - port  %s :%d (pid %d %s)\n", l.Proto, l.Port, l.PID, l.Process)
 	}
 	if len(d.NewProcs)+len(d.GoneProcs)+len(d.ChangedProcs)+len(d.NewListeners)+len(d.GoneListeners) == 0 {
-		fmt.Println("  (no process or listener changes)")
+		fmt.Fprintln(w, "  (no process or listener changes)")
+	}
+	if len(d.Verdicts) > 0 {
+		fmt.Fprintln(w, "verdicts:")
+		for _, v := range d.Verdicts {
+			fmt.Fprintf(w, "  ! %s  [%s confidence]\n", v.Summary, v.Confidence)
+			for _, e := range v.Evidence {
+				fmt.Fprintf(w, "      evidence: %s\n", e)
+			}
+			for _, n := range v.NextActions {
+				fmt.Fprintf(w, "      next: %s\n", n)
+			}
+		}
 	}
 }
 

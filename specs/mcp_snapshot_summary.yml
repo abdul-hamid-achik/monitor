@@ -1,0 +1,50 @@
+version: 1
+name: monitor_mcp_snapshot_summary
+
+intent: |
+  The `monitor_snapshot` MCP tool leads with an interpreted `summary` string
+  (always present) ahead of the raw SystemInfo fields, which are unchanged.
+  When a threshold (memory/CPU high, or a partition filling up) is near, it
+  also carries a `next` suggestions array; `next` follows the same additive
+  pattern as an alert's `diagnosis` — present only when there is something to
+  suggest, omitted (not `[]`) otherwise. The next_reflects_thresholds outcome
+  below re-derives the same high/critical thresholds buildSnapshotSummary uses
+  (internal/mcp/summary.go) from the raw fields in the SAME payload, so the
+  assertion is correct regardless of how loaded the host running the spec is.
+
+target:
+  cmd: ["sh", "-c", "{ printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_snapshot\",\"arguments\":{}}}'; sleep 3; } | ./bin/monitor mcp serve 2>&1 | tail -2"]
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 80
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exited: true
+      timeoutMs: 30000
+
+outcomes:
+  - id: summary_present
+    description: the snapshot payload always carries an interpreted summary
+    verify:
+      command:
+        run: "{ printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_snapshot\",\"arguments\":{}}}'; sleep 3; } | ./bin/monitor mcp serve 2>&1 | tail -2 | grep -q 'summary'"
+  - id: raw_data_preserved
+    description: the raw SystemInfo (cpu usage) still follows the summary
+    verify:
+      command:
+        run: "{ printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_snapshot\",\"arguments\":{}}}'; sleep 3; } | ./bin/monitor mcp serve 2>&1 | tail -2 | grep -q 'usage_percent'"
+  - id: next_reflects_thresholds
+    description: next is a non-empty array whenever mem/cpu/disk is near a threshold in the SAME payload
+    verify:
+      command:
+        run: "{ printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_snapshot\",\"arguments\":{}}}'; sleep 3; } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 -c 'import json,sys; lines=[l for l in sys.stdin if l.strip().startswith(\"{\")]; resp=json.loads(lines[-1]); text=resp[\"result\"][\"content\"][0][\"text\"]; payload=json.loads(text); assert payload.get(\"summary\"), \"summary missing\"; mem=payload.get(\"memory\",{}).get(\"usage_percent\",0); cpu=payload.get(\"cpu\",{}).get(\"usage_percent\",0); parts=payload.get(\"disk\",{}).get(\"partitions\") or []; worst=max([p.get(\"usage_percent\",0) for p in parts], default=0); nxt=payload.get(\"next\",[]); trig=mem>=75 or cpu>=75 or worst>=80; assert (not trig) or len(nxt)>0, \"expected next suggestions when mem=%s cpu=%s disk=%s: %r\"%(mem,cpu,worst,payload); print(\"ok\")'"

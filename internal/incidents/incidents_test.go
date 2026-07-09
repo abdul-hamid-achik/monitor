@@ -1,6 +1,7 @@
 package incidents
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -47,8 +48,10 @@ func TestCaptureSuccessRemovesTempDir(t *testing.T) {
 }
 
 // TestCaptureSaveFailureKeepsBundle asserts a save failure keeps the local
-// bundle (for forensics) and reports the error in the Note.
+// bundle (for forensics), registers it in the durable registry, and reports
+// the error in the Note.
 func TestCaptureSaveFailureKeepsBundle(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	origHas, origSave := hasFcheap, stashSave
 	defer func() { hasFcheap, stashSave = origHas, origSave }()
 
@@ -70,13 +73,28 @@ func TestCaptureSaveFailureKeepsBundle(t *testing.T) {
 	if !strings.Contains(res.Note, "disk full") {
 		t.Errorf("Note should mention the failure; got %q", res.Note)
 	}
+	if !strings.Contains(res.Note, "resume-stash") {
+		t.Errorf("Note should point at resume-stash; got %q", res.Note)
+	}
 	if res.Path == "" {
 		t.Fatal("Path should be populated on failure")
+	}
+	if res.RegistryID == "" {
+		t.Fatal("RegistryID should be populated when registration succeeds")
+	}
+	if res.RegistryID != res.TreeHash[:12] {
+		t.Errorf("RegistryID = %q, want tree-hash prefix %q", res.RegistryID, res.TreeHash[:12])
+	}
+	if !strings.HasPrefix(res.Path, os.Getenv("XDG_STATE_HOME")) {
+		t.Errorf("Path should be under the XDG_STATE_HOME temp dir %q; got %q", os.Getenv("XDG_STATE_HOME"), res.Path)
 	}
 	if _, statErr := os.Stat(filepath.Join(res.Path, "manifest.json")); statErr != nil {
 		t.Errorf("bundle should be kept on save failure: %v", statErr)
 	}
-	_ = os.RemoveAll(res.Path)
+	entryPath := filepath.Join(filepath.Dir(res.Path), "entry.json")
+	if _, statErr := os.Stat(entryPath); statErr != nil {
+		t.Errorf("entry.json should exist at %s: %v", entryPath, statErr)
+	}
 }
 
 // TestComputeTreeHashStable verifies that the same bundle produces the
@@ -183,14 +201,140 @@ func TestWriteBundleOmitsProfileWhenZero(t *testing.T) {
 	}
 }
 
+// TestWriteBundleIncludesDiagnosis verifies the diagnosis round-trips into
+// manifest.json when present on the request.
+func TestWriteBundleIncludesDiagnosis(t *testing.T) {
+	dir := t.TempDir()
+	req := &CaptureRequest{
+		Snapshot: collector.SystemInfo{Hostname: "test"},
+		Trigger:  "manual",
+		Diagnosis: &Diagnosis{
+			Summary:     "RSS grew 42%/10min while CPU stayed flat",
+			Evidence:    []string{"slope 3.2MB/min", "R²=0.94"},
+			Confidence:  "high",
+			NextActions: []string{"monitor_profile_capture type:heap"},
+		},
+	}
+	if err := writeBundle(dir, req); err != nil {
+		t.Fatalf("writeBundle: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read manifest.json: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("manifest.json not valid JSON: %v", err)
+	}
+	diag, ok := m["diagnosis"].(map[string]any)
+	if !ok {
+		t.Fatalf("manifest.json missing diagnosis object: %v", m)
+	}
+	if diag["summary"] != req.Diagnosis.Summary {
+		t.Errorf("diagnosis.summary = %v, want %q", diag["summary"], req.Diagnosis.Summary)
+	}
+	if diag["confidence"] != "high" {
+		t.Errorf("diagnosis.confidence = %v, want high", diag["confidence"])
+	}
+}
+
+// TestWriteBundleOmitsDiagnosisWhenNil verifies manifest.json carries no
+// "diagnosis" key at all when the request has none (byte-level omitempty
+// check, not just a nil-field check).
+func TestWriteBundleOmitsDiagnosisWhenNil(t *testing.T) {
+	dir := t.TempDir()
+	req := &CaptureRequest{
+		Snapshot: collector.SystemInfo{Hostname: "test"},
+		Trigger:  "manual",
+	}
+	if err := writeBundle(dir, req); err != nil {
+		t.Fatalf("writeBundle: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read manifest.json: %v", err)
+	}
+	if bytes.Contains(data, []byte(`"diagnosis"`)) {
+		t.Errorf("manifest.json should omit the diagnosis key when nil; got %s", data)
+	}
+}
+
+// TestBuildTags exercises the fcheap tag set built for a bundle.
+func TestBuildTags(t *testing.T) {
+	const treeHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd"
+	tests := []struct {
+		name        string
+		trigger     string
+		alert       AlertDetail
+		diag        *Diagnosis
+		wantContain []string
+		wantCount   int
+	}{
+		{
+			name:      "trigger+hash only",
+			trigger:   "manual",
+			alert:     AlertDetail{},
+			diag:      nil,
+			wantCount: 3,
+		},
+		{
+			name:        "alert rule adds tag",
+			trigger:     "alert",
+			alert:       AlertDetail{Rule: "rss_growth"},
+			wantContain: []string{"alert:rss_growth"},
+		},
+		{
+			name:        "pid tag only with rule",
+			trigger:     "alert",
+			alert:       AlertDetail{Rule: "rss_growth", PID: 42},
+			wantContain: []string{"alert:rss_growth", "pid:42"},
+		},
+		{
+			name:        "confidence tag",
+			trigger:     "alert",
+			diag:        &Diagnosis{Confidence: "high"},
+			wantContain: []string{"confidence:high"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tags := buildTags(tt.trigger, tt.alert, tt.diag, treeHash)
+			if tt.wantCount > 0 && len(tags) != tt.wantCount {
+				t.Errorf("len(tags) = %d, want %d (%v)", len(tags), tt.wantCount, tags)
+			}
+			for _, want := range tt.wantContain {
+				found := false
+				for _, tag := range tags {
+					if tag == want {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("tags %v missing %q", tags, want)
+				}
+			}
+		})
+	}
+	t.Run("no confidence tag when empty", func(t *testing.T) {
+		tags := buildTags("manual", AlertDetail{}, &Diagnosis{Summary: "x"}, treeHash)
+		for _, tag := range tags {
+			if strings.HasPrefix(tag, "confidence:") {
+				t.Errorf("unexpected confidence tag %q when Confidence is empty", tag)
+			}
+		}
+	})
+}
+
 // TestCaptureWithoutFcheapStillProducesBundle verifies the graceful-
 // degradation path: when fcheap isn't on PATH, Capture returns a
-// non-empty result with the local bundle path and an error wrapping
+// non-empty result with the registered bundle path and an error wrapping
 // "fcheap not on PATH".
 func TestCaptureWithoutFcheapStillProducesBundle(t *testing.T) {
-	if _, err := exec.LookPath("fcheap"); err == nil {
-		t.Skip("fcheap is on PATH; cannot exercise the no-fcheap fallback")
-	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	origHas := hasFcheap
+	defer func() { hasFcheap = origHas }()
+	hasFcheap = func() bool { return false }
 
 	ctx := context.Background()
 	res, err := Capture(ctx, CaptureRequest{
@@ -215,7 +359,10 @@ func TestCaptureWithoutFcheapStillProducesBundle(t *testing.T) {
 	if res.Note == "" {
 		t.Fatalf("Note should explain the failure; got empty string")
 	}
-	// Bundle on disk should still exist for forensics.
+	if res.RegistryID == "" {
+		t.Fatalf("RegistryID should be populated when registration succeeds")
+	}
+	// Bundle on disk should still exist for forensics, now under the registry.
 	if _, err := os.Stat(filepath.Join(res.Path, "manifest.json")); err != nil {
 		t.Fatalf("local bundle manifest missing: %v", err)
 	}

@@ -1,0 +1,49 @@
+version: 1
+name: monitor_mcp_processes_bounded
+
+intent: |
+  The `monitor_processes` MCP tool returns a bounded listing instead of
+  dumping every process: it honors an optional `limit` argument (plus
+  `sort_by` and `filter`) and always reports `total`, `truncated`, and a
+  concise `reason` (top_cpu, top_rss, or filtered) for what was kept.
+  Outcomes that need a specific value (not just field presence) parse the
+  tool's JSON out of the MCP `content[0].text` envelope with python3 instead
+  of grep, since that text is itself JSON-escaped — a naive quoted grep
+  pattern would look for unescaped quotes that never appear on the wire.
+
+target:
+  cmd: ["sh", "-c", "{ printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_processes\",\"arguments\":{\"limit\":5}}}'; sleep 3; } | ./bin/monitor mcp serve 2>&1 | tail -2"]
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 80
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exited: true
+      timeoutMs: 30000
+
+outcomes:
+  - id: truncated_and_reason
+    description: a limit of 5 (a real host runs far more than 5 processes) truncates the list with reason=top_cpu
+    verify:
+      command:
+        run: "{ printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_processes\",\"arguments\":{\"limit\":5}}}'; sleep 3; } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 -c 'import json,sys; lines=[l for l in sys.stdin if l.strip().startswith(\"{\")]; resp=json.loads(lines[-1]); text=resp[\"result\"][\"content\"][0][\"text\"]; payload=json.loads(text); assert payload.get(\"truncated\") is True, payload; assert payload.get(\"reason\")==\"top_cpu\", payload; print(\"ok\")'"
+  - id: total_reported
+    description: the listing reports a total process count larger than the bounded page
+    verify:
+      command:
+        run: "{ printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_processes\",\"arguments\":{\"limit\":5}}}'; sleep 3; } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 -c 'import json,sys; lines=[l for l in sys.stdin if l.strip().startswith(\"{\")]; resp=json.loads(lines[-1]); text=resp[\"result\"][\"content\"][0][\"text\"]; payload=json.loads(text); assert isinstance(payload.get(\"total\"), int) and payload[\"total\"]>5, payload; print(\"ok\")'"
+  - id: filter_reason
+    description: a name filter reports reason=filtered
+    verify:
+      command:
+        run: "{ printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_processes\",\"arguments\":{\"filter\":\"kernel\"}}}'; sleep 3; } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 -c 'import json,sys; lines=[l for l in sys.stdin if l.strip().startswith(\"{\")]; resp=json.loads(lines[-1]); text=resp[\"result\"][\"content\"][0][\"text\"]; payload=json.loads(text); assert payload.get(\"reason\")==\"filtered\", payload; print(\"ok\")'"

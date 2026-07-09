@@ -54,6 +54,15 @@ type Baseline struct {
 	Load1      float64            `json:"load1"`
 	Processes  map[int32]ProcSnap `json:"processes"`
 	Listeners  []Listener         `json:"listeners"`
+
+	// Swap/disk snapshot added for diff verdicts (sprint 4.5). Baselines
+	// saved by older builds unmarshal these as zero; DiskTotal == 0 is the
+	// sentinel for "pre-verdict schema" and suppresses swap/disk verdicts
+	// (a real capture always has a nonzero disk total).
+	SwapUsed  uint64 `json:"swap_used,omitempty"`
+	SwapTotal uint64 `json:"swap_total,omitempty"`
+	DiskUsed  uint64 `json:"disk_used,omitempty"`  // bytes used on the root partition
+	DiskTotal uint64 `json:"disk_total,omitempty"` // bytes total on the root partition
 }
 
 // Save writes b to dir/<name>.json atomically (temp file + rename).
@@ -155,6 +164,10 @@ type Diff struct {
 	ChangedProcs  []ProcChange `json:"changed_procs"`
 	NewListeners  []Listener   `json:"new_listeners"`
 	GoneListeners []Listener   `json:"gone_listeners"`
+
+	// Verdicts interprets the significant deltas. Populated by
+	// ComputeVerdicts, not Compute, so Compute stays a pure diff.
+	Verdicts []Verdict `json:"verdicts,omitempty"`
 }
 
 // Compute diffs old -> new. A process appearing only in new is "new", only in

@@ -5,7 +5,10 @@ intent: |
   `monitor incidents` lists recent incident stashes (via fcheap). The command
   is wired into the CLI, documents --json, and degrades gracefully (a clean
   error, never a panic) when fcheap isn't installed — so this spec is CI-safe
-  without fcheap on PATH.
+  without fcheap on PATH. It also hosts the registry subcommands `pending`
+  and `resume-stash` (the latter retries the fcheap archive for a bundle
+  retained after a failed capture); see specs/incidents_resume.yml for the
+  resume-stash behavior itself.
 
 target:
   cmd: ["./bin/monitor", "incidents", "--help"]
@@ -43,6 +46,11 @@ outcomes:
     verify:
       command:
         run: "! ./bin/monitor incidents --json 2>&1 | grep -qiE 'panic|goroutine [0-9]+'"
+  - id: resume_stash_subcommand_listed
+    description: incidents --help lists the resume-stash subcommand
+    verify:
+      command:
+        run: "./bin/monitor incidents --help | grep -q 'resume-stash'"
   - id: clean_exit
     description: incidents --help exits cleanly
     verify:

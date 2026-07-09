@@ -42,12 +42,31 @@ type Event struct {
 }
 
 // Alert is an optional analyzer finding attached to an Event.
+//
+// Diagnosis is additive: nil when the analyzer window is too short or no
+// cross-signal pattern matched. JSON consumers that ignore unknown keys are
+// unaffected.
 type Alert struct {
-	Severity string `json:"severity"`
-	Rule     string `json:"rule"`
-	PID      int32  `json:"pid,omitempty"`
-	Process  string `json:"process,omitempty"`
-	Detail   string `json:"detail"`
+	Severity  string     `json:"severity"`
+	Rule      string     `json:"rule"`
+	PID       int32      `json:"pid,omitempty"`
+	Process   string     `json:"process,omitempty"`
+	Detail    string     `json:"detail"`
+	Diagnosis *Diagnosis `json:"diagnosis,omitempty"`
+}
+
+// Diagnosis is the analyzer's interpretation of correlated per-process
+// signals: what the pattern is, the numeric evidence behind it (slope, R²,
+// sample counts — never discarded), how confident the classification is,
+// and which monitor MCP tools to run next. It lives next to Alert (rather
+// than in internal/analyzer, which builds it) so every Alert consumer —
+// watch NDJSON, webhooks, incidents, MCP — can carry it without importing
+// the analyzer and creating an import cycle.
+type Diagnosis struct {
+	Summary     string   `json:"summary"`
+	Evidence    []string `json:"evidence"`
+	Confidence  string   `json:"confidence"`   // "low" | "medium" | "high"
+	NextActions []string `json:"next_actions"` // at most 2, each a concrete monitor MCP tool invocation
 }
 
 // Collector periodically samples the system and emits Events.

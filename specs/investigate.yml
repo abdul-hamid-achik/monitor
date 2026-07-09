@@ -2,11 +2,15 @@ version: 1
 name: monitor_investigate
 
 intent: |
-  `monitor investigate <pid> --json` runs the diagnostic pipeline and
-  returns JSON with the PID, start time, the ordered list of pipeline steps,
-  and a note describing the pipeline stage. The current implementation is a
-  stub that emits the documented contract. Uses PID 1 (launchd) which is
-  always present on macOS and is not killed by investigate.
+  `monitor investigate <pid> --json` runs the diagnostic pipeline
+  (snapshot -> profile -> correlate -> stash) and returns JSON with the PID,
+  start time, an ordered list of typed per-step results ({step, status,
+  limitation, recovery}), and an overall verdict of "complete" or "partial"
+  (complete iff no step failed). Uses PID 1 (launchd) which is always present
+  on macOS and is not killed by investigate; launchd exposes no pprof server
+  and macOS `sample` needs root to attach to another user's process, so this
+  spec expects verdict "partial" in the sandboxed CI environment — do NOT
+  assert a specific verdict value, only that the field is present.
 
 target:
   cmd: ["./bin/monitor", "investigate", "1", "--json"]
@@ -54,3 +58,13 @@ outcomes:
     verify:
       process:
         exitCode: 0
+  - id: verdict_present
+    description: stdout includes the overall complete|partial verdict
+    verify:
+      command:
+        run: "./bin/monitor investigate 1 --json | grep -q '\"verdict\"'"
+  - id: typed_steps
+    description: steps carry per-step status objects, not bare strings
+    verify:
+      command:
+        run: "./bin/monitor investigate 1 --json | grep -q '\"status\"'"

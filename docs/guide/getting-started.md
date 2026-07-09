@@ -113,8 +113,9 @@ Speak MCP over stdio to expose Monitor's data and tools to an agent:
 ./bin/monitor mcp serve
 ```
 
-This exposes seven tools — three read-only and four mutating — with the
-mutating tools gated on `confirm: true`.
+This exposes eight tools — four read-only and four mutating — with the
+mutating tools gated on `confirm: true` (the read-only `monitor_analyze` has
+no confirm gate).
 
 → See [MCP Server](/guide/mcp) for the tool list and confirmation model.
 

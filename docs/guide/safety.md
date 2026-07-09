@@ -34,6 +34,23 @@ cleanly. Force-kill (`SIGKILL`) is always an explicit, separate action:
 - CLI: `monitor kill <pid> --force`
 - MCP: `force: true` in the `monitor_kill` input
 
+### Verified outcomes
+
+Sending a signal is not the same as the process dying. After `SIGTERM`,
+`kill` polls the PID briefly (up to ~2s) and reports what actually
+happened as an `outcome` on every surface (`monitor kill --json` per-PID
+results and the `monitor_kill` MCP payload):
+
+- `terminated` — the process is confirmed gone.
+- `still_running` — it survived the polling window; a `next_action` field
+  suggests the force-kill (`--force` on the CLI, `force: true` on MCP).
+- `unknown` — the liveness check itself failed (state can't be verified).
+
+`killed` is `true` only once `outcome` is `terminated` — never merely
+because a signal was sent. Escalation to `SIGKILL` is never automatic: a
+survivor produces a suggestion, and the follow-up force-kill is a separate,
+explicit action. See [`kill`](/guide/cli#kill) for the full JSON shape.
+
 ## Example: a refused kill
 
 ```bash
