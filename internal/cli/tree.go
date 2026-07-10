@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,7 +14,24 @@ import (
 // treeNode is a process plus its children, for the process hierarchy.
 type treeNode struct {
 	collector.ProcessInfo
-	Children []*treeNode `json:"children,omitempty"`
+	Children []*treeNode `json:"children"`
+}
+
+func (n *treeNode) MarshalJSON() ([]byte, error) {
+	process, err := json.Marshal(n.ProcessInfo)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(process, &fields); err != nil {
+		return nil, err
+	}
+	children, err := json.Marshal(n.Children)
+	if err != nil {
+		return nil, err
+	}
+	fields["children"] = children
+	return json.Marshal(fields)
 }
 
 // buildForest builds the process forest from procs. If root > 0 it returns the
@@ -23,7 +41,7 @@ type treeNode struct {
 func buildForest(procs []collector.ProcessInfo, root int32) []*treeNode {
 	byPID := make(map[int32]*treeNode, len(procs))
 	for _, p := range procs {
-		byPID[p.PID] = &treeNode{ProcessInfo: p}
+		byPID[p.PID] = &treeNode{ProcessInfo: p, Children: []*treeNode{}}
 	}
 	var roots []*treeNode
 	for _, p := range procs {
