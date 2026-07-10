@@ -13,9 +13,10 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"runtime"
 	"strings"
 	"time"
+
+	"github.com/abdul-hamid-achik/monitor/internal/capability"
 )
 
 // ProfileType is a discriminator for the kind of profile captured.
@@ -50,6 +51,24 @@ type Profile struct {
 	Symbols []Symbol    `json:"symbols,omitempty"`
 }
 
+// ValidateCaptureWith checks a requested profile type against an injected
+// capability set. Entry points call this before ownership checks or collection.
+func ValidateCaptureWith(caps capability.Set, t ProfileType) error {
+	switch t {
+	case ProfileHeap, ProfileCPU, ProfileGoroutine:
+		return caps.Require(capability.ProfilePprof)
+	case ProfileSample:
+		return caps.Require(capability.ProfileSample)
+	default:
+		return fmt.Errorf("unknown profile type %q", t)
+	}
+}
+
+// ValidateCapture checks profile support on the current host.
+func ValidateCapture(t ProfileType) error {
+	return ValidateCaptureWith(capability.Current(), t)
+}
+
 // Capture takes a profile snapshot for the given pid. For the pprof types
 // (heap/cpu/goroutine) it scrapes the net/http/pprof server at addr (default
 // "localhost:6060" when addr is ""); the caller is responsible for pointing
@@ -59,6 +78,9 @@ type Profile struct {
 // type it runs `sample <pid>` and addr is ignored.
 func Capture(ctx context.Context, pid int32, t ProfileType, addr string) (Profile, error) {
 	p := Profile{PID: pid, Type: t, Taken: time.Now()}
+	if err := ValidateCapture(t); err != nil {
+		return p, err
+	}
 	if pid <= 0 {
 		return p, fmt.Errorf("invalid pid %d", pid)
 	}
@@ -89,9 +111,6 @@ func Capture(ctx context.Context, pid int32, t ProfileType, addr string) (Profil
 		p.Symbols = goToolPprofTop(ctx, path)
 		return p, nil
 	case ProfileSample:
-		if runtime.GOOS != "darwin" {
-			return p, fmt.Errorf("sample only available on macOS")
-		}
 		out, err := exec.CommandContext(ctx, "sample", fmt.Sprintf("%d", pid), "1", "-mayDie").CombinedOutput()
 		if err != nil {
 			return p, fmt.Errorf("sample: %w", err)

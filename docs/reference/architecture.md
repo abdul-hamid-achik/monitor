@@ -85,10 +85,12 @@ the streaming CLI, the analyzer, the MCP surface, and log capture:
 ```
 
 - **TUI** (`internal/ui/studio`) subscribes and re-renders each tab as events arrive.
-- **CLI** (`internal/cli`) reads a single `Event` for `snapshot`, or streams
-  NDJSON for `watch`.
+- **CLI** (`internal/cli`) reads a single `Event` for `snapshot`, projects it
+  through `collector.BuildCompactSnapshot` when `--compact` is requested, or
+  streams NDJSON for `watch`.
 - **MCP** (`internal/mcp`) answers `monitor_snapshot` / `monitor_processes`
-  from the same data, samples a short window through `internal/analyzer` for
+  from the same data (including the same bounded compact projection), samples
+  a short window through `internal/analyzer` for
   `monitor_analyze`, and routes mutating tools through `internal/kill` and
   `internal/profiler`.
 - **Analyzer, capture, incidents** observe events to flag anomalies, ingest

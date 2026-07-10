@@ -1,0 +1,48 @@
+version: 1
+name: monitor_snapshot_compact
+
+intent: |
+  `monitor snapshot --compact` returns the bounded, schema-versioned JSON view
+  intended for agent context windows and honors explicit list limits.
+
+target:
+  cmd: ["./bin/monitor", "snapshot", "--compact", "--process-limit", "2", "--filesystem-limit", "2"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: compact_schema_present
+    description: stdout identifies the compact v1 schema
+    verify:
+      command:
+        run: "./bin/monitor snapshot --compact | grep -q '\"kind\": \"monitor.compact_snapshot\"'"
+  - id: process_limit_present
+    description: stdout records the requested process cap
+    verify:
+      command:
+        run: "./bin/monitor snapshot --compact --process-limit 2 | grep -q '\"limit\": 2'"
+  - id: bounded_output
+    description: the default compact snapshot remains below 64 KiB
+    verify:
+      command:
+        run: "test $(./bin/monitor snapshot --compact | wc -c) -lt 65536"
+  - id: clean_exit
+    description: the binary exits cleanly
+    verify:
+      process:
+        exitCode: 0

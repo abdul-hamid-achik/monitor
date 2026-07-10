@@ -32,6 +32,9 @@ func newProfileCmd() *cobra.Command {
 			ctx, cancel := Context()
 			defer cancel()
 			pt := profiler.ProfileType(ptype)
+			if err := profiler.ValidateCapture(pt); err != nil {
+				return err
+			}
 			if pt != profiler.ProfileSample && !cmd.Flags().Changed("pprof-addr") {
 				if own, detail := profiler.VerifyListenerOwnership(ctx, pid, pprofAddr); own != profiler.OwnershipOwned {
 					return fmt.Errorf("refusing to scrape %s for pid %d: %s (pass --pprof-addr explicitly to assert the endpoint is correct, or use -t sample)", pprofAddr, pid, detail)

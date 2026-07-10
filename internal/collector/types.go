@@ -1,6 +1,69 @@
 package collector
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/abdul-hamid-achik/monitor/internal/capability"
+)
+
+// MetricState makes absence explicit instead of overloading numeric zero.
+type MetricState string
+
+const (
+	MetricObserved    MetricState = "observed"
+	MetricUnsupported MetricState = "unsupported"
+	MetricUnavailable MetricState = "unavailable"
+)
+
+// MetricStatus describes whether a metric was collected and, when it was not,
+// why. Observed metrics may legitimately contain numeric zero.
+type MetricStatus struct {
+	State  MetricState `json:"state"`
+	Reason string      `json:"reason,omitempty"`
+}
+
+const (
+	metricCPUUsage      = "usage"
+	metricCPUPerCore    = "per_core"
+	metricCPUInfo       = "info"
+	metricCPULoad       = "load_average"
+	metricMemoryVirtual = "virtual"
+	metricMemorySwap    = "swap"
+	metricMemoryBreakdown = "breakdown"
+	metricNetworkIO     = "io"
+	metricNetworkRate   = "rate"
+	metricDiskParts     = "partitions"
+	metricDiskIO        = "io"
+	metricDiskRate      = "rate"
+	metricProcessCPU    = "cpu"
+	metricProcessMemory = "memory"
+	metricProcessMemPct = "memory_percent"
+	metricProcessName   = "name"
+	metricProcessThread = "threads"
+	metricProcessUser   = "user"
+	metricProcessParent = "parent"
+)
+
+func observed(statuses map[string]MetricStatus, key string) bool {
+	status, exists := statuses[key]
+	return !exists || status.State == MetricObserved
+}
+
+func metricStatus(state MetricState, reason string) MetricStatus {
+	return MetricStatus{State: state, Reason: reason}
+}
+
+func statusFromCapability(s capability.Support) MetricStatus {
+	switch s.State {
+	case capability.Unsupported:
+		return metricStatus(MetricUnsupported, s.Reason)
+	case capability.Unavailable:
+		return metricStatus(MetricUnavailable, s.Reason)
+	default:
+		return metricStatus(MetricObserved, "")
+	}
+}
 
 // CPUInfo holds CPU usage statistics.
 type CPUInfo struct {
@@ -15,6 +78,7 @@ type CPUInfo struct {
 	History        []float64   `json:"history"`
 	PerCoreHistory [][]float64 `json:"per_core_history,omitempty"`
 	LastUpdate     time.Time   `json:"last_update"`
+	MetricStates   map[string]MetricStatus `json:"metric_states"`
 }
 
 // MemoryInfo holds RAM and swap statistics.
@@ -35,6 +99,7 @@ type MemoryInfo struct {
 	PurgeableMemory  uint64    `json:"purgeable_memory"`
 	History          []float64 `json:"history"`
 	LastUpdate       time.Time `json:"last_update"`
+	MetricStates     map[string]MetricStatus `json:"metric_states"`
 }
 
 // TemperatureInfo holds sensor readings (estimated on non-SMC builds).
@@ -49,6 +114,7 @@ type TemperatureInfo struct {
 	FanMode    string    `json:"fan_mode"`
 	History    []float64 `json:"history"`
 	LastUpdate time.Time `json:"last_update"`
+	State      MetricStatus `json:"state"`
 	Available  bool      `json:"available"`
 	// Source names the data origin: "estimated" (CPU-load heuristic) or
 	// "powermetrics" (real SMC readings via sudo powermetrics). Lets
@@ -68,6 +134,7 @@ type NetworkInfo struct {
 	DownloadHistory []float64 `json:"download_history"`
 	UploadHistory   []float64 `json:"upload_history"`
 	LastUpdate      time.Time `json:"last_update"`
+	MetricStates    map[string]MetricStatus `json:"metric_states"`
 }
 
 // DiskPartitionInfo describes a mounted partition.
@@ -91,6 +158,7 @@ type DiskInfo struct {
 	ReadHistory  []float64           `json:"read_history"`
 	WriteHistory []float64           `json:"write_history"`
 	LastUpdate   time.Time           `json:"last_update"`
+	MetricStates  map[string]MetricStatus `json:"metric_states"`
 }
 
 // ProcessInfo describes one OS process.
@@ -108,6 +176,7 @@ type ProcessInfo struct {
 	IsProtected   bool    `json:"is_protected"`
 	IOReadBytes   uint64  `json:"io_read_bytes,omitempty"`
 	IOWriteBytes  uint64  `json:"io_write_bytes,omitempty"`
+	MetricStates   map[string]MetricStatus `json:"metric_states"`
 }
 
 // SystemInfo aggregates all metric families.
@@ -118,6 +187,7 @@ type CgroupInfo struct {
 	MemLimitBytes uint64  `json:"mem_limit_bytes,omitempty"`
 	MemUsageBytes uint64  `json:"mem_usage_bytes,omitempty"`
 	CPUQuotaCores float64 `json:"cpu_quota_cores,omitempty"`
+	State         MetricStatus `json:"state"`
 }
 
 type SystemInfo struct {
@@ -128,6 +198,7 @@ type SystemInfo struct {
 	Network             NetworkInfo     `json:"network"`
 	Disk                DiskInfo        `json:"disk"`
 	Processes           []ProcessInfo   `json:"processes"`
+	ProcessesState       MetricStatus     `json:"processes_state"`
 	ProcessesLastUpdate time.Time       `json:"processes_last_update"`
 	Hostname            string          `json:"hostname"`
 	OS                  string          `json:"os"`
@@ -136,6 +207,154 @@ type SystemInfo struct {
 	Uptime              uint64          `json:"uptime"`
 	BootTime            uint64          `json:"boot_time"`
 	LastUpdate          time.Time       `json:"last_update"`
+	Capture             MetricStatus                  `json:"capture"`
+	Capabilities        map[capability.Name]capability.Support `json:"capabilities"`
+}
+// MarshalJSON keeps observed values at their established numeric keys, while
+// omitting values that were unsupported or unavailable. metric_states remains
+// explicit in both cases, so an observed zero cannot be confused with absence.
+func (c CPUInfo) MarshalJSON() ([]byte, error) {
+	out := map[string]any{
+		"history": c.History, "last_update": c.LastUpdate, "metric_states": c.MetricStates,
+	}
+	if len(c.PerCoreHistory) > 0 {
+		out["per_core_history"] = c.PerCoreHistory
+	}
+	if observed(c.MetricStates, metricCPUUsage) {
+		out["usage_percent"] = c.UsagePercent
+	}
+	if observed(c.MetricStates, metricCPUPerCore) {
+		out["per_core_usage"] = c.PerCoreUsage
+		out["core_count"] = c.CoreCount
+	}
+	if observed(c.MetricStates, metricCPUInfo) {
+		out["frequency_mhz"] = c.FrequencyMHz
+		out["thread_count"] = c.ThreadCount
+	}
+	if observed(c.MetricStates, metricCPULoad) {
+		out["load_avg_1"] = c.LoadAvg1
+		out["load_avg_5"] = c.LoadAvg5
+		out["load_avg_15"] = c.LoadAvg15
+	}
+	return json.Marshal(out)
+}
+
+func (m MemoryInfo) MarshalJSON() ([]byte, error) {
+	out := map[string]any{
+		"history": m.History, "last_update": m.LastUpdate, "metric_states": m.MetricStates,
+	}
+	if observed(m.MetricStates, metricMemoryVirtual) {
+		out["total_bytes"] = m.TotalBytes
+		out["used_bytes"] = m.UsedBytes
+		out["free_bytes"] = m.FreeBytes
+		out["available_bytes"] = m.AvailableBytes
+		out["usage_percent"] = m.UsagePercent
+		out["memory_pressure"] = m.MemoryPressure
+	}
+	if observed(m.MetricStates, metricMemorySwap) {
+		out["swap_total"] = m.SwapTotal
+		out["swap_used"] = m.SwapUsed
+		out["swap_free"] = m.SwapFree
+	}
+	if observed(m.MetricStates, metricMemoryBreakdown) {
+		out["app_memory"] = m.AppMemory
+		out["wired_memory"] = m.WiredMemory
+		out["compressed_memory"] = m.CompressedMemory
+		out["cache_memory"] = m.CacheMemory
+		out["purgeable_memory"] = m.PurgeableMemory
+	}
+	return json.Marshal(out)
+}
+
+func (n NetworkInfo) MarshalJSON() ([]byte, error) {
+	out := map[string]any{
+		"download_history": n.DownloadHistory, "upload_history": n.UploadHistory,
+		"last_update": n.LastUpdate, "metric_states": n.MetricStates,
+	}
+	if observed(n.MetricStates, metricNetworkIO) {
+		out["bytes_sent"] = n.BytesSent
+		out["bytes_recv"] = n.BytesRecv
+		out["packets_sent"] = n.PacketsSent
+		out["packets_recv"] = n.PacketsRecv
+	}
+	if observed(n.MetricStates, metricNetworkRate) {
+		out["bytes_sent_per_sec"] = n.BytesSentPerSec
+		out["bytes_recv_per_sec"] = n.BytesRecvPerSec
+	}
+	return json.Marshal(out)
+}
+
+func (d DiskInfo) MarshalJSON() ([]byte, error) {
+	out := map[string]any{
+		"read_history": d.ReadHistory, "write_history": d.WriteHistory,
+		"last_update": d.LastUpdate, "metric_states": d.MetricStates,
+	}
+	if observed(d.MetricStates, metricDiskParts) {
+		out["partitions"] = d.Partitions
+	}
+	if observed(d.MetricStates, metricDiskIO) {
+		out["read_bytes"] = d.ReadBytes
+		out["write_bytes"] = d.WriteBytes
+	}
+	if observed(d.MetricStates, metricDiskRate) {
+		out["read_per_sec"] = d.ReadPerSec
+		out["write_per_sec"] = d.WritePerSec
+	}
+	return json.Marshal(out)
+}
+
+func (p ProcessInfo) MarshalJSON() ([]byte, error) {
+	out := map[string]any{
+		"pid": p.PID, "name": p.Name, "is_system": p.IsSystem,
+		"is_protected": p.IsProtected, "metric_states": p.MetricStates,
+	}
+	if observed(p.MetricStates, metricProcessCPU) {
+		out["cpu_percent"] = p.CPUPercent
+	}
+	if observed(p.MetricStates, metricProcessMemory) {
+		out["memory"] = p.Memory
+	}
+	if observed(p.MetricStates, metricProcessMemPct) {
+		out["memory_percent"] = p.MemoryPercent
+	}
+	if observed(p.MetricStates, metricProcessThread) {
+		out["threads"] = p.Threads
+	}
+	if observed(p.MetricStates, metricProcessUser) {
+		out["user"] = p.User
+	}
+	if p.Status != "" {
+		out["status"] = p.Status
+	}
+	if observed(p.MetricStates, metricProcessParent) {
+		out["parent"] = p.Parent
+	}
+	if p.IOReadBytes != 0 {
+		out["io_read_bytes"] = p.IOReadBytes
+	}
+	if p.IOWriteBytes != 0 {
+		out["io_write_bytes"] = p.IOWriteBytes
+	}
+	return json.Marshal(out)
+}
+
+
+func (t TemperatureInfo) MarshalJSON() ([]byte, error) {
+	out := map[string]any{
+		"state": t.State, "available": t.Available, "source": t.Source,
+		"history": t.History, "last_update": t.LastUpdate,
+	}
+	if t.State.State == "" || t.State.State == MetricObserved {
+		out["cpu_package"] = t.CPUPackage
+		out["cpu_cores"] = t.CPUCores
+		out["gpu"] = t.GPU
+		out["ane"] = t.ANE
+		out["battery"] = t.Battery
+		out["ambient"] = t.Ambient
+		out["fan_rpm"] = t.FanRPM
+		out["fan_mode"] = t.FanMode
+	}
+	return json.Marshal(out)
 }
 
 // ProtectedProcessNames are macOS processes monitor will not kill.

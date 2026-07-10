@@ -2,8 +2,13 @@ package collector
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/abdul-hamid-achik/monitor/internal/capability"
+	"github.com/shirou/gopsutil/v4/load"
 )
 
 func TestNewDefaults(t *testing.T) {
@@ -51,6 +56,119 @@ func TestCollectRuns(t *testing.T) {
 		t.Log("no CPU cores reported (acceptable on exotic systems)")
 	}
 }
+func TestLoadAverageObservedZeroVersusUnavailable(t *testing.T) {
+	linux := capability.Detect(capability.Detector{
+		GOOS: "linux",
+		LookPath: func(string) (string, error) { return "", errors.New("missing") },
+	})
+	tests := []struct {
+		name        string
+		collect     func(context.Context) (*load.AvgStat, error)
+		wantState   MetricState
+		wantNumeric bool
+	}{
+		{
+			name: "observed zero",
+			collect: func(context.Context) (*load.AvgStat, error) {
+				return &load.AvgStat{}, nil
+			},
+			wantState: MetricObserved, wantNumeric: true,
+		},
+		{
+			name: "collector unavailable",
+			collect: func(context.Context) (*load.AvgStat, error) {
+				return nil, errors.New("no load source")
+			},
+			wantState: MetricUnavailable, wantNumeric: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := New(Options{Capabilities: &linux, LoadAverage: tt.collect})
+			info, err := c.Capture(context.Background())
+			if err != nil {
+				t.Fatalf("Capture: %v", err)
+			}
+			if got := info.CPU.MetricStates[metricCPULoad].State; got != tt.wantState {
+				t.Fatalf("load state = %q, want %q", got, tt.wantState)
+			}
+			data, err := json.Marshal(info.CPU)
+			if err != nil {
+				t.Fatalf("marshal CPU: %v", err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(data, &payload); err != nil {
+				t.Fatalf("unmarshal CPU: %v", err)
+			}
+			_, numeric := payload["load_avg_1"].(float64)
+			if numeric != tt.wantNumeric {
+				t.Fatalf("load_avg_1 numeric=%v, want %v; payload=%s", numeric, tt.wantNumeric, data)
+			}
+		})
+	}
+}
+
+func TestCaptureBlocksUnsupportedPlatformBeforeCollectors(t *testing.T) {
+	unsupported := capability.Detect(capability.Detector{
+		GOOS: "plan9",
+		LookPath: func(string) (string, error) { return "", errors.New("missing") },
+	})
+	called := false
+	c := New(Options{
+		Capabilities: &unsupported,
+		LoadAverage: func(context.Context) (*load.AvgStat, error) {
+			called = true
+			return &load.AvgStat{}, nil
+		},
+	})
+	info, err := c.Capture(context.Background())
+	if err == nil {
+		t.Fatal("Capture should reject unsupported platform")
+	}
+	if called {
+		t.Fatal("collector seam was invoked before capability rejection")
+	}
+	if info.Capture.State != MetricUnsupported {
+		t.Fatalf("capture state = %q, want unsupported", info.Capture.State)
+	}
+}
+
+func TestUnsupportedLoadAverageIsNotCollectedOrSerialized(t *testing.T) {
+	darwin := capability.Detect(capability.Detector{
+		GOOS: "darwin",
+		LookPath: func(string) (string, error) { return "/usr/bin/sample", nil },
+	})
+	called := false
+	c := New(Options{
+		Capabilities: &darwin,
+		LoadAverage: func(context.Context) (*load.AvgStat, error) {
+			called = true
+			return &load.AvgStat{}, nil
+		},
+	})
+	info, err := c.Capture(context.Background())
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if called {
+		t.Fatal("unsupported load collector must not run")
+	}
+	if info.CPU.MetricStates[metricCPULoad].State != MetricUnsupported {
+		t.Fatalf("load state = %+v", info.CPU.MetricStates[metricCPULoad])
+	}
+	data, err := json.Marshal(info.CPU)
+	if err != nil {
+		t.Fatalf("marshal CPU: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("unmarshal CPU: %v", err)
+	}
+	if _, exists := payload["load_avg_1"]; exists {
+		t.Fatalf("unsupported load average serialized as a number: %s", data)
+	}
+}
+
 
 func TestSubscribeCalledOnEachTick(t *testing.T) {
 	c := New(Options{Interval: 1_000_000})

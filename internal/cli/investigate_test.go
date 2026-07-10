@@ -14,9 +14,9 @@ import (
 // restoreStubs saves the package-level stub points and returns a func that
 // restores them, so every test that swaps them can `defer restoreStubs(t)()`.
 func restoreStubs() func() {
-	origOwnership, origCapture, origIncidents := verifyOwnership, captureProfile, incidentsCapture
+	origOwnership, origCapture, origIncidents, origValidate := verifyOwnership, captureProfile, incidentsCapture, validateProfile
 	return func() {
-		verifyOwnership, captureProfile, incidentsCapture = origOwnership, origCapture, origIncidents
+		verifyOwnership, captureProfile, incidentsCapture, validateProfile = origOwnership, origCapture, origIncidents, origValidate
 	}
 }
 
@@ -134,6 +134,24 @@ func TestCaptureInvestigateProfileBothFail(t *testing.T) {
 	}
 	if method != "" {
 		t.Errorf("method = %q, want empty on failure", method)
+	}
+}
+
+func TestCaptureInvestigateProfileBlocksUnsupportedFallback(t *testing.T) {
+	defer restoreStubs()()
+	verifyOwnership = func(context.Context, int32, string) (profiler.PortOwnership, string) {
+		return profiler.OwnershipNotOwned, "no owned endpoint"
+	}
+	validateProfile = func(profiler.ProfileType) error {
+		return errors.New("capability profile_sample is unsupported")
+	}
+	captureProfile = func(context.Context, int32, profiler.ProfileType, string) (profiler.Profile, error) {
+		t.Fatal("unsupported sample capture must be blocked before collection")
+		return profiler.Profile{}, nil
+	}
+	_, _, step := captureInvestigateProfile(context.Background(), 42)
+	if step.Status != stepFailed || !strings.Contains(step.Limitation, "unsupported") {
+		t.Fatalf("step = %+v, want failed unsupported limitation", step)
 	}
 }
 

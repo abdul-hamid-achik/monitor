@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/abdul-hamid-achik/monitor/internal/capability"
 	"github.com/abdul-hamid-achik/monitor/internal/cgroup"
 
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -24,6 +25,10 @@ import (
 type Options struct {
 	Interval    time.Duration // tick interval (default 1s)
 	HistorySize int           // samples retained for sparklines (default 60)
+	// Capabilities and LoadAverage are injectable seams for cross-platform
+	// tests. Nil selects detection and gopsutil collection for the current host.
+	Capabilities *capability.Set
+	LoadAverage  func(context.Context) (*load.AvgStat, error)
 }
 
 // Subscriber is a non-blocking callback invoked on every tick.
@@ -82,6 +87,8 @@ type Collector struct {
 	published SystemInfo
 	lastNet   net.IOCountersStat
 	lastDisk  disk.IOCountersStat
+	capabilities capability.Set
+	loadAverage  func(context.Context) (*load.AvgStat, error)
 
 	cpuHist     *RingBuffer[float64]
 	memHist     *RingBuffer[float64]
@@ -111,6 +118,14 @@ func New(opts Options) *Collector {
 	if opts.HistorySize <= 0 {
 		opts.HistorySize = 60
 	}
+	caps := capability.Current()
+	if opts.Capabilities != nil {
+		caps = *opts.Capabilities
+	}
+	loadAverage := opts.LoadAverage
+	if loadAverage == nil {
+		loadAverage = load.AvgWithContext
+	}
 	return &Collector{
 		opts:        opts,
 		subs:        make(map[int]Subscriber),
@@ -120,6 +135,8 @@ func New(opts Options) *Collector {
 		netUpHist:   NewRingBuffer[float64](opts.HistorySize),
 		diskRHist:   NewRingBuffer[float64](opts.HistorySize),
 		diskWHist:   NewRingBuffer[float64](opts.HistorySize),
+		capabilities: caps,
+		loadAverage:  loadAverage,
 	}
 }
 
@@ -164,17 +181,33 @@ func (c *Collector) Snapshot() SystemInfo {
 	return c.published
 }
 
-// Collect samples the system once and returns the SystemInfo. Subscribers
-// receive an Event built from the same sample.
-//
-// Sampling runs WITHOUT c.mu: the collect* helpers and the lastNet/lastDisk/
-// ring-buffer state they touch are owned by the single Collect goroutine
-// (Run's ticker, or a one-off CLI call), so Collect must NOT be invoked
-// concurrently on the same Collector. c.mu is taken only to publish the
-// assembled snapshot atomically, so a slow process enumeration can't block
-// Snapshot() readers.
-func (c *Collector) Collect(ctx context.Context) SystemInfo {
+// Capture is the strict one-shot API. It validates required platform
+// capabilities before invoking any collector and returns a structured
+// unsupported/unavailable snapshot together with the capability error.
+func (c *Collector) Capture(ctx context.Context) (SystemInfo, error) {
+	if err := c.capabilities.Require(capability.SystemMetrics, capability.ProcessMetrics); err != nil {
+		support := c.capabilities.SupportFor(capability.SystemMetrics)
+		if c.capabilities.SupportFor(capability.ProcessMetrics).State != capability.Supported {
+			support = c.capabilities.SupportFor(capability.ProcessMetrics)
+		}
+		c.info = SystemInfo{
+			Capture:      statusFromCapability(support),
+			Capabilities: c.capabilities.Items,
+		}
+		c.mu.Lock()
+		c.published = c.info
+		info := c.published
+		c.mu.Unlock()
+		return info, err
+	}
+
 	c.info.LastUpdate = time.Now()
+	c.info.Capture = metricStatus(MetricObserved, "")
+	c.info.Capabilities = c.capabilities.Items
+	c.info.CPU.MetricStates = make(map[string]MetricStatus)
+	c.info.Memory.MetricStates = make(map[string]MetricStatus)
+	c.info.Network.MetricStates = make(map[string]MetricStatus)
+	c.info.Disk.MetricStates = make(map[string]MetricStatus)
 	c.collectCPU(ctx)
 	c.collectMemory(ctx)
 	c.collectCgroup()
@@ -206,6 +239,14 @@ func (c *Collector) Collect(ctx context.Context) SystemInfo {
 			Processes: info.Processes,
 		})
 	}
+	return info, nil
+}
+
+// Collect preserves the original convenience API while delegating to Capture,
+// so direct callers cannot bypass capability enforcement. Inspect
+// SystemInfo.Capture when using this compatibility method.
+func (c *Collector) Collect(ctx context.Context) SystemInfo {
+	info, _ := c.Capture(ctx)
 	return info
 }
 
@@ -221,7 +262,9 @@ func (c *Collector) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
-			c.Collect(ctx)
+			if _, err := c.Capture(ctx); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -230,29 +273,63 @@ func (c *Collector) collectCPU(ctx context.Context) {
 	percent, err := cpu.PercentWithContext(ctx, 0, false)
 	if err == nil && len(percent) > 0 {
 		c.info.CPU.UsagePercent = percent[0]
+		c.info.CPU.MetricStates[metricCPUUsage] = metricStatus(MetricObserved, "")
+	} else {
+		c.info.CPU.UsagePercent = 0
+		reason := "CPU usage collector returned no samples"
+		if err != nil {
+			reason = err.Error()
+		}
+		c.info.CPU.MetricStates[metricCPUUsage] = metricStatus(MetricUnavailable, reason)
 	}
+
 	perCore, err := cpu.PercentWithContext(ctx, 0, true)
-	if err == nil {
+	if err == nil && len(perCore) > 0 {
 		c.info.CPU.PerCoreUsage = perCore
 		c.info.CPU.CoreCount = len(perCore)
+		c.info.CPU.MetricStates[metricCPUPerCore] = metricStatus(MetricObserved, "")
+	} else {
+		c.info.CPU.PerCoreUsage = nil
+		c.info.CPU.CoreCount = 0
+		reason := "per-core CPU collector returned no samples"
+		if err != nil {
+			reason = err.Error()
+		}
+		c.info.CPU.MetricStates[metricCPUPerCore] = metricStatus(MetricUnavailable, reason)
 	}
+
 	info, err := cpu.InfoWithContext(ctx)
 	if err == nil && len(info) > 0 {
 		c.info.CPU.FrequencyMHz = info[0].Mhz
 		c.info.CPU.ThreadCount = int(info[0].Cores) * len(info)
+		c.info.CPU.MetricStates[metricCPUInfo] = metricStatus(MetricObserved, "")
+	} else {
+		c.info.CPU.FrequencyMHz = 0
+		c.info.CPU.ThreadCount = 0
+		reason := "CPU info collector returned no samples"
+		if err != nil {
+			reason = err.Error()
+		}
+		c.info.CPU.MetricStates[metricCPUInfo] = metricStatus(MetricUnavailable, reason)
 	}
+
 	c.info.CPU.LoadAvg1 = 0
 	c.info.CPU.LoadAvg5 = 0
 	c.info.CPU.LoadAvg15 = 0
-	// On Linux, gopsutil's load.Avg() reads /proc/loadavg and returns
-	// real values. On macOS it returns 0s (known gopsutil limitation).
-	// We try it unconditionally; Linux users get load averages, macOS
-	// users get 0 (same as before).
-	if avg, err := load.AvgWithContext(ctx); err == nil {
+	loadSupport := c.capabilities.SupportFor(capability.CPULoadAverage)
+	if loadSupport.State != capability.Supported {
+		c.info.CPU.MetricStates[metricCPULoad] = statusFromCapability(loadSupport)
+	} else if avg, loadErr := c.loadAverage(ctx); loadErr != nil {
+		c.info.CPU.MetricStates[metricCPULoad] = metricStatus(MetricUnavailable, loadErr.Error())
+	} else if avg == nil {
+		c.info.CPU.MetricStates[metricCPULoad] = metricStatus(MetricUnavailable, "load average collector returned no sample")
+	} else {
 		c.info.CPU.LoadAvg1 = avg.Load1
 		c.info.CPU.LoadAvg5 = avg.Load5
 		c.info.CPU.LoadAvg15 = avg.Load15
+		c.info.CPU.MetricStates[metricCPULoad] = metricStatus(MetricObserved, "")
 	}
+
 	c.cpuHist.Push(c.info.CPU.UsagePercent)
 	c.info.CPU.History = c.cpuHist.ToSlice()
 	c.info.CPU.LastUpdate = time.Now()
@@ -261,32 +338,38 @@ func (c *Collector) collectCPU(ctx context.Context) {
 func (c *Collector) collectMemory(ctx context.Context) {
 	vm, err := mem.VirtualMemoryWithContext(ctx)
 	if err != nil {
-		return
-	}
-	c.info.Memory.TotalBytes = vm.Total
-	c.info.Memory.UsedBytes = vm.Used
-	c.info.Memory.FreeBytes = vm.Free
-	c.info.Memory.AvailableBytes = vm.Available
-	c.info.Memory.UsagePercent = vm.UsedPercent
-	c.info.Memory.AppMemory = vm.Used
-	// Guard the unsigned subtraction: on some platforms Used+Free can
-	// transiently exceed Total, which would wrap to a near-2^64 value.
-	if vm.Total > vm.Used+vm.Free {
-		c.info.Memory.CacheMemory = vm.Total - vm.Used - vm.Free
+		c.info.Memory.MetricStates[metricMemoryVirtual] = metricStatus(MetricUnavailable, err.Error())
+		c.info.Memory.MetricStates[metricMemoryBreakdown] = metricStatus(MetricUnavailable, err.Error())
 	} else {
-		c.info.Memory.CacheMemory = 0
+		c.info.Memory.TotalBytes = vm.Total
+		c.info.Memory.UsedBytes = vm.Used
+		c.info.Memory.FreeBytes = vm.Free
+		c.info.Memory.AvailableBytes = vm.Available
+		c.info.Memory.UsagePercent = vm.UsedPercent
+		if vm.Total > 0 {
+			c.info.Memory.MemoryPressure = float64(vm.Used) / float64(vm.Total) * 100
+		} else {
+			c.info.Memory.MemoryPressure = 0
+		}
+		c.info.Memory.MetricStates[metricMemoryVirtual] = metricStatus(MetricObserved, "")
+		// gopsutil's cross-platform VirtualMemoryStat does not identify the
+		// app/wired/compressed/purgeable breakdown consistently.
+		c.info.Memory.MetricStates[metricMemoryBreakdown] = metricStatus(MetricUnavailable, "platform memory breakdown is not exposed by this collector")
 	}
-	if vm.Total > 0 {
-		c.info.Memory.MemoryPressure = float64(vm.Used) / float64(vm.Total) * 100
-	}
-	if swap, err := mem.SwapMemoryWithContext(ctx); err == nil {
+
+	if swap, swapErr := mem.SwapMemoryWithContext(ctx); swapErr == nil {
 		c.info.Memory.SwapTotal = swap.Total
 		c.info.Memory.SwapUsed = swap.Used
 		c.info.Memory.SwapFree = swap.Free
+		c.info.Memory.MetricStates[metricMemorySwap] = metricStatus(MetricObserved, "")
+	} else {
+		c.info.Memory.SwapTotal = 0
+		c.info.Memory.SwapUsed = 0
+		c.info.Memory.SwapFree = 0
+		c.info.Memory.MetricStates[metricMemorySwap] = metricStatus(MetricUnavailable, swapErr.Error())
 	}
-	// History is pushed after collectCgroup (in Collect) so the sparkline plots
-	// the final UsagePercent — container-relative inside a memory-limited
-	// cgroup, host-relative otherwise — matching the headline value.
+	// History is pushed after collectCgroup (in Capture) so the sparkline
+	// reflects a container-relative value when cgroup limits are active.
 	c.info.Memory.LastUpdate = time.Now()
 }
 
@@ -295,12 +378,18 @@ func (c *Collector) collectMemory(ctx context.Context) {
 // reflects the container rather than the whole machine. No-op on the host /
 // macOS (Active=false).
 func (c *Collector) collectCgroup() {
+	support := c.capabilities.SupportFor(capability.CgroupV2)
+	if support.State != capability.Supported {
+		c.info.Cgroup = CgroupInfo{State: statusFromCapability(support)}
+		return
+	}
 	l := cgroup.Read()
 	c.info.Cgroup = CgroupInfo{
 		Limited:       l.Active,
 		MemLimitBytes: l.MemLimit,
 		MemUsageBytes: l.MemCurrent,
 		CPUQuotaCores: l.CPUQuota,
+		State:         metricStatus(MetricObserved, ""),
 	}
 	if l.MemLimit > 0 {
 		free := uint64(0)
@@ -313,47 +402,40 @@ func (c *Collector) collectCgroup() {
 		c.info.Memory.AvailableBytes = free
 		c.info.Memory.UsagePercent = float64(l.MemCurrent) / float64(l.MemLimit) * 100
 		c.info.Memory.MemoryPressure = c.info.Memory.UsagePercent
-		// Rescale the App/Cache breakdown to the container too; otherwise these
-		// keep host-scale values (vm.Used can be many GB) that exceed the
-		// overridden TotalBytes (the limit) and render a nonsensical split.
-		c.info.Memory.AppMemory = l.MemCurrent
-		c.info.Memory.CacheMemory = 0
 	}
 }
 
 func (c *Collector) collectTemperature() {
-	// Read the hook under the lock: sampling is otherwise lock-free, but
-	// WithTemperatureHook writes this field under c.mu, so snapshot it here
-	// to keep the lock discipline consistent even if a hook is ever
-	// installed after sampling has started.
 	c.mu.RLock()
 	hook := c.temperatureHook
 	c.mu.RUnlock()
 	if hook != nil {
 		cpuPkg, cpuCores, gpu, ane, battery, ambient, fanRPM, fanMode, source, available := hook()
-		c.info.Temperature.CPUPackage = cpuPkg
-		c.info.Temperature.CPUCores = cpuCores
-		c.info.Temperature.GPU = gpu
-		c.info.Temperature.ANE = ane
-		c.info.Temperature.Battery = battery
-		c.info.Temperature.Ambient = ambient
-		c.info.Temperature.FanRPM = fanRPM
-		c.info.Temperature.FanMode = fanMode
-		c.info.Temperature.Source = source
-		c.info.Temperature.Available = available
-		c.info.Temperature.LastUpdate = time.Now()
+		c.info.Temperature = TemperatureInfo{
+			CPUPackage: cpuPkg, CPUCores: cpuCores, GPU: gpu, ANE: ane,
+			Battery: battery, Ambient: ambient, FanRPM: fanRPM, FanMode: fanMode,
+			Source: source, Available: available, LastUpdate: time.Now(),
+		}
+		if available {
+			c.info.Temperature.State = metricStatus(MetricObserved, "")
+		} else {
+			c.info.Temperature.State = metricStatus(MetricUnavailable, "temperature source returned no reading")
+		}
 		return
 	}
 	baseTemp := 35.0
 	loadTemp := c.info.CPU.UsagePercent * 0.5
-	c.info.Temperature.CPUPackage = baseTemp + loadTemp
-	c.info.Temperature.CPUCores = baseTemp + loadTemp + 2
-	c.info.Temperature.GPU = baseTemp + c.info.CPU.UsagePercent*0.3
-	c.info.Temperature.ANE = baseTemp + c.info.CPU.UsagePercent*0.2
-	c.info.Temperature.Battery = 38.0
-	c.info.Temperature.Source = "estimated"
-	c.info.Temperature.Available = true
-	c.info.Temperature.LastUpdate = time.Now()
+	c.info.Temperature = TemperatureInfo{
+		CPUPackage: baseTemp + loadTemp,
+		CPUCores:   baseTemp + loadTemp + 2,
+		GPU:        baseTemp + c.info.CPU.UsagePercent*0.3,
+		ANE:        baseTemp + c.info.CPU.UsagePercent*0.2,
+		Battery:    38.0,
+		Source:     "estimated",
+		Available:  true,
+		LastUpdate: time.Now(),
+		State:      metricStatus(MetricObserved, ""),
+	}
 }
 
 // WithTemperatureHook installs a function that supplies temperature
@@ -390,23 +472,30 @@ func perSecond(prev, cur uint64, elapsed float64) uint64 {
 func (c *Collector) collectNetwork(ctx context.Context) {
 	counters, err := net.IOCountersWithContext(ctx, false)
 	if err != nil || len(counters) == 0 {
+		reason := "network collector returned no counters"
+		if err != nil {
+			reason = err.Error()
+		}
+		c.info.Network.MetricStates[metricNetworkIO] = metricStatus(MetricUnavailable, reason)
+		c.info.Network.MetricStates[metricNetworkRate] = metricStatus(MetricUnavailable, reason)
 		return
 	}
 	cur := counters[0]
 	now := time.Now()
-	// Compute per-second rates against the PREVIOUS sample before
-	// overwriting lastNet/LastUpdate. The first sample (LastUpdate zero)
-	// has no previous counters, so it seeds a 0 into the history.
+	c.info.Network.MetricStates[metricNetworkIO] = metricStatus(MetricObserved, "")
 	if !c.info.Network.LastUpdate.IsZero() {
-		if elapsed := now.Sub(c.info.Network.LastUpdate).Seconds(); elapsed > 0 {
+		elapsed := now.Sub(c.info.Network.LastUpdate).Seconds()
+		if elapsed > 0 {
 			c.info.Network.BytesSentPerSec = perSecond(c.lastNet.BytesSent, cur.BytesSent, elapsed)
 			c.info.Network.BytesRecvPerSec = perSecond(c.lastNet.BytesRecv, cur.BytesRecv, elapsed)
 			c.netDownHist.Push(float64(c.info.Network.BytesRecvPerSec))
 			c.netUpHist.Push(float64(c.info.Network.BytesSentPerSec))
+			c.info.Network.MetricStates[metricNetworkRate] = metricStatus(MetricObserved, "")
+		} else {
+			c.info.Network.MetricStates[metricNetworkRate] = metricStatus(MetricUnavailable, "sampling interval was not positive")
 		}
 	} else {
-		c.netDownHist.Push(0)
-		c.netUpHist.Push(0)
+		c.info.Network.MetricStates[metricNetworkRate] = metricStatus(MetricUnavailable, "first sample has no prior counter")
 	}
 	c.info.Network.BytesSent = cur.BytesSent
 	c.info.Network.BytesRecv = cur.BytesRecv
@@ -421,92 +510,136 @@ func (c *Collector) collectNetwork(ctx context.Context) {
 func (c *Collector) collectDisk(ctx context.Context) {
 	parts, err := disk.PartitionsWithContext(ctx, false)
 	if err != nil {
+		c.info.Disk.Partitions = nil
+		c.info.Disk.MetricStates[metricDiskParts] = metricStatus(MetricUnavailable, err.Error())
+	} else {
+		out := make([]DiskPartitionInfo, 0, len(parts))
+		skipped := 0
+		for _, p := range parts {
+			u, usageErr := disk.UsageWithContext(ctx, p.Mountpoint)
+			if usageErr != nil {
+				skipped++
+				continue
+			}
+			out = append(out, DiskPartitionInfo{
+				Device: p.Device, MountPoint: p.Mountpoint, TotalBytes: u.Total,
+				UsedBytes: u.Used, FreeBytes: u.Free, UsagePercent: u.UsedPercent,
+				Filesystem: p.Fstype,
+			})
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].MountPoint < out[j].MountPoint })
+		c.info.Disk.Partitions = out
+		reason := ""
+		if skipped > 0 {
+			reason = "one or more mounted filesystems were unavailable"
+		}
+		c.info.Disk.MetricStates[metricDiskParts] = metricStatus(MetricObserved, reason)
+	}
+
+	ioCounters, ioErr := disk.IOCountersWithContext(ctx)
+	if ioErr != nil {
+		c.info.Disk.MetricStates[metricDiskIO] = metricStatus(MetricUnavailable, ioErr.Error())
+		c.info.Disk.MetricStates[metricDiskRate] = metricStatus(MetricUnavailable, ioErr.Error())
+		c.info.Disk.LastUpdate = time.Now()
 		return
 	}
-	var out []DiskPartitionInfo
-	for _, p := range parts {
-		u, err := disk.UsageWithContext(ctx, p.Mountpoint)
-		if err != nil {
-			continue
-		}
-		out = append(out, DiskPartitionInfo{
-			Device:       p.Device,
-			MountPoint:   p.Mountpoint,
-			TotalBytes:   u.Total,
-			UsedBytes:    u.Used,
-			FreeBytes:    u.Free,
-			UsagePercent: u.UsedPercent,
-			Filesystem:   p.Fstype,
-		})
+	var read, write uint64
+	for _, counter := range ioCounters {
+		read += counter.ReadBytes
+		write += counter.WriteBytes
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].MountPoint < out[j].MountPoint })
-	c.info.Disk.Partitions = out
-
-	io, err := disk.IOCountersWithContext(ctx)
-	if err == nil {
-		var read, write uint64
-		for _, v := range io {
-			read += v.ReadBytes
-			write += v.WriteBytes
+	c.info.Disk.ReadBytes = read
+	c.info.Disk.WriteBytes = write
+	c.info.Disk.MetricStates[metricDiskIO] = metricStatus(MetricObserved, "")
+	now := time.Now()
+	if !c.info.Disk.LastUpdate.IsZero() {
+		elapsed := now.Sub(c.info.Disk.LastUpdate).Seconds()
+		if elapsed > 0 {
+			c.info.Disk.ReadPerSec = perSecond(c.lastDisk.ReadBytes, read, elapsed)
+			c.info.Disk.WritePerSec = perSecond(c.lastDisk.WriteBytes, write, elapsed)
+			c.diskRHist.Push(float64(c.info.Disk.ReadPerSec))
+			c.diskWHist.Push(float64(c.info.Disk.WritePerSec))
+			c.info.Disk.ReadHistory = c.diskRHist.ToSlice()
+			c.info.Disk.WriteHistory = c.diskWHist.ToSlice()
+			c.info.Disk.MetricStates[metricDiskRate] = metricStatus(MetricObserved, "")
+		} else {
+			c.info.Disk.MetricStates[metricDiskRate] = metricStatus(MetricUnavailable, "sampling interval was not positive")
 		}
-		if !c.info.Disk.LastUpdate.IsZero() {
-			elapsed := time.Since(c.info.Disk.LastUpdate).Seconds()
-			if elapsed > 0 {
-				c.info.Disk.ReadPerSec = perSecond(c.lastDisk.ReadBytes, read, elapsed)
-				c.info.Disk.WritePerSec = perSecond(c.lastDisk.WriteBytes, write, elapsed)
-				c.diskRHist.Push(float64(c.info.Disk.ReadPerSec))
-				c.diskWHist.Push(float64(c.info.Disk.WritePerSec))
-				c.info.Disk.ReadHistory = c.diskRHist.ToSlice()
-				c.info.Disk.WriteHistory = c.diskWHist.ToSlice()
-			}
-		}
-		c.lastDisk.ReadBytes = read
-		c.lastDisk.WriteBytes = write
+	} else {
+		c.info.Disk.MetricStates[metricDiskRate] = metricStatus(MetricUnavailable, "first sample has no prior counter")
 	}
-	c.info.Disk.LastUpdate = time.Now()
+	c.lastDisk.ReadBytes = read
+	c.lastDisk.WriteBytes = write
+	c.info.Disk.LastUpdate = now
 }
 
 func (c *Collector) collectProcesses(ctx context.Context) {
 	procs, err := process.ProcessesWithContext(ctx)
 	if err != nil {
+		c.info.Processes = nil
+		c.info.ProcessesState = metricStatus(MetricUnavailable, err.Error())
+		c.info.ProcessesLastUpdate = time.Time{}
 		return
 	}
-	var out []ProcessInfo
+	out := make([]ProcessInfo, 0, len(procs))
 	for _, p := range procs {
-		pi, err := c.processInfo(ctx, p)
-		if err != nil {
+		pi, processErr := c.processInfo(ctx, p)
+		if processErr != nil {
 			continue
 		}
 		out = append(out, pi)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CPUPercent > out[j].CPUPercent })
 	c.info.Processes = out
+	c.info.ProcessesState = metricStatus(MetricObserved, "")
 	c.info.ProcessesLastUpdate = c.info.LastUpdate
 }
 
 func (c *Collector) processInfo(ctx context.Context, p *process.Process) (ProcessInfo, error) {
-	var pi ProcessInfo
-	pi.PID = p.Pid
+	pi := ProcessInfo{PID: p.Pid, MetricStates: make(map[string]MetricStatus)}
 	if name, err := p.NameWithContext(ctx); err == nil {
 		pi.Name = name
+		pi.MetricStates[metricProcessName] = metricStatus(MetricObserved, "")
 	} else {
 		pi.Name = "unknown"
+		pi.MetricStates[metricProcessName] = metricStatus(MetricUnavailable, err.Error())
 	}
-	if cpu, err := p.CPUPercentWithContext(ctx); err == nil {
-		pi.CPUPercent = cpu
+	if value, err := p.CPUPercentWithContext(ctx); err == nil {
+		pi.CPUPercent = value
+		pi.MetricStates[metricProcessCPU] = metricStatus(MetricObserved, "")
+	} else {
+		pi.MetricStates[metricProcessCPU] = metricStatus(MetricUnavailable, err.Error())
 	}
-	if mem, err := p.MemoryInfoWithContext(ctx); err == nil {
-		pi.Memory = mem.RSS
+	if value, err := p.MemoryInfoWithContext(ctx); err == nil {
+		pi.Memory = value.RSS
+		pi.MetricStates[metricProcessMemory] = metricStatus(MetricObserved, "")
+	} else {
+		pi.MetricStates[metricProcessMemory] = metricStatus(MetricUnavailable, err.Error())
 	}
-	if t, err := p.NumThreadsWithContext(ctx); err == nil {
-		pi.Threads = t
+	if value, err := p.MemoryPercentWithContext(ctx); err == nil {
+		pi.MemoryPercent = float64(value)
+		pi.MetricStates[metricProcessMemPct] = metricStatus(MetricObserved, "")
+	} else {
+		pi.MetricStates[metricProcessMemPct] = metricStatus(MetricUnavailable, err.Error())
 	}
-	if u, err := p.UsernameWithContext(ctx); err == nil {
-		pi.User = u
-		pi.IsSystem = IsSystemProcess(u)
+	if value, err := p.NumThreadsWithContext(ctx); err == nil {
+		pi.Threads = value
+		pi.MetricStates[metricProcessThread] = metricStatus(MetricObserved, "")
+	} else {
+		pi.MetricStates[metricProcessThread] = metricStatus(MetricUnavailable, err.Error())
 	}
-	if ppid, err := p.PpidWithContext(ctx); err == nil {
-		pi.Parent = ppid
+	if value, err := p.UsernameWithContext(ctx); err == nil {
+		pi.User = value
+		pi.IsSystem = IsSystemProcess(value)
+		pi.MetricStates[metricProcessUser] = metricStatus(MetricObserved, "")
+	} else {
+		pi.MetricStates[metricProcessUser] = metricStatus(MetricUnavailable, err.Error())
+	}
+	if value, err := p.PpidWithContext(ctx); err == nil {
+		pi.Parent = value
+		pi.MetricStates[metricProcessParent] = metricStatus(MetricObserved, "")
+	} else {
+		pi.MetricStates[metricProcessParent] = metricStatus(MetricUnavailable, err.Error())
 	}
 	pi.IsProtected = IsProtectedProcess(pi.Name, pi.PID)
 	return pi, nil

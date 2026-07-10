@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"runtime"
 	"strings"
 	"time"
 
@@ -57,6 +56,7 @@ var (
 	verifyOwnership  = profiler.VerifyListenerOwnership
 	captureProfile   = profiler.Capture
 	incidentsCapture = incidents.Capture
+	validateProfile   = profiler.ValidateCapture
 )
 
 // computeVerdict: complete iff no step failed (skips are acceptable).
@@ -94,9 +94,9 @@ func captureInvestigateProfile(ctx context.Context, pid int32) (profiler.Profile
 		reasons = append(reasons, fmt.Sprintf("pprof endpoint %s not proven to belong to pid %d (%s: %s)", profiler.DefaultPprofAddr, pid, own, detail))
 	}
 
-	if runtime.GOOS == "darwin" {
-		prof, err := captureProfile(ctx, pid, profiler.ProfileSample, "")
-		if err == nil {
+	if err := validateProfile(profiler.ProfileSample); err == nil {
+		prof, captureErr := captureProfile(ctx, pid, profiler.ProfileSample, "")
+		if captureErr == nil {
 			if rec := prof.VerifyArtifact(); rec.Verified {
 				step.Status = stepOK
 				step.Limitation = strings.Join(append(reasons, "used macOS sample: frames carry no file:line, so codemap correlation is unavailable"), "; ")
@@ -105,10 +105,10 @@ func captureInvestigateProfile(ctx context.Context, pid int32) (profiler.Profile
 				reasons = append(reasons, "sample: "+rec.Limitation)
 			}
 		} else {
-			reasons = append(reasons, "sample: "+err.Error())
+			reasons = append(reasons, "sample: "+captureErr.Error())
 		}
 	} else {
-		reasons = append(reasons, "macOS sample unavailable on "+runtime.GOOS)
+		reasons = append(reasons, err.Error())
 	}
 
 	step.Status = stepFailed

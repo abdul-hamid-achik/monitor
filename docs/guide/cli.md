@@ -71,17 +71,34 @@ leaves `MONITOR` alone, so nested invocations don't clobber the outer run.
 ### `snapshot`
 
 Print a single system snapshot — CPU, memory, network, and the process list.
-Default output is human-readable; `--json` emits the full structure.
+Default output is human-readable; `--json` emits the full lossless structure.
+`--compact` emits JSON using the stable `monitor.compact_snapshot` schema. It
+omits histories and per-core arrays, caps both top-process lists and the
+filesystem list, and is the recommended form for agent context windows.
 
 | Flag | Default | Effect |
 |------|---------|--------|
 | `--interval` | `1s` | Sampling interval. |
 | `--json` | `false` | Emit JSON to stdout. |
+| `--compact` | `false` | Emit bounded, schema-versioned JSON instead of human/full output. |
+| `--process-limit` | `5` | Entries in each of `top_cpu` and `top_memory`; clamped to 25. |
+| `--process-filter` | `""` | Case-insensitive process-name substring for the compact view. |
+| `--filesystem-limit` | `10` | Filesystems in the compact view; clamped to 50. |
+| `--filesystem-filter` | `""` | Case-insensitive device, mount-point, or filesystem substring. |
 
 ```bash
 ./bin/monitor snapshot
 ./bin/monitor snapshot --json | jq '.cpu.usage_percent'
+./bin/monitor snapshot --compact --process-limit 3 --process-filter ollama
+./bin/monitor snapshot --compact --filesystem-filter apfs | jq '.filesystems'
 ```
+
+The compact payload starts with `schema_version: 1` and
+`kind: "monitor.compact_snapshot"`. `processes.system_total`,
+`processes.matched`, `processes.truncated`, `filesystem_system_total`,
+`filesystem_total`, `filesystem_limit`, and `filesystems_truncated` make every
+omission explicit. Empty lists serialize as `[]`, never `null`. The existing
+`--json` shape is unchanged.
 
 ```json
 {

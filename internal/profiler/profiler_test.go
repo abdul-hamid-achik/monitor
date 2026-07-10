@@ -7,6 +7,8 @@ import (
 	"net/http/pprof"
 	"strings"
 	"testing"
+
+	"github.com/abdul-hamid-achik/monitor/internal/capability"
 )
 
 // TestCaptureHeapOverHTTP exercises the real scrape path: Capture builds the
@@ -66,6 +68,18 @@ func TestCaptureInvalidPID(t *testing.T) {
 func TestCaptureUnknownType(t *testing.T) {
 	if _, err := Capture(context.Background(), 1234, ProfileType("bogus"), ""); err == nil {
 		t.Error("unknown profile type should error")
+	}
+}
+
+func TestValidateCaptureWithInjectedCapabilities(t *testing.T) {
+	linux := capability.Detect(capability.Detector{GOOS: "linux", LookPath: func(string) (string, error) {
+		return "", context.Canceled
+	}})
+	if err := ValidateCaptureWith(linux, ProfileHeap); err != nil {
+		t.Fatalf("heap unexpectedly rejected: %v", err)
+	}
+	if err := ValidateCaptureWith(linux, ProfileSample); err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("sample error = %v, want unsupported capability", err)
 	}
 }
 

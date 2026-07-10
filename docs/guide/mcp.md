@@ -26,7 +26,7 @@ returns JSON.
 
 | Tool | Description |
 |------|-------------|
-| `monitor_snapshot` | Return the latest `SystemInfo` (CPU, memory, temperature, network, disk, processes) with a prepended interpreted `summary` string (memory/CPU/disk state, top consumer) and, when a threshold is near, `next` suggestions. |
+| `monitor_snapshot` | Return the latest system view with an interpreted `summary` and optional `next` suggestions. Pass `compact:true` for the bounded, history-free `monitor.compact_snapshot` v1 payload recommended for agent context; omit it for the backward-compatible full `SystemInfo`. |
 | `monitor_processes` | Return the top processes. Typed input: `limit` (default 15, max 200), `sort_by` (`cpu` default or `rss`), `filter` (case-insensitive substring on the process name). Output: `{processes, total, truncated, reason}`. |
 | `monitor_doctor` | Report ecosystem tool availability (codemap, fcheap, tinyvault, glyphrun, etc.). |
 | `monitor_analyze` | Sample metrics for `window_seconds` (default 10, min 4, max 60) and return `{window_seconds, samples, diagnoses, healthy}` where `diagnoses` is `[]Diagnosis` (`summary`, `evidence`, `confidence`, `next_actions`) — always present, `[]` when nothing looks wrong (`healthy:true`). Optional `pid` focuses the diagnosis on one process and is echoed back. The tool to call when something is slow. Read-only — no confirm. |
@@ -37,6 +37,26 @@ instructions tell the agent to call `monitor_snapshot` first to orient, then
 drill down with `monitor_processes` or `monitor_doctor`, or reach for
 `monitor_analyze` directly when the user reports slowness or a suspected
 leak.
+
+For a small local model, prefer:
+
+```json
+{
+  "name": "monitor_snapshot",
+  "arguments": {
+    "compact": true,
+    "process_limit": 5,
+    "process_filter": "ollama",
+    "filesystem_limit": 10,
+    "filesystem_filter": "apfs"
+  }
+}
+```
+
+The filters are case-insensitive. Limits are clamped (`process_limit` to 25,
+`filesystem_limit` to 50), histories are omitted, and truncation/total fields
+tell the caller when to drill down with `monitor_processes`. The full response
+remains the default so existing clients are not broken.
 
 ### Mutating tools
 

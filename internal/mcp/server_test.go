@@ -36,6 +36,64 @@ func TestHandleSnapshotWithStubService(t *testing.T) {
 	}
 }
 
+func TestHandleSnapshotCompactIsBoundedAndFiltered(t *testing.T) {
+	procs := make([]collector.ProcessInfo, 40)
+	for i := range procs {
+		name := "other"
+		if i%2 == 0 {
+			name = "ollama-runner"
+		}
+		procs[i] = collector.ProcessInfo{
+			PID: int32(i + 1), Name: name, CPUPercent: float64(i), Memory: uint64(40 - i),
+		}
+	}
+	s := newTestServer(t, &Service{Snapshots: func() collector.SystemInfo {
+		return collector.SystemInfo{
+			Hostname: "test-host", Processes: procs,
+			Disk: collector.DiskInfo{Partitions: []collector.DiskPartitionInfo{
+				{MountPoint: "/", Filesystem: "apfs"},
+				{MountPoint: "/tmp", Filesystem: "tmpfs"},
+			}},
+		}
+	}})
+
+	_, payload, err := s.handleSnapshot(context.Background(), nil, &snapshotInput{
+		Compact: true, ProcessLimit: 3, ProcessFilter: "OLLAMA",
+		FilesystemLimit: 1, FilesystemFilter: "tmpfs",
+	})
+	if err != nil {
+		t.Fatalf("handleSnapshot: %v", err)
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", payload)
+	}
+	if got, _ := m["schema_version"].(float64); int(got) != collector.CompactSnapshotSchemaVersion {
+		t.Fatalf("schema_version = %v", m["schema_version"])
+	}
+	if _, exists := m["disk"]; exists {
+		t.Fatalf("compact payload unexpectedly includes lossless disk object")
+	}
+	processes, ok := m["processes"].(map[string]any)
+	if !ok {
+		t.Fatalf("processes type = %T", m["processes"])
+	}
+	if got, _ := processes["limit"].(float64); int(got) != 3 {
+		t.Fatalf("process limit = %v", processes["limit"])
+	}
+	if top, _ := processes["top_cpu"].([]any); len(top) != 3 {
+		t.Fatalf("top_cpu length = %d, want 3", len(top))
+	}
+	filesystems, ok := m["filesystems"].([]any)
+	if !ok || len(filesystems) != 1 {
+		t.Fatalf("filesystems = %T %v", m["filesystems"], m["filesystems"])
+	}
+	fs := filesystems[0].(map[string]any)
+	if fs["mount_point"] != "/tmp" {
+		t.Fatalf("filesystem filter returned %v", fs)
+	}
+}
+
 // TestReadHandlersRefuseNilSnapshots is a regression for the read handlers
 // dereferencing a nil Snapshots service: they must return a structured error
 // instead of panicking.

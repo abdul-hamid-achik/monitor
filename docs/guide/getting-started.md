@@ -98,6 +98,7 @@ Every subcommand supports `--json` for machine-readable output:
 
 ```bash
 ./bin/monitor snapshot --json | jq '.cpu'   # one-shot system snapshot
+./bin/monitor snapshot --compact             # bounded schema-versioned agent view
 ./bin/monitor watch --json                   # stream NDJSON metric events
 ./bin/monitor process 1234 --json            # detailed process info
 ./bin/monitor doctor --json                  # ecosystem tool availability

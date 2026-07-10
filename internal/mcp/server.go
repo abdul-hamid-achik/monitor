@@ -128,7 +128,10 @@ func (s *Server) register() {
 		Name: "monitor_snapshot",
 		Description: "Return the latest SystemInfo with an interpreted 'summary' string " +
 			"(memory/CPU/disk state, top consumer) and, when a threshold is near, 'next' " +
-			"suggestions. The raw metrics (cpu, memory, disk, processes, ...) follow at the top level.",
+			"suggestions. Set compact:true for a bounded, history-free, schema-versioned payload " +
+			"recommended for agent context; process_limit (default 5, max 25), process_filter, " +
+			"filesystem_limit (default 10, max 50), and filesystem_filter narrow that view. " +
+			"Without compact, the lossless raw metrics follow at the top level for compatibility.",
 	}, s.handleSnapshot)
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name: "monitor_processes",
@@ -169,7 +172,13 @@ func (s *Server) register() {
 
 // -- Read-only input/handler types ----------------------------------------
 
-type snapshotInput struct{}
+type snapshotInput struct {
+	Compact          bool   `json:"compact,omitempty"           jsonschema:"return the bounded schema-versioned agent view instead of full SystemInfo"`
+	ProcessLimit     int    `json:"process_limit,omitempty"     jsonschema:"top CPU and memory processes in compact view (default 5, max 25)"`
+	ProcessFilter    string `json:"process_filter,omitempty"    jsonschema:"case-insensitive process name substring in compact view"`
+	FilesystemLimit  int    `json:"filesystem_limit,omitempty"  jsonschema:"filesystems in compact view (default 10, max 50)"`
+	FilesystemFilter string `json:"filesystem_filter,omitempty" jsonschema:"case-insensitive device, mount, or filesystem substring in compact view"`
+}
 
 // processesInput is the typed input for monitor_processes.
 type processesInput struct {
@@ -205,6 +214,14 @@ type snapshotPayload struct {
 	Summary string   `json:"summary"`
 	Next    []string `json:"next,omitempty"`
 	collector.SystemInfo
+}
+
+// compactSnapshotPayload keeps the interpretation beside the bounded metrics,
+// matching the full MCP response without reintroducing SystemInfo's histories.
+type compactSnapshotPayload struct {
+	Summary string   `json:"summary"`
+	Next    []string `json:"next,omitempty"`
+	collector.CompactSnapshot
 }
 
 const (
@@ -246,12 +263,19 @@ type recordInput struct {
 
 // -- Handlers ------------------------------------------------------------
 
-func (s *Server) handleSnapshot(_ context.Context, _ *mcp.CallToolRequest, _ *snapshotInput) (*mcp.CallToolResult, any, error) {
+func (s *Server) handleSnapshot(_ context.Context, _ *mcp.CallToolRequest, in *snapshotInput) (*mcp.CallToolResult, any, error) {
 	if s.svc.Snapshots == nil {
 		return result(map[string]any{"error": "snapshot service not configured"})
 	}
 	info := s.svc.Snapshots()
 	summary, next := buildSnapshotSummary(info)
+	if in != nil && in.Compact {
+		compact := collector.BuildCompactSnapshot(info, collector.CompactOptions{
+			ProcessLimit: in.ProcessLimit, ProcessFilter: in.ProcessFilter,
+			FilesystemLimit: in.FilesystemLimit, FilesystemFilter: in.FilesystemFilter,
+		})
+		return result(compactSnapshotPayload{Summary: summary, Next: next, CompactSnapshot: compact})
+	}
 	return result(snapshotPayload{Summary: summary, Next: next, SystemInfo: info})
 }
 
@@ -416,11 +440,14 @@ func (s *Server) handleProfileCapture(ctx context.Context, _ *mcp.CallToolReques
 	if err := requireConfirm(in.Confirm); err != nil {
 		return result(map[string]any{"captured": false, "refused": true, "reason": err.Error(), "pid": in.PID})
 	}
-	if s.svc.Profile == nil {
-		return result(map[string]any{"captured": false, "refused": true, "reason": "profile service not configured", "pid": in.PID})
-	}
 	if in.Type == "" {
 		in.Type = "heap"
+	}
+	if err := profiler.ValidateCapture(profiler.ProfileType(in.Type)); err != nil {
+		return result(map[string]any{"captured": false, "refused": true, "reason": err.Error(), "pid": in.PID, "type": in.Type})
+	}
+	if s.svc.Profile == nil {
+		return result(map[string]any{"captured": false, "refused": true, "reason": "profile service not configured", "pid": in.PID})
 	}
 	prof, err := s.svc.Profile(ctx, in.PID, profiler.ProfileType(in.Type))
 	if err != nil {

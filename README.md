@@ -39,6 +39,7 @@ Every subcommand supports `--json` for machine-readable output:
 
 ```bash
 ./bin/monitor snapshot --json | jq '.cpu'      # one-shot system snapshot
+./bin/monitor snapshot --compact                # bounded v1 payload for agent context
 ./bin/monitor watch --json                      # stream NDJSON metric events
 ./bin/monitor process 1234 --json               # detailed process info
 ./bin/monitor tree 1234                          # process hierarchy (parent/child)
@@ -66,9 +67,11 @@ can detect it is being observed.
 ./bin/monitor mcp serve     # speaks MCP over stdio
 ```
 
-Exposes 7 tools — 3 read-only (`monitor_snapshot`, `monitor_processes`,
-`monitor_doctor`) and 4 mutating (`monitor_kill`, `monitor_profile_capture`,
-`monitor_investigate`, `monitor_record`). Every mutating tool requires
+Exposes 8 tools — 4 read-only (`monitor_snapshot`, `monitor_processes`,
+`monitor_doctor`, `monitor_analyze`) and 4 mutating (`monitor_kill`,
+`monitor_profile_capture`, `monitor_investigate`, `monitor_record`). For small
+model contexts, call `monitor_snapshot` with `{"compact":true}`; the response
+omits histories and bounds process/filesystem lists. Every mutating tool requires
 `confirm: true` in its typed input; the handlers re-check it so hand-built
 requests still get a structured refusal rather than acting.
 
