@@ -1,32 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 120" width="480" height="120">
-  <defs>
-    <linearGradient id="mn-grad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#F87171"/>
-      <stop offset="100%" stop-color="#EF4444"/>
-    </linearGradient>
-  </defs>
-  <title>monitor</title>
-  <!-- monitor-cli inspired: bar chart with dots + wave -->
-  <g transform="translate(20,32)">
-    <!-- background panel -->
-    <rect x="0" y="0" width="88" height="56" rx="6" fill="#0F172A" stroke="url(#mn-grad)" stroke-width="1.5"/>
-    <!-- ascending bars -->
-    <rect x="8"  y="38" width="6" height="14" fill="url(#mn-grad)" opacity="0.5"/>
-    <rect x="18" y="32" width="6" height="20" fill="url(#mn-grad)" opacity="0.7"/>
-    <rect x="28" y="22" width="6" height="30" fill="url(#mn-grad)" opacity="0.85"/>
-    <rect x="38" y="14" width="6" height="38" fill="url(#mn-grad)"/>
-    <!-- sparkline overlay -->
-    <path d="M 4 50 L 14 40 L 24 42 L 34 30 L 44 22 L 54 26 L 64 16 L 76 12" fill="none" stroke="#FFFFFF" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"/>
-    <!-- end dot -->
-    <circle cx="76" cy="12" r="2.5" fill="#FFFFFF"/>
-    <!-- grid lines -->
-    <line x1="4" y1="6" x2="84" y2="6" stroke="#FFFFFF" stroke-width="0.3" opacity="0.1"/>
-    <line x1="4" y1="50" x2="84" y2="50" stroke="#FFFFFF" stroke-width="0.3" opacity="0.3"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <title>Monitor</title>
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="#20252D"/>
+  <rect x="2.75" y="2.75" width="58.5" height="58.5" rx="14.25" fill="none" stroke="#FF8A80" stroke-width="1.5"/>
+  <g opacity="0.2" stroke="#FFFFFF" stroke-width="1">
+    <path d="M12 18.5H52"/>
+    <path d="M12 32H52"/>
+    <path d="M12 45.5H52"/>
   </g>
-  <!-- wordmark in light cream on dark side -->
-  <g font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-weight="800" font-size="58" letter-spacing="-3">
-    <text x="135" y="76" fill="#F8FAFC">monitor</text>
-    <!-- period accent -->
-    <circle cx="390" cy="66" r="4" fill="url(#mn-grad)"/>
+  <g fill="#B83232">
+    <rect x="13" y="38" width="5" height="10" rx="1" opacity="0.58"/>
+    <rect x="22" y="31" width="5" height="17" rx="1" opacity="0.72"/>
+    <rect x="31" y="25" width="5" height="23" rx="1" opacity="0.86"/>
+    <rect x="40" y="17" width="5" height="31" rx="1"/>
   </g>
+  <path d="M11 43L18 36L25 38L33 28L40 30L50 18" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="50" cy="18" r="2.75" fill="#FF8A80"/>
 </svg>

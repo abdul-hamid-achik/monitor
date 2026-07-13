@@ -1,131 +1,120 @@
 # Getting Started
 
-Monitor is a terminal-based, **agent-harnessable** system monitor for macOS and
-Linux, built in Go with the Charm ecosystem (Bubble Tea v2) and a Nord theme.
+Monitor gives you the same local system data through an interactive terminal
+UI, a JSON CLI, and an MCP server for AI agents. This tour gets all three
+surfaces running in about two minutes.
 
-It offers an interactive TUI (`monitor studio`) and exposes the same data to
-scripts, agents, and other tools via JSON CLI commands and an MCP stdio server.
-Running bare `monitor` prints help.
+## Install Monitor
 
-## Prerequisites
-
-- **Go 1.25 or higher** — required to build from source.
-- **A platform:**
-  - **macOS (Apple Silicon)** — full feature set, including real SMC
-    temperature readings via `powermetrics`.
-  - **Linux** — core metrics (CPU, memory, network, disk, processes).
-    Temperature always falls back to a CPU-load estimate.
-- **[Task](https://taskfile.dev/)** — optional task runner. Every `task`
-  command below has a plain `go` equivalent, so Task is never strictly
-  required.
-
-## Build from source
-
-Clone the repository, then build the binary:
+On macOS or Linux with Homebrew, install the project cask:
 
 ```bash
-go mod tidy
-
-# Build to bin/monitor
-go build -o bin/monitor ./cmd/monitor
+brew install --cask abdul-hamid-achik/tap/monitor
 ```
 
-If you have Task installed, the one-word equivalent is:
-
-```bash
-task build
-```
-
-For an optimized (stripped) release binary:
-
-```bash
-go build -ldflags="-s -w" -o bin/monitor ./cmd/monitor
-# or: task release
-```
-
-Optionally install it onto your `PATH`:
-
-```bash
-sudo cp bin/monitor /usr/local/bin/
-# or: task install
-```
+For release archives, upgrade instructions, or a source build, see
+[Installation](/guide/installation). The rest of this guide assumes `monitor`
+is on your `PATH`.
 
 ## First run
 
-Launch the interactive TUI with the `studio` subcommand (running bare
-`monitor` prints help instead):
+Check the installed version and capture a compact system snapshot:
 
 ```bash
-./bin/monitor studio   # `monitor tui` is an alias
+monitor --version
+monitor snapshot --compact
 ```
 
-You will land on the **Overview** tab. The TUI ships nine tabs — Overview,
-CPU, Memory, Temperature, Disk, Network, Processes, Settings, and Trends —
-with full keyboard and mouse navigation.
+Then launch Studio, Monitor's interactive TUI:
 
-A few keys to get moving:
+```bash
+monitor studio
+```
+
+Running bare `monitor` prints command help. `monitor tui` is an alias for
+`monitor studio`.
+
+Studio opens on the **Overview** tab. Use these keys to move around:
 
 | Key | Action |
-|-----|--------|
-| `1`–`9` | Jump to a tab |
+|---|---|
+| `1`–`9` | Jump directly to a tab |
 | `→` / `Tab` / `l` | Next tab |
 | `←` / `Shift+Tab` / `h` | Previous tab |
 | `/` | Search processes |
+| `?` | Open context-aware help |
 | `q` / `Ctrl+C` | Quit |
 
-If you prefer the task runner, `task run` builds and launches the TUI in one
-step.
+The nine tabs cover Overview, CPU, Memory, Temperature, Disk, Network,
+Processes, Settings, and Trends. See [The TUI](/guide/tui) for process actions,
+diagnostics, and the complete keyboard reference.
 
-## A 2-minute tour
+## A two-minute tour
 
-Monitor has three surfaces over the same underlying metrics. Pick the one that
-matches how you want to use it:
-
-### 1. The TUI
-
-A live, themed dashboard with sortable processes, multi-select, and
-safety-checked termination. Launch it with the `studio` subcommand:
+### 1. Watch the TUI
 
 ```bash
-./bin/monitor studio
+monitor studio
 ```
 
-→ See [The TUI](/guide/tui) for the full tab and keyboard reference.
+Open the CPU and Memory tabs, then visit Processes and press `/` to filter the
+table. Press `Enter` on a process to inspect its pinned diagnostics.
 
-### 2. The CLI (JSON for scripts and agents)
+### 2. Query the CLI
 
-Every subcommand supports `--json` for machine-readable output:
+After leaving Studio, request the same metrics as machine-readable output:
 
 ```bash
-./bin/monitor snapshot --json | jq '.cpu'   # one-shot system snapshot
-./bin/monitor snapshot --compact             # bounded schema-versioned agent view
-./bin/monitor watch --json                   # stream NDJSON metric events
-./bin/monitor process 1234 --json            # detailed process info
-./bin/monitor doctor --json                  # ecosystem tool availability
+monitor snapshot --json | jq '.cpu'
+monitor process 1234 --json
+monitor doctor --json
 ```
 
-→ See the [CLI Reference](/guide/cli) for every subcommand and flag.
-
-### 3. The MCP server (for AI agents)
-
-Speak MCP over stdio to expose Monitor's data and tools to an agent:
+Replace `1234` with a live PID. `jq` is optional; omit the pipe to see the full
+snapshot. To stream newline-delimited metric events until you press `Ctrl+C`,
+run:
 
 ```bash
-./bin/monitor mcp serve
+monitor watch --json
 ```
 
-This exposes eight tools — four read-only and four mutating — with the
-mutating tools gated on `confirm: true` (the read-only `monitor_analyze` has
-no confirm gate).
+See the [CLI Reference](/guide/cli) for snapshots, history, baselines, anomaly
+analysis, profiling, logs, and safety-checked process termination.
 
-→ See [MCP Server](/guide/mcp) for the tool list and confirmation model.
+### 3. Start the MCP server
+
+```bash
+monitor mcp serve
+```
+
+The stdio server exposes four read-only tools and four mutating tools. Every
+mutating call requires `confirm: true`, while protected and system processes
+remain non-terminable. See [MCP Server](/guide/mcp) for client configuration and
+the full tool schemas.
+
+## Platform notes
+
+The core TUI and CLI metrics work on macOS and Linux, with transparent
+differences where the operating systems expose different data:
+
+- **macOS:** `sample` profiling is available. Apple Silicon temperature can
+  come from `powermetrics` when cached `sudo` credentials are available;
+  otherwise Monitor uses an estimate. The macOS collector does not expose load
+  averages.
+- **Linux:** load averages and cgroup v2 detection are available. Temperature
+  is estimated, and the macOS `sample` profiler is unavailable. `pprof`
+  profiling still works for Go processes that expose an endpoint.
+
+Studio marks temperature readings `real` or `est`, and JSON output includes the
+temperature source.
 
 ## Where to go next
 
+- [Installation](/guide/installation) — upgrade, uninstall, archives, and
+  source builds.
 - [The TUI](/guide/tui) — tabs, keyboard shortcuts, and mouse navigation.
 - [CLI Reference](/guide/cli) — the full JSON command surface.
 - [MCP Server](/guide/mcp) — the agent-facing tool surface.
-- [Anomaly Detection](/guide/anomaly-detection) — the rules behind `watch`
-  alerts, and how to configure thresholds.
-- [Ecosystem Integration](/guide/ecosystem) — fcheap, tinyvault, glyphrun,
-  codemap, and friends.
+- [Anomaly Detection](/guide/anomaly-detection) — alert rules and thresholds.
+- [Ecosystem Integration](/guide/ecosystem) — optional local tool integrations.
+- [Process Safety](/guide/safety) — termination policy across every surface.

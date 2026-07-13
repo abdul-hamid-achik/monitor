@@ -5,7 +5,7 @@ with a Nord theme, nine tabs, and full keyboard and mouse navigation. (Running
 bare `monitor` prints help instead.)
 
 ```bash
-./bin/monitor studio   # launches the TUI (9 tabs); `monitor tui` also works
+monitor studio   # launches the TUI (9 tabs); `monitor tui` also works
 ```
 
 The same data is available without a terminal via the [CLI](./cli.md) and the
@@ -164,7 +164,7 @@ You can act on either a single highlighted row or a multi-row selection:
 2. **Kill** with `k` (SIGTERM) or `x` (SIGKILL). If you haven't explicitly
    selected anything, the currently highlighted row is used.
 3. A **confirmation dialog** appears, listing each target PID and a safety
-   label: `✓ OK`, `⚠️ CAUTION` for system processes, or `🛓 CRITICAL` for
+   label: `OK`, `CAUTION` for system processes, or `CRITICAL` for
    protected ones. Force-kill adds a warning that the process won't be allowed
    to clean up.
 4. Press `y` to confirm or `n` / `Esc` to cancel. Verification runs

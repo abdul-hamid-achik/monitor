@@ -147,7 +147,7 @@ stream; a stash failure surfaces in a `stash_error` field rather than aborting
 and what happens when fcheap isn't installed.
 
 ```bash
-./bin/monitor watch --json --stash --stash-ttl 24h
+monitor watch --json --stash --stash-ttl 24h
 ```
 
 ## See also

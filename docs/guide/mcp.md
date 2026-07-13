@@ -8,7 +8,7 @@ ecosystem health, and — with explicit confirmation — take action.
 ## Starting the server
 
 ```bash
-./bin/monitor mcp serve
+monitor mcp serve
 ```
 
 The server speaks MCP over **stdio** using newline-delimited JSON-RPC. It does
@@ -175,9 +175,9 @@ on the client, but the shape is the same — a command and its arguments:
 }
 ```
 
-If `monitor` is not on your `PATH`, use an absolute path to the binary
-(for example `/usr/local/bin/monitor`, or `./bin/monitor` from a source
-build).
+If the agent client does not inherit your shell `PATH`, run
+`command -v monitor` and use the returned absolute path for `command`. A source
+build that has not been installed can use `./bin/monitor` instead.
 
 ## See also
 

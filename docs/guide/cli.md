@@ -6,9 +6,9 @@ subcommand. Running bare `monitor` prints help. Most subcommands support
 scripts and agents.
 
 ```bash
-./bin/monitor --help          # list every subcommand
-./bin/monitor <cmd> --help    # flags for one subcommand
-./bin/monitor --version       # prints: monitor <version>
+monitor --help          # list every subcommand
+monitor <cmd> --help    # flags for one subcommand
+monitor --version       # prints: monitor <version>
 ```
 
 The subcommands group into four purposes:
@@ -44,7 +44,7 @@ subcommand or mode you asked for. It is most useful with the long-running modes
 listen address to stderr:
 
 ```bash
-./bin/monitor --pprof localhost:6060 watch --json
+monitor --pprof localhost:6060 watch --json
 # monitor: pprof listening on http://localhost:6060/debug/pprof/
 ```
 
@@ -52,7 +52,7 @@ Because the endpoint is a standard `net/http/pprof` server, you can point
 Monitor's own profiler at it to capture Monitor profiling Monitor:
 
 ```bash
-./bin/monitor profile <monitor-pid> --type heap --pprof-addr localhost:6060 --json
+monitor profile <monitor-pid> --type heap --pprof-addr localhost:6060 --json
 ```
 
 ### Observed-child environment
@@ -88,10 +88,10 @@ filesystem list, and is the recommended form for agent context windows.
 | `--filesystem-filter` | `""` | Case-insensitive device, mount-point, or filesystem substring. |
 
 ```bash
-./bin/monitor snapshot
-./bin/monitor snapshot --json | jq '.cpu.usage_percent'
-./bin/monitor snapshot --compact --process-limit 3 --process-filter ollama
-./bin/monitor snapshot --compact --filesystem-filter apfs | jq '.filesystems'
+monitor snapshot
+monitor snapshot --json | jq '.cpu.usage_percent'
+monitor snapshot --compact --process-limit 3 --process-filter ollama
+monitor snapshot --compact --filesystem-filter apfs | jq '.filesystems'
 ```
 
 The compact payload starts with `schema_version: 1` and
@@ -182,9 +182,9 @@ confidence level, and the fcheap bundle's `manifest.json` carries it too
 ignore the new key see no change.
 
 ```bash
-./bin/monitor watch --json | jq -c 'select(.type=="tick")'
-./bin/monitor watch --json --stash --stash-ttl 24h
-./bin/monitor watch --json --webhook https://hooks.example.com/alerts --notify
+monitor watch --json | jq -c 'select(.type=="tick")'
+monitor watch --json --stash --stash-ttl 24h
+monitor watch --json --webhook https://hooks.example.com/alerts --notify
 ```
 
 ```json
@@ -202,8 +202,8 @@ Print detailed information for a single PID. Takes exactly one argument.
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
-./bin/monitor process 1133
-./bin/monitor process 1133 --json
+monitor process 1133
+monitor process 1133 --json
 ```
 
 ```json
@@ -244,8 +244,8 @@ parent, memory share, I/O counters when supported, and per-field
 | `--json` | `false` | Emit a bounded JSON envelope with match/truncation metadata. |
 
 ```bash
-./bin/monitor processes --sort memory --limit 10
-./bin/monitor ps --filter node --json
+monitor processes --sort memory --limit 10
+monitor ps --filter node --json
 ```
 
 ### `tree`
@@ -261,9 +261,9 @@ determinism.
 | `--json` | `false` | Emit nested JSON output. |
 
 ```bash
-./bin/monitor tree              # the whole forest
-./bin/monitor tree 1234         # the subtree rooted at pid 1234
-./bin/monitor tree --json | jq '.[0].children'
+monitor tree              # the whole forest
+monitor tree 1234         # the subtree rooted at pid 1234
+monitor tree --json | jq '.[0].children'
 ```
 
 The text output indents each child under its parent and annotates CPU and
@@ -320,9 +320,9 @@ suggesting `--force`; `kill` never escalates to `SIGKILL` on its own.
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
-./bin/monitor kill 1234                 # SIGTERM, safety-checked
-./bin/monitor kill 1234 5678 --force    # SIGKILL both
-./bin/monitor kill 1 --yes --json       # still returns a structured refusal
+monitor kill 1234                 # SIGTERM, safety-checked
+monitor kill 1234 5678 --force    # SIGKILL both
+monitor kill 1 --yes --json       # still returns a structured refusal
 ```
 
 When a human-output kill is refused, the command exits non-zero. With `--json`
@@ -382,8 +382,8 @@ JSON result always includes `"diagnoses": []` rather than `null`.
 | `--json` | `false` | Emit `{window, interval, pid?, samples, healthy, diagnoses}`. |
 
 ```bash
-./bin/monitor analyze --window 10s
-./bin/monitor analyze --pid 1234 --window 15s --json
+monitor analyze --window 10s
+monitor analyze --pid 1234 --window 15s --json
 ```
 
 ### `profile`
@@ -408,8 +408,8 @@ refused rather than reported as a hollow success.
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
-./bin/monitor profile 1234 --type heap --json
-./bin/monitor profile 1234 -t goroutine --pprof-addr localhost:7070 --json
+monitor profile 1234 --type heap --json
+monitor profile 1234 -t goroutine --pprof-addr localhost:7070 --json
 ```
 
 ```json
@@ -445,8 +445,8 @@ or unverified profile is never stashed.
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
-./bin/monitor investigate 1234 --json
-./bin/monitor investigate 1234 --no-save --json   # profile in JSON, nothing stashed
+monitor investigate 1234 --json
+monitor investigate 1234 --no-save --json   # profile in JSON, nothing stashed
 ```
 
 ```json
@@ -479,7 +479,7 @@ operations, or manual incident triage. The trigger tag is `manual`.
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
-./bin/monitor stash --note "before deploy" --json
+monitor stash --note "before deploy" --json
 ```
 
 ```json
@@ -501,8 +501,8 @@ is an alias for the whole command tree.
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
-./bin/monitor incidents
-./bin/monitor incidents --json
+monitor incidents
+monitor incidents --json
 ```
 
 ```json
@@ -524,7 +524,7 @@ List bundles retained in the local registry — the ones still waiting to be
 archived.
 
 ```bash
-./bin/monitor incidents pending --json
+monitor incidents pending --json
 ```
 
 #### `incidents resume-stash`
@@ -536,8 +536,8 @@ failure the bundle is kept and the attempt (and error) is recorded for the
 next try.
 
 ```bash
-./bin/monitor incidents resume-stash abc123def456
-./bin/monitor incident resume-stash abc123def456 --json
+monitor incidents resume-stash abc123def456
+monitor incident resume-stash abc123def456 --json
 ```
 
 ### `logs`
@@ -575,8 +575,8 @@ else defaults to `info` (or `error` for stderr lines without a level).
 | `--json` | `false` | Emit JSON output (final result). |
 
 ```bash
-./bin/monitor logs capture -- sh -c 'echo INFO: hello; echo WARN: bad >&2'
-./bin/monitor logs capture --pid 1234 --max-lines 500
+monitor logs capture -- sh -c 'echo INFO: hello; echo WARN: bad >&2'
+monitor logs capture --pid 1234 --max-lines 500
 ```
 
 ```json
@@ -609,9 +609,9 @@ full structured entries (`json`/`ndjson`) or replay captured lines (`raw`).
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
-./bin/monitor logs search "error" --json
-./bin/monitor logs search "timeout" --level error,warn --process api --since 2h
-./bin/monitor logs search --since 15m --format ndjson -o recent.ndjson
+monitor logs search "error" --json
+monitor logs search "timeout" --level error,warn --process api --since 2h
+monitor logs search --since 15m --format ndjson -o recent.ndjson
 ```
 
 ```json
@@ -643,8 +643,8 @@ Sample the system on an interval and append each tick to the store. Runs until
 | `--db` | `~/.local/share/monitor/history.veclite` | History store path. |
 
 ```bash
-./bin/monitor history record                       # sample every second
-./bin/monitor history record -i 5s --db /tmp/h.veclite
+monitor history record                       # sample every second
+monitor history record -i 5s --db /tmp/h.veclite
 ```
 
 #### `history query`
@@ -660,8 +660,8 @@ the metric name — and reports the matching samples plus summary stats
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
-./bin/monitor history query cpu.usage --since 30m
-./bin/monitor history query mem.usage --since 6h --json | jq '.summary.p95'
+monitor history query cpu.usage --since 30m
+monitor history query mem.usage --since 6h --json | jq '.summary.p95'
 ```
 
 ```json
@@ -697,8 +697,8 @@ List the metrics that have been recorded into the store.
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
-./bin/monitor history list
-./bin/monitor history list --json
+monitor history list
+monitor history list --json
 ```
 
 ```json
@@ -725,8 +725,8 @@ invisible without elevated privileges.
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
-./bin/monitor baseline save pre-deploy
-./bin/monitor baseline save pre-deploy --json
+monitor baseline save pre-deploy
+monitor baseline save pre-deploy --json
 ```
 
 ```json
@@ -742,8 +742,8 @@ List the names of saved baselines (sorted).
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
-./bin/monitor baseline list
-./bin/monitor baseline list --json
+monitor baseline list
+monitor baseline list --json
 ```
 
 ```json
@@ -755,7 +755,7 @@ List the names of saved baselines (sorted).
 Delete a saved baseline. Takes exactly one argument — the baseline name.
 
 ```bash
-./bin/monitor baseline delete pre-deploy
+monitor baseline delete pre-deploy
 ```
 
 ### `diff`
@@ -776,9 +776,9 @@ largest absolute memory movement first.
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
-./bin/monitor diff pre-deploy                 # pre-deploy -> live
-./bin/monitor diff pre-deploy post-deploy     # pre-deploy -> post-deploy
-./bin/monitor diff pre-deploy --mem-threshold 8192 --json
+monitor diff pre-deploy                 # pre-deploy -> live
+monitor diff pre-deploy post-deploy     # pre-deploy -> post-deploy
+monitor diff pre-deploy --mem-threshold 8192 --json
 ```
 
 The `--json` output is the `Diff` struct: `cpu_delta` / `mem_delta` are
@@ -851,12 +851,12 @@ commands. Writes are validated and atomic; setting keys accept hyphens or
 underscores.
 
 ```bash
-./bin/monitor config show --json
-./bin/monitor config get update-interval
-./bin/monitor config set update-interval 500ms
-./bin/monitor config set cpu-alert-threshold 85
-./bin/monitor config path
-./bin/monitor config reset --yes
+monitor config show --json
+monitor config get update-interval
+monitor config set update-interval 500ms
+monitor config set cpu-alert-threshold 85
+monitor config path
+monitor config reset --yes
 ```
 
 See [Configuration](/reference/configuration) for fields and validation rules.
@@ -877,9 +877,9 @@ Probed tools: `codemap`, `fcheap`, `vecgrep`, `tinyvault`, `vidtrace`,
 `glyphrun`, `cairntrace`, `veclite`, and `tmux`.
 
 ```bash
-./bin/monitor doctor
-./bin/monitor doctor --json | jq '.fcheap.available'
-./bin/monitor doctor --require fcheap,codemap
+monitor doctor
+monitor doctor --json | jq '.fcheap.available'
+monitor doctor --require fcheap,codemap
 ```
 
 ```json
@@ -904,7 +904,7 @@ argument — the path to a spec — and prints glyphrun's output. The spawned sp
 sees `MONITOR=1` and `MONITOR_RUN_DIR`.
 
 ```bash
-./bin/monitor run specs/version.yml
+monitor run specs/version.yml
 ```
 
 ### `reload`
@@ -921,8 +921,8 @@ is loopback-only; remote processes cannot reach it. If no TUI is running,
 | `--timeout` | `3s` | HTTP client timeout for the POST. |
 
 ```bash
-./bin/monitor reload
-./bin/monitor reload --addr 127.0.0.1:7351 --timeout 5s
+monitor reload
+monitor reload --addr 127.0.0.1:7351 --timeout 5s
 ```
 
 ### `mcp`
@@ -931,7 +931,7 @@ Run an MCP stdio server exposing Monitor's data. The single subcommand,
 `mcp serve`, speaks MCP over stdio (newline-delimited JSON-RPC).
 
 ```bash
-./bin/monitor mcp serve
+monitor mcp serve
 ```
 
 The server exposes eight tools — four read-only (`monitor_snapshot`,
@@ -955,8 +955,8 @@ binary on `$PATH` and a configured tinyvault project.
 | `--project` | `""` | Tinyvault project name (**required**). |
 
 ```bash
-./bin/monitor vault --project myapp -- /usr/local/bin/myapp --port 8080
-./bin/monitor vault --project myapp -- env   # debug: show injected env
+monitor vault --project myapp -- /usr/local/bin/myapp --port 8080
+monitor vault --project myapp -- env   # debug: show injected env
 ```
 
 ### `studio`
@@ -965,9 +965,9 @@ Launch the interactive TUI (Bubble Tea v2). All nine tabs are rendered with
 full keyboard + mouse interactivity. `tui` is an alias.
 
 ```bash
-./bin/monitor studio                  # launch the TUI
-./bin/monitor tui                     # alias
-./bin/monitor studio --reload-server  # also expose POST /reload for agents/CI
+monitor studio                  # launch the TUI
+monitor tui                     # alias
+monitor studio --reload-server  # also expose POST /reload for agents/CI
 ```
 
 See [The TUI](/guide/tui) for the tab and keyboard reference.

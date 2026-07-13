@@ -39,8 +39,8 @@ integration "isn't working" — usually the answer is that the binary isn't on
 `$PATH`.
 
 ```bash
-./bin/monitor doctor          # human-readable health table
-./bin/monitor doctor --json   # machine-readable, for agents
+monitor doctor          # human-readable health table
+monitor doctor --json   # machine-readable, for agents
 ```
 
 Each probe runs `<binary> --version` with a 2-second timeout. A tool that is
@@ -74,8 +74,8 @@ later by trigger, alert rule, or PID. Every monitor stash carries the
 ### `monitor stash` — capture a snapshot now
 
 ```bash
-./bin/monitor stash --json
-./bin/monitor stash --note "before risky deploy" --ttl 30d
+monitor stash --json
+monitor stash --note "before risky deploy" --ttl 30d
 ```
 
 `stash` bundles the current system snapshot and returns the stash ID. Use it to
@@ -91,8 +91,8 @@ the analyzer didn't fire. Flags:
 ### `monitor investigate <pid>` — the diagnostic pipeline
 
 ```bash
-./bin/monitor investigate 1234 --json
-./bin/monitor investigate 1234 --no-save   # bundle locally, skip fcheap
+monitor investigate 1234 --json
+monitor investigate 1234 --no-save   # bundle locally, skip fcheap
 ```
 
 `investigate` runs a snapshot → profile → stash pipeline against one process: it
@@ -109,8 +109,8 @@ the resulting stash. Flags:
 ### `monitor incidents` — list what you've captured
 
 ```bash
-./bin/monitor incidents
-./bin/monitor incidents --json
+monitor incidents
+monitor incidents --json
 ```
 
 This lists recent monitor stashes, with the `monitor-incident` tag pre-applied
@@ -130,8 +130,8 @@ lost with the temp dir. See the [CLI Reference](./cli#incidents).
 analyzer raises an alert:
 
 ```bash
-./bin/monitor watch --json --stash
-./bin/monitor watch --stash --stash-ttl 24h
+monitor watch --json --stash
+monitor watch --stash --stash-ttl 24h
 ```
 
 With `--stash`, each alert fires a capture in the background and emits the
@@ -155,10 +155,10 @@ agent that invoked Monitor ever seeing the secret values.
 
 ```bash
 # Launch a service with its secrets injected
-./bin/monitor vault --project myapp -- /usr/local/bin/myapp --port 8080
+monitor vault --project myapp -- /usr/local/bin/myapp --port 8080
 
 # Debug: see exactly which env vars would be injected
-./bin/monitor vault --project myapp -- env
+monitor vault --project myapp -- env
 ```
 
 Everything after the `--` separator is the command and its arguments. Under the
@@ -178,7 +178,7 @@ JSON result. This lets you drive behavioral specs against services while Monitor
 is observing them.
 
 ```bash
-./bin/monitor run specs/version.yml
+monitor run specs/version.yml
 ```
 
 Monitor invokes `glyph run --format json <spec>`. When Monitor launches a child
