@@ -25,8 +25,12 @@ func formatNumberShort(n uint64) string {
 func (m Model) renderNetwork() string {
 	net := m.last.Network
 	panelWidth := (m.width - 6) / 2
-	if panelWidth < 40 {
-		panelWidth = 40
+	stacked := m.width < 88
+	if stacked {
+		panelWidth = m.width - 4
+	}
+	if panelWidth < 20 {
+		panelWidth = 20
 	}
 	downloadBar := widgets.NewBarGauge()
 	downloadBar.Value = float64(net.BytesRecvPerSec) / (1024 * 1024)
@@ -77,5 +81,11 @@ func (m Model) renderNetwork() string {
 		lipgloss.JoinVertical(lipgloss.Left, m.titleStyle.Render(" Packets "), "",
 			lipgloss.NewStyle().Foreground(lipgloss.Color("#88C0D0")).Render(" ↓ "+formatNumberShort(net.PacketsRecv)),
 			lipgloss.NewStyle().Foreground(lipgloss.Color("#A3BE8C")).Render(" ↑ "+formatNumberShort(net.PacketsSent))))
-	return lipgloss.JoinVertical(lipgloss.Left, historyPanel, "", downloadPanel+" "+uploadPanel, "", totalPanel+" "+packetsPanel)
+	speedPanels := downloadPanel + " " + uploadPanel
+	summaryPanels := totalPanel + " " + packetsPanel
+	if stacked {
+		speedPanels = lipgloss.JoinVertical(lipgloss.Left, downloadPanel, uploadPanel)
+		summaryPanels = lipgloss.JoinVertical(lipgloss.Left, totalPanel, packetsPanel)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, historyPanel, "", speedPanels, "", summaryPanels)
 }

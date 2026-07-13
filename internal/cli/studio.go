@@ -33,19 +33,23 @@ persistent metric history.
   monitor studio                 # launch the TUI
   monitor studio --reload-server # also expose POST /reload for agents/CI
 
-Use 1-9 to jump between tabs, / to search processes, and q to quit.`,
+		Use 1-9 to jump between tabs, / to search processes, and q to quit.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			programReloader := studio.NewProgramReloader()
 			// Optionally expose POST /reload so external processes (CI / agents)
 			// can trigger an in-process refresh via `monitor reload`.
 			if reloadServer {
-				srv := reload.NewServer(reloadAddr, reload.NoopReloader{})
+				srv := reload.NewServer(reloadAddr, programReloader)
 				if err := srv.Start(); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: --reload-server failed to start on %s: %v\n", reloadAddr, err)
 				} else {
 					fmt.Fprintf(os.Stderr, "monitor: /reload endpoint listening on http://%s\n", srv.Addr())
 				}
 			}
-			if err := studio.Run(); err != nil {
+			if err := studio.RunWithOptions(studio.Options{
+				DisableTemperatureSource: disableTemperatureSource,
+				Reloader:                 programReloader,
+			}); err != nil {
 				// In headless environments the TUI can't claim a TTY; if the
 				// reload server is up, keep serving until a signal so CI can
 				// still exercise it. studio.Run already logged the error.

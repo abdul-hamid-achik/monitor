@@ -25,7 +25,9 @@ func TestPrintDiffRendersVerdicts(t *testing.T) {
 		}},
 	}
 	var buf bytes.Buffer
-	printDiff(&buf, d)
+	if err := printDiff(&buf, d); err != nil {
+		t.Fatalf("printDiff: %v", err)
+	}
 	out := buf.String()
 	for _, want := range []string{"verdicts:", "total RSS +36%", "[medium confidence]", "evidence:", "next:"} {
 		if !strings.Contains(out, want) {
@@ -37,7 +39,9 @@ func TestPrintDiffRendersVerdicts(t *testing.T) {
 func TestPrintDiffNoVerdictsOmitsSection(t *testing.T) {
 	d := baseline.Diff{From: "pre", To: "live"}
 	var buf bytes.Buffer
-	printDiff(&buf, d)
+	if err := printDiff(&buf, d); err != nil {
+		t.Fatalf("printDiff empty: %v", err)
+	}
 	if strings.Contains(buf.String(), "verdicts:") {
 		t.Errorf("printDiff with no verdicts should not print a verdicts section:\n%s", buf.String())
 	}

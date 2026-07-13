@@ -1,0 +1,53 @@
+version: 1
+name: monitor_processes
+
+intent: |
+  `monitor processes` (`ps`) exposes a bounded, filterable, deterministic
+  process inventory without forcing agents to consume the full snapshot.
+
+target:
+  cmd: ["./bin/monitor", "processes", "--limit", "3", "--sort", "pid", "--system", "--json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: bounded_envelope
+    description: JSON identifies the requested limit and returned row count
+    verify:
+      command:
+        run: "./bin/monitor processes --limit 3 --system --json | grep -q '\"limit\": 3' && ./bin/monitor processes --limit 3 --system --json | grep -q '\"returned\"'"
+  - id: explicit_system_policy
+    description: JSON records that system processes were included
+    verify:
+      command:
+        run: "./bin/monitor processes --limit 3 --system --json | grep -q '\"includes_system\": true'"
+  - id: ps_alias
+    description: the short ps alias exposes the same process envelope
+    verify:
+      command:
+        run: "./bin/monitor ps --limit 1 --json | grep -q '\"processes\"'"
+  - id: invalid_sort_refused
+    description: unsupported sort keys fail with an actionable error
+    verify:
+      command:
+        run: "! ./bin/monitor processes --sort age >/dev/null 2>&1 && ./bin/monitor processes --sort age 2>&1 | grep -qi 'expected cpu, memory, pid, or name'"
+  - id: clean_exit
+    description: the bounded process inventory exits cleanly
+    verify:
+      process:
+        exitCode: 0

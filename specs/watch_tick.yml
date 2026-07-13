@@ -41,6 +41,16 @@ outcomes:
     verify:
       command:
         run: "./bin/monitor watch --once --json | grep -q '\"memory\"'"
+  - id: cooldown_is_documented
+    description: watch exposes sustained-alert deduplication controls
+    verify:
+      command:
+        run: "./bin/monitor watch --help | grep -q -- '--alert-cooldown'"
+  - id: delivery_limit_is_documented
+    description: watch exposes bounded alert-delivery concurrency
+    verify:
+      command:
+        run: "./bin/monitor watch --help | grep -q -- '--delivery-limit'"
   - id: clean_exit
     description: exit cleanly after one event
     verify:

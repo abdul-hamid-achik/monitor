@@ -12,8 +12,26 @@ directory (`~/.config/monitor`) is created automatically when settings are
 saved.
 
 Settings drive the TUI (update cadence, process limits, mouse, alert
-thresholds); the JSON CLI commands take their behaviour from flags, not from
-this file.
+thresholds). `monitor processes` also uses `max_processes` and
+`show_system_processes` as its defaults; explicit CLI flags still win.
+
+## Manage settings from the CLI
+
+The `config` command avoids hand-editing duration values and validates every
+change before atomically replacing the file:
+
+```bash
+monitor config show
+monitor config get update-interval
+monitor config set update-interval 500ms
+monitor config set cpu-alert-threshold 85
+monitor config path
+monitor config reset --yes
+```
+
+Every subcommand also supports `--json`. Keys accept either underscores or
+hyphens. `config set` accepts Go-style durations such as `250ms`, `2s`, and
+`1m`, then stores them in the existing nanosecond representation.
 
 ## Example
 
@@ -39,12 +57,12 @@ keeps its default.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `update_interval` | duration (nanoseconds) | `1000000000` (1s) | How often the collector refreshes metrics. Encoded as an integer number of nanoseconds (Go `time.Duration`). Values `<= 0` are ignored and the default is kept. |
-| `temperature_unit` | string | `"C"` | Temperature display unit. An empty string is ignored and the default is kept. |
+| `temperature_unit` | string | `"C"` | Temperature display unit (`C` or `F`, case-insensitive). Unknown values are ignored and the default is kept. |
 | `show_system_processes` | bool | `false` | Whether system/root-owned processes are shown in the Processes tab. |
 | `max_processes` | int | `50` | Maximum number of processes listed. Only accepted in the range `1`–`1000`; out-of-range values are ignored and the default is kept. |
 | `mouse_enabled` | bool | `true` | Whether mouse interaction (clicking tabs, selecting rows, scrolling) is enabled in the TUI. |
-| `cpu_alert_threshold` | float | `0` | CPU-usage percentage that triggers an alert. `0` disables the alert. Negative values are ignored. |
-| `memory_alert_threshold` | float | `0` | Memory-usage percentage that triggers an alert. `0` disables the alert. Negative values are ignored. |
+| `cpu_alert_threshold` | float | `0` | CPU-usage percentage that triggers an alert. `0` disables the alert. Values outside `0`–`100` are ignored. |
+| `memory_alert_threshold` | float | `0` | Memory-usage percentage that triggers an alert. `0` disables the alert. Values outside `0`–`100` are ignored. |
 
 ::: tip update_interval is in nanoseconds
 Because `update_interval` is a Go `time.Duration`, it is stored as an integer
@@ -67,9 +85,10 @@ Monitor is deliberately forgiving here:
 - **Missing file** → defaults are used.
 - **Unreadable / malformed JSON** → defaults are used (the file is not
   rewritten or deleted).
-- **Out-of-range field** (e.g. `max_processes` of `0` or `5000`, a negative
-  threshold, a non-positive `update_interval`) → that single field falls back
-  to its default; the rest of the file is still applied.
+- **Out-of-range field** (e.g. `max_processes` of `0` or `5000`, a threshold
+  outside `0`–`100`, an unknown temperature unit, or a non-positive
+  `update_interval`) → that single field falls back to its default; the rest
+  of the file is still applied.
 
 ## Temperature source flag
 
@@ -98,6 +117,7 @@ variables so the child can detect that it is being observed:
 |----------|--------|---------|
 | `MONITOR` | `monitor run` / `monitor watch` | Set to `1` for child processes (unless `MONITOR_RUN_DIR` is already set), mirroring glyphrun's `GLYPHRUN` pattern. |
 | `MONITOR_RUN_DIR` | the run harness | Path to the run directory for the observed process. Its presence means the process was spawned by an existing Monitor run, so `MONITOR` is not re-set. |
+| `MONITOR_LOG_STORE` | `monitor logs capture/search` | Shared override for the log database path. A command-level `--store` flag takes precedence; the default is `~/.local/share/monitor/logs.veclite`. |
 
 A child can check `MONITOR=1` (or the presence of `MONITOR_RUN_DIR`) to alter
 its behaviour — for example to emit extra diagnostics — while being monitored.

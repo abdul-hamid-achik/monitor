@@ -1,0 +1,53 @@
+version: 1
+name: monitor_config_cli
+
+intent: |
+  `monitor config` makes the effective settings and their on-disk location
+  scriptable without requiring users or agents to interpret the TUI.
+
+target:
+  cmd: ["./bin/monitor", "config", "show", "--json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: effective_settings
+    description: JSON includes the process and alert settings shared with Studio
+    verify:
+      command:
+        run: "./bin/monitor config show --json | grep -q '\"max_processes\"' && ./bin/monitor config show --json | grep -q '\"cpu_alert_threshold\"'"
+  - id: config_path
+    description: the settings path points to monitor/config.json
+    verify:
+      command:
+        run: "./bin/monitor config path | grep -q '/monitor/config.json$'"
+  - id: get_duration
+    description: get renders update_interval as a human duration
+    verify:
+      command:
+        run: "./bin/monitor config get update-interval | grep -qE '^[0-9]+(ns|us|µs|ms|s|m|h)'"
+  - id: reset_is_guarded
+    description: resetting all settings requires explicit confirmation
+    verify:
+      command:
+        run: "! ./bin/monitor config reset >/dev/null 2>&1 && ./bin/monitor config reset 2>&1 | grep -q -- '--yes'"
+  - id: clean_exit
+    description: showing settings exits cleanly
+    verify:
+      process:
+        exitCode: 0

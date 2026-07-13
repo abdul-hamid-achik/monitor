@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -211,8 +212,7 @@ absolute floor) get a verdict line with confidence and next actions; with
 			if JSONOutput(cmd) {
 				return WriteJSON(d)
 			}
-			printDiff(os.Stdout, d)
-			return nil
+			return printDiff(os.Stdout, d)
 		},
 	}
 	cmd.Flags().IntVar(&memKB, "mem-threshold", 1024, "min per-process memory change to report, in KB")
@@ -220,38 +220,41 @@ absolute floor) get a verdict line with confidence and next actions; with
 	return cmd
 }
 
-func printDiff(w io.Writer, d baseline.Diff) {
-	fmt.Fprintf(w, "%s -> %s  (cpu %+.1f%%  mem %+.1f%%  load1 %+.2f)\n", d.From, d.To, d.CPUDelta, d.MemDelta, d.Load1Delta)
+func printDiff(w io.Writer, d baseline.Diff) error {
+	var b strings.Builder
+	_, _ = fmt.Fprintf(&b, "%s -> %s  (cpu %+.1f%%  mem %+.1f%%  load1 %+.2f)\n", d.From, d.To, d.CPUDelta, d.MemDelta, d.Load1Delta)
 	for _, p := range d.NewProcs {
-		fmt.Fprintf(w, "  + proc  %s (pid %d)  %s\n", p.Name, p.PID, collector.FormatBytes(p.NewMem))
+		_, _ = fmt.Fprintf(&b, "  + proc  %s (pid %d)  %s\n", p.Name, p.PID, collector.FormatBytes(p.NewMem))
 	}
 	for _, p := range d.GoneProcs {
-		fmt.Fprintf(w, "  - proc  %s (pid %d)  %s\n", p.Name, p.PID, collector.FormatBytes(p.OldMem))
+		_, _ = fmt.Fprintf(&b, "  - proc  %s (pid %d)  %s\n", p.Name, p.PID, collector.FormatBytes(p.OldMem))
 	}
 	for _, p := range d.ChangedProcs {
-		fmt.Fprintf(w, "  ~ proc  %s (pid %d)  %s  (%s -> %s)\n", p.Name, p.PID, signedBytes(p.MemDelta), collector.FormatBytes(p.OldMem), collector.FormatBytes(p.NewMem))
+		_, _ = fmt.Fprintf(&b, "  ~ proc  %s (pid %d)  %s  (%s -> %s)\n", p.Name, p.PID, signedBytes(p.MemDelta), collector.FormatBytes(p.OldMem), collector.FormatBytes(p.NewMem))
 	}
 	for _, l := range d.NewListeners {
-		fmt.Fprintf(w, "  + port  %s :%d (pid %d %s)\n", l.Proto, l.Port, l.PID, l.Process)
+		_, _ = fmt.Fprintf(&b, "  + port  %s :%d (pid %d %s)\n", l.Proto, l.Port, l.PID, l.Process)
 	}
 	for _, l := range d.GoneListeners {
-		fmt.Fprintf(w, "  - port  %s :%d (pid %d %s)\n", l.Proto, l.Port, l.PID, l.Process)
+		_, _ = fmt.Fprintf(&b, "  - port  %s :%d (pid %d %s)\n", l.Proto, l.Port, l.PID, l.Process)
 	}
 	if len(d.NewProcs)+len(d.GoneProcs)+len(d.ChangedProcs)+len(d.NewListeners)+len(d.GoneListeners) == 0 {
-		fmt.Fprintln(w, "  (no process or listener changes)")
+		b.WriteString("  (no process or listener changes)\n")
 	}
 	if len(d.Verdicts) > 0 {
-		fmt.Fprintln(w, "verdicts:")
+		b.WriteString("verdicts:\n")
 		for _, v := range d.Verdicts {
-			fmt.Fprintf(w, "  ! %s  [%s confidence]\n", v.Summary, v.Confidence)
+			_, _ = fmt.Fprintf(&b, "  ! %s  [%s confidence]\n", v.Summary, v.Confidence)
 			for _, e := range v.Evidence {
-				fmt.Fprintf(w, "      evidence: %s\n", e)
+				_, _ = fmt.Fprintf(&b, "      evidence: %s\n", e)
 			}
 			for _, n := range v.NextActions {
-				fmt.Fprintf(w, "      next: %s\n", n)
+				_, _ = fmt.Fprintf(&b, "      next: %s\n", n)
 			}
 		}
 	}
+	_, err := io.WriteString(w, b.String())
+	return err
 }
 
 func signedBytes(delta int64) string {

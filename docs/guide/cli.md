@@ -14,15 +14,16 @@ scripts and agents.
 The subcommands group into four purposes:
 
 - **Inspect** — read current state: [`snapshot`](#snapshot),
-  [`watch`](#watch), [`process`](#process), [`tree`](#tree).
+  [`watch`](#watch), [`process`](#process), [`processes`](#processes),
+  [`tree`](#tree).
 - **Act** — change something: [`kill`](#kill).
-- **Diagnose** — capture and analyze: [`profile`](#profile),
+- **Diagnose** — capture and analyze: [`analyze`](#analyze), [`profile`](#profile),
   [`investigate`](#investigate), [`stash`](#stash), [`incidents`](#incidents),
   [`logs`](#logs), [`history`](#history), [`baseline`](#baseline),
   [`diff`](#diff).
 - **Ecosystem & runtime** — talk to sibling tools and the running TUI:
-  [`doctor`](#doctor), [`run`](#run), [`reload`](#reload), [`mcp`](#mcp),
-  [`vault`](#vault), [`studio`](#studio).
+  [`config`](#config), [`doctor`](#doctor), [`run`](#run), [`reload`](#reload),
+  [`mcp`](#mcp), [`vault`](#vault), [`studio`](#studio).
 
 ## Global flags
 
@@ -78,7 +79,7 @@ filesystem list, and is the recommended form for agent context windows.
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `--interval` | `1s` | Sampling interval. |
+| `--interval` | `1s` | Warm-up delay between counter samples; `0` skips warm-up and leaves first-sample rates unavailable. |
 | `--json` | `false` | Emit JSON to stdout. |
 | `--compact` | `false` | Emit bounded, schema-versioned JSON instead of human/full output. |
 | `--process-limit` | `5` | Entries in each of `top_cpu` and `top_memory`; clamped to 25. |
@@ -134,16 +135,19 @@ Pipe into `jq` or any other line-oriented tool.
 | `--stash-ttl` | `7d` | TTL for incident stashes (passed to fcheap `--ttl`). |
 | `--webhook` | `""` | POST each alert as JSON to this URL. |
 | `--notify` | `false` | Show a desktop notification on each alert (`osascript` / `notify-send`). |
+| `--alert-cooldown` | `1m` | Suppress repeats of the same active finding across output and sinks; `0` emits every sample. |
+| `--delivery-limit` | `8` | Maximum concurrent stash, webhook, and notification deliveries; excess work is dropped with a stderr warning. |
 | `--json` | `false` | Emit NDJSON to stdout. |
 
-Alerts come from the built-in analyzer. Four rules always run, and watch feeds
+Alerts come from the built-in analyzer. Five rules always run, and watch feeds
 the analyzer the full event — including per-partition `Disk` and the
 `Processes` list — so the per-process rules fire too:
 
-- `cpu_spike` — a process's CPU exceeds 3× a fixed 50% baseline (≈150% CPU).
-- `rss_growth` — a process's resident memory keeps climbing (linear-regression slope with R² confidence).
+- `cpu_spike` — current process CPU exceeds 3× its rolling median baseline and an absolute 50% floor.
+- `rss_growth` — process RSS keeps climbing faster than 50 KB/s (wall-clock-normalized regression with R² confidence).
 - `disk_fill` — any mounted partition's usage is `>= 90%`.
 - `swap_pressure` — swap used is `>= 50%` of swap total (real memory pressure).
+- `zombie_process` — the OS reports a process in zombie (`Z`) state.
 
 In addition, the `cpu_alert_threshold` and `memory_alert_threshold` settings in
 [`config.json`](/reference/configuration) get teeth here: when either is set
@@ -156,12 +160,18 @@ loop never blocks on fcheap I/O, and a stash failure shows up in a
 `stash_error` field rather than stalling stdout.
 
 `--webhook` and `--notify` are additional alert sinks — they fire alongside
-(not instead of) the NDJSON stream and `--stash`. Each sink runs in its own
-goroutine, so the watch loop never blocks on network or notifier I/O. `--webhook`
+(not instead of) the NDJSON stream and `--stash`. Deliveries run asynchronously
+under the bounded `--delivery-limit`, so the watch loop never blocks or creates
+unbounded goroutines when a sink is slow. `--webhook`
 POSTs the raw `collector.Alert` JSON (the same object embedded in an `alert`
 line) to the given URL; a non-2xx response is logged to stderr. `--notify`
 shells out to `osascript` on macOS or `notify-send` on Linux; delivery failures
 are logged to stderr and never stall the stream.
+
+Repeated alerts are gated by a stable identity (rule plus PID, filesystem, or
+system scope). The default one-minute cooldown prevents a full disk or sustained
+threshold from creating a stash, webhook, and notification every second. The
+first finding emits immediately and can emit again after the cooldown expires.
 
 When the analyzer attaches a diagnosis to a per-process alert (see
 `monitor_analyze` in the [MCP reference](/guide/mcp)), it rides along on every
@@ -205,9 +215,37 @@ Print detailed information for a single PID. Takes exactly one argument.
   "memory_percent": 0,
   "threads": 24,
   "user": "abdulachik",
+  "status": "S",
+  "parent": 1,
+  "metric_states": {
+    "status": {"state": "observed"},
+    "io": {"state": "unsupported", "reason": "per-process I/O counters are not exposed by gopsutil on macOS"}
+  },
   "is_system": false,
   "is_protected": false
 }
+```
+
+### `processes`
+
+List a bounded process inventory without requesting the full system snapshot.
+`ps` is an alias. By default it uses `max_processes` and
+`show_system_processes` from Monitor's effective configuration; flags override
+those defaults. Human rows include OS status; JSON entries additionally expose
+parent, memory share, I/O counters when supported, and per-field
+`metric_states` when a value is unavailable.
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--sort` | `cpu` | Sort by `cpu`, `memory`, `pid`, or `name`. |
+| `-f`, `--filter` | `""` | Case-insensitive substring across name, PID, user, and status. |
+| `-n`, `--limit` | config value | Maximum rows, capped at 1000. |
+| `--system`, `--all` | config value | Include system-owned processes. |
+| `--json` | `false` | Emit a bounded JSON envelope with match/truncation metadata. |
+
+```bash
+./bin/monitor processes --sort memory --limit 10
+./bin/monitor ps --filter node --json
 ```
 
 ### `tree`
@@ -265,8 +303,8 @@ under a `children` array (omitted when a process has none):
 Safely terminate one or more processes. Accepts one or more PIDs. Termination
 is gated by the same safety check used by the TUI and the MCP server:
 **protected** processes (`launchd`, `kernel_task`, `WindowServer`, `Finder`,
-`Dock`, …) and **system** (root-owned) processes are refused unless you pass
-`--yes`.
+`Dock`, …) and **system** (root-owned) processes are always refused. The
+compatibility `--yes` flag acknowledges intent but cannot bypass this invariant.
 
 The kill is **verified**, not just dispatched: after sending the signal,
 `kill` polls for up to ~2 seconds to observe whether the process actually
@@ -278,24 +316,25 @@ suggesting `--force`; `kill` never escalates to `SIGKILL` on its own.
 | Flag | Default | Effect |
 |------|---------|--------|
 | `--force` | `false` | Send `SIGKILL` instead of `SIGTERM`. |
-| `--yes` | `false` | Skip the protection checks (required to kill protected/system PIDs). |
+| `--yes` | `false` | Acknowledge intent; never overrides protected/system safety. |
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
 ./bin/monitor kill 1234                 # SIGTERM, safety-checked
 ./bin/monitor kill 1234 5678 --force    # SIGKILL both
-./bin/monitor kill 1 --yes --json       # override protection (use with care)
+./bin/monitor kill 1 --yes --json       # still returns a structured refusal
 ```
 
-When a kill is refused, the command exits non-zero. With `--json` it returns a
-structured refusal instead of acting:
+When a human-output kill is refused, the command exits non-zero. With `--json`
+it returns a structured refusal instead of acting:
 
 ```json
 {
   "killed": false,
+  "refused": true,
+  "reason": "protected or system processes cannot be terminated by monitor",
   "protected": true,
-  "safety_warnings": ["pid 1 (launchd) is protected"],
-  "note": "protected or system process; pass --yes to override"
+  "safety_warnings": ["launchd (pid 1) is a protected system process"]
 }
 ```
 
@@ -327,6 +366,25 @@ next action instead of a false `killed:true`:
 ```
 
 ## Diagnose
+
+### `analyze`
+
+Sample a bounded window and run the same cross-signal process diagnosis engine
+as the read-only `monitor_analyze` MCP tool. Without `--pid`, Monitor considers
+every process present in the final sample; a PID focuses the report. A healthy
+JSON result always includes `"diagnoses": []` rather than `null`.
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--window` | `10s` | Total sampling window; greater than zero and at most 60 seconds. |
+| `-i`, `--interval` | `1s` | Delay between samples; must not exceed the window. |
+| `--pid` | `0` | Focus on one positive PID (`0` means all current processes). |
+| `--json` | `false` | Emit `{window, interval, pid?, samples, healthy, diagnoses}`. |
+
+```bash
+./bin/monitor analyze --window 10s
+./bin/monitor analyze --pid 1234 --window 15s --json
+```
 
 ### `profile`
 
@@ -484,15 +542,19 @@ next try.
 
 ### `logs`
 
-Manage captured process logs in the local veclite store (at
-`$TMPDIR/monitor-logs.veclite`). Two subcommands: `capture` and `search`.
+Manage captured process logs in the durable local veclite store at
+`~/.local/share/monitor/logs.veclite`. `--store` overrides the location for
+either subcommand, and `MONITOR_LOG_STORE` provides a shared environment-wide
+override (explicit flag wins).
 
 #### `logs capture`
 
 Ingest log lines into the store. Two modes:
 
-1. **Wrap a new command** — everything after `--` is run via `sh -c`, and
-   stdout+stderr are captured until the process exits.
+1. **Wrap a new command** — everything after `--` is passed directly to the
+   executable as exact argv. Monitor does not join arguments or invoke an
+   intermediate shell. Use an explicit `sh -c '…'` when shell syntax is
+   intentional. stdout+stderr are captured until the process exits.
 2. **Tail a running process** — `--pid N` shells out to `lsof` to find the
    process's open log files (`.log`, `.out`, paths under `/var/log`, …) and
    tails each from EOF until `SIGINT`.
@@ -509,6 +571,7 @@ else defaults to `info` (or `error` for stderr lines without a level).
 | `--name` | `""` | Override the captured process name in the store. |
 | `--process-name` | `""` | Alias for `--name`. |
 | `--level` | `""` | Default level for untagged lines; empty = `info` (or `error` for stderr). |
+| `--store` | `~/.local/share/monitor/logs.veclite` | Override the shared capture/search database. |
 | `--json` | `false` | Emit JSON output (final result). |
 
 ```bash
@@ -522,22 +585,33 @@ else defaults to `info` (or `error` for stderr lines without a level).
   "lines": 2,
   "bytes": 21,
   "duration": "3.2ms",
+  "store": "/Users/me/.local/share/monitor/logs.veclite",
   "error": ""
 }
 ```
 
 #### `logs search`
 
-Keyword-search the captured log store.
+Keyword-search the captured log store. The query is optional when filters are
+enough on their own; results are always newest-first. Exports can preserve the
+full structured entries (`json`/`ndjson`) or replay captured lines (`raw`).
 
 | Flag | Default | Effect |
 |------|---------|--------|
 | `--limit` | `50` | Max results. |
+| `--level` | none | Filter one or more levels; repeat or comma-separate. |
+| `--process` | `""` | Filter by a case-insensitive process-name substring. |
+| `--pid` | `0` | Filter by process ID. |
+| `--since` | `0` | Include only entries this recent, such as `15m` or `2h`. |
+| `--format` | `text` | Output `text`, `json`, `ndjson`, or `raw`. |
+| `--output`, `-o` | stdout | Write an export to a file (`-` means stdout). |
+| `--store` | `~/.local/share/monitor/logs.veclite` | Override the shared capture/search database. |
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
 ./bin/monitor logs search "error" --json
-./bin/monitor logs search "timeout" --limit 200
+./bin/monitor logs search "timeout" --level error,warn --process api --since 2h
+./bin/monitor logs search --since 15m --format ndjson -o recent.ndjson
 ```
 
 ```json
@@ -770,6 +844,23 @@ per-process `proc_rss` verdict):
 
 ## Ecosystem & runtime
 
+### `config`
+
+Inspect and update the settings shared by Studio and process inventory
+commands. Writes are validated and atomic; setting keys accept hyphens or
+underscores.
+
+```bash
+./bin/monitor config show --json
+./bin/monitor config get update-interval
+./bin/monitor config set update-interval 500ms
+./bin/monitor config set cpu-alert-threshold 85
+./bin/monitor config path
+./bin/monitor config reset --yes
+```
+
+See [Configuration](/reference/configuration) for fields and validation rules.
+
 ### `doctor`
 
 Print the availability and version of every sibling ecosystem tool. With
@@ -779,6 +870,8 @@ Print the availability and version of every sibling ecosystem tool. With
 | Flag | Default | Effect |
 |------|---------|--------|
 | `--json` | `false` | Emit JSON output. |
+| `--require` | none | Require named integrations; repeat or comma-separate values. |
+| `--strict` | `false` | Require every known integration. |
 
 Probed tools: `codemap`, `fcheap`, `vecgrep`, `tinyvault`, `vidtrace`,
 `glyphrun`, `cairntrace`, `veclite`, and `tmux`.
@@ -786,6 +879,7 @@ Probed tools: `codemap`, `fcheap`, `vecgrep`, `tinyvault`, `vidtrace`,
 ```bash
 ./bin/monitor doctor
 ./bin/monitor doctor --json | jq '.fcheap.available'
+./bin/monitor doctor --require fcheap,codemap
 ```
 
 ```json

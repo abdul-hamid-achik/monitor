@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -27,10 +28,16 @@ Examples:
   monitor snapshot --json | jq '.cpu.usage_percent'
   monitor snapshot --compact --process-limit 5 | jq '.processes.top_cpu'`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if interval < 0 {
+				return fmt.Errorf("--interval must be zero or greater")
+			}
 			c := NewCollector(interval)
 			ctx, cancel := Context()
 			defer cancel()
-			info := c.Collect(ctx)
+			info, err := collectSnapshot(ctx, c, interval)
+			if err != nil {
+				return err
+			}
 			if compact {
 				return WriteJSON(collector.BuildCompactSnapshot(info, collector.CompactOptions{
 					ProcessLimit: processLimit, ProcessFilter: processFilter,
@@ -44,7 +51,8 @@ Examples:
 			return nil
 		},
 	}
-	cmd.Flags().DurationVar(&interval, "interval", time.Second, "sampling interval")
+	cmd.Flags().DurationVar(&interval, "interval", time.Second,
+		"warm-up interval between counter samples (0 = instant snapshot without rates)")
 	cmd.Flags().Bool("json", false, "emit JSON to stdout")
 	cmd.Flags().BoolVar(&compact, "compact", false, "emit bounded schema-versioned JSON for agents")
 	cmd.Flags().IntVar(&processLimit, "process-limit", collector.DefaultCompactProcessLimit,
@@ -56,6 +64,25 @@ Examples:
 	cmd.Flags().StringVar(&filesystemFilter, "filesystem-filter", "",
 		"case-insensitive device, mount, or filesystem substring in compact output")
 	return cmd
+}
+
+// collectSnapshot takes a warm-up sample and, when interval is non-zero, a
+// second sample after the requested delay. Counter-derived network/disk rates
+// are therefore real instead of first-sample zeroes. A zero interval retains
+// the fast orientation path for callers that do not need rates.
+func collectSnapshot(ctx context.Context, c *collector.Collector, interval time.Duration) (collector.SystemInfo, error) {
+	info := c.Collect(ctx)
+	if interval == 0 {
+		return info, nil
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return collector.SystemInfo{}, ctx.Err()
+	case <-timer.C:
+		return c.Collect(ctx), nil
+	}
 }
 
 func printHumanSnapshot(info collector.SystemInfo) {

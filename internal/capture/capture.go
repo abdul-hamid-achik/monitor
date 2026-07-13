@@ -20,6 +20,7 @@ package capture
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -69,9 +70,16 @@ type Result struct {
 	Err error
 }
 
+// Appender is the smallest log-store contract the capture pipeline needs.
+// Keeping the boundary narrow makes write failures testable and ensures a
+// capture never reports a line as ingested before the store accepted it.
+type Appender interface {
+	Append(logger.Entry) error
+}
+
 // Runner owns the log store and orchestrates a single capture.
 type Runner struct {
-	store *logger.Store
+	store Appender
 
 	// MaxLines caps the total number of ingested lines; 0 = unlimited.
 	// When the cap is hit, the runner stops reading and returns
@@ -90,7 +98,7 @@ type Runner struct {
 
 // NewRunner returns a Runner that writes to store. The caller must
 // keep store open for the lifetime of the Runner.
-func NewRunner(store *logger.Store) *Runner {
+func NewRunner(store Appender) *Runner {
 	return &Runner{store: store}
 }
 
@@ -99,6 +107,10 @@ func NewRunner(store *logger.Store) *Runner {
 // is reached.
 func (r *Runner) Run(ctx context.Context, src Source) Result {
 	start := time.Now()
+	r.mu.Lock()
+	r.lines = 0
+	r.bytes = 0
+	r.mu.Unlock()
 	if src.Name == "" {
 		if src.Command != "" {
 			src.Name = filepath.Base(src.Command)
@@ -155,29 +167,40 @@ func (r *Runner) runCommand(ctx context.Context, src Source) Result {
 	if err := cmd.Start(); err != nil {
 		return Result{Err: fmt.Errorf("start: %w", err)}
 	}
+	// Stamp wrapped-command entries with the real child PID so later
+	// `logs search --pid` filters are useful in both capture modes.
+	src.PID = int32(cmd.Process.Pid)
 
 	var wg sync.WaitGroup
+	ingestErrs := make(chan error, 2)
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		r.ingest(ctx, stdout, src, false)
-		if r.capReached() {
+		err := r.ingest(ctx, stdout, src, false)
+		ingestErrs <- err
+		if err != nil || r.capReached() {
 			cancel()
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		r.ingest(ctx, stderr, src, true)
-		if r.capReached() {
+		err := r.ingest(ctx, stderr, src, true)
+		ingestErrs <- err
+		if err != nil || r.capReached() {
 			cancel()
 		}
 	}()
 	wg.Wait()
+	close(ingestErrs)
 	runErr := cmd.Wait()
 	if r.capReached() {
 		// Hitting the cap is a clean stop; the kill we triggered above is
-		// expected, not a failure.
+		// expected, not a failure. An ingestion error cannot be hidden by
+		// this branch: failed appends do not advance the counters to a cap.
 		runErr = nil
+	}
+	for err := range ingestErrs {
+		runErr = errors.Join(runErr, err)
 	}
 
 	res := Result{Err: runErr}
@@ -200,16 +223,26 @@ func (r *Runner) runTailPID(ctx context.Context, src Source) Result {
 		return Result{Err: fmt.Errorf("no log-shaped files found for pid %d", src.PID)}
 	}
 
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	var wg sync.WaitGroup
+	errCh := make(chan error, len(files))
 	for _, f := range files {
 		wg.Add(1)
 		go func(path string) {
 			defer wg.Done()
-			r.tailFile(ctx, src, path)
+			if err := r.tailFile(ctx, src, path); err != nil {
+				errCh <- err
+				cancel()
+			}
 		}(f)
 	}
 	wg.Wait()
+	close(errCh)
 	res := Result{}
+	for err := range errCh {
+		res.Err = errors.Join(res.Err, err)
+	}
 	r.mu.Lock()
 	res.Lines = r.lines
 	res.Bytes = r.bytes
@@ -262,26 +295,26 @@ func looksLikeLogPath(p string) bool {
 
 // tailFile opens path at EOF and reads new lines as they're appended.
 // It honors ctx for shutdown and stops when r.capReached() returns true.
-func (r *Runner) tailFile(ctx context.Context, src Source, path string) {
+func (r *Runner) tailFile(ctx context.Context, src Source, path string) (err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		// Silently skip; the file may have been rotated away between
 		// lsof and open. Other files in the set may still be valid.
-		return
+		return nil
 	}
-	defer f.Close()
+	defer func() { err = errors.Join(err, f.Close()) }()
 	if _, err := f.Seek(0, io.SeekEnd); err != nil {
-		return
+		return fmt.Errorf("seek %s: %w", path, err)
 	}
 	reader := bufio.NewReader(f)
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		default:
 		}
 		if r.capReached() {
-			return
+			return nil
 		}
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -291,57 +324,83 @@ func (r *Runner) tailFile(ctx context.Context, src Source, path string) {
 				// variant that works portably on macOS.
 				select {
 				case <-ctx.Done():
-					return
+					return nil
 				case <-time.After(500 * time.Millisecond):
 				}
 				continue
 			}
-			return
+			return fmt.Errorf("read %s: %w", path, err)
 		}
-		r.appendLine(src, line, false)
+		if err := r.appendLine(src, line, false); err != nil {
+			return fmt.Errorf("append %s: %w", path, err)
+		}
 	}
 }
 
 // ingest reads from r line-by-line, parses the level token, and
 // appends to the log store. Honors MaxLines / MaxBytes caps and the
 // context for shutdown.
-func (r *Runner) ingest(ctx context.Context, reader io.Reader, src Source, isStderr bool) {
+func (r *Runner) ingest(ctx context.Context, reader io.Reader, src Source, isStderr bool) error {
 	scanner := bufio.NewScanner(reader)
 	// Allow long log lines; 1 MiB matches the log scanner convention.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		default:
 		}
 		if r.capReached() {
-			return
+			return nil
 		}
-		r.appendLine(src, scanner.Text(), isStderr)
+		if err := r.appendLine(src, scanner.Text(), isStderr); err != nil {
+			return fmt.Errorf("append log line: %w", err)
+		}
 	}
+	// Command-context cancellation closes the pipe underneath Scanner. That
+	// read error is expected when a cap, sibling ingestion error, or caller
+	// cancellation deliberately stops the child; the initiating condition is
+	// reported separately.
+	if ctx.Err() != nil {
+		return nil
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan log stream: %w", err)
+	}
+	return nil
 }
 
-func (r *Runner) appendLine(src Source, raw string, isStderr bool) {
+func (r *Runner) appendLine(src Source, raw string, isStderr bool) error {
 	line := strings.TrimRight(raw, "\r\n")
 	level, message := parseLevel(line)
+	if level == "info" && message == line && src.Level != "" {
+		level = strings.ToLower(src.Level)
+	}
 	if isStderr && level == "info" {
 		// Stderr lines without a level token are usually errors.
 		level = "error"
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if (r.MaxLines > 0 && r.lines >= r.MaxLines) ||
+		(r.MaxBytes > 0 && r.bytes >= r.MaxBytes) {
+		return nil
+	}
+	if r.store == nil {
+		return errors.New("log store is not configured")
+	}
+	if err := r.store.Append(logger.Entry{
+		PID:     pidFromSource(src),
+		Process: src.Name,
+		Level:   level,
+		Message: message,
+		Raw:     line,
+	}); err != nil {
+		return err
+	}
 	r.lines++
 	r.bytes += int64(len(line)) + 1 // +1 for the newline we trimmed
-	r.mu.Unlock()
-	if r.store != nil {
-		_ = r.store.Append(logger.Entry{
-			PID:     pidFromSource(src),
-			Process: src.Name,
-			Level:   level,
-			Message: message,
-			Raw:     line,
-		})
-	}
+	return nil
 }
 
 func (r *Runner) capReached() bool {

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -58,8 +59,6 @@ func newHistoryRecordCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("open history store: %w", err)
 			}
-			defer store.Close()
-
 			c := NewCollector(0)
 			ctx, cancel := Context()
 			defer cancel()
@@ -72,7 +71,7 @@ func newHistoryRecordCmd() *cobra.Command {
 				select {
 				case <-ctx.Done():
 					fmt.Fprintf(os.Stderr, "monitor: recorded %d ticks\n", n)
-					return nil
+					return store.Close()
 				case <-t.C:
 					info := c.Collect(ctx)
 					if err := store.Append(sampleSystem(time.Now(), info)...); err != nil {
@@ -114,11 +113,9 @@ Use 'monitor history list' to see which metrics have been recorded.`,
 					"a recorder already running? it holds an exclusive lock — "+
 					"stop it before querying, or query a copied --db path)", err)
 			}
-			defer store.Close()
-
 			pts, err := store.Query(args[0], time.Now().Add(-since))
-			if err != nil {
-				return err
+			if combined := errors.Join(err, store.Close()); combined != nil {
+				return combined
 			}
 			summary := history.Summarize(pts)
 			if JSONOutput(cmd) {
@@ -160,10 +157,9 @@ func newHistoryListCmd() *cobra.Command {
 					"a recorder already running? it holds an exclusive lock — "+
 					"stop it before querying, or query a copied --db path)", err)
 			}
-			defer store.Close()
 			metrics, err := store.Metrics()
-			if err != nil {
-				return err
+			if combined := errors.Join(err, store.Close()); combined != nil {
+				return combined
 			}
 			if JSONOutput(cmd) {
 				return WriteJSON(metrics)

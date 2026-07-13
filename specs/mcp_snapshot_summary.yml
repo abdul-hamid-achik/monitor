@@ -13,7 +13,9 @@ intent: |
   assertion is correct regardless of how loaded the host running the spec is.
 
 target:
-  cmd: ["sh", "-c", "{ printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_snapshot\",\"arguments\":{}}}'; sleep 3; } | ./bin/monitor mcp serve 2>&1 | tail -2"]
+  # Avoid persisting a potentially very large lossless snapshot in the PTY
+  # artifact. The three outcomes below still parse/verify the real response.
+  cmd: ["sh", "-c", "{ printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_snapshot\",\"arguments\":{}}}'; sleep 3; } | ./bin/monitor mcp serve >/dev/null 2>&1"]
   cwd: "."
 
 terminal:

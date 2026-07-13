@@ -41,6 +41,12 @@ type processKeyMap struct {
 	Search    key.Binding
 }
 
+type killBatchResultMsg struct {
+	results  []kill.Result
+	failures []string
+	spared   []string
+}
+
 var procKeys = processKeyMap{
 	Kill:      key.NewBinding(key.WithKeys("k")),
 	ForceKill: key.NewBinding(key.WithKeys("x")),
@@ -52,16 +58,73 @@ var procKeys = processKeyMap{
 }
 
 func (m *Model) setupProcessTable() {
-	cols := make([]table.Column, 0, len(processTableSpecs))
-	for _, spec := range processTableSpecs {
-		cols = append(cols, table.Column{Title: spec.title, Width: spec.width})
-	}
-	tbl := table.New(table.WithColumns(cols), table.WithHeight(20))
+	tbl := table.New(table.WithHeight(20))
 	m.processTable = &tbl
 	s := table.DefaultStyles()
 	s.Header = s.Header.Bold(true).Foreground(lipgloss.Color("#88C0D0"))
 	s.Selected = s.Selected.Foreground(lipgloss.Color("#2E3440")).Background(lipgloss.Color("#88C0D0")).Bold(true)
 	m.processTable.SetStyles(s)
+	m.configureProcessTable()
+}
+
+// processSpecsForWidth progressively removes secondary columns and assigns
+// remaining room to process names. The table is useful down to about 32 cells
+// instead of retaining a 76-cell fixed layout that gets clipped.
+func processSpecsForWidth(width int) []processColumnSpec {
+	if width <= 0 {
+		width = 120
+	}
+	var specs []processColumnSpec
+	switch {
+	case width >= 100:
+		specs = append(specs, processTableSpecs...)
+	case width >= 78:
+		specs = []processColumnSpec{
+			{"PID", 7, "pid"}, {"Name", 22, "name"}, {"CPU%", 7, "cpu"},
+			{"Memory", 10, "memory"}, {"Threads", 7, "threads"},
+		}
+	case width >= 58:
+		specs = []processColumnSpec{
+			{"PID", 7, "pid"}, {"Name", 20, "name"}, {"CPU%", 7, "cpu"}, {"Memory", 10, "memory"},
+		}
+	default:
+		specs = []processColumnSpec{
+			{"PID", 7, "pid"}, {"Name", 14, "name"}, {"CPU%", 7, "cpu"},
+		}
+	}
+	available := width - 10
+	fixed := 0
+	nameIdx := -1
+	for i, spec := range specs {
+		if spec.sortBy == "name" {
+			nameIdx = i
+			continue
+		}
+		fixed += spec.width
+	}
+	if nameIdx >= 0 {
+		nameWidth := available - fixed
+		if nameWidth < 10 {
+			nameWidth = 10
+		}
+		if nameWidth > 32 {
+			nameWidth = 32
+		}
+		specs[nameIdx].width = nameWidth
+	}
+	return specs
+}
+
+func (m *Model) configureProcessTable() {
+	if m.processTable == nil {
+		return
+	}
+	specs := processSpecsForWidth(m.width)
+	cols := make([]table.Column, 0, len(specs))
+	for _, spec := range specs {
+		cols = append(cols, table.Column{Title: spec.title, Width: spec.width})
+	}
+	m.processTable.SetColumns(cols)
 }
 
 func (m *Model) updateProcessTable() {
@@ -83,27 +146,44 @@ func (m *Model) updateProcessTable() {
 	if maxProcs > 0 && len(procs) > maxProcs {
 		procs = procs[:maxProcs]
 	}
+	specs := processSpecsForWidth(m.width)
 	rows := make([]table.Row, 0, len(procs))
 	for _, p := range procs {
-		name := truncateStr(p.Name, 20)
-		if m.selectedPids[p.PID] {
-			name = "▸ " + name
-		} else {
-			name = "  " + name
+		row := make(table.Row, 0, len(specs))
+		for _, spec := range specs {
+			row = append(row, m.processCell(p, spec))
 		}
-		rows = append(rows, table.Row{
-			fmt.Sprintf("%d", p.PID), name,
-			fmt.Sprintf("%.1f", p.CPUPercent),
-			collector.FormatBytes(p.Memory),
-			collector.FormatBytes(p.IOReadBytes + p.IOWriteBytes),
-			fmt.Sprintf("%d", p.Threads),
-			truncateStr(p.User, 12),
-		})
+		rows = append(rows, row)
 	}
 	// Always set rows — an empty slice is valid and clears stale rows so
 	// a filter that matches nothing renders the empty-state message
 	// instead of the previously displayed processes.
 	m.processTable.SetRows(rows)
+}
+
+func (m Model) processCell(p collector.ProcessInfo, spec processColumnSpec) string {
+	switch spec.sortBy {
+	case "pid":
+		return fmt.Sprintf("%d", p.PID)
+	case "name":
+		prefix := "  "
+		if m.selectedPids[p.PID] {
+			prefix = "▸ "
+		}
+		return prefix + truncateStr(p.Name, spec.width-2)
+	case "cpu":
+		return fmt.Sprintf("%.1f", p.CPUPercent)
+	case "memory":
+		return collector.FormatBytes(p.Memory)
+	case "io":
+		return collector.FormatBytes(p.IOReadBytes + p.IOWriteBytes)
+	case "threads":
+		return fmt.Sprintf("%d", p.Threads)
+	case "user":
+		return truncateStr(p.User, spec.width)
+	default:
+		return ""
+	}
 }
 
 func (m Model) filteredProcesses() []collector.ProcessInfo {
@@ -116,8 +196,11 @@ func (m Model) filteredProcesses() []collector.ProcessInfo {
 		if !showSys && p.IsSystem {
 			continue
 		}
-		if m.searchQuery != "" && !strings.Contains(strings.ToLower(p.Name), strings.ToLower(m.searchQuery)) {
-			continue
+		if m.searchQuery != "" {
+			haystack := fmt.Sprintf("%s %d %s", p.Name, p.PID, p.User)
+			if !strings.Contains(strings.ToLower(haystack), strings.ToLower(m.searchQuery)) {
+				continue
+			}
 		}
 		out = append(out, p)
 	}
@@ -196,16 +279,25 @@ func (m Model) handleProcessKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.processSearch {
-		switch msg.Code {
-		case tea.KeyBackspace:
-			if len(m.searchQuery) > 0 {
-				m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
+		switch msg.Keystroke() {
+		case "enter":
+			m.processSearch = false
+			m.searchBefore = m.searchQuery
+			return m, nil
+		case "ctrl+u":
+			m.searchQuery = ""
+			m.updateProcessTable()
+			return m, nil
+		case "backspace":
+			runes := []rune(m.searchQuery)
+			if len(runes) > 0 {
+				m.searchQuery = string(runes[:len(runes)-1])
 				m.updateProcessTable()
 			}
 			return m, nil
-		case tea.KeyEscape:
+		case "esc":
 			m.processSearch = false
-			m.searchQuery = ""
+			m.searchQuery = m.searchBefore
 			m.updateProcessTable()
 			return m, nil
 		}
@@ -216,6 +308,14 @@ func (m Model) handleProcessKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch {
+	case msg.Keystroke() == "enter":
+		pid, ok := m.selectedRowPID()
+		if !ok {
+			return m, nil
+		}
+		m.processDetailPID = pid
+		m.processDetailVisible = true
+		return m, nil
 	case key.Matches(msg, procKeys.SelectAll):
 		for _, p := range m.filteredProcesses() {
 			m.selectedPids[p.PID] = true
@@ -281,10 +381,8 @@ func (m Model) handleProcessKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.updateProcessTable()
 		return m, nil
 	case key.Matches(msg, procKeys.Search):
-		m.processSearch = !m.processSearch
-		if !m.processSearch {
-			m.searchQuery = ""
-		}
+		m.searchBefore = m.searchQuery
+		m.processSearch = true
 		m.updateProcessTable()
 		return m, nil
 	}
@@ -327,47 +425,141 @@ func (m Model) handleKillConfirmKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "y":
 		var spared []string
+		var attempted []int32
 		for pid := range m.selectedPids {
 			if m.pidRefused(pid) {
 				spared = append(spared, m.procName(pid))
 				continue
 			}
-			_ = kill.Kill(pid, m.forceKill)
+			attempted = append(attempted, pid)
 		}
-		// Report spared PIDs in the status bar — parity with the CLI's refusal
-		// line and the MCP refused payload (don't silently skip them).
+		sort.Slice(attempted, func(i, j int) bool { return attempted[i] < attempted[j] })
+		sort.Strings(spared)
+		// Report both the immediate safety decision and the asynchronous
+		// verification phase. KillVerified can wait up to two seconds, so it
+		// runs in a command rather than blocking Update and freezing the TUI.
 		if len(spared) > 0 {
-			sort.Strings(spared)
 			m.killNotice = fmt.Sprintf("Spared %d protected/system process(es): %s", len(spared), strings.Join(spared, ", "))
 			m.killNoticeTicks = 4
 		}
+		if len(attempted) > 0 {
+			m.killNotice = fmt.Sprintf("Verifying termination of %d process(es)…", len(attempted))
+			if len(spared) > 0 {
+				m.killNotice += fmt.Sprintf("; spared %d", len(spared))
+			}
+			m.killNoticeTicks = 30
+		}
+		force := m.forceKill
 		m.showKillConfirm = false
 		m.selectedPids = make(map[int32]bool)
 		m.forceKill = false
 		m.updateProcessTable()
+		if len(attempted) > 0 {
+			return m, verifyKillsCmd(attempted, force, spared)
+		}
 		return m, nil
 	}
 	return m, nil
 }
 
+func verifyKillsCmd(pids []int32, force bool, spared []string) tea.Cmd {
+	return func() tea.Msg {
+		msg := killBatchResultMsg{spared: append([]string(nil), spared...)}
+		for _, pid := range pids {
+			result, err := kill.KillVerified(pid, force)
+			if err != nil {
+				msg.failures = append(msg.failures, fmt.Sprintf("pid %d: %v", pid, err))
+				continue
+			}
+			msg.results = append(msg.results, result)
+		}
+		return msg
+	}
+}
+
+func formatKillBatchResult(msg killBatchResultMsg) string {
+	terminated, running, unknown := 0, 0, 0
+	for _, result := range msg.results {
+		switch result.Outcome {
+		case kill.OutcomeTerminated:
+			terminated++
+		case kill.OutcomeStillRunning:
+			running++
+		default:
+			unknown++
+		}
+	}
+	parts := make([]string, 0, 5)
+	if terminated > 0 {
+		parts = append(parts, fmt.Sprintf("terminated %d", terminated))
+	}
+	if running > 0 {
+		parts = append(parts, fmt.Sprintf("still running %d (use x to force)", running))
+	}
+	if unknown > 0 {
+		parts = append(parts, fmt.Sprintf("unverified %d", unknown))
+	}
+	if len(msg.failures) > 0 {
+		parts = append(parts, fmt.Sprintf("failed %d: %s", len(msg.failures), strings.Join(msg.failures, "; ")))
+	}
+	if len(msg.spared) > 0 {
+		parts = append(parts, fmt.Sprintf("spared %d protected/system", len(msg.spared)))
+	}
+	if len(parts) == 0 {
+		return "No processes were terminated"
+	}
+	return strings.Join(parts, " · ")
+}
+
 func (m Model) renderProcesses() string {
+	if m.processDetailVisible {
+		return m.renderProcessDetail()
+	}
 	if m.last.LastUpdate.IsZero() {
-		return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Processes ") + "\n\n  Waiting for process data…")
+		return m.panelStyle.Width(m.width - 4).Render(
+			m.titleStyle.Render(" Processes ") +
+				"\n\n  Waiting for process data…\n  The first snapshot normally arrives within one update interval.")
 	}
 	var content []string
-	title := " Processes - k:kill x:force-kill "
+	direction := "↓"
+	if m.sortAsc {
+		direction = "↑"
+	}
+	visible := len(m.filteredProcesses())
+	title := fmt.Sprintf(" Processes · %d shown · sort %s%s ", visible, m.sortBy, direction)
 	if len(m.selectedPids) > 0 {
-		title = fmt.Sprintf(" Processes - %d selected │ k:kill x:force-kill ", len(m.selectedPids))
+		title += fmt.Sprintf("· %d selected ", len(m.selectedPids))
 	}
 	content = append(content, m.titleStyle.Render(title))
 	if m.processSearch {
-		content = append(content, lipgloss.NewStyle().Foreground(lipgloss.Color("#88C0D0")).Render(" Search: ")+lipgloss.NewStyle().Foreground(lipgloss.Color("#D8DEE9")).Render(m.searchQuery)+"_")
+		content = append(content, lipgloss.NewStyle().Foreground(lipgloss.Color("#88C0D0")).Render(" Filter: ")+lipgloss.NewStyle().Foreground(lipgloss.Color("#D8DEE9")).Render(m.searchQuery)+"_  ·  enter apply  esc cancel  ctrl+u clear")
+	} else if m.searchQuery != "" {
+		content = append(content, fmt.Sprintf(" Filter: %q · %d match(es) · / edit", m.searchQuery, visible))
+	} else {
+		content = append(content, " ↑/↓ navigate  ·  enter details  ·  space select  ·  / filter  ·  c/m sort  ·  k/x terminate")
 	}
 	content = append(content, "")
 	if m.processTable != nil && len(m.processTable.Rows()) > 0 {
 		content = append(content, m.processTable.View())
+	} else if m.last.ProcessesState.State != "" && m.last.ProcessesState.State != collector.MetricObserved {
+		reason := strings.TrimSpace(m.last.ProcessesState.Reason)
+		if reason == "" {
+			reason = string(m.last.ProcessesState.State)
+		}
+		content = append(content,
+			"  Process telemetry is unavailable · "+reason,
+			"  Press r to retry the snapshot; monitor doctor can check collector health.",
+		)
+	} else if m.searchQuery != "" {
+		content = append(content,
+			"  No processes match the current filter.",
+			"  Press / to edit or clear the filter.",
+		)
 	} else {
-		content = append(content, "  No processes match the current filter")
+		content = append(content,
+			"  No processes were returned by the latest snapshot.",
+			"  Press r to refresh, or enable system processes in Settings.",
+		)
 	}
 	panel := m.panelStyle.Width(m.width - 4).Render(lipgloss.JoinVertical(lipgloss.Left, content...))
 	body := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, panel)

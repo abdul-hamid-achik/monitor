@@ -2,8 +2,8 @@ version: 1
 name: monitor_kill_safety
 
 intent: |
-  `monitor kill 1` refuses to terminate PID 1 (launchd/init) without --yes and
-  exits non-zero to signal the refusal. The refusal is driven by the shared
+  `monitor kill 1` refuses to terminate PID 1 (launchd/init), even with --yes,
+  and human output exits non-zero to signal the refusal. The refusal is driven by the shared
   kill.CheckSafety classification (protected OR system) that the CLI, MCP, and
   the studio TUI all consume — so the JSON carries both HasProtected and
   HasSystem and the note names the unified "protected or system" gate.
@@ -39,6 +39,11 @@ outcomes:
     verify:
       command:
         run: "ps -p 1 -o pid= | grep -q '^ *1$'"
+  - id: yes_cannot_override
+    description: compatibility --yes cannot bypass protected-process safety
+    verify:
+      command:
+        run: "./bin/monitor kill 1 --yes --json | grep -q '\"refused\": true' && ps -p 1 -o pid= | grep -q '^ *1$'"
   - id: refused_exit_code
     description: the command exited with a non-zero code
     verify:

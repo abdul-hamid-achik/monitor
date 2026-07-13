@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -56,9 +57,37 @@ func TestCollectRuns(t *testing.T) {
 		t.Log("no CPU cores reported (acceptable on exotic systems)")
 	}
 }
+
+func TestCollectProcessTelemetryDeclaresStatusAndIO(t *testing.T) {
+	c := New(Options{})
+	info := c.Collect(context.Background())
+	var self *ProcessInfo
+	for i := range info.Processes {
+		if info.Processes[i].PID == int32(os.Getpid()) {
+			self = &info.Processes[i]
+			break
+		}
+	}
+	if self == nil {
+		t.Fatal("collector did not return the test process")
+	}
+	for _, key := range []string{metricProcessStatus, metricProcessIO} {
+		state, ok := self.MetricStates[key]
+		if !ok {
+			t.Errorf("process metric %q has no explicit availability state", key)
+			continue
+		}
+		if state.State != MetricObserved && state.State != MetricUnavailable && state.State != MetricUnsupported {
+			t.Errorf("process metric %q state = %q", key, state.State)
+		}
+	}
+	if self.MetricStates[metricProcessStatus].State == MetricObserved && self.Status == "" {
+		t.Error("observed process status is empty")
+	}
+}
 func TestLoadAverageObservedZeroVersusUnavailable(t *testing.T) {
 	linux := capability.Detect(capability.Detector{
-		GOOS: "linux",
+		GOOS:     "linux",
 		LookPath: func(string) (string, error) { return "", errors.New("missing") },
 	})
 	tests := []struct {
@@ -110,7 +139,7 @@ func TestLoadAverageObservedZeroVersusUnavailable(t *testing.T) {
 
 func TestCaptureBlocksUnsupportedPlatformBeforeCollectors(t *testing.T) {
 	unsupported := capability.Detect(capability.Detector{
-		GOOS: "plan9",
+		GOOS:     "plan9",
 		LookPath: func(string) (string, error) { return "", errors.New("missing") },
 	})
 	called := false
@@ -135,7 +164,7 @@ func TestCaptureBlocksUnsupportedPlatformBeforeCollectors(t *testing.T) {
 
 func TestUnsupportedLoadAverageIsNotCollectedOrSerialized(t *testing.T) {
 	darwin := capability.Detect(capability.Detector{
-		GOOS: "darwin",
+		GOOS:     "darwin",
 		LookPath: func(string) (string, error) { return "/usr/bin/sample", nil },
 	})
 	called := false
@@ -168,7 +197,6 @@ func TestUnsupportedLoadAverageIsNotCollectedOrSerialized(t *testing.T) {
 		t.Fatalf("unsupported load average serialized as a number: %s", data)
 	}
 }
-
 
 func TestSubscribeCalledOnEachTick(t *testing.T) {
 	c := New(Options{Interval: 1_000_000})
@@ -236,6 +264,27 @@ func TestSetInterval(t *testing.T) {
 	c.SetInterval(250_000_000)
 	if c.opts.Interval != 250_000_000 {
 		t.Errorf("interval = %v, want 250ms", c.opts.Interval)
+	}
+}
+
+func TestSetIntervalResetsRunningCollector(t *testing.T) {
+	c := New(Options{Interval: time.Hour})
+	seen := make(chan struct{}, 1)
+	c.Subscribe(func(Event) {
+		select {
+		case seen <- struct{}{}:
+		default:
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+
+	c.SetInterval(5 * time.Millisecond)
+	select {
+	case <-seen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("running collector did not apply the new interval")
 	}
 }
 

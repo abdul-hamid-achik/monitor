@@ -7,7 +7,9 @@ intent: |
   wiring and buildForest produce a valid tree rooted at the given pid.
 
 target:
-  cmd: ["./bin/monitor", "tree", "1", "--json"]
+  # A busy host can make the lossless nested tree larger than a megabyte.
+  # Keep the PTY recording bounded; outcomes still inspect the real payload.
+  cmd: ["sh", "-c", "./bin/monitor tree 1 --json >/dev/null"]
   cwd: "."
 
 terminal:

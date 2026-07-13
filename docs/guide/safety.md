@@ -22,7 +22,7 @@ was flagged.
 | Surface | How you confirm |
 |---------|-----------------|
 | **TUI** | A confirmation dialog appears (`k` = SIGTERM, `x` = SIGKILL); confirm with `y`, cancel with `n`/`esc`. Protected **and** system PIDs stay refused even at the dialog, matching the CLI and MCP. |
-| **CLI** | `monitor kill <pid>` refuses protected/system PIDs; `--yes` skips **all** protection checks and will attempt even protected/system targets (the OS may still deny them). |
+| **CLI** | `monitor kill <pid>` refuses protected/system PIDs. `--yes` is accepted for compatibility but never overrides the safety classification. |
 | **MCP** | `monitor_kill` requires `confirm: true` in its typed input, *and* still refuses protected/system PIDs with a structured `{ "refused": true }` payload. |
 
 ## SIGTERM vs SIGKILL
@@ -61,8 +61,9 @@ $ monitor kill 1 --json
   "safety_warnings": [
     "launchd (pid 1) is a protected system process"
   ],
-  "note": "protected or system process; pass --yes to override",
-  "confirmation": { "HasProtected": true, "HasSystem": false }
+  "refused": true,
+  "reason": "protected or system processes cannot be terminated by monitor",
+  "safety": { "has_protected": true, "has_system": true }
 }
 ```
 

@@ -121,7 +121,9 @@ func TestComputeTreeHashStable(t *testing.T) {
 	}
 
 	// Re-create the dir with the same files; hash must match.
-	os.RemoveAll(dir)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("remove original dir: %v", err)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
@@ -142,9 +144,13 @@ func TestComputeTreeHashStable(t *testing.T) {
 // incident gets one file renamed).
 func TestComputeTreeHashDistinguishesNames(t *testing.T) {
 	a := t.TempDir()
-	os.WriteFile(filepath.Join(a, "only.txt"), []byte("same"), 0o644)
+	if err := os.WriteFile(filepath.Join(a, "only.txt"), []byte("same"), 0o644); err != nil {
+		t.Fatalf("write only.txt: %v", err)
+	}
 	b := t.TempDir()
-	os.WriteFile(filepath.Join(b, "OTHER.txt"), []byte("same"), 0o644)
+	if err := os.WriteFile(filepath.Join(b, "OTHER.txt"), []byte("same"), 0o644); err != nil {
+		t.Fatalf("write OTHER.txt: %v", err)
+	}
 	ha, _, _ := computeTreeHash(a)
 	hb, _, _ := computeTreeHash(b)
 	if ha == hb {

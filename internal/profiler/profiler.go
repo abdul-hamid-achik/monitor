@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -161,12 +162,16 @@ func writeTempProfile(pid int32, body []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	path := f.Name()
 	if _, err := f.Write(body); err != nil {
-		os.Remove(f.Name())
-		return "", err
+		closeErr := f.Close()
+		removeErr := os.Remove(path)
+		return "", errors.Join(err, closeErr, removeErr)
 	}
-	return f.Name(), nil
+	if err := f.Close(); err != nil {
+		return "", errors.Join(err, os.Remove(path))
+	}
+	return path, nil
 }
 
 // goToolPprofTop best-effort symbolicates a saved profile via the go
@@ -216,7 +221,9 @@ func parsePprofTop(text string) []Symbol {
 		seen[fn] = true
 		// flat% is the 2nd column, e.g. "87.96%".
 		var weight float64
-		fmt.Sscanf(strings.TrimSuffix(parts[1], "%"), "%g", &weight)
+		if _, err := fmt.Sscanf(strings.TrimSuffix(parts[1], "%"), "%g", &weight); err != nil {
+			weight = 0
+		}
 		syms = append(syms, Symbol{Func: fn, File: fileLine[:colon], Line: ln, Weight: weight})
 		if len(syms) >= 25 {
 			break
@@ -234,12 +241,12 @@ func httpGet(ctx context.Context, url string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return "", fmt.Errorf("status %d", resp.StatusCode)
+		return "", errors.Join(fmt.Errorf("status %d", resp.StatusCode), resp.Body.Close())
 	}
-	b, err := io.ReadAll(resp.Body)
-	return string(b), err
+	b, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	return string(b), errors.Join(readErr, closeErr)
 }
 
 // parsePprof extracts the top frames from a pprof text dump.

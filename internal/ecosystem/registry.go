@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -39,8 +40,7 @@ func RecordScreen(ctx context.Context, seconds int) (string, error) {
 		}
 		// -V N records N seconds of video; -x suppresses the capture sound.
 		if err := exec.CommandContext(ctx, "screencapture", "-x", "-V", fmt.Sprintf("%d", seconds), path).Run(); err != nil {
-			os.Remove(path)
-			return "", fmt.Errorf("screencapture: %w", err)
+			return "", errors.Join(fmt.Errorf("screencapture: %w", err), os.Remove(path))
 		}
 		return path, nil
 	case "linux":
@@ -56,8 +56,7 @@ func RecordScreen(ctx context.Context, seconds int) (string, error) {
 			return "", err
 		}
 		if err := exec.CommandContext(ctx, "ffmpeg", "-y", "-f", "x11grab", "-t", fmt.Sprintf("%d", seconds), "-i", display, path).Run(); err != nil {
-			os.Remove(path)
-			return "", fmt.Errorf("ffmpeg x11grab: %w", err)
+			return "", errors.Join(fmt.Errorf("ffmpeg x11grab: %w", err), os.Remove(path))
 		}
 		return path, nil
 	default:
@@ -71,7 +70,9 @@ func tempRecordingPath(ext string) (string, error) {
 		return "", err
 	}
 	path := f.Name()
-	f.Close()
+	if err := f.Close(); err != nil {
+		return "", errors.Join(fmt.Errorf("close recording temp file: %w", err), os.Remove(path))
+	}
 	return path, nil
 }
 

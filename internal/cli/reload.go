@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -43,8 +44,10 @@ no TUI is running, reload exits non-zero with a clear error.`,
 			if err != nil {
 				return fmt.Errorf("POST %s: %w", url, err)
 			}
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
+			body, readErr := io.ReadAll(resp.Body)
+			if err := errors.Join(readErr, resp.Body.Close()); err != nil {
+				return fmt.Errorf("read POST %s response: %w", url, err)
+			}
 			bodyStr := strings.TrimSpace(string(body))
 			if resp.StatusCode == http.StatusOK {
 				fmt.Println(bodyStr)

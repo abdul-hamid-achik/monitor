@@ -72,9 +72,8 @@ Each mutating tool takes a `pid` and a required `confirm` field (see below).
 ## The confirm gate
 
 Every mutating tool requires `confirm: true` in its typed input before it will
-act. This mirrors the CLI's `--yes` convention and keeps the MCP surface safe
-for agents: the agent must explicitly assert intent before anything changes on
-the host.
+act. This makes an agent explicitly assert intent before anything changes on
+the host. Process protection remains a separate invariant after confirmation.
 
 The gate is enforced at two layers:
 
@@ -184,5 +183,5 @@ build).
 
 - [CLI Reference](/guide/cli) — the same data over `--json` commands.
 - The mutating tools mirror the CLI subcommands `kill`, `profile`,
-  `investigate`, and `record`; the CLI gates them with `--yes` where the MCP
-  tools gate with `confirm: true`.
+  `investigate`, and `record`; MCP adds a required `confirm: true` gate, while
+  both surfaces retain the same protected-process refusal.

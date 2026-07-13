@@ -19,6 +19,8 @@ preconditions:
   commands:
     - run: "test -x ./bin/monitor"
       timeoutMs: 5000
+    - run: "DB=/tmp/monitor-logs-search-spec.veclite; rm -f \"$DB\" \"$DB.lock\" /tmp/monitor-logs-search-spec.ndjson; ./bin/monitor logs capture --store \"$DB\" --name api-service -- sh -c 'echo INFO: healthy; echo ERROR: timeout >&2' >/dev/null 2>&1"
+      timeoutMs: 5000
 
 steps:
   - wait:
@@ -42,6 +44,16 @@ outcomes:
     verify:
       command:
         run: "./bin/monitor logs search foo --limit 5 --json | grep -qE '^\\[|^\\{'"
+  - id: filters_by_level_and_process
+    description: metadata filters select only the matching process error
+    verify:
+      command:
+        run: "./bin/monitor logs search --store /tmp/monitor-logs-search-spec.veclite --level error --process api --format json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d)==1 and d[0][\"level\"]==\"error\" and d[0][\"process\"]==\"api-service\"'"
+  - id: exports_ndjson
+    description: filtered results can be exported as one JSON record per line
+    verify:
+      command:
+        run: "./bin/monitor logs search timeout --store /tmp/monitor-logs-search-spec.veclite --format ndjson -o /tmp/monitor-logs-search-spec.ndjson && python3 -c 'import json; lines=open(\"/tmp/monitor-logs-search-spec.ndjson\").read().splitlines(); assert len(lines)==1 and json.loads(lines[0])[\"level\"]==\"error\"'"
   - id: clean_exit
     description: the binary exits cleanly
     verify:

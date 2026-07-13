@@ -43,6 +43,11 @@ outcomes:
     verify:
       command:
         run: "./bin/monitor process 1 --json | grep -q '\"is_protected\": true' && ./bin/monitor process 1 --json | grep -q '\"is_system\": true'"
+  - id: process_metric_states
+    description: process JSON distinguishes status and I/O availability from numeric zero
+    verify:
+      command:
+        run: "./bin/monitor process 1 --json | python3 -c 'import json,sys; d=json.load(sys.stdin); assert \"status\" in d.get(\"metric_states\", {}) and \"io\" in d.get(\"metric_states\", {})'"
   - id: unknown_pid_errors
     description: an unknown pid errors with a non-zero exit (the once-broken path now works)
     verify:

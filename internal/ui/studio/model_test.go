@@ -1,14 +1,17 @@
 package studio
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/config"
+	"github.com/abdul-hamid-achik/monitor/internal/kill"
 )
 
 func TestTabHitTest(t *testing.T) {
@@ -320,6 +323,27 @@ func TestKillConfirmNoticeOnSpared(t *testing.T) {
 	}
 }
 
+func TestKillResultFeedback(t *testing.T) {
+	m := NewModelWithOptions(Options{DisableTemperatureSource: true})
+	updated, _ := m.Update(killBatchResultMsg{
+		results: []kill.Result{
+			{PID: 10, Outcome: kill.OutcomeTerminated},
+			{PID: 11, Outcome: kill.OutcomeStillRunning},
+		},
+		failures: []string{"pid 12: permission denied"},
+		spared:   []string{"launchd"},
+	})
+	m = updated.(Model)
+	for _, want := range []string{"terminated 1", "still running 1", "failed 1", "spared 1"} {
+		if !strings.Contains(m.killNotice, want) {
+			t.Errorf("verified kill notice %q missing %q", m.killNotice, want)
+		}
+	}
+	if m.killNoticeTicks <= 0 {
+		t.Error("verified kill feedback should remain visible for several ticks")
+	}
+}
+
 func TestRenderProcessesEmpty(t *testing.T) {
 	m := NewModel()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
@@ -411,14 +435,198 @@ func TestThresholdMarks(t *testing.T) {
 // TestUpdateIntervalApplied verifies the saved UpdateInterval drives the tick
 // cadence (was previously hardcoded to 1s).
 func TestUpdateIntervalApplied(t *testing.T) {
-	m := NewModel()
+	m := NewModelWithOptions(Options{DisableTemperatureSource: true})
 	m.settings = config.Default()
-	m.settings.UpdateInterval = 2 * time.Second
-	// tickCmd is opaque, but it must not panic and must read the setting; the
-	// observable contract is that NewModel created the collector at the saved
-	// interval. Here we just assert the helper honors a custom interval by not
-	// falling back when one is set (smoke: cmd is non-nil).
-	if cmd := m.tickCmd(); cmd == nil {
-		t.Fatal("tickCmd returned nil")
+	m.view = viewSettings
+	m.settings.UpdateInterval = 5 * time.Second
+	c := m.collector
+	c.SetInterval(5 * time.Second)
+	events := make(chan struct{}, 1)
+	unsubscribe := c.Subscribe(func(collector.Event) {
+		select {
+		case events <- struct{}{}:
+		default:
+		}
+	})
+	defer unsubscribe()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+
+	// 5s cycles to 500ms. The active collector should reset immediately, not
+	// retain the five-second ticker it started with.
+	updated, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = updated.(Model)
+	if m.settings.UpdateInterval != 500*time.Millisecond {
+		t.Fatalf("cycled update interval = %v, want 500ms", m.settings.UpdateInterval)
 	}
+	select {
+	case <-events:
+		// A sample inside two seconds proves the running five-second ticker was
+		// reset by the Settings edit.
+	case <-time.After(2 * time.Second):
+		t.Fatal("live collector did not adopt the updated 500ms interval")
+	}
+}
+
+func TestResponsiveHeaderLayoutsAndHitTargets(t *testing.T) {
+	m := NewModel()
+	m.width = 140
+	if got := m.headerLayout(); len(got.labels) != int(viewCount) || got.labels[3] != "4:Temperature" {
+		t.Fatalf("wide header should use all full labels; got %#v", got.labels)
+	}
+
+	m.width = 80
+	if got := m.headerLayout(); len(got.labels) != int(viewCount) || got.labels[3] != "4:Tmp" {
+		t.Fatalf("80-column header should use all compact labels; got %#v", got.labels)
+	}
+	if got := lipgloss.Width(m.renderHeader()); got > m.width {
+		t.Fatalf("compact header width = %d, terminal width = %d", got, m.width)
+	}
+
+	m.width = 40
+	m.view = viewProcesses
+	layout := m.headerLayout()
+	if len(layout.views) != 1 || layout.views[0] != viewProcesses {
+		t.Fatalf("narrow header should retain active process tab; got %#v", layout.views)
+	}
+	x := m.titleWidth() + 1
+	if got, ok := m.headerTabAt(x); !ok || got != viewProcesses {
+		t.Fatalf("narrow active-tab hit target = (%d, %v), want Processes", got, ok)
+	}
+	if got := lipgloss.Width(m.renderHeader()); got > m.width {
+		t.Fatalf("narrow header width = %d, terminal width = %d", got, m.width)
+	}
+}
+
+func TestHelpOverlayIsContextAwareAndModal(t *testing.T) {
+	m := NewModel()
+	m.ready = true
+	m.width, m.height = 90, 30
+	m.view = viewProcesses
+
+	updated, _ := m.Update(tea.KeyPressMsg(tea.Key{Text: "?", Code: '?'}))
+	m = updated.(Model)
+	if !m.helpVisible {
+		t.Fatal("? should open help")
+	}
+	content := m.View().Content
+	for _, want := range []string{"Keyboard Help", "pause or resume", "force-kill", "Press ? or Esc"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("process help missing %q", want)
+		}
+	}
+	// Navigation is inert while the modal is open.
+	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyTab}))
+	m = updated.(Model)
+	if m.view != viewProcesses {
+		t.Error("tab should not switch views behind help")
+	}
+	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	m = updated.(Model)
+	if m.helpVisible {
+		t.Fatal("Esc should close help")
+	}
+}
+
+func TestPauseFreezesSamplesAndStatus(t *testing.T) {
+	m := NewModel()
+	m.width = 100
+	m.last.LastUpdate = time.Now()
+	m.last.CPU.UsagePercent = 37
+	m.paused = true
+
+	updated, _ := m.Update(tickMsg(time.Now()))
+	m = updated.(Model)
+	if m.last.CPU.UsagePercent != 37 {
+		t.Fatalf("paused tick changed CPU sample to %.1f", m.last.CPU.UsagePercent)
+	}
+	if status := m.statusText(); !strings.Contains(status, "PAUSED") || !strings.Contains(status, m.last.LastUpdate.Format("15:04:05")) {
+		t.Fatalf("paused status lacks state/sample time: %q", status)
+	}
+	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Text: "p", Code: 'p'}))
+	m = updated.(Model)
+	if m.paused {
+		t.Fatal("p should resume a paused model")
+	}
+}
+
+func TestProcessTableRespondsToTerminalWidth(t *testing.T) {
+	m := NewModel()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m = updated.(Model)
+	if got := len(m.processTable.Columns()); got != 7 {
+		t.Fatalf("wide process table columns = %d, want 7", got)
+	}
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 48, Height: 30})
+	m = updated.(Model)
+	if got := len(m.processTable.Columns()); got != 3 {
+		t.Fatalf("narrow process table columns = %d, want 3", got)
+	}
+	if got := m.processTable.Columns()[1].Width; got < 10 {
+		t.Fatalf("responsive name column width = %d, want at least 10", got)
+	}
+}
+
+func TestProcessSearchApplyCancelClearAndMetadata(t *testing.T) {
+	m := NewModel()
+	m.view = viewProcesses
+	m.last.Processes = []collector.ProcessInfo{
+		{PID: 101, Name: "alpha", User: "alice"},
+		{PID: 202, Name: "beta", User: "bob"},
+	}
+	m.searchQuery = "alpha"
+
+	updated, _ := m.Update(tea.KeyPressMsg(tea.Key{Text: "/", Code: '/'}))
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Text: "x", Code: 'x'}))
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	m = updated.(Model)
+	if m.searchQuery != "alpha" || m.processSearch {
+		t.Fatalf("Esc should restore prior filter; query=%q active=%v", m.searchQuery, m.processSearch)
+	}
+
+	m.searchQuery = ""
+	m.searchBefore = ""
+	m.processSearch = true
+	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Text: "bob", Code: 'b'}))
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = updated.(Model)
+	if m.processSearch || len(m.filteredProcesses()) != 1 || m.filteredProcesses()[0].PID != 202 {
+		t.Fatalf("Enter should apply user-name filter; query=%q matches=%v", m.searchQuery, m.filteredProcesses())
+	}
+
+	m.processSearch = true
+	updated, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: 'u', Mod: tea.ModCtrl}))
+	m = updated.(Model)
+	if m.searchQuery != "" || len(m.filteredProcesses()) != 2 {
+		t.Fatalf("Ctrl+U should clear filter; query=%q matches=%d", m.searchQuery, len(m.filteredProcesses()))
+	}
+}
+
+func TestResponsiveFrameAndStackedOverview(t *testing.T) {
+	m := NewModel()
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 70, Height: 24})
+	m = updated.(Model)
+	m.last.LastUpdate = time.Now()
+	m.last.CPU.CoreCount = 8
+	m.last.CPU.ThreadCount = 8
+	m.last.Memory.TotalBytes = 16 << 30
+
+	if got := lipgloss.Width(m.renderOverview()); got > m.width {
+		t.Fatalf("stacked overview width = %d, terminal width = %d", got, m.width)
+	}
+	if got := lipgloss.Height(m.View().Content); got != m.height {
+		t.Fatalf("rendered frame height = %d, terminal height = %d", got, m.height)
+	}
+}
+
+func TestNewModelWithDisabledTemperatureSource(t *testing.T) {
+	m := NewModelWithOptions(Options{DisableTemperatureSource: true})
+	if m.collector == nil {
+		t.Fatal("disabled temperature source should still create the system collector")
+	}
+	m.cancel()
 }

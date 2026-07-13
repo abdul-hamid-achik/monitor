@@ -43,6 +43,8 @@ type Model struct {
 	ready         bool
 	quitting      bool
 	view          viewID
+	paused        bool
+	helpVisible   bool
 
 	settings *config.Settings
 
@@ -54,18 +56,23 @@ type Model struct {
 	tabActive   lipgloss.Style
 	tabInactive lipgloss.Style
 
-	processTable    *table.Model
-	selectedPids    map[int32]bool
-	sortBy          string
-	sortAsc         bool
-	processSearch   bool
-	searchQuery     string
-	showKillConfirm bool
-	forceKill       bool
-	killConf        kill.Confirmation
+	processTable         *table.Model
+	selectedPids         map[int32]bool
+	sortBy               string
+	sortAsc              bool
+	processSearch        bool
+	searchQuery          string
+	searchBefore         string
+	processDetailVisible bool
+	processDetailPID     int32
+	showKillConfirm      bool
+	forceKill            bool
+	killConf             kill.Confirmation
 
 	settingsCursor int
 	settingsSaved  bool
+	settingsDirty  bool
+	settingsErr    string
 
 	// killNotice is a transient status-bar message (e.g. when a confirmed kill
 	// spared protected/system PIDs), shown for killNoticeTicks ticks so the TUI
@@ -86,7 +93,25 @@ type trendSeries struct {
 	pts    []history.Point
 }
 
+// Options controls optional Studio integrations. The zero value preserves the
+// interactive defaults.
+type Options struct {
+	// DisableTemperatureSource prevents Studio from starting the privileged
+	// powermetrics-backed source. The collector's built-in estimate remains
+	// available, matching the non-TUI --no-temperature-source behavior.
+	DisableTemperatureSource bool
+	// Reloader, when non-nil, is attached to the running Bubble Tea program so
+	// external `monitor reload` requests can inject a real refresh message.
+	Reloader *ProgramReloader
+}
+
 func NewModel() Model {
+	return NewModelWithOptions(Options{})
+}
+
+// NewModelWithOptions builds a Studio model while allowing CLI-global policy
+// (such as --no-temperature-source) to be honored before subprocesses start.
+func NewModelWithOptions(opts Options) Model {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Load the user's saved settings (falls back to defaults on any error) so
@@ -101,14 +126,16 @@ func NewModel() Model {
 	}
 	c := collector.New(collector.Options{Interval: interval, HistorySize: 60})
 
-	ts := temperature.New(ctx, temperature.Options{
-		Interval: 5 * time.Second,
-		Logf:     func(string, ...any) {},
-	})
-	c.WithTemperatureHook(func() (float64, float64, float64, float64, float64, float64, int, string, string, bool) {
-		r := ts.Latest()
-		return r.CPUPackage, r.CPUCores, r.GPU, r.ANE, r.Battery, r.Ambient, r.FanRPM, r.FanMode, string(r.Source), r.Available
-	})
+	if !opts.DisableTemperatureSource {
+		ts := temperature.New(ctx, temperature.Options{
+			Interval: 5 * time.Second,
+			Logf:     func(string, ...any) {},
+		})
+		c.WithTemperatureHook(func() (float64, float64, float64, float64, float64, float64, int, string, string, bool) {
+			r := ts.Latest()
+			return r.CPUPackage, r.CPUCores, r.GPU, r.ANE, r.Battery, r.Ambient, r.FanRPM, r.FanMode, string(r.Source), r.Available
+		})
+	}
 
 	panelStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -165,6 +192,7 @@ func (m Model) startCollectorCmd() tea.Cmd {
 }
 
 type tickMsg time.Time
+type externalReloadMsg struct{}
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -176,13 +204,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.height-overhead > 5 {
 				m.processTable.SetHeight(m.height - overhead)
 			}
-			m.processTable.SetWidth(m.width - 6)
+			if m.width > 6 {
+				m.processTable.SetWidth(m.width - 6)
+			}
+			m.configureProcessTable()
 		}
 		return m, nil
 	case tickMsg:
-		m.last = m.collector.Snapshot()
-		if m.view == viewProcesses {
-			m.updateProcessTable()
+		if !m.paused {
+			m.last = m.collector.Snapshot()
+			if m.view == viewProcesses {
+				m.updateProcessTable()
+			}
 		}
 		// Expire the transient kill notice after a few ticks.
 		if m.killNoticeTicks > 0 {
@@ -197,6 +230,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTrends()
 		}
 		return m, m.tickCmd()
+	case externalReloadMsg:
+		m.refreshNow()
+		return m, nil
+	case killBatchResultMsg:
+		m.killNotice = formatKillBatchResult(msg)
+		m.killNoticeTicks = 6
+		// A verified kill changes the process list; take the latest published
+		// snapshot and redraw now rather than waiting for another UI tick.
+		if !m.paused {
+			m.last = m.collector.Snapshot()
+			if m.view == viewProcesses {
+				m.updateProcessTable()
+			}
+		}
+		return m, nil
 	case tea.KeyPressMsg:
 		if m.showKillConfirm {
 			return m.handleKillConfirmKeys(msg)
@@ -208,6 +256,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.processSearch {
 			return m.handleProcessKeys(msg)
 		}
+		if m.helpVisible {
+			switch msg.Keystroke() {
+			case "?", "esc", "q":
+				m.helpVisible = false
+				return m, nil
+			case "ctrl+c":
+				m.quitting = true
+				if m.unsubscribe != nil {
+					m.unsubscribe()
+				}
+				m.cancel()
+				return m, tea.Quit
+			default:
+				return m, nil
+			}
+		}
+		// Process details are modal: navigation and destructive shortcuts do
+		// not leak through to the table while the panel is open. The inspected
+		// PID remains pinned even if live sorting changes the row beneath it.
+		if m.processDetailVisible {
+			switch msg.Keystroke() {
+			case "enter", "esc", "q":
+				m.processDetailVisible = false
+				m.processDetailPID = 0
+				return m, nil
+			case "?":
+				m.helpVisible = true
+				return m, nil
+			case "r":
+				m.refreshNow()
+				return m, nil
+			case "ctrl+c":
+				m.quitting = true
+				if m.unsubscribe != nil {
+					m.unsubscribe()
+				}
+				m.cancel()
+				return m, tea.Quit
+			default:
+				return m, nil
+			}
+		}
 		switch msg.Keystroke() {
 		case "q", "ctrl+c", "esc":
 			m.quitting = true
@@ -216,6 +306,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.cancel()
 			return m, tea.Quit
+		case "?":
+			m.helpVisible = true
+			return m, nil
+		case "p":
+			m.paused = !m.paused
+			return m, nil
+		case "r":
+			m.refreshNow()
+			return m, nil
 		case "tab", "right", "l":
 			m.view = (m.view + 1) % viewCount
 			return m, nil
@@ -267,7 +366,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseClickMsg:
 		// A click on the header row (line 0) switches to the clicked tab.
 		if msg.Mouse().Y == 0 {
-			if v, ok := tabHitTest(msg.Mouse().X, m.titleWidth(), m.tabWidths()); ok {
+			if v, ok := m.headerTabAt(msg.Mouse().X); ok {
 				m.view = v
 				return m, nil
 			}
@@ -285,6 +384,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
+	}
+}
+
+func (m *Model) refreshNow() {
+	m.last = m.collector.Snapshot()
+	if m.view == viewProcesses {
+		m.updateProcessTable()
+	}
+	if m.view == viewTrends {
+		m.refreshTrends()
 	}
 }
 
@@ -307,6 +416,9 @@ func (m Model) View() tea.View {
 }
 
 func (m Model) render() string {
+	if m.helpVisible {
+		return m.renderHelp()
+	}
 	header := m.renderHeader()
 	var content string
 	switch m.view {
@@ -335,12 +447,54 @@ func (m Model) render() string {
 	if m.killNotice != "" {
 		statusText = " ⚠ " + m.killNotice + " "
 	} else {
-		cpuMark, memMark := m.thresholdMarks()
-		statusText = fmt.Sprintf(" CPU %.1f%%%s  │  Mem %.1f%%%s  │  Update %s  │  1-9: tabs  │  q: quit ",
-			m.last.CPU.UsagePercent, cpuMark, m.last.Memory.UsagePercent, memMark, m.last.LastUpdate.Format("15:04:05"))
+		statusText = m.statusText()
 	}
-	status := m.statusStyle.Width(m.width).Render(statusText)
+	statusWidth := m.width
+	if statusWidth < 1 {
+		statusWidth = 1
+	}
+	status := m.statusStyle.Width(statusWidth).Render(statusText)
+	contentHeight := m.height - 2
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+	content = lipgloss.NewStyle().Height(contentHeight).MaxHeight(contentHeight).Render(content)
 	return strings.Join([]string{header, content, status}, "\n")
+}
+
+// statusText keeps the most important telemetry and key hints visible without
+// overflowing narrow terminals. State is communicated with both a symbol and
+// a word, so it does not depend on color alone.
+func (m Model) statusText() string {
+	state := "LIVE"
+	when := "waiting"
+	if !m.last.LastUpdate.IsZero() {
+		when = m.last.LastUpdate.Format("15:04:05")
+	}
+	if m.paused {
+		state = "PAUSED"
+	} else if m.last.LastUpdate.IsZero() {
+		state = "WAITING"
+	} else {
+		staleAfter := 3 * time.Second
+		if m.settings != nil && 2*m.settings.UpdateInterval > staleAfter {
+			staleAfter = 2 * m.settings.UpdateInterval
+		}
+		if time.Since(m.last.LastUpdate) > staleAfter {
+			state = "STALE"
+		}
+	}
+	cpuMark, memMark := m.thresholdMarks()
+	if m.width >= 100 {
+		return fmt.Sprintf(" ● %-7s │ CPU %5.1f%%%s │ Mem %5.1f%%%s │ sampled %s │ p pause  r refresh  ? help  q quit ",
+			state, m.last.CPU.UsagePercent, cpuMark, m.last.Memory.UsagePercent, memMark, when)
+	}
+	if m.width >= 64 {
+		return fmt.Sprintf(" ● %-7s │ CPU %.1f%%%s  Mem %.1f%%%s │ %s │ p/r  ? help  q quit ",
+			state, m.last.CPU.UsagePercent, cpuMark, m.last.Memory.UsagePercent, memMark, when)
+	}
+	return fmt.Sprintf(" ● %s │ C %.0f%%%s M %.0f%%%s │ p r ? q ",
+		state, m.last.CPU.UsagePercent, cpuMark, m.last.Memory.UsagePercent, memMark)
 }
 
 // thresholdMarks returns a "!" for CPU / memory when the live value meets or
@@ -360,45 +514,18 @@ func (m Model) thresholdMarks() (cpu, mem string) {
 }
 
 func (m Model) renderHeader() string {
-	overview := m.tabInactive.Render(" 1:Overview ")
-	cpu := m.tabInactive.Render(" 2:CPU ")
-	memory := m.tabInactive.Render(" 3:Memory ")
-	temperature := m.tabInactive.Render(" 4:Temperature ")
-	disk := m.tabInactive.Render(" 5:Disk ")
-	network := m.tabInactive.Render(" 6:Network ")
-	processes := m.tabInactive.Render(" 7:Processes ")
-	settings := m.tabInactive.Render(" 8:Settings ")
-	trends := m.tabInactive.Render(" 9:Trends ")
-	if m.view == viewOverview {
-		overview = m.tabActive.Render(" 1:Overview ")
+	layout := m.headerLayout()
+	tabs := make([]string, 0, len(layout.labels))
+	for i, label := range layout.labels {
+		if layout.views[i] == m.view {
+			// The pointer is a non-color active-state cue for monochrome and
+			// low-contrast terminals.
+			tabs = append(tabs, m.headerTabStyle(true, layout.compact).Render("▸"+label))
+		} else {
+			tabs = append(tabs, m.headerTabStyle(false, layout.compact).Render(" "+label))
+		}
 	}
-	if m.view == viewCPU {
-		cpu = m.tabActive.Render(" 2:CPU ")
-	}
-	if m.view == viewMemory {
-		memory = m.tabActive.Render(" 3:Memory ")
-	}
-	if m.view == viewTemperature {
-		temperature = m.tabActive.Render(" 4:Temperature ")
-	}
-	if m.view == viewDisk {
-		disk = m.tabActive.Render(" 5:Disk ")
-	}
-	if m.view == viewNetwork {
-		network = m.tabActive.Render(" 6:Network ")
-	}
-	if m.view == viewProcesses {
-		processes = m.tabActive.Render(" 7:Processes ")
-	}
-	if m.view == viewSettings {
-		settings = m.tabActive.Render(" 8:Settings ")
-	}
-	if m.view == viewTrends {
-		trends = m.tabActive.Render(" 9:Trends ")
-	}
-	title := m.titleStyle.Render(fmt.Sprintf(" MONITOR (v2)  %s ", m.last.LastUpdate.Format("15:04:05")))
-	tabs := lipgloss.JoinHorizontal(lipgloss.Top, overview, cpu, memory, temperature, disk, network, processes, settings, trends)
-	return lipgloss.JoinHorizontal(lipgloss.Top, title, tabs)
+	return lipgloss.JoinHorizontal(lipgloss.Top, m.titleStyle.Render(layout.title), lipgloss.JoinHorizontal(lipgloss.Top, tabs...))
 }
 
 func tempBadge(source string) string {
@@ -449,23 +576,37 @@ func (m Model) renderOverview() string {
 	cpu := m.last.CPU
 	mem := m.last.Memory
 	net := m.last.Network
-	cpuPanel := m.panelStyle.Width(m.width/2 - 2).Render(
+	panelWidth := m.width/2 - 2
+	gaugeWidth := m.width/2 - 10
+	stacked := m.width < 88
+	if stacked {
+		panelWidth = m.width - 4
+		gaugeWidth = m.width - 12
+	}
+	if panelWidth < 20 {
+		panelWidth = 20
+	}
+	cpuPanel := m.panelStyle.Width(panelWidth).Render(
 		m.titleStyle.Render(" CPU ") + "\n\n" +
-			m.renderGauge(cpu.UsagePercent, m.width/2-10) +
+			m.renderGauge(cpu.UsagePercent, gaugeWidth) +
 			fmt.Sprintf("\n  %.2f GHz  │  %d cores  │  %d threads", cpu.FrequencyMHz/1000, cpu.CoreCount, cpu.ThreadCount))
 	memTitle := " Memory "
 	if m.last.Cgroup.Limited && m.last.Cgroup.MemLimitBytes > 0 {
 		memTitle = " Memory [cgroup limit] "
 	}
-	memPanel := m.panelStyle.Width(m.width/2 - 2).Render(
+	memPanel := m.panelStyle.Width(panelWidth).Render(
 		m.titleStyle.Render(memTitle) + "\n\n" +
-			m.renderGauge(mem.UsagePercent, m.width/2-10) +
+			m.renderGauge(mem.UsagePercent, gaugeWidth) +
 			fmt.Sprintf("\n  %s / %s  │  swap %s", collector.FormatBytes(mem.UsedBytes), collector.FormatBytes(mem.TotalBytes), collector.FormatBytes(mem.SwapUsed)))
 	netPanel := m.panelStyle.Width(m.width - 4).Render(
 		m.titleStyle.Render(" Network ") + "\n\n" +
 			fmt.Sprintf("  ↓ %s/s    ↑ %s/s", collector.FormatBytes(net.BytesRecvPerSec), collector.FormatBytes(net.BytesSentPerSec)) +
 			fmt.Sprintf("\n  Total: ↓ %s    ↑ %s", collector.FormatBytes(net.BytesRecv), collector.FormatBytes(net.BytesSent)))
-	return strings.Join([]string{cpuPanel + "  " + memPanel, netPanel}, "\n")
+	resourcePanels := cpuPanel + "  " + memPanel
+	if stacked {
+		resourcePanels = lipgloss.JoinVertical(lipgloss.Left, cpuPanel, memPanel)
+	}
+	return strings.Join([]string{resourcePanels, netPanel}, "\n")
 }
 
 func (m Model) renderSettings() string {
@@ -505,6 +646,10 @@ func (m Model) renderSettings() string {
 	hint := "  ↑/↓ select  ·  enter/space change  ·  - back  ·  s save"
 	if m.settingsSaved {
 		hint += "   ✓ saved"
+	} else if m.settingsErr != "" {
+		hint += "   ⚠ " + m.settingsErr
+	} else if m.settingsDirty {
+		hint += "   ● unsaved"
 	}
 	footer := "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("#4C566A")).Render(hint)
 	return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Settings ") + "\n\n" + body + footer)

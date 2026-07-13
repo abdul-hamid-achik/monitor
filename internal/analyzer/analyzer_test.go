@@ -19,7 +19,13 @@ func TestEngineObservesWithoutRules(t *testing.T) {
 // must disable it.
 func TestOnAlertHookFiresPerAlert(t *testing.T) {
 	e := NewEngine()
-	e.AddRule(&CPUSpikeRule{Factor: 1}) // threshold = 50%
+	e.AddRule(&CPUSpikeRule{Factor: 2, MinCPUPercent: 20, MinBaselineSamples: 3})
+	for i := 0; i < 3; i++ {
+		e.Observe(collector.Event{Timestamp: time.Now(), Processes: []collector.ProcessInfo{
+			{PID: 1, Name: "hot", CPUPercent: 10},
+			{PID: 2, Name: "cool", CPUPercent: 5},
+		}})
+	}
 	var got []collector.Alert
 	e.SetOnAlert(func(_ collector.Event, a collector.Alert) { got = append(got, a) })
 
@@ -98,11 +104,16 @@ func TestThresholdRule(t *testing.T) {
 }
 
 func TestCPUSpikeRule(t *testing.T) {
-	r := &CPUSpikeRule{Factor: 2.0}
+	r := &CPUSpikeRule{Factor: 2.0, MinCPUPercent: 20, MinBaselineSamples: 3}
 	e := NewEngine()
 	e.AddRule(r)
 
-	// baseline 50% — threshold is 2*50 = 100
+	for i := 0; i < 3; i++ {
+		e.Observe(collector.Event{Timestamp: time.Now(), Processes: []collector.ProcessInfo{
+			{PID: 2, Name: "spike", CPUPercent: 50},
+		}})
+	}
+	// Rolling baseline 50% — threshold is 2*50 = 100.
 	ev := collector.Event{
 		Timestamp: time.Now(),
 		Processes: []collector.ProcessInfo{
@@ -131,6 +142,18 @@ func TestCPUSpikeRule(t *testing.T) {
 	}
 }
 
+func TestCPUSpikeRuleUsesAbsoluteFloor(t *testing.T) {
+	r := &CPUSpikeRule{Factor: 3, MinCPUPercent: 20, MinBaselineSamples: 3}
+	e := NewEngine()
+	e.AddRule(r)
+	for i := 0; i < 3; i++ {
+		e.Observe(collector.Event{Timestamp: time.Now(), Processes: []collector.ProcessInfo{{PID: 7, CPUPercent: 1}}})
+	}
+	if got := e.Observe(collector.Event{Timestamp: time.Now(), Processes: []collector.ProcessInfo{{PID: 7, CPUPercent: 10}}}); len(got) != 0 {
+		t.Fatalf("idle jitter crossed relative factor but not absolute floor: %+v", got)
+	}
+}
+
 func TestRSSGrowthRule(t *testing.T) {
 	r := &RSSGrowthRule{MinBytesPerSample: 1}
 	e := NewEngine()
@@ -156,6 +179,25 @@ func TestRSSGrowthRule(t *testing.T) {
 	}
 	if alerts[0].Rule != "rss_growth" {
 		t.Errorf("wrong rule: %s", alerts[0].Rule)
+	}
+}
+
+func TestRSSGrowthRuleNormalizesByElapsedTime(t *testing.T) {
+	run := func(step time.Duration, bytesPerStep uint64) bool {
+		e := NewEngine()
+		e.AddRule(&RSSGrowthRule{MinBytesPerSecond: 900})
+		base := time.Now()
+		var alerts []collector.Alert
+		for i := 0; i < 4; i++ {
+			alerts = e.Observe(collector.Event{
+				Timestamp: base.Add(time.Duration(i) * step),
+				Processes: []collector.ProcessInfo{{PID: 42, Name: "grower", Memory: uint64(i) * bytesPerStep}},
+			})
+		}
+		return len(alerts) > 0
+	}
+	if !run(time.Second, 1000) || !run(2*time.Second, 2000) {
+		t.Fatal("equivalent 1000 bytes/second growth should alert at either sample interval")
 	}
 }
 
@@ -192,5 +234,22 @@ func TestHistoryTrimsToMax(t *testing.T) {
 	}
 	if got := len(h.RSSForPID(1)); got != 3 {
 		t.Errorf("history len = %d, want 3 (capped)", got)
+	}
+}
+
+func TestZombieRule(t *testing.T) {
+	rule := &ZombieRule{}
+	alerts := rule.Evaluate(collector.Event{Processes: []collector.ProcessInfo{
+		{PID: 10, Name: "healthy", Status: "S", Parent: 1},
+		{PID: 20, Name: "unreaped", Status: "Z", Parent: 2},
+		{PID: 30, Name: "word-form", Status: "zombie", Parent: 3},
+	}}, nil)
+	if len(alerts) != 2 {
+		t.Fatalf("zombie alerts = %d, want 2", len(alerts))
+	}
+	for _, alert := range alerts {
+		if alert.Rule != "zombie_process" || alert.PID == 10 {
+			t.Errorf("unexpected alert: %+v", alert)
+		}
 	}
 }

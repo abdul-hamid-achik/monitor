@@ -161,11 +161,12 @@ func (s *Sparkline) Render() string {
 
 		if s.ShowAxis {
 			for i := range lines {
-				if i == 0 {
+				switch i {
+				case 0:
 					lines[i] = maxLabel + " │" + lines[i]
-				} else if i == s.Height-1 {
+				case s.Height - 1:
 					lines[i] = minLabel + " │" + lines[i]
-				} else {
+				default:
 					lines[i] = strings.Repeat(" ", len(maxLabel)) + " │" + lines[i]
 				}
 			}

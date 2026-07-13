@@ -13,7 +13,7 @@ func TestAppendAndQuery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	closeStoreOnCleanup(t, s)
 
 	base := time.Now().Add(-10 * time.Minute)
 	for i := 0; i < 6; i++ {
@@ -62,7 +62,7 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenReadOnly: %v", err)
 	}
-	defer r.Close()
+	closeStoreOnCleanup(t, r)
 	pts, err := r.Query("cpu.usage", ts.Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("Query: %v", err)
@@ -93,7 +93,7 @@ func TestAppendIsDurableBeforeClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open writer: %v", err)
 	}
-	defer w.Close()
+	closeStoreOnCleanup(t, w)
 
 	ts := time.Now().Add(-time.Minute).Truncate(time.Second)
 	if err := w.Append(Sample{Timestamp: ts, Metric: "cpu.usage", Value: 73}); err != nil {
@@ -113,7 +113,7 @@ func TestAppendIsDurableBeforeClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenReadOnly(copy): %v", err)
 	}
-	defer r.Close()
+	closeStoreOnCleanup(t, r)
 	pts, err := r.Query("cpu.usage", ts.Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("Query: %v", err)
@@ -131,7 +131,7 @@ func TestMetricsReturnsDistinctSortedNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer s.Close()
+	closeStoreOnCleanup(t, s)
 
 	now := time.Now()
 	// Two metrics, the first recorded several times.
@@ -161,7 +161,7 @@ func TestMetricsEmptyStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenReadOnly: %v", err)
 	}
-	defer r.Close()
+	closeStoreOnCleanup(t, r)
 	if names, err := r.Metrics(); err != nil || len(names) != 0 {
 		t.Errorf("Metrics() on empty store = %v, %v; want empty, nil", names, err)
 	}
@@ -182,4 +182,13 @@ func TestSummarize(t *testing.T) {
 	if s.Avg != 25 {
 		t.Errorf("avg = %v, want 25", s.Avg)
 	}
+}
+
+func closeStoreOnCleanup(t *testing.T, store *Store) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close history store: %v", err)
+		}
+	})
 }

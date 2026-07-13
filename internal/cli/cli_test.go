@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
@@ -68,9 +70,50 @@ func TestWriteNDJSON(t *testing.T) {
 	}
 }
 
+func TestWriteNDJSONConcurrentLinesRemainValid(t *testing.T) {
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+
+	const count = 32
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			if err := WriteNDJSON(map[string]int{"n": n}); err != nil {
+				t.Errorf("WriteNDJSON: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	_ = w.Close()
+	os.Stdout = old
+
+	lines := 0
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		var value map[string]int
+		if err := json.Unmarshal(scanner.Bytes(), &value); err != nil {
+			t.Fatalf("interleaved NDJSON line %q: %v", scanner.Text(), err)
+		}
+		lines++
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if lines != count {
+		t.Fatalf("lines = %d, want %d", lines, count)
+	}
+}
+
 func TestRootCommandHasSubcommands(t *testing.T) {
 	root := Root()
-	want := []string{"snapshot", "watch", "kill", "process", "doctor", "mcp", "logs", "profile", "investigate", "run"}
+	want := []string{"snapshot", "watch", "kill", "process", "processes", "config", "doctor", "mcp", "logs", "profile", "investigate", "run"}
 	have := map[string]bool{}
 	for _, c := range root.Commands() {
 		have[c.Name()] = true

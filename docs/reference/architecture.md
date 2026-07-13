@@ -48,11 +48,11 @@ monitor/
 | Package | Role |
 |---------|------|
 | `internal/collector` | Pub/sub metric collector — publishes an `Event` on every tick; the canonical pattern other packages follow. Holds the metric types (`CPUInfo`, `MemoryInfo`, `ProcessInfo`, ...) and a generic ring buffer. |
-| `internal/cli` | Cobra subcommands (`snapshot`, `watch`, `process`, `tree`, `kill`, `profile`, `investigate`, `stash`, `incidents`, `logs`, `history`, `baseline`, `diff`, `doctor`, `run`, `reload`, `mcp`, `vault`, `studio`) plus the `--json` output helpers. |
+| `internal/cli` | Cobra subcommands (`snapshot`, `watch`, `analyze`, `process`, `processes`, `tree`, `kill`, `profile`, `investigate`, `stash`, `incidents`, `logs`, `history`, `baseline`, `diff`, `config`, `doctor`, `run`, `reload`, `mcp`, `vault`, `studio`) plus the JSON/NDJSON output helpers. |
 | `internal/mcp` | MCP stdio server: 8 tools (4 read-only, 4 mutating) over the standard Model Context Protocol transport, with confirm-gated mutation. |
-| `internal/analyzer` | Pluggable anomaly rules — `CPUSpikeRule` (CPU% over a fixed baseline factor), `RSSGrowthRule` (linear regression on the RSS ring buffer), `DiskFillRule`, `SwapPressureRule`, and a config-driven `ThresholdRule` (the `cpu_alert_threshold` / `memory_alert_threshold` settings). Every rule attaches a `Diagnosis` (summary, evidence, confidence, next actions) when it can interpret the signal; cross-signal correlation over the per-PID history (`internal/analyzer/diagnosis.go`) classifies memory-leak / hot-loop / load / GC-pressure patterns for `monitor_analyze` and `watch` alerts alike. |
+| `internal/analyzer` | Pluggable anomaly rules — `CPUSpikeRule` (current CPU versus a rolling per-PID median plus an absolute floor), `RSSGrowthRule` (wall-clock-normalized RSS regression), `ZombieRule`, `DiskFillRule`, `SwapPressureRule`, and a config-driven `ThresholdRule`. Per-process alerts attach a `Diagnosis` when their cross-signal history can interpret the signal; `internal/analyzer/diagnosis.go` classifies memory-leak / hot-loop / load / GC-pressure patterns for CLI, MCP, and watch consumers. |
 | `internal/capture` | Log capture pipeline — pumps a child process's stdout/stderr into the veclite log store. |
-| `internal/logger` | veclite-backed log store with keyword search; the TUI holds the writer, CLI search opens read-only with shared-read. |
+| `internal/logger` | Durable veclite-backed log store with metadata/time filtering and export; `logs capture` holds the writer while search opens read-only with shared-read. |
 | `internal/profiler` | Process profiling — scrapes `net/http/pprof` over HTTP for Go processes, and runs macOS `sample` for any process. |
 | `internal/incidents` | Content-addressed incident stash — bundles a snapshot, tree-hashes it, and saves it to fcheap (with a no-fcheap fallback). Bundles embed the triggering alert's `Diagnosis`; a failed fcheap archive retains the bundle in a durable local registry, recoverable later via `monitor incidents resume-stash`. |
 | `internal/reload` | Localhost HTTP `/reload` endpoint (POST on `127.0.0.1:7351`) signalling external processes that data changed. |
@@ -98,8 +98,8 @@ the streaming CLI, the analyzer, the MCP surface, and log capture:
 
 Process termination, wherever it is requested, funnels through the shared safety
 check in `internal/kill`: protected and system processes are refused, and an
-explicit confirmation is required (the TUI prompts, the CLI needs `--yes`, the
-MCP tools need `confirm: true`).
+explicit action is required (the TUI prompts, the CLI command states the target,
+and MCP tools need `confirm: true`). CLI `--yes` never bypasses protection.
 
 ## Notes on the current tree
 

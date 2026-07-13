@@ -36,7 +36,7 @@ tasks:
       - go.sum
     cmds:
       - go build -o {{.BINARY}} ./cmd/monitor
-      - ./{{.BINARY}}
+      - ./{{.BINARY}} studio
 
   test:
     desc: Run all tests
@@ -96,10 +96,13 @@ tasks:
     desc: Run all glyphrun behavioral specs
     cmds:
       - |
+        if ! command -v glyph >/dev/null 2>&1; then
+          echo "SKIP: glyph not installed"
+          exit 0
+        fi
         for spec in specs/*.yml; do
           echo "--- Running $spec ---"
-          glyph run "$spec" || echo "SKIP: glyph not installed"
-          break
+          glyph run "$spec"
         done
       - echo "Specs complete."
 

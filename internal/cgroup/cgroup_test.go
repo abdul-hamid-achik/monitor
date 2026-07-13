@@ -83,13 +83,19 @@ func TestReadResolvesLeafLimit(t *testing.T) {
 	if err := os.MkdirAll(leaf, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(svc, "memory.max"), []byte("268435456"), 0o644) // 256 MiB on the ancestor
-	os.WriteFile(filepath.Join(leaf, "memory.max"), []byte("max"), 0o644)      // leaf unlimited
+	if err := os.WriteFile(filepath.Join(svc, "memory.max"), []byte("268435456"), 0o644); err != nil {
+		t.Fatalf("write ancestor memory.max: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(leaf, "memory.max"), []byte("max"), 0o644); err != nil {
+		t.Fatalf("write leaf memory.max: %v", err)
+	}
 
 	// Point selfCgroupPath at a fixture naming the leaf, and DefaultRoot at our
 	// fake root via a temporary swap of the package's resolution.
 	procFixture := filepath.Join(t.TempDir(), "cgroup")
-	os.WriteFile(procFixture, []byte("0::/system.slice/foo.service\n"), 0o644)
+	if err := os.WriteFile(procFixture, []byte("0::/system.slice/foo.service\n"), 0o644); err != nil {
+		t.Fatalf("write cgroup fixture: %v", err)
+	}
 	oldSelf := selfCgroupPath
 	selfCgroupPath = procFixture
 	defer func() { selfCgroupPath = oldSelf }()
@@ -126,8 +132,12 @@ func TestReadFrom(t *testing.T) {
 
 	// An unlimited cgroup reports Active=false.
 	empty := t.TempDir()
-	os.WriteFile(filepath.Join(empty, "memory.max"), []byte("max"), 0o644)
-	os.WriteFile(filepath.Join(empty, "cpu.max"), []byte("max 100000"), 0o644)
+	if err := os.WriteFile(filepath.Join(empty, "memory.max"), []byte("max"), 0o644); err != nil {
+		t.Fatalf("write unlimited memory.max: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(empty, "cpu.max"), []byte("max 100000"), 0o644); err != nil {
+		t.Fatalf("write unlimited cpu.max: %v", err)
+	}
 	if l := ReadFrom(empty); l.Active {
 		t.Errorf("unlimited cgroup should be inactive; got %+v", l)
 	}

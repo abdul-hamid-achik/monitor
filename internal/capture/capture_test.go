@@ -3,6 +3,7 @@ package capture
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -78,7 +79,7 @@ func TestIngestCapturesStdoutAndStderr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	closeTestStore(t, store)
 
 	// sh -c prints on stdout and stderr separately so we can verify
 	// both streams reach the store with the right levels.
@@ -106,6 +107,8 @@ func TestIngestCapturesStdoutAndStderr(t *testing.T) {
 		}
 		if len(entries) == 0 {
 			t.Errorf("expected to find %q in store; not present", want)
+		} else if entries[0].PID <= 0 {
+			t.Errorf("captured command entry PID = %d, want real child PID", entries[0].PID)
 		}
 	}
 }
@@ -118,7 +121,7 @@ func TestIngestRespectsMaxLines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	closeTestStore(t, store)
 
 	// 50 lines of "line N" via a shell loop.
 	src := Source{
@@ -131,6 +134,9 @@ func TestIngestRespectsMaxLines(t *testing.T) {
 	res := r.Run(context.Background(), src)
 	if res.Lines != 10 {
 		t.Errorf("Lines = %d, want 10", res.Lines)
+	}
+	if res.Err != nil {
+		t.Errorf("cap is normal completion, got error: %v", res.Err)
 	}
 }
 
@@ -145,7 +151,7 @@ func TestRunCommandCapDoesNotDeadlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	closeTestStore(t, store)
 
 	// An infinite producer of reasonably long lines — far more than the
 	// ~64KiB pipe buffer once it runs past the cap.
@@ -178,7 +184,7 @@ func TestIngestStopsOnContextCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	closeTestStore(t, store)
 
 	src := Source{
 		Command: "sh",
@@ -208,7 +214,7 @@ func TestTailFileFollowsNewLines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	closeTestStore(t, store)
 
 	path := filepath.Join(dir, "app.log")
 	if err := os.WriteFile(path, []byte("seed\n"), 0o644); err != nil {
@@ -218,10 +224,9 @@ func TestTailFileFollowsNewLines(t *testing.T) {
 	r := NewRunner(store)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		r.tailFile(ctx, Source{Name: "tail", Level: "info"}, path)
-		close(done)
+		done <- r.tailFile(ctx, Source{Name: "tail", Level: "info"}, path)
 	}()
 
 	// Append two more lines, then cancel and wait for tail to return.
@@ -236,7 +241,10 @@ func TestTailFileFollowsNewLines(t *testing.T) {
 	time.Sleep(700 * time.Millisecond)
 	cancel()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("tailFile: %v", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("tailFile did not return after cancel")
 	}
@@ -271,7 +279,7 @@ func TestRunDispatchesOnSourceShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	closeTestStore(t, store)
 
 	r := NewRunner(store)
 	res := r.Run(context.Background(), Source{})
@@ -289,7 +297,7 @@ func TestLevelParityOnStderr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	closeTestStore(t, store)
 
 	src := Source{
 		Command: "sh",
@@ -323,22 +331,23 @@ func TestIngestStopsOnEOF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer store.Close()
+	closeTestStore(t, store)
 
 	runner := NewRunner(store)
 	r, w := io.Pipe()
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		runner.ingest(ctx, r, Source{Name: "pipe", Level: "info"}, true)
-		close(done)
+		done <- runner.ingest(ctx, r, Source{Name: "pipe", Level: "info"}, true)
 	}()
 	// Close the writer side; the reader hits EOF; ingest returns.
 	_ = w.Close()
 	select {
-	case <-done:
-		// Good: ingest exited on EOF.
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
 	case <-time.After(time.Second):
 		t.Errorf("ingest did not return after EOF")
 	}
@@ -350,6 +359,124 @@ func dbPathFor(t *testing.T, dir string) string {
 	return filepath.Join(dir, "logs.veclite")
 }
 
+func closeTestStore(t *testing.T, store *logger.Store) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close log store: %v", err)
+		}
+	})
+}
+
 // _ silences an unused-import warning when the test list above changes
 // (strings, etc.); keeps `go vet` happy.
 var _ = strings.TrimSpace
+
+type failingAppender struct {
+	err error
+}
+
+func (f failingAppender) Append(logger.Entry) error { return f.err }
+
+func TestAppendFailureIsReturnedAndNotCounted(t *testing.T) {
+	wantErr := errors.New("disk full")
+	runner := NewRunner(failingAppender{err: wantErr})
+	res := runner.Run(context.Background(), Source{
+		Command: "sh",
+		Args:    []string{"sh", "-c", "printf 'INFO: first\nINFO: second\n'"},
+		Name:    "failing-store",
+	})
+	if !errors.Is(res.Err, wantErr) {
+		t.Fatalf("Result.Err = %v, want wrapped %v", res.Err, wantErr)
+	}
+	if res.Lines != 0 || res.Bytes != 0 {
+		t.Fatalf("failed append counted as ingested: lines=%d bytes=%d", res.Lines, res.Bytes)
+	}
+}
+
+type errorAfterDataReader struct {
+	read bool
+	err  error
+}
+
+func (r *errorAfterDataReader) Read(p []byte) (int, error) {
+	if !r.read {
+		r.read = true
+		return copy(p, "INFO: accepted\n"), nil
+	}
+	return 0, r.err
+}
+
+func TestScannerFailureIsReturnedAfterSuccessfulLines(t *testing.T) {
+	store, err := logger.OpenStore(dbPathFor(t, t.TempDir()))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	closeTestStore(t, store)
+
+	wantErr := errors.New("source read failed")
+	runner := NewRunner(store)
+	err = runner.ingest(context.Background(), &errorAfterDataReader{err: wantErr}, Source{Name: "reader"}, false)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("ingest error = %v, want wrapped %v", err, wantErr)
+	}
+	if runner.lines != 1 {
+		t.Fatalf("successful lines = %d, want 1", runner.lines)
+	}
+}
+
+func TestScannerFailurePropagatesToResult(t *testing.T) {
+	store, err := logger.OpenStore(dbPathFor(t, t.TempDir()))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	closeTestStore(t, store)
+
+	runner := NewRunner(store)
+	res := runner.Run(context.Background(), Source{
+		Command: os.Args[0],
+		Args:    []string{os.Args[0], "-test.run=TestCaptureOversizedLineHelper", "--"},
+		Env:     []string{"MONITOR_CAPTURE_OVERSIZED_HELPER=1"},
+		Name:    "oversized-line",
+	})
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "scan log stream") {
+		t.Fatalf("Result.Err = %v, want scanner failure", res.Err)
+	}
+	if res.Lines != 0 {
+		t.Fatalf("oversized rejected line counted as ingested: %d", res.Lines)
+	}
+}
+
+func TestCaptureOversizedLineHelper(t *testing.T) {
+	if os.Getenv("MONITOR_CAPTURE_OVERSIZED_HELPER") != "1" {
+		return
+	}
+	_, _ = os.Stdout.WriteString(strings.Repeat("x", 1024*1024+1))
+	os.Exit(0)
+}
+
+func TestSourceDefaultLevelAppliesToUntaggedStdout(t *testing.T) {
+	store, err := logger.OpenStore(dbPathFor(t, t.TempDir()))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	closeTestStore(t, store)
+
+	runner := NewRunner(store)
+	res := runner.Run(context.Background(), Source{
+		Command: "printf",
+		Args:    []string{"printf", "plain warning\n"},
+		Name:    "level-test",
+		Level:   "warn",
+	})
+	if res.Err != nil {
+		t.Fatalf("Run: %v", res.Err)
+	}
+	entries, err := store.Search("plain warning", 1)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Level != "warn" {
+		t.Fatalf("entries = %+v, want one warn entry", entries)
+	}
+}

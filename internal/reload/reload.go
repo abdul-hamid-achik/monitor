@@ -74,12 +74,16 @@ func NewServer(addr string, r Reloader) *Server {
 		w.Header().Set("Content-Type", "application/json")
 		// Use the stdlib fmt import above; explicit body so the JSON
 		// is always valid even when a future change adds fields.
-		fmt.Fprintf(w, `{"ok":true,"count":%d}`, n)
+		if _, err := fmt.Fprintf(w, `{"ok":true,"count":%d}`, n); err != nil {
+			return
+		}
 	})
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"ok":true,"count":%d}`, s.loaded.Load())
+		if _, err := fmt.Fprintf(w, `{"ok":true,"count":%d}`, s.loaded.Load()); err != nil {
+			return
+		}
 	})
 
 	s.srv = &http.Server{

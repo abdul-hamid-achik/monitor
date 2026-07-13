@@ -66,7 +66,9 @@ configured for the given project name.`,
 			// Print the merged env (tvault run -- env prints the env).
 			// For real service launches, the user passes the service binary
 			// and tvault handles the exec; the output is the service's stdout.
-			os.Stdout.Write(output)
+			if _, err := os.Stdout.Write(output); err != nil {
+				return fmt.Errorf("write tinyvault output: %w", err)
+			}
 			return nil
 		},
 	}

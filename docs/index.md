@@ -21,7 +21,7 @@ features:
     details: Interactive Bubble Tea TUI for humans, JSON CLI commands for agents, and an MCP server with seven tools.
     link: /guide/getting-started
   - title: Anomaly detection
-    details: CPU-spike detection (3× a fixed baseline), RSS-growth regression with slope and R² confidence, disk-fill and swap-pressure rules, plus configurable CPU/memory thresholds.
+    details: CPU-spike detection against a rolling per-process baseline, wall-clock RSS-growth regression, zombie-process, disk-fill, and swap-pressure rules, plus configurable CPU/memory thresholds.
     link: /guide/anomaly-detection
   - title: Ecosystem-integrated
     details: Wraps codemap, fcheap, vecgrep, vidtrace, glyphrun, cairntrace, tinyvault, veclite, and tmux as one tool.

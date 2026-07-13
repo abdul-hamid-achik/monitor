@@ -17,7 +17,8 @@ scripts, and agents alike. Running bare `monitor` prints help.
 - 🤖 **Agent-harnessable** — every view is also a JSON CLI command + an MCP server
 - 🌡️ **Real temperature** — SMC sensors via `powermetrics` on macOS, with a
   transparent CPU-load estimate fallback when sudo isn't available
-- 🔍 **Process tools** — sort, multi-select, search, and safely terminate
+- 🔍 **Process tools** — sort, search, inspect PID-pinned diagnostics,
+  multi-select, and safely terminate
 - ⚠️ **Safe process killing** — protected/system processes refuse termination,
   consistently across the TUI, CLI, and MCP surfaces
 - 🧩 **Ecosystem integration** — fcheap incident stashes, tinyvault secret
@@ -35,26 +36,32 @@ scripts, and agents alike. Running bare `monitor` prints help.
 
 ### 2. CLI + JSON (for scripts and agents)
 
-Every subcommand supports `--json` for machine-readable output:
+Inspection, diagnosis, and settings commands provide `--json` output for
+machine-readable workflows:
 
 ```bash
 ./bin/monitor snapshot --json | jq '.cpu'      # one-shot system snapshot
 ./bin/monitor snapshot --compact                # bounded v1 payload for agent context
 ./bin/monitor watch --json                      # stream NDJSON metric events
+./bin/monitor analyze --window 10s --json       # bounded cross-signal diagnosis
 ./bin/monitor process 1234 --json               # detailed process info
+./bin/monitor ps --sort memory --limit 10 --json # bounded/filterable process inventory
 ./bin/monitor tree 1234                          # process hierarchy (parent/child)
 ./bin/monitor kill 1234                           # safety-checked (refuses protected/system PIDs)
 ./bin/monitor profile 1234 --type heap --json   # heap/cpu/goroutine/sample profile
-./bin/monitor logs capture -- mycommand          # ingest a command's logs
-./bin/monitor logs search "error" --json         # keyword search the log store
+./bin/monitor logs capture -- mycommand --verbose # ingest exact argv into the durable log store
+./bin/monitor logs search "error" --level error --since 1h --json # filtered log search
 ./bin/monitor stash --json                        # capture an incident bundle to fcheap
 ./bin/monitor investigate 1234 --json             # snapshot + profile + codemap-ranked stash
 ./bin/monitor history record                       # persist metric samples over time
 ./bin/monitor history query cpu.usage --since 1h --json   # time-series + trend stats
 ./bin/monitor baseline save pre-deploy             # capture a labeled snapshot
 ./bin/monitor diff pre-deploy                       # what changed since the baseline
-./bin/monitor watch --webhook https://… --notify    # POST/desktop-notify on each alert
+./bin/monitor watch --webhook https://… --notify    # deduplicated alert delivery
 ./bin/monitor doctor --json                       # ecosystem tool availability
+./bin/monitor doctor --require fcheap,codemap     # CI gate for required integrations
+./bin/monitor config set update-interval 500ms    # validated, atomic settings update
+./bin/monitor config show --json                  # effective Studio/CLI settings
 ./bin/monitor vault --project myapp -- mycommand  # run with tinyvault secrets injected
 ```
 
@@ -106,6 +113,9 @@ sudo cp bin/monitor /usr/local/bin/
 | `→` / `Tab` / `l` | Next tab |
 | `←` / `Shift+Tab` / `h` | Previous tab |
 | `1`–`9` | Jump to a tab (Overview, CPU, Memory, Temperature, Disk, Network, Processes, Settings, Trends) |
+| `?` | Open context-aware keyboard help |
+| `p` / `r` | Pause or resume live updates / refresh now |
+| `Enter` | Open diagnostics for the highlighted process |
 | `/` | Search processes |
 | `Space` | Toggle process selection |
 | `Ctrl+A` / `Ctrl+D` | Select all / clear selection |
@@ -113,13 +123,20 @@ sudo cp bin/monitor /usr/local/bin/
 | `k` / `x` | Terminate / force-kill selected (with confirmation) |
 
 Studio (the TUI) is keyboard-driven; navigate tabs and the process table with the
-keys above.
+keys above. Process diagnostics show identity, status, parent, CPU, RSS, memory
+share, I/O, threads, and protection policy. Unsupported or unavailable metrics
+include the collector's reason, and a PID that exits while inspected gets an
+explicit exited state. The panel is modal: `Enter`, `Esc`, or `q` closes it,
+`r` refreshes the pinned PID, `?` opens help, and `Ctrl+C` quits Studio.
 
 ### Tabs
 
 Overview, CPU, Memory, Temperature, Disk, Network, Processes, Settings, and
 Trends (longer-range sparklines from `monitor history record`).
 Settings are read from `~/.config/monitor/config.json` (written atomically).
+The CPU tab fits per-core gauges into a responsive one-to-four-column grid. If
+the current terminal cannot show every core, Studio reports `+N cores hidden`
+and suggests enlarging the terminal rather than silently truncating the list.
 
 ## Safety features
 
@@ -129,8 +146,8 @@ and MCP server alike:
 1. **Protected processes** — `launchd` (PID 1), `kernel_task`, `WindowServer`,
    `Finder`, `Dock`, etc. cannot be terminated.
 2. **System processes** — root/`_mbsetupuser`-owned processes are refused too.
-3. **Explicit confirmation** — the TUI prompts; the CLI needs `--yes`; the MCP
-   tools need `confirm: true`.
+3. **Explicit action** — the TUI prompts, the CLI command is itself explicit,
+   and MCP tools require `confirm: true`; `--yes` never bypasses protection.
 4. **SIGTERM vs SIGKILL** — both modes are offered explicitly.
 
 ## Architecture
@@ -141,7 +158,7 @@ monitor/
 ├── internal/
 │   ├── collector/             # pub/sub metric collector (canonical pattern)
 │   ├── cli/                   # cobra subcommands (snapshot, watch, kill, ...)
-│   ├── mcp/                   # MCP stdio server (7 tools, confirm-gated)
+│   ├── mcp/                   # MCP stdio server (8 tools; mutations confirm-gated)
 │   ├── analyzer/              # anomaly rules (CPU spike, RSS growth)
 │   ├── capture/               # process stdout/stderr → veclite log store
 │   ├── logger/                # veclite-backed log store + keyword search

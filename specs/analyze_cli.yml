@@ -1,0 +1,48 @@
+version: 1
+name: monitor_analyze_cli
+
+intent: |
+  `monitor analyze` exposes the MCP diagnosis window as a bounded JSON CLI
+  workflow with explicit sample counts, health, and diagnosis arrays.
+
+target:
+  cmd: ["./bin/monitor", "analyze", "--window", "100ms", "--interval", "20ms", "--json"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: report_shape
+    description: JSON includes samples, healthy, and diagnoses
+    verify:
+      command:
+        run: "./bin/monitor analyze --window 100ms --interval 20ms --json | grep -q '\"samples\"' && ./bin/monitor analyze --window 100ms --interval 20ms --json | grep -q '\"diagnoses\"'"
+  - id: diagnoses_is_array
+    description: diagnoses is always a JSON array
+    verify:
+      command:
+        run: "./bin/monitor analyze --window 100ms --interval 20ms --json | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin)[\"diagnoses\"], list)'"
+  - id: invalid_window_refused
+    description: invalid sampling windows fail clearly
+    verify:
+      command:
+        run: "! ./bin/monitor analyze --window 0s >/dev/null 2>&1"
+  - id: clean_exit
+    description: bounded analysis exits cleanly
+    verify:
+      process:
+        exitCode: 0

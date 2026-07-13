@@ -6,6 +6,7 @@ package baseline
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -84,17 +85,13 @@ func Save(dir string, b *Baseline) error {
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
+		return errors.Join(err, tmp.Close(), os.Remove(tmpName))
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return err
+		return errors.Join(err, os.Remove(tmpName))
 	}
 	if err := os.Rename(tmpName, final); err != nil {
-		os.Remove(tmpName)
-		return err
+		return errors.Join(err, os.Remove(tmpName))
 	}
 	return nil
 }

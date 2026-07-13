@@ -84,11 +84,13 @@ func Webhook(ctx context.Context, client *http.Client, url string, a collector.A
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
 	// Drain the body (bounded) so the transport can return the connection to
 	// the keep-alive pool instead of dropping it — alerts can POST to the same
 	// URL every tick. Applies on both the success and non-2xx paths.
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	if err := resp.Body.Close(); err != nil {
+		return fmt.Errorf("webhook %s: close response: %w", url, err)
+	}
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("webhook %s: status %d", url, resp.StatusCode)
 	}

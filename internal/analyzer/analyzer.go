@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,6 +76,39 @@ func (r *SwapPressureRule) Evaluate(ev collector.Event, _ *History) []collector.
 type ThresholdRule struct {
 	CPUPercent float64
 	MemPercent float64
+}
+
+// ZombieRule reports processes that have exited but are still waiting for
+// their parent to reap them. Status collection is availability-aware, so an
+// unsupported platform simply produces no zombie findings.
+type ZombieRule struct{}
+
+// Name returns the rule name.
+func (*ZombieRule) Name() string { return "zombie_process" }
+
+// Evaluate emits one warning per zombie process.
+func (*ZombieRule) Evaluate(ev collector.Event, _ *History) []collector.Alert {
+	var out []collector.Alert
+	for _, p := range ev.Processes {
+		zombie := false
+		for _, state := range strings.Split(p.Status, ",") {
+			state = strings.TrimSpace(state)
+			if strings.EqualFold(state, "z") || strings.EqualFold(state, "zombie") {
+				zombie = true
+				break
+			}
+		}
+		if zombie {
+			out = append(out, collector.Alert{
+				Severity: "warning",
+				Rule:     "zombie_process",
+				PID:      p.PID,
+				Process:  p.Name,
+				Detail:   fmt.Sprintf("%s (pid %d) is a zombie awaiting parent %d", p.Name, p.PID, p.Parent),
+			})
+		}
+	}
+	return out
 }
 
 // Name returns the rule name.
@@ -301,39 +335,74 @@ func (h *History) nameForPID(pid int32) string {
 
 // CPUSpikeRule flags processes whose CPU% is N times their baseline.
 type CPUSpikeRule struct {
-	Factor float64
+	Factor             float64
+	MinCPUPercent      float64
+	MinBaselineSamples int
 }
 
 // Name returns the rule name.
 func (r *CPUSpikeRule) Name() string { return "cpu_spike" }
 
-// Evaluate returns an alert per process whose CPU% exceeds factor*50 (placeholder baseline).
-func (r *CPUSpikeRule) Evaluate(ev collector.Event, _ *History) []collector.Alert {
+// Evaluate compares the current CPU sample with a median of prior samples for
+// the same PID. A minimum absolute CPU floor prevents idle jitter from being
+// labeled as a spike.
+func (r *CPUSpikeRule) Evaluate(ev collector.Event, h *History) []collector.Alert {
 	factor := r.Factor // local default — don't mutate shared rule state under concurrent Observe
 	if factor <= 0 {
 		factor = 3.0
 	}
+	minCPU := r.MinCPUPercent
+	if minCPU <= 0 {
+		minCPU = 50
+	}
+	minSamples := r.MinBaselineSamples
+	if minSamples <= 0 {
+		minSamples = 3
+	}
+	if h == nil {
+		return nil
+	}
 	var out []collector.Alert
 	for _, p := range ev.Processes {
-		if p.CPUPercent > factor*50 {
+		samples := h.CPUForPID(p.PID)
+		if len(samples) < minSamples+1 {
+			continue
+		}
+		baselineSamples := append([]float64(nil), samples[:len(samples)-1]...)
+		slices.Sort(baselineSamples)
+		baseline := medianFloat64(baselineSamples)
+		threshold := math.Max(minCPU, baseline*factor)
+		if p.CPUPercent >= threshold {
 			out = append(out, collector.Alert{
 				Severity: "warning",
 				Rule:     r.Name(),
 				PID:      p.PID,
 				Process:  p.Name,
-				Detail:   fmt.Sprintf("cpu spike: %.0f%% (>= %.0f%%)", p.CPUPercent, factor*50),
+				Detail: fmt.Sprintf("cpu spike: %.1f%% vs %.1f%% rolling baseline (threshold %.1f%%, %.1fx)",
+					p.CPUPercent, baseline, threshold, factor),
 			})
 		}
 	}
 	return out
 }
 
-// RSSGrowthRule detects monotonic RSS growth across the history window.
-// The threshold is bytes-per-SAMPLE: the regression runs against the sample
-// index, not wall-clock time, so at the collector's default 1s tick it is
-// effectively bytes-per-second. (A true per-second slope would need the
-// sample timestamps threaded into the regression — see BACKLOG.)
+func medianFloat64(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	mid := len(values) / 2
+	if len(values)%2 == 0 {
+		return (values[mid-1] + values[mid]) / 2
+	}
+	return values[mid]
+}
+
+// RSSGrowthRule detects sustained RSS growth across the history window.
 type RSSGrowthRule struct {
+	// MinBytesPerSecond is the preferred wall-clock-normalized threshold.
+	MinBytesPerSecond uint64
+	// MinBytesPerSample is retained for source compatibility. When non-zero it
+	// selects the legacy sample-index threshold instead.
 	MinBytesPerSample uint64
 }
 
@@ -342,25 +411,37 @@ func (r *RSSGrowthRule) Name() string { return "rss_growth" }
 
 // Evaluate returns alerts for processes with sustained RSS growth.
 func (r *RSSGrowthRule) Evaluate(ev collector.Event, h *History) []collector.Alert {
-	minGrowth := r.MinBytesPerSample // local default — don't mutate shared rule state
-	if minGrowth == 0 {
-		minGrowth = 50_000 // ~50KB per sample
+	minRate := r.MinBytesPerSecond
+	if minRate == 0 {
+		minRate = 50_000
 	}
 	var out []collector.Alert
 	for _, p := range ev.Processes {
-		samples := h.RSSForPID(p.PID)
+		timestamps, samples, _ := h.SeriesForPID(p.PID)
 		if len(samples) < 3 {
 			continue
 		}
 		slope, r2 := linearRegression(samples)
-		if slope > float64(minGrowth) && r2 > 0.7 {
+		growth := slope
+		unit := "sample"
+		threshold := float64(r.MinBytesPerSample)
+		if r.MinBytesPerSample == 0 {
+			elapsed := timestamps[len(timestamps)-1].Sub(timestamps[0]).Seconds()
+			if elapsed <= 0 {
+				continue
+			}
+			growth = slope * float64(len(samples)-1) / elapsed
+			threshold = float64(minRate)
+			unit = "second"
+		}
+		if growth > threshold && r2 > 0.7 {
 			out = append(out, collector.Alert{
 				Severity: "warning",
 				Rule:     r.Name(),
 				PID:      p.PID,
 				Process:  p.Name,
-				Detail: fmt.Sprintf("suspected memory leak: RSS +%s/sample over %d samples (R²=%.2f)",
-					collector.FormatBytes(uint64(slope)), len(samples), r2),
+				Detail: fmt.Sprintf("suspected memory leak: RSS +%s/%s over %d samples (R²=%.2f)",
+					collector.FormatBytes(uint64(growth)), unit, len(samples), r2),
 			})
 		}
 	}

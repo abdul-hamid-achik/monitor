@@ -2,7 +2,7 @@ version: 1
 name: monitor_logs_capture
 
 intent: |
-  `monitor logs capture 'sh -c ...'` ingests a command's stdout/stderr
+  `monitor logs capture -- command args...` preserves exact argv and ingests stdout/stderr
   into the local veclite log store, and `monitor logs search` reads
   the same store. The end-to-end round-trip is the contract: capture
   a line, search for it, see it come back with the right level.
@@ -20,9 +20,9 @@ preconditions:
   commands:
     - run: "test -x ./bin/monitor"
       timeoutMs: 5000
-    - run: "cat > /tmp/logs_capture_verify.sh <<'SH'\n#!/bin/sh\nSENT=\"spec_capture_roundtrip_$$\"\n./bin/monitor logs capture \"echo INFO: $SENT\" >/dev/null 2>&1\n./bin/monitor logs search \"$SENT\" --json | python3 -c \"import json,sys; d=json.load(sys.stdin); assert isinstance(d,list) and len(d) >= 1; e=d[0]; assert e.get('level') == 'info'; print('ok')\"\nSH\nchmod +x /tmp/logs_capture_verify.sh"
+    - run: "cat > /tmp/logs_capture_verify.sh <<'SH'\n#!/bin/sh\nDB=/tmp/monitor-logs-capture-spec.veclite\nMARK=/tmp/monitor-logs-capture-must-not-run\nSENT=\"spec_capture_roundtrip_$$\"\nrm -f \"$DB\" \"$DB.lock\" \"$MARK\"\n./bin/monitor logs capture --store \"$DB\" -- printf '%s\\n' \"INFO: $SENT ; touch $MARK\" >/dev/null 2>&1\ntest ! -e \"$MARK\"\n./bin/monitor logs search \"$SENT\" --store \"$DB\" --json | python3 -c \"import json,sys; d=json.load(sys.stdin); assert isinstance(d,list) and len(d) == 1; e=d[0]; assert e.get('level') == 'info' and '; touch ' in e.get('raw',''); print('ok')\"\nSH\nchmod +x /tmp/logs_capture_verify.sh"
       timeoutMs: 5000
-    - run: "cat > /tmp/logs_capture_error.sh <<'SH'\n#!/bin/sh\nSENT=\"spec_capture_error_$$\"\n./bin/monitor logs capture \"echo ERROR: $SENT >&2\" >/dev/null 2>&1\n./bin/monitor logs search \"$SENT\" --json | python3 -c \"import json,sys; d=json.load(sys.stdin); e=[x for x in d if x.get('level') == 'error']; assert e; print('ok')\"\nSH\nchmod +x /tmp/logs_capture_error.sh"
+    - run: "cat > /tmp/logs_capture_error.sh <<'SH'\n#!/bin/sh\nDB=/tmp/monitor-logs-capture-error-spec.veclite\nSENT=\"spec_capture_error_$$\"\nrm -f \"$DB\" \"$DB.lock\"\n./bin/monitor logs capture --store \"$DB\" -- sh -c 'echo ERROR: \"$1\" >&2' sh \"$SENT\" >/dev/null 2>&1\n./bin/monitor logs search \"$SENT\" --store \"$DB\" --json | python3 -c \"import json,sys; d=json.load(sys.stdin); e=[x for x in d if x.get('level') == 'error']; assert e; print('ok')\"\nSH\nchmod +x /tmp/logs_capture_error.sh"
       timeoutMs: 5000
 
 steps:
@@ -52,8 +52,13 @@ outcomes:
     verify:
       command:
         run: "./bin/monitor logs capture --help 2>&1 | grep -qE -- '--name'"
+  - id: help_has_store
+    description: capture exposes the shared explicit log-store path
+    verify:
+      command:
+        run: "./bin/monitor logs capture --help 2>&1 | grep -qE -- '--store'"
   - id: round_trip_writes_to_store
-    description: capture writes a unique sentinel line; search finds it back
+    description: exact argv remains literal and the shared explicit store round-trips it
     verify:
       command:
         run: "/tmp/logs_capture_verify.sh"

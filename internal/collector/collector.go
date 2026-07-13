@@ -4,8 +4,13 @@ package collector
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -82,13 +87,14 @@ type Collector struct {
 	// goroutine and mutated WITHOUT mu (so slow IO doesn't block readers).
 	// published is the last consistent snapshot, swapped in under mu at the
 	// end of each Collect; Snapshot() reads only published.
-	mu        sync.RWMutex
-	info      SystemInfo
-	published SystemInfo
-	lastNet   net.IOCountersStat
-	lastDisk  disk.IOCountersStat
+	mu           sync.RWMutex
+	info         SystemInfo
+	published    SystemInfo
+	lastNet      net.IOCountersStat
+	lastDisk     disk.IOCountersStat
 	capabilities capability.Set
 	loadAverage  func(context.Context) (*load.AvgStat, error)
+	intervalCh   chan time.Duration
 
 	cpuHist     *RingBuffer[float64]
 	memHist     *RingBuffer[float64]
@@ -127,16 +133,17 @@ func New(opts Options) *Collector {
 		loadAverage = load.AvgWithContext
 	}
 	return &Collector{
-		opts:        opts,
-		subs:        make(map[int]Subscriber),
-		cpuHist:     NewRingBuffer[float64](opts.HistorySize),
-		memHist:     NewRingBuffer[float64](opts.HistorySize),
-		netDownHist: NewRingBuffer[float64](opts.HistorySize),
-		netUpHist:   NewRingBuffer[float64](opts.HistorySize),
-		diskRHist:   NewRingBuffer[float64](opts.HistorySize),
-		diskWHist:   NewRingBuffer[float64](opts.HistorySize),
+		opts:         opts,
+		subs:         make(map[int]Subscriber),
+		cpuHist:      NewRingBuffer[float64](opts.HistorySize),
+		memHist:      NewRingBuffer[float64](opts.HistorySize),
+		netDownHist:  NewRingBuffer[float64](opts.HistorySize),
+		netUpHist:    NewRingBuffer[float64](opts.HistorySize),
+		diskRHist:    NewRingBuffer[float64](opts.HistorySize),
+		diskWHist:    NewRingBuffer[float64](opts.HistorySize),
 		capabilities: caps,
 		loadAverage:  loadAverage,
+		intervalCh:   make(chan time.Duration, 1),
 	}
 }
 
@@ -160,9 +167,9 @@ func (c *Collector) Subscribe(fn Subscriber) func() {
 	}
 }
 
-// SetInterval changes the tick interval used by Run. It only affects a
-// ticker started AFTER this call — Run reads the interval once at startup
-// and does not reset an already-running ticker. Values <= 0 are ignored.
+// SetInterval changes the tick interval used by Run. An active Run loop resets
+// its ticker immediately; callers do not need to restart the collector.
+// Values <= 0 are ignored.
 func (c *Collector) SetInterval(d time.Duration) {
 	if d <= 0 {
 		return
@@ -170,6 +177,20 @@ func (c *Collector) SetInterval(d time.Duration) {
 	c.mu.Lock()
 	c.opts.Interval = d
 	c.mu.Unlock()
+	// Keep only the newest requested interval. The channel is buffered so a
+	// settings edit never blocks while Run is collecting a slow sample.
+	select {
+	case c.intervalCh <- d:
+	default:
+		select {
+		case <-c.intervalCh:
+		default:
+		}
+		select {
+		case c.intervalCh <- d:
+		default:
+		}
+	}
 }
 
 // Snapshot returns the latest published SystemInfo. It only contends with
@@ -261,6 +282,8 @@ func (c *Collector) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case interval := <-c.intervalCh:
+			t.Reset(interval)
 		case <-t.C:
 			if _, err := c.Capture(ctx); err != nil {
 				return err
@@ -581,9 +604,10 @@ func (c *Collector) collectProcesses(ctx context.Context) {
 		c.info.ProcessesLastUpdate = time.Time{}
 		return
 	}
+	statusByPID, statusErr := bulkProcessStatuses(ctx)
 	out := make([]ProcessInfo, 0, len(procs))
 	for _, p := range procs {
-		pi, processErr := c.processInfo(ctx, p)
+		pi, processErr := c.processInfo(ctx, p, statusByPID, statusErr)
 		if processErr != nil {
 			continue
 		}
@@ -595,7 +619,7 @@ func (c *Collector) collectProcesses(ctx context.Context) {
 	c.info.ProcessesLastUpdate = c.info.LastUpdate
 }
 
-func (c *Collector) processInfo(ctx context.Context, p *process.Process) (ProcessInfo, error) {
+func (c *Collector) processInfo(ctx context.Context, p *process.Process, statusByPID map[int32]string, bulkStatusErr error) (ProcessInfo, error) {
 	pi := ProcessInfo{PID: p.Pid, MetricStates: make(map[string]MetricStatus)}
 	if name, err := p.NameWithContext(ctx); err == nil {
 		pi.Name = name
@@ -641,8 +665,69 @@ func (c *Collector) processInfo(ctx context.Context, p *process.Process) (Proces
 	} else {
 		pi.MetricStates[metricProcessParent] = metricStatus(MetricUnavailable, err.Error())
 	}
+	if runtime.GOOS == "darwin" {
+		if value, ok := statusByPID[p.Pid]; ok && value != "" {
+			pi.Status = value
+			pi.MetricStates[metricProcessStatus] = metricStatus(MetricObserved, "")
+		} else {
+			reason := "process status was absent from the bulk ps sample"
+			if bulkStatusErr != nil {
+				reason = bulkStatusErr.Error()
+			}
+			pi.MetricStates[metricProcessStatus] = metricStatus(MetricUnavailable, reason)
+		}
+	} else if value, err := p.StatusWithContext(ctx); err == nil && len(value) > 0 {
+		pi.Status = strings.Join(value, ",")
+		pi.MetricStates[metricProcessStatus] = metricStatus(MetricObserved, "")
+	} else {
+		reason := "process status collector returned no state"
+		if err != nil {
+			reason = err.Error()
+		}
+		pi.MetricStates[metricProcessStatus] = metricStatus(MetricUnavailable, reason)
+	}
+	if runtime.GOOS == "darwin" {
+		pi.MetricStates[metricProcessIO] = metricStatus(MetricUnsupported, "per-process I/O counters are not exposed by gopsutil on macOS")
+	} else if value, err := p.IOCountersWithContext(ctx); err == nil && value != nil {
+		pi.IOReadBytes = value.ReadBytes
+		pi.IOWriteBytes = value.WriteBytes
+		pi.MetricStates[metricProcessIO] = metricStatus(MetricObserved, "")
+	} else {
+		reason := "process I/O collector returned no counters"
+		if err != nil {
+			reason = err.Error()
+		}
+		pi.MetricStates[metricProcessIO] = metricStatus(MetricUnavailable, reason)
+	}
 	pi.IsProtected = IsProtectedProcess(pi.Name, pi.PID)
 	return pi, nil
+}
+
+// bulkProcessStatuses avoids gopsutil's macOS StatusWithContext implementation,
+// which launches one `ps` process per PID. One bulk query keeps collector ticks
+// bounded even on machines with hundreds of processes. Other platforms return
+// nil and use gopsutil's native per-process implementation.
+func bulkProcessStatuses(ctx context.Context) (map[int32]string, error) {
+	if runtime.GOOS != "darwin" {
+		return nil, nil
+	}
+	out, err := exec.CommandContext(ctx, "ps", "-axo", "pid=,state=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("collect process states: %w", err)
+	}
+	statuses := make(map[int32]string)
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		pid, err := strconv.ParseInt(fields[0], 10, 32)
+		if err != nil || pid <= 0 || fields[1] == "" {
+			continue
+		}
+		statuses[int32(pid)] = fields[1][:1]
+	}
+	return statuses, nil
 }
 
 func (c *Collector) collectHost() {

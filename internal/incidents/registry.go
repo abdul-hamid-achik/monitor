@@ -3,6 +3,7 @@ package incidents
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -322,16 +323,11 @@ func copyFlatDir(src, dst string) error {
 		}
 		out, err := os.OpenFile(filepath.Join(dst, de.Name()), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
-			in.Close()
+			return errors.Join(err, in.Close())
+		}
+		_, copyErr := io.Copy(out, in)
+		if err := errors.Join(copyErr, in.Close(), out.Close()); err != nil {
 			return err
-		}
-		_, cerr := io.Copy(out, in)
-		in.Close()
-		if err := out.Close(); cerr == nil {
-			cerr = err
-		}
-		if cerr != nil {
-			return cerr
 		}
 	}
 	return nil

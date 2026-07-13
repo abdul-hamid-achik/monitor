@@ -45,18 +45,19 @@ table can interpret the pattern — see [Diagnosis](#diagnosis) below.
 
 ## The rules
 
-Four rules always run, and two more light up when you configure them.
+Five rules always run, and two more light up when you configure them.
 
 ### Always-on rules
 
 | Rule | What it detects | Default threshold |
 |------|-----------------|-------------------|
-| `cpu_spike` | A single process whose CPU exceeds 3× a fixed 50% baseline (≈150% CPU). | factor `3.0` |
-| `rss_growth` | A process whose resident memory is climbing steadily — a linear regression over its RSS history with slope > ~50 KB/sample **and** R² > 0.7. | `50_000` bytes/sample |
+| `cpu_spike` | Current process CPU is at least 3× the median of its prior samples. Three baseline samples and an absolute floor prevent idle jitter from firing. | factor `3.0`, floor `50%` |
+| `rss_growth` | Resident memory is climbing steadily — a regression over RSS history, normalized by elapsed wall-clock time, with slope > ~50 KB/s **and** R² > 0.7. | `50_000` bytes/second |
 | `disk_fill` | Any mounted partition whose usage is at or above the threshold. | `90%` |
 | `swap_pressure` | Swap usage at or above a fraction of swap total — real memory pressure, not just high RAM use. | `50%` of swap total |
+| `zombie_process` | The OS reports a process in zombie (`Z`) state, waiting for its parent to reap it. Unsupported status telemetry stays quiet. | status `Z` |
 
-`cpu_spike` and `rss_growth` are per-process (the alert carries the PID);
+`cpu_spike`, `rss_growth`, and `zombie_process` are per-process (the alert carries the PID);
 `disk_fill` fires once per offending partition; `swap_pressure` and the
 threshold rules are system-wide.
 
@@ -121,7 +122,10 @@ triage consistently as new severities are added.
 
 ## Alert sinks
 
-Alerts never block the watch loop — each sink runs in its own goroutine. See
+Alerts never block the watch loop. Side-effecting sinks share a bounded worker
+budget (`--delivery-limit`, default 8); when all slots are busy, Monitor drops
+the new delivery with an explicit stderr message instead of accumulating
+unbounded goroutines. See
 [`watch`](./cli#watch) for the full flag reference; in summary:
 
 | Sink | Flag | Behavior |

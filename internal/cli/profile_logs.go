@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +17,7 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/capture"
 	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
 	"github.com/abdul-hamid-achik/monitor/internal/incidents"
+	"github.com/abdul-hamid-achik/monitor/internal/logger"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 )
 
@@ -93,6 +96,7 @@ func newLogsCaptureCmd() *cobra.Command {
 		name        string
 		processName string
 		level       string
+		storePath   string
 	)
 	cmd := &cobra.Command{
 		Use:   "capture [--pid N] [-- command args...]",
@@ -104,8 +108,10 @@ Two modes:
 
   1. Wrap a new command:
        monitor logs capture -- sh -c 'echo INFO: hello; echo WARN: bad >&2'
-     The runner spawns the command and captures stdout+stderr until the
-     process exits (or until --max-lines / --max-bytes / SIGINT).
+     Everything after -- is passed directly to the program as its exact argv;
+     Monitor does not join, quote, or reinterpret it through a shell. The
+     runner captures stdout+stderr until the process exits (or until
+     --max-lines / --max-bytes / SIGINT).
 
   2. Tail an existing process:
        monitor logs capture --pid 1234
@@ -122,42 +128,24 @@ to 'info' (or 'error' for stderr lines without a level).`,
 			ctx, cancel := Context()
 			defer cancel()
 
-			dbPath := filepath.Join(os.TempDir(), "monitor-logs.veclite")
+			src, err := buildCaptureSource(args, cmd.ArgsLenAtDash(), pid, name, processName, level)
+			if err != nil {
+				return err
+			}
+			dbPath, err := logger.ResolvePath(storePath)
+			if err != nil {
+				return err
+			}
 			store, err := openLogStore(dbPath)
 			if err != nil {
 				return fmt.Errorf("open log store: %w", err)
 			}
-			defer store.Close()
-
-			src := capture.Source{Level: level}
-			switch {
-			case pid > 0:
-				if name != "" {
-					src.Name = name
-				} else {
-					src.Name = processName
+			closed := false
+			defer func() {
+				if !closed {
+					_ = store.Close()
 				}
-			case len(args) > 0:
-				// Use sh -c with the joined arg list. This sidesteps
-				// cobra's flag parsing (which would eat -c) AND lets
-				// callers use any shell syntax (pipes, redirects, ...).
-				script := strings.Join(args, " ")
-				src.Command = "sh"
-				src.Args = []string{"sh", "-c", script}
-				if name != "" {
-					src.Name = name
-				} else {
-					src.Name = "sh"
-				}
-			default:
-				return fmt.Errorf("either --pid N or a command is required (e.g. 'echo INFO: hello')")
-			}
-			if src.Name == "" {
-				src.Name = processName
-			}
-			if src.Level == "" {
-				src.Level = "info"
-			}
+			}()
 
 			runner := capture.NewRunner(store)
 			runner.MaxLines = maxLines
@@ -165,24 +153,28 @@ to 'info' (or 'error' for stderr lines without a level).`,
 
 			fmt.Fprintf(os.Stderr, "monitor: capturing %s into %s (Ctrl-C to stop)\n", src.Name, dbPath)
 			res := runner.Run(ctx, src)
+			if err := store.Close(); err != nil {
+				res.Err = errors.Join(res.Err, fmt.Errorf("close log store: %w", err))
+			}
+			closed = true
 			fmt.Fprintf(os.Stderr, "monitor: %d lines / %d bytes in %s\n",
 				res.Lines, res.Bytes, res.Duration)
 			if res.Err != nil {
 				fmt.Fprintf(os.Stderr, "monitor: capture ended with error: %v\n", res.Err)
-				if res.Lines == 0 {
-					return res.Err
-				}
 			}
 			if JSONOutput(cmd) {
-				return WriteJSON(map[string]any{
+				if err := WriteJSON(map[string]any{
 					"name":     res.Source.Name,
 					"lines":    res.Lines,
 					"bytes":    res.Bytes,
 					"duration": res.Duration.String(),
+					"store":    dbPath,
 					"error":    errString(res.Err),
-				})
+				}); err != nil {
+					return err
+				}
 			}
-			return nil
+			return res.Err
 		},
 	}
 	cmd.Flags().Int32Var(&pid, "pid", 0, "tail open log files for the running process (uses lsof)")
@@ -191,8 +183,54 @@ to 'info' (or 'error' for stderr lines without a level).`,
 	cmd.Flags().StringVar(&name, "name", "", "override the captured process name in the log store")
 	cmd.Flags().StringVar(&processName, "process-name", "", "alias for --name (kept for clarity)")
 	cmd.Flags().StringVar(&level, "level", "", "default level for lines without a token; empty = info (or error for stderr)")
+	cmd.Flags().StringVar(&storePath, "store", "", "log store path (default ~/.local/share/monitor/logs.veclite; env MONITOR_LOG_STORE)")
 	cmd.Flags().Bool("json", false, "emit JSON output (final result)")
 	return cmd
+}
+
+func buildCaptureSource(args []string, argsAtDash int, pid int32, name, processName, level string) (capture.Source, error) {
+	if pid < 0 {
+		return capture.Source{}, fmt.Errorf("--pid must be greater than zero")
+	}
+	if pid > 0 && len(args) > 0 {
+		return capture.Source{}, fmt.Errorf("--pid and a command cannot be used together")
+	}
+	if pid <= 0 && len(args) == 0 {
+		return capture.Source{}, fmt.Errorf("either --pid N or a command after -- is required")
+	}
+	if name == "" {
+		name = processName
+	}
+	if level == "" {
+		level = "info"
+	}
+	level = strings.ToLower(strings.TrimSpace(level))
+	if !validLogLevels[level] {
+		return capture.Source{}, fmt.Errorf("invalid --level %q (use trace, debug, info, warn, error, or fatal)", level)
+	}
+	if pid > 0 {
+		if name == "" {
+			name = fmt.Sprintf("pid:%d", pid)
+		}
+		return capture.Source{PID: pid, Name: name, Level: level}, nil
+	}
+
+	if argsAtDash < 0 {
+		// Keep the original single-string form working for existing scripts,
+		// but never reconstruct a script by joining multiple argv elements.
+		if len(args) != 1 {
+			return capture.Source{}, fmt.Errorf("put the command and its arguments after -- to preserve exact argv")
+		}
+		if name == "" {
+			name = "sh"
+		}
+		return capture.Source{Command: "sh", Args: []string{"sh", "-c", args[0]}, Name: name, Level: level}, nil
+	}
+	argv := append([]string(nil), args...)
+	if name == "" {
+		name = filepath.Base(argv[0])
+	}
+	return capture.Source{Command: argv[0], Args: argv, Name: name, Level: level}, nil
 }
 
 // errString returns err.Error() or "" for nil; used to render an
@@ -205,34 +243,143 @@ func errString(err error) string {
 }
 
 func newLogsSearchCmd() *cobra.Command {
-	var limit int
+	var (
+		limit     int
+		storePath string
+		levels    []string
+		process   string
+		pid       int32
+		since     time.Duration
+		format    string
+		output    string
+	)
 	cmd := &cobra.Command{
-		Use:   "search <query>",
-		Short: "Search captured logs",
-		Args:  cobra.MinimumNArgs(1),
+		Use:   "search [query]",
+		Short: "Search and export captured logs",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dbPath := filepath.Join(os.TempDir(), "monitor-logs.veclite")
-			store, err := openLogStore(dbPath)
-			if err != nil {
-				return fmt.Errorf("open log store: %w", err)
+			if limit <= 0 {
+				return fmt.Errorf("--limit must be greater than zero")
 			}
-			defer store.Close()
-			results, err := store.Search(args[0], limit)
+			if since < 0 {
+				return fmt.Errorf("--since cannot be negative")
+			}
+			if pid < 0 {
+				return fmt.Errorf("--pid must be greater than zero")
+			}
+			for _, level := range levels {
+				level = strings.ToLower(strings.TrimSpace(level))
+				if !validLogLevels[level] {
+					return fmt.Errorf("invalid --level %q", level)
+				}
+			}
+			dbPath, err := logger.ResolvePath(storePath)
 			if err != nil {
 				return err
 			}
-			if JSONOutput(cmd) {
-				return WriteJSON(results)
+			store, err := logger.OpenReadOnly(dbPath)
+			if err != nil {
+				return fmt.Errorf("open log store: %w", err)
 			}
-			for _, r := range results {
-				fmt.Printf("[%s] %d %s %s\n", r.Timestamp.Format(time.RFC3339), r.PID, r.Process, r.Message)
+			query := ""
+			if len(args) == 1 {
+				query = args[0]
+			}
+			opts := logger.SearchOptions{
+				Query: query, Limit: limit, Levels: levels, Process: process, PID: pid,
+			}
+			if since > 0 {
+				opts.Since = time.Now().Add(-since)
+			}
+			results, err := store.SearchWithOptions(opts)
+			if combined := errors.Join(err, store.Close()); combined != nil {
+				return combined
+			}
+			if JSONOutput(cmd) {
+				if cmd.Flags().Changed("format") && format != "json" {
+					return fmt.Errorf("--json conflicts with --format %s", format)
+				}
+				format = "json"
+			}
+			out := cmd.OutOrStdout()
+			var file *os.File
+			if output != "" && output != "-" {
+				file, err = os.Create(output)
+				if err != nil {
+					return fmt.Errorf("create export: %w", err)
+				}
+				defer func() {
+					if file != nil {
+						_ = file.Close()
+					}
+				}()
+				out = file
+			}
+			if err := writeLogEntries(out, results, format); err != nil {
+				return err
+			}
+			if file != nil {
+				if err := file.Close(); err != nil {
+					return fmt.Errorf("close export: %w", err)
+				}
+				file = nil
 			}
 			return nil
 		},
 	}
 	cmd.Flags().IntVar(&limit, "limit", 50, "max results")
+	cmd.Flags().StringVar(&storePath, "store", "", "log store path (default ~/.local/share/monitor/logs.veclite; env MONITOR_LOG_STORE)")
+	cmd.Flags().StringSliceVar(&levels, "level", nil, "filter levels (repeat or comma-separate)")
+	cmd.Flags().StringVar(&process, "process", "", "filter by process name substring")
+	cmd.Flags().Int32Var(&pid, "pid", 0, "filter by process ID")
+	cmd.Flags().DurationVar(&since, "since", 0, "only include entries this recent (for example 15m or 2h)")
+	cmd.Flags().StringVar(&format, "format", "text", "output format: text, json, ndjson, raw")
+	cmd.Flags().StringVarP(&output, "output", "o", "", "write the export to a file ('-' for stdout)")
 	cmd.Flags().Bool("json", false, "emit JSON output")
 	return cmd
+}
+
+var validLogLevels = map[string]bool{
+	"trace": true, "debug": true, "info": true, "warn": true,
+	"warning": true, "error": true, "fatal": true,
+}
+
+func writeLogEntries(w io.Writer, entries []logger.Entry, format string) error {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "text":
+		for _, entry := range entries {
+			if _, err := fmt.Fprintf(w, "[%s] %-7s %d %s %s\n",
+				entry.Timestamp.Format(time.RFC3339), entry.Level, entry.PID, entry.Process, entry.Message); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "raw":
+		for _, entry := range entries {
+			raw := entry.Raw
+			if raw == "" {
+				raw = entry.Message
+			}
+			if _, err := fmt.Fprintln(w, raw); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "json":
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(entries)
+	case "ndjson":
+		enc := json.NewEncoder(w)
+		for _, entry := range entries {
+			if err := enc.Encode(entry); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown log output format %q (use text, json, ndjson, or raw)", format)
+	}
 }
 
 func newInvestigateCmd() *cobra.Command {

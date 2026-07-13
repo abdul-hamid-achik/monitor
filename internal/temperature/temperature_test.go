@@ -102,7 +102,11 @@ func TestNewWithoutSudoFallsBackToEstimate(t *testing.T) {
 		Bin:  filepath.Join(t.TempDir(), "no-such-powermetrics"),
 		SUDO: filepath.Join(t.TempDir(), "no-such-sudo"),
 	})
-	defer ts.Close()
+	defer func() {
+		if err := ts.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 
 	if ts.Started() {
 		t.Fatalf("Started() should be false when binaries are missing")
@@ -148,7 +152,11 @@ sleep 1
 		SUDO: sudo,
 		Logf: func(format string, args ...any) { logged = append(logged, format) },
 	})
-	defer ts.Close()
+	defer func() {
+		if err := ts.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	}()
 
 	// Wait for the streaming goroutine to parse at least one line.
 	deadline := time.Now().Add(3 * time.Second)

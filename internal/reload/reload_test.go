@@ -32,8 +32,28 @@ func freePort(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("freePort: %v", err)
 	}
-	defer ln.Close()
+	defer func() {
+		if err := ln.Close(); err != nil {
+			t.Errorf("close free-port listener: %v", err)
+		}
+	}()
 	return ln.Addr().String()
+}
+
+func closeResponseBody(t *testing.T, resp *http.Response) {
+	t.Helper()
+	if err := resp.Body.Close(); err != nil {
+		t.Errorf("close response body: %v", err)
+	}
+}
+
+func shutdownServer(t *testing.T, s *Server) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := s.Shutdown(ctx); err != nil {
+		t.Errorf("Shutdown: %v", err)
+	}
 }
 
 // waitForServer polls /healthz until it returns 200 or the timeout
@@ -45,7 +65,7 @@ func waitForServer(t *testing.T, addr string, timeout time.Duration) {
 	for time.Now().Before(deadline) {
 		resp, err := http.Get("http://" + addr + "/healthz")
 		if err == nil {
-			resp.Body.Close()
+			closeResponseBody(t, resp)
 			if resp.StatusCode == 200 {
 				return
 			}
@@ -64,18 +84,14 @@ func TestServerHealthzReturnsOK(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = s.Shutdown(ctx)
-	})
+	t.Cleanup(func() { shutdownServer(t, s) })
 	waitForServer(t, addr, time.Second)
 
 	resp, err := http.Get("http://" + addr + "/healthz")
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(t, resp)
 	if resp.StatusCode != 200 {
 		t.Fatalf("GET /healthz status=%d, want 200", resp.StatusCode)
 	}
@@ -90,18 +106,14 @@ func TestServerReloadCallsReloader(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = s.Shutdown(ctx)
-	})
+	t.Cleanup(func() { shutdownServer(t, s) })
 	waitForServer(t, addr, time.Second)
 
 	resp, err := http.Post("http://"+addr+"/reload", "application/json", strings.NewReader(""))
 	if err != nil {
 		t.Fatalf("POST /reload: %v", err)
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(t, resp)
 	if resp.StatusCode != 200 {
 		t.Fatalf("POST /reload status=%d, want 200", resp.StatusCode)
 	}
@@ -119,11 +131,7 @@ func TestServerReloadIdempotent(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = s.Shutdown(ctx)
-	})
+	t.Cleanup(func() { shutdownServer(t, s) })
 	waitForServer(t, addr, time.Second)
 
 	for i := 0; i < 5; i++ {
@@ -131,7 +139,7 @@ func TestServerReloadIdempotent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("POST /reload #%d: %v", i, err)
 		}
-		resp.Body.Close()
+		closeResponseBody(t, resp)
 	}
 	if got := r.count.Load(); got != 5 {
 		t.Fatalf("Reloader.Reload called %d times, want 5", got)
@@ -148,11 +156,7 @@ func TestServerReloadMethodNotAllowed(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = s.Shutdown(ctx)
-	})
+	t.Cleanup(func() { shutdownServer(t, s) })
 	waitForServer(t, addr, time.Second)
 
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
@@ -161,7 +165,7 @@ func TestServerReloadMethodNotAllowed(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s /reload: %v", method, err)
 		}
-		resp.Body.Close()
+		closeResponseBody(t, resp)
 		if resp.StatusCode != http.StatusMethodNotAllowed {
 			t.Errorf("%s /reload status=%d, want 405", method, resp.StatusCode)
 		}
@@ -180,18 +184,14 @@ func TestServerReloadErrorPropagates(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = s.Shutdown(ctx)
-	})
+	t.Cleanup(func() { shutdownServer(t, s) })
 	waitForServer(t, addr, time.Second)
 
 	resp, err := http.Post("http://"+addr+"/reload", "application/json", strings.NewReader(""))
 	if err != nil {
 		t.Fatalf("POST /reload: %v", err)
 	}
-	defer resp.Body.Close()
+	defer closeResponseBody(t, resp)
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("status=%d, want 500", resp.StatusCode)
 	}
@@ -207,11 +207,7 @@ func TestServerConcurrentReloads(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = s.Shutdown(ctx)
-	})
+	t.Cleanup(func() { shutdownServer(t, s) })
 	waitForServer(t, addr, time.Second)
 
 	const N = 50
@@ -224,7 +220,7 @@ func TestServerConcurrentReloads(t *testing.T) {
 			if err != nil {
 				return
 			}
-			resp.Body.Close()
+			closeResponseBody(t, resp)
 		}()
 	}
 	wg.Wait()
@@ -242,7 +238,11 @@ func TestServerStartFailsOnPortConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hold: %v", err)
 	}
-	defer hold.Close()
+	defer func() {
+		if err := hold.Close(); err != nil {
+			t.Errorf("close competing listener: %v", err)
+		}
+	}()
 
 	s := NewServer(addr, &fakeReloader{})
 	if err := s.Start(); err == nil {
@@ -258,7 +258,7 @@ func TestAddrResolvesPortZero(t *testing.T) {
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer s.Shutdown(context.Background())
+	defer shutdownServer(t, s)
 
 	_, port, err := net.SplitHostPort(s.Addr())
 	if err != nil {

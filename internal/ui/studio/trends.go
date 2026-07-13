@@ -31,13 +31,28 @@ func (m *Model) refreshTrends() {
 		m.trendsAt = time.Now()
 		return
 	}
-	defer store.Close()
-
 	since := time.Now().Add(-time.Hour)
 	series := make([]trendSeries, 0, 2)
 	for _, metric := range []string{"cpu.usage", "mem.usage"} {
-		pts, _ := store.Query(metric, since)
+		pts, queryErr := store.Query(metric, since)
+		if queryErr != nil {
+			closeErr := store.Close()
+			if closeErr != nil {
+				m.trendsErr = fmt.Sprintf("%v; close history store: %v", queryErr, closeErr)
+			} else {
+				m.trendsErr = queryErr.Error()
+			}
+			m.trends = nil
+			m.trendsAt = time.Now()
+			return
+		}
 		series = append(series, trendSeries{metric: metric, pts: pts})
+	}
+	if err := store.Close(); err != nil {
+		m.trendsErr = fmt.Sprintf("close history store: %v", err)
+		m.trends = nil
+		m.trendsAt = time.Now()
+		return
 	}
 	m.trends = series
 	m.trendsErr = ""

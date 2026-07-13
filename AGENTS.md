@@ -114,7 +114,7 @@ monitor/
 │   ├── logger/                  # NEW: veclite-backed log store
 │   │   ├── store.go
 │   │   └── store_test.go
-│   ├── mcp/                     # NEW: MCP stdio server (7 tools: 3 read-only + 4 mutating)
+│   ├── mcp/                     # MCP stdio server (8 tools: 4 read-only + 4 mutating)
 │   │   ├── server.go            # Service, Server, tool handlers, confirm gate
 │   │   └── server_test.go       # handler unit tests
 │   ├── temperature/             # NEW: real SMC temperature via sudo powermetrics
@@ -135,7 +135,7 @@ monitor/
 │   └── widgets/                 # Reusable widgets (sparklines, gauges; lipgloss v2)
 │       ├── gauge.go
 │       └── gauge_test.go
-├── specs/                       # glyphrun behavioral specs (23 specs, all passing)
+├── specs/                       # glyphrun behavioral specs (31 specs)
 │   ├── baseline.yml             # save/list/delete + path-traversal guard
 │   ├── cli_help.yml
 │   ├── diff.yml                 # baseline vs live diff
@@ -203,13 +203,14 @@ Read-only tools shipped:
 - `monitor_snapshot` — full SystemInfo
 - `monitor_processes` — top processes
 - `monitor_doctor` — ecosystem health
+- `monitor_analyze` — bounded cross-signal process diagnosis
 
 Mutating tools (all require `confirm: true` in the typed input):
 
 - `monitor_kill` — terminate a process; safety-checked, refuses protected
 - `monitor_profile_capture` — heap/cpu/goroutine/sample profile
-- `monitor_investigate` — diagnostic pipeline (stub when no svc wired)
-- `monitor_record` — vidtrace recording (stub; returns structured refusal)
+- `monitor_investigate` — diagnostic pipeline (structured fallback if no service is wired)
+- `monitor_record` — platform screen recording with artifact verification
 
 Two-layer safety: the MCP SDK validates the typed input schema (rejecting
 calls that omit `confirm` outright), and the handlers re-check `confirm`
@@ -218,11 +219,13 @@ with `refused: true` and a `reason`.
 
 ### Logger (`internal/logger`)
 
-veclite-backed log store. The TUI holds the exclusive writer lock; CLI search
+veclite-backed log store. `monitor logs capture` holds the writer lock; CLI search
 uses `OpenReadOnly` with `WithSharedRead(true)` + `WithReadOnly(true)`, which
 is lock-free (no flock) — concurrent queries never block collection, and the
-TUI's writer lock never blocks a search. Readers see a point-in-time snapshot;
-the `/reload` HTTP endpoint in `internal/reload` (POST /reload on 127.0.0.1:7351) signals external processes that data has changed; `monitor --reload-server` starts it and `monitor reload` posts to it.
+writer never blocks a search. Readers see a point-in-time snapshot. The
+`/reload` HTTP endpoint in `internal/reload` (POST /reload on 127.0.0.1:7351)
+injects a refresh into the active Studio model; `monitor studio --reload-server`
+starts it and `monitor reload` posts to it.
 
 ### Profiler (`internal/profiler`)
 
@@ -234,9 +237,9 @@ the `/reload` HTTP endpoint in `internal/reload` (POST /reload on 127.0.0.1:7351
 
 Pluggable rules:
 
-- `CPUSpikeRule` — flags CPU% > factor × baseline
-- `RSSGrowthRule` — linear regression on RSS ring buffer; slope + R²
-- `ZombieRule` — processes in state Z (planned)
+- `CPUSpikeRule` — current CPU versus a rolling per-PID median + absolute floor
+- `RSSGrowthRule` — wall-clock-normalized RSS regression; bytes/second + R²
+- `ZombieRule` — processes observed in state Z
 
 Engine observes every `collector.Event` and returns fired alerts.
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/temperature"
 )
+
+var ndjsonWriteMu sync.Mutex
 
 // parsePID parses a positive PID from s, rejecting trailing garbage and
 // non-positive values. Unlike fmt.Sscanf("%d"), strconv.ParseInt fails on
@@ -51,6 +54,8 @@ func WriteJSON(v any) error {
 
 // WriteNDJSON writes one JSON object per Write; flushes after each.
 func WriteNDJSON(v any) error {
+	ndjsonWriteMu.Lock()
+	defer ndjsonWriteMu.Unlock()
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "")
 	return enc.Encode(v)

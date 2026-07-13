@@ -18,17 +18,45 @@ func (m Model) handleSettingsKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		m.settingsCursor = (m.settingsCursor + 1) % settingsRows
 	case "enter", " ", "space":
+		before := m.currentUpdateInterval()
 		m.cycleSetting(1)
+		m.applyCollectorInterval(before)
 		m.settingsSaved = false
+		m.settingsDirty = true
+		m.settingsErr = ""
 	case "-", "_":
+		before := m.currentUpdateInterval()
 		m.cycleSetting(-1)
+		m.applyCollectorInterval(before)
 		m.settingsSaved = false
+		m.settingsDirty = true
+		m.settingsErr = ""
 	case "s":
-		if m.settings != nil && m.settings.Save() == nil {
-			m.settingsSaved = true
+		if m.settings != nil {
+			if err := m.settings.Save(); err != nil {
+				m.settingsSaved = false
+				m.settingsErr = err.Error()
+			} else {
+				m.settingsSaved = true
+				m.settingsDirty = false
+				m.settingsErr = ""
+			}
 		}
 	}
 	return m, nil
+}
+
+func (m Model) currentUpdateInterval() time.Duration {
+	if m.settings == nil {
+		return 0
+	}
+	return m.settings.UpdateInterval
+}
+
+func (m Model) applyCollectorInterval(before time.Duration) {
+	if m.settingsCursor == 0 && m.settings != nil && m.collector != nil && m.settings.UpdateInterval != before {
+		m.collector.SetInterval(m.settings.UpdateInterval)
+	}
 }
 
 // cycleSetting advances the selected setting's value by dir (+1 / -1). It

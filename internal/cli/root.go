@@ -40,7 +40,9 @@ child can detect it is being observed.`,
 	root.AddCommand(
 		newSnapshotCmd(),
 		newWatchCmd(),
+		newAnalyzeCmd(),
 		newProcessCmd(),
+		newProcessesCmd(),
 		newKillCmd(),
 		newProfileCmd(),
 		newInvestigateCmd(),
@@ -57,6 +59,7 @@ child can detect it is being observed.`,
 		newBaselineCmd(),
 		newDiffCmd(),
 		newTreeCmd(),
+		newConfigCmd(),
 	)
 
 	return root
