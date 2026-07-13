@@ -100,7 +100,7 @@ func TestViewInitializingReturnsPlaceholder(t *testing.T) {
 }
 
 func TestHandleKeyQuit(t *testing.T) {
-	for _, key := range []string{"q", "ctrl+c", "esc"} {
+	for _, key := range []string{"q", "ctrl+c"} {
 		m := NewModel()
 		updated, cmd := m.Update(tea.KeyPressMsg(tea.Key{Text: key, Code: 'q'}))
 		fm := updated.(Model)
@@ -110,6 +110,15 @@ func TestHandleKeyQuit(t *testing.T) {
 		if cmd == nil {
 			t.Errorf("Update(%s) should return a tea.Quit cmd", key)
 		}
+	}
+}
+
+func TestEscapeDoesNotQuitFromMainView(t *testing.T) {
+	m := NewModel()
+	updated, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEscape}))
+	m = updated.(Model)
+	if m.quitting || cmd != nil {
+		t.Fatal("Esc should be reserved for backing out of modal UI, not quitting Studio")
 	}
 }
 
@@ -496,6 +505,23 @@ func TestResponsiveHeaderLayoutsAndHitTargets(t *testing.T) {
 	}
 	if got := lipgloss.Width(m.renderHeader()); got > m.width {
 		t.Fatalf("narrow header width = %d, terminal width = %d", got, m.width)
+	}
+}
+
+func TestMouseTabsUseNavigationRow(t *testing.T) {
+	m := NewModel()
+	m.width = 140
+	x := m.titleWidth() + m.tabWidths()[0] + 1
+
+	updated, _ := m.Update(tea.MouseClickMsg{X: x, Y: 0, Button: tea.MouseLeft})
+	m = updated.(Model)
+	if m.view != viewOverview {
+		t.Fatal("identity-row click must not activate a tab")
+	}
+	updated, _ = m.Update(tea.MouseClickMsg{X: x, Y: 1, Button: tea.MouseLeft})
+	m = updated.(Model)
+	if m.view != viewCPU {
+		t.Fatalf("navigation-row click selected view %d, want CPU", m.view)
 	}
 }
 

@@ -22,6 +22,9 @@ func (m Model) renderCPU() string {
 	if m.height < 32 {
 		sparkHeight = 4
 	}
+	if m.height < 24 {
+		sparkHeight = 2
+	}
 	historyBody := m.renderCPUHistory(cpu, sparkHeight)
 	sparkline := m.panelStyle.Width(maxInt(20, m.width-4)).Render(
 		lipgloss.JoinVertical(lipgloss.Left, m.titleStyle.Render(" CPU Usage History "), "", historyBody),
@@ -41,13 +44,32 @@ func (m Model) renderCPU() string {
 		// On a stacked layout reserve room for the statistics panel.
 		maxCoreRows -= 9
 	}
-	if maxCoreRows < 3 {
+	shortStack := !wide && m.height < 30
+	if shortStack {
+		maxCoreRows = 2
+		if m.height < 20 {
+			maxCoreRows = 1
+		}
+	} else if maxCoreRows < 3 {
 		maxCoreRows = 3
 	}
 
 	coreBody := m.renderCoreGrid(cpu, coresWidth, maxCoreRows)
+	coreParts := []string{m.titleStyle.Render(" Per-Core Usage "), "", coreBody}
+	if shortStack {
+		summary := fmt.Sprintf("  %.1f%% total · %.2f GHz · %d cores / %d threads",
+			cpu.UsagePercent, cpu.FrequencyMHz/1000, cpu.CoreCount, cpu.ThreadCount)
+		if issue := metricIssue(cpu.MetricStates, "info"); issue != "" {
+			coreParts = append(coreParts, "  CPU info unavailable · "+issue)
+			summary = fmt.Sprintf("  %.1f%% total · CPU info unavailable", cpu.UsagePercent)
+		}
+		if issue := metricIssue(cpu.MetricStates, "load_average"); issue != "" {
+			coreParts = append(coreParts, "  Load unavailable · "+issue)
+		}
+		coreParts = append(coreParts, "", fitText(summary, maxInt(1, coresWidth-m.panelStyle.GetHorizontalFrameSize())))
+	}
 	coresPanel := m.panelStyle.Width(coresWidth).Render(
-		lipgloss.JoinVertical(lipgloss.Left, m.titleStyle.Render(" Per-Core Usage "), "", coreBody),
+		lipgloss.JoinVertical(lipgloss.Left, coreParts...),
 	)
 	statsPanel := m.panelStyle.Width(statsWidth).Render(
 		lipgloss.JoinVertical(lipgloss.Left, m.titleStyle.Render(" Statistics "), "", m.renderCPUStats(cpu)),
@@ -56,6 +78,8 @@ func (m Model) renderCPU() string {
 	bottom := lipgloss.JoinVertical(lipgloss.Left, coresPanel, statsPanel)
 	if wide {
 		bottom = lipgloss.JoinHorizontal(lipgloss.Top, coresPanel, statsPanel)
+	} else if shortStack {
+		return lipgloss.JoinVertical(lipgloss.Left, sparkline, "", coresPanel)
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, sparkline, "", bottom)
 }
@@ -71,6 +95,9 @@ func (m Model) renderCPUHistory(cpu collector.CPUInfo, height int) string {
 	spark.Data = cpu.History
 	spark.Width = maxInt(8, m.width-20)
 	spark.Height = height
+	spark.Min = 0
+	spark.Max = 100
+	spark.AutoScale = false
 	spark.Color = "#88C0D0"
 	return spark.Render()
 }
@@ -101,7 +128,10 @@ func (m Model) renderCoreGrid(cpu collector.CPUInfo, width, maxRows int) string 
 	}
 	rows := (visible + columns - 1) / columns
 	cellWidth := width / columns
-	barWidth := cellWidth - 17
+	// Leave generous slack for the styled bar plus the numeric suffix. Some
+	// terminal renderers account for ANSI resets conservatively at exact-width
+	// boundaries, which otherwise wraps the percentage onto a second row.
+	barWidth := cellWidth - 25
 	if barWidth < 5 {
 		barWidth = 5
 	}
@@ -128,7 +158,11 @@ func (m Model) renderCoreGrid(cpu collector.CPUInfo, width, maxRows int) string 
 		lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, cells...))
 	}
 	if hidden := len(cpu.PerCoreUsage) - visible; hidden > 0 {
-		lines = append(lines, fmt.Sprintf("  +%d cores hidden · enlarge the terminal to inspect them", hidden))
+		note := fmt.Sprintf("  +%d cores hidden · enlarge the terminal to inspect them", hidden)
+		if width < 50 {
+			note = fmt.Sprintf("  +%d cores hidden", hidden)
+		}
+		lines = append(lines, note)
 	}
 	return strings.Join(lines, "\n")
 }

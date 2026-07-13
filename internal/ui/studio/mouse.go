@@ -54,14 +54,14 @@ func allTabViews() []viewID {
 // content while keeping numeric shortcuts discoverable.
 func (m Model) headerLayout() headerTabs {
 	full := headerTabs{
-		title:  fmt.Sprintf(" MONITOR  %s ", m.last.LastUpdate.Format("15:04:05")),
+		title:  " ",
 		labels: fullTabLabels,
 		views:  allTabViews(),
 	}
 	if m.width <= 0 || m.headerLayoutWidth(full) <= m.width {
 		return full
 	}
-	compact := headerTabs{title: " MONITOR ", labels: compactTabLabels, views: allTabViews(), compact: true}
+	compact := headerTabs{title: " ", labels: compactTabLabels, views: allTabViews(), compact: true}
 	if m.headerLayoutWidth(compact) <= m.width {
 		return compact
 	}
@@ -70,8 +70,8 @@ func (m Model) headerLayout() headerTabs {
 		idx = 0
 	}
 	return headerTabs{
-		title:  " MONITOR ‹tab› ",
-		labels: []string{fullTabLabels[idx]},
+		title:  " ",
+		labels: []string{fmt.Sprintf("‹ %s ›", fullTabLabels[idx])},
 		views:  []viewID{viewID(idx)},
 	}
 }

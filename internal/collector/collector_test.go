@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/abdul-hamid-achik/monitor/internal/capability"
 	"github.com/shirou/gopsutil/v4/load"
+	"github.com/shirou/gopsutil/v4/net"
+
+	"github.com/abdul-hamid-achik/monitor/internal/capability"
 )
 
 func TestNewDefaults(t *testing.T) {
@@ -232,6 +234,30 @@ func TestPerSecond(t *testing.T) {
 		if got := perSecond(c.prev, c.cur, c.elapsed); got != c.want {
 			t.Errorf("perSecond(%d, %d, %v) = %d, want %d", c.prev, c.cur, c.elapsed, got, c.want)
 		}
+	}
+}
+
+func TestCollectNetworkContainsCollectorPanic(t *testing.T) {
+	c := New(Options{
+		NetworkCounters: func(context.Context) ([]net.IOCountersStat, error) {
+			panic("malformed netstat output")
+		},
+	})
+	c.info.Network.MetricStates = make(map[string]MetricStatus)
+
+	c.collectNetwork(context.Background())
+
+	for _, metric := range []string{metricNetworkIO, metricNetworkRate} {
+		status := c.info.Network.MetricStates[metric]
+		if status.State != MetricUnavailable {
+			t.Fatalf("%s state = %q, want unavailable", metric, status.State)
+		}
+		if status.Reason != "network collector panic: malformed netstat output" {
+			t.Fatalf("%s reason = %q", metric, status.Reason)
+		}
+	}
+	if !c.info.Network.LastUpdate.IsZero() {
+		t.Fatal("failed network sample must not advance LastUpdate")
 	}
 }
 

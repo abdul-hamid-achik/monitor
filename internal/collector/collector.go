@@ -34,6 +34,10 @@ type Options struct {
 	// tests. Nil selects detection and gopsutil collection for the current host.
 	Capabilities *capability.Set
 	LoadAverage  func(context.Context) (*load.AvgStat, error)
+	// NetworkCounters is injectable because gopsutil shells out to netstat on
+	// macOS and has historically panicked on unexpected output. Nil selects
+	// the gopsutil aggregate counter implementation.
+	NetworkCounters func(context.Context) ([]net.IOCountersStat, error)
 }
 
 // Subscriber is a non-blocking callback invoked on every tick.
@@ -87,14 +91,15 @@ type Collector struct {
 	// goroutine and mutated WITHOUT mu (so slow IO doesn't block readers).
 	// published is the last consistent snapshot, swapped in under mu at the
 	// end of each Collect; Snapshot() reads only published.
-	mu           sync.RWMutex
-	info         SystemInfo
-	published    SystemInfo
-	lastNet      net.IOCountersStat
-	lastDisk     disk.IOCountersStat
-	capabilities capability.Set
-	loadAverage  func(context.Context) (*load.AvgStat, error)
-	intervalCh   chan time.Duration
+	mu              sync.RWMutex
+	info            SystemInfo
+	published       SystemInfo
+	lastNet         net.IOCountersStat
+	lastDisk        disk.IOCountersStat
+	capabilities    capability.Set
+	loadAverage     func(context.Context) (*load.AvgStat, error)
+	networkCounters func(context.Context) ([]net.IOCountersStat, error)
+	intervalCh      chan time.Duration
 
 	cpuHist     *RingBuffer[float64]
 	memHist     *RingBuffer[float64]
@@ -132,18 +137,25 @@ func New(opts Options) *Collector {
 	if loadAverage == nil {
 		loadAverage = load.AvgWithContext
 	}
+	networkCounters := opts.NetworkCounters
+	if networkCounters == nil {
+		networkCounters = func(ctx context.Context) ([]net.IOCountersStat, error) {
+			return net.IOCountersWithContext(ctx, false)
+		}
+	}
 	return &Collector{
-		opts:         opts,
-		subs:         make(map[int]Subscriber),
-		cpuHist:      NewRingBuffer[float64](opts.HistorySize),
-		memHist:      NewRingBuffer[float64](opts.HistorySize),
-		netDownHist:  NewRingBuffer[float64](opts.HistorySize),
-		netUpHist:    NewRingBuffer[float64](opts.HistorySize),
-		diskRHist:    NewRingBuffer[float64](opts.HistorySize),
-		diskWHist:    NewRingBuffer[float64](opts.HistorySize),
-		capabilities: caps,
-		loadAverage:  loadAverage,
-		intervalCh:   make(chan time.Duration, 1),
+		opts:            opts,
+		subs:            make(map[int]Subscriber),
+		cpuHist:         NewRingBuffer[float64](opts.HistorySize),
+		memHist:         NewRingBuffer[float64](opts.HistorySize),
+		netDownHist:     NewRingBuffer[float64](opts.HistorySize),
+		netUpHist:       NewRingBuffer[float64](opts.HistorySize),
+		diskRHist:       NewRingBuffer[float64](opts.HistorySize),
+		diskWHist:       NewRingBuffer[float64](opts.HistorySize),
+		capabilities:    caps,
+		loadAverage:     loadAverage,
+		networkCounters: networkCounters,
+		intervalCh:      make(chan time.Duration, 1),
 	}
 }
 
@@ -493,7 +505,7 @@ func perSecond(prev, cur uint64, elapsed float64) uint64 {
 }
 
 func (c *Collector) collectNetwork(ctx context.Context) {
-	counters, err := net.IOCountersWithContext(ctx, false)
+	counters, err := safeNetworkCounters(ctx, c.networkCounters)
 	if err != nil || len(counters) == 0 {
 		reason := "network collector returned no counters"
 		if err != nil {
@@ -528,6 +540,19 @@ func (c *Collector) collectNetwork(ctx context.Context) {
 	c.info.Network.UploadHistory = c.netUpHist.ToSlice()
 	c.lastNet = cur
 	c.info.Network.LastUpdate = now
+}
+
+// safeNetworkCounters contains panics from platform-specific parsers in the
+// third-party network collector. A malformed netstat line must degrade one
+// metric family, not crash long-running consumers such as Studio and watch.
+func safeNetworkCounters(ctx context.Context, collect func(context.Context) ([]net.IOCountersStat, error)) (counters []net.IOCountersStat, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			counters = nil
+			err = fmt.Errorf("network collector panic: %v", recovered)
+		}
+	}()
+	return collect(ctx)
 }
 
 func (c *Collector) collectDisk(ctx context.Context) {

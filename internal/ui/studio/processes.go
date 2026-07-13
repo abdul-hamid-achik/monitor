@@ -48,8 +48,10 @@ type killBatchResultMsg struct {
 }
 
 var procKeys = processKeyMap{
-	Kill:      key.NewBinding(key.WithKeys("k")),
-	ForceKill: key.NewBinding(key.WithKeys("x")),
+	// Destructive actions deliberately require Shift so the table's standard
+	// j/k navigation can never be mistaken for a termination request.
+	Kill:      key.NewBinding(key.WithKeys("K")),
+	ForceKill: key.NewBinding(key.WithKeys("X")),
 	SortCPU:   key.NewBinding(key.WithKeys("c")),
 	SortMem:   key.NewBinding(key.WithKeys("m")),
 	SelectAll: key.NewBinding(key.WithKeys("ctrl+a")),
@@ -61,10 +63,41 @@ func (m *Model) setupProcessTable() {
 	tbl := table.New(table.WithHeight(20))
 	m.processTable = &tbl
 	s := table.DefaultStyles()
-	s.Header = s.Header.Bold(true).Foreground(lipgloss.Color("#88C0D0"))
-	s.Selected = s.Selected.Foreground(lipgloss.Color("#2E3440")).Background(lipgloss.Color("#88C0D0")).Bold(true)
+	s.Header = s.Header.Bold(true).Foreground(m.theme.Accent)
+	s.Selected = s.Selected.Foreground(m.theme.SelectedFG).Background(m.theme.Accent).Bold(true)
 	m.processTable.SetStyles(s)
+	m.processTable.Focus()
 	m.configureProcessTable()
+}
+
+// processViewData is the single source of truth for process-table membership.
+// matched contains every process accepted by the system-process and text
+// filters; shown is the sorted, MaxProcesses-bounded subset that the user can
+// actually see and act on with select-all.
+type processViewData struct {
+	matched []collector.ProcessInfo
+	shown   []collector.ProcessInfo
+}
+
+func (m Model) currentProcessView() processViewData {
+	matched := m.filteredProcesses()
+	sort.SliceStable(matched, func(i, j int) bool {
+		cmp := m.compareProcesses(matched[i], matched[j])
+		if m.sortAsc {
+			return cmp < 0
+		}
+		return cmp > 0
+	})
+
+	shown := matched
+	maxProcs := config.DefaultSettings.MaxProcesses
+	if m.settings != nil && m.settings.MaxProcesses > 0 {
+		maxProcs = m.settings.MaxProcesses
+	}
+	if maxProcs > 0 && len(shown) > maxProcs {
+		shown = shown[:maxProcs]
+	}
+	return processViewData{matched: matched, shown: shown}
 }
 
 // processSpecsForWidth progressively removes secondary columns and assigns
@@ -119,33 +152,44 @@ func (m *Model) configureProcessTable() {
 	if m.processTable == nil {
 		return
 	}
+	selectedPID, preserveSelection := m.selectedRowPID()
 	specs := processSpecsForWidth(m.width)
 	cols := make([]table.Column, 0, len(specs))
 	for _, spec := range specs {
 		cols = append(cols, table.Column{Title: spec.title, Width: spec.width})
 	}
+	// Bubbles renders its viewport immediately in SetColumns. Old rows may have
+	// more cells than the new responsive schema, and renderRow indexes columns
+	// by row-cell index. Clear the old schema first, then rebuild matching rows.
+	m.processTable.SetRows(nil)
 	m.processTable.SetColumns(cols)
+	m.updateProcessTable()
+
+	rows := m.processTable.Rows()
+	if len(rows) == 0 {
+		return
+	}
+	cursor := 0
+	if preserveSelection {
+		for i, row := range rows {
+			if len(row) == 0 {
+				continue
+			}
+			var pid int32
+			if _, err := fmt.Sscanf(row[0], "%d", &pid); err == nil && pid == selectedPID {
+				cursor = i
+				break
+			}
+		}
+	}
+	m.processTable.SetCursor(cursor)
 }
 
 func (m *Model) updateProcessTable() {
 	if m.processTable == nil {
 		return
 	}
-	procs := m.filteredProcesses()
-	sort.SliceStable(procs, func(i, j int) bool {
-		cmp := m.compareProcesses(procs[i], procs[j])
-		if m.sortAsc {
-			return cmp < 0
-		}
-		return cmp > 0
-	})
-	maxProcs := config.DefaultSettings.MaxProcesses
-	if m.settings != nil && m.settings.MaxProcesses > 0 {
-		maxProcs = m.settings.MaxProcesses
-	}
-	if maxProcs > 0 && len(procs) > maxProcs {
-		procs = procs[:maxProcs]
-	}
+	procs := m.currentProcessView().shown
 	specs := processSpecsForWidth(m.width)
 	rows := make([]table.Row, 0, len(procs))
 	for _, p := range procs {
@@ -159,6 +203,12 @@ func (m *Model) updateProcessTable() {
 	// a filter that matches nothing renders the empty-state message
 	// instead of the previously displayed processes.
 	m.processTable.SetRows(rows)
+	// Bubbles moves the cursor to -1 when rows become empty but does not move it
+	// back when data later returns. Normalize it so Enter and navigation work
+	// after startup, a cleared filter, or a responsive schema rebuild.
+	if len(rows) > 0 && m.processTable.Cursor() < 0 {
+		m.processTable.SetCursor(0)
+	}
 }
 
 func (m Model) processCell(p collector.ProcessInfo, spec processColumnSpec) string {
@@ -317,7 +367,7 @@ func (m Model) handleProcessKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.processDetailVisible = true
 		return m, nil
 	case key.Matches(msg, procKeys.SelectAll):
-		for _, p := range m.filteredProcesses() {
+		for _, p := range m.currentProcessView().shown {
 			m.selectedPids[p.PID] = true
 		}
 		m.updateProcessTable()
@@ -494,7 +544,7 @@ func formatKillBatchResult(msg killBatchResultMsg) string {
 		parts = append(parts, fmt.Sprintf("terminated %d", terminated))
 	}
 	if running > 0 {
-		parts = append(parts, fmt.Sprintf("still running %d (use x to force)", running))
+		parts = append(parts, fmt.Sprintf("still running %d (use X to force)", running))
 	}
 	if unknown > 0 {
 		parts = append(parts, fmt.Sprintf("unverified %d", unknown))
@@ -525,18 +575,23 @@ func (m Model) renderProcesses() string {
 	if m.sortAsc {
 		direction = "↑"
 	}
-	visible := len(m.filteredProcesses())
-	title := fmt.Sprintf(" Processes · %d shown · sort %s%s ", visible, m.sortBy, direction)
+	processes := m.currentProcessView()
+	shown, matched := len(processes.shown), len(processes.matched)
+	title := fmt.Sprintf(" Processes · %d shown", shown)
+	if matched > shown {
+		title += fmt.Sprintf(" · %d matched", matched)
+	}
+	title += fmt.Sprintf(" · sort %s%s ", m.sortBy, direction)
 	if len(m.selectedPids) > 0 {
 		title += fmt.Sprintf("· %d selected ", len(m.selectedPids))
 	}
 	content = append(content, m.titleStyle.Render(title))
 	if m.processSearch {
-		content = append(content, lipgloss.NewStyle().Foreground(lipgloss.Color("#88C0D0")).Render(" Filter: ")+lipgloss.NewStyle().Foreground(lipgloss.Color("#D8DEE9")).Render(m.searchQuery)+"_  ·  enter apply  esc cancel  ctrl+u clear")
+		content = append(content, lipgloss.NewStyle().Foreground(m.theme.Accent).Render(" Filter: ")+lipgloss.NewStyle().Foreground(m.theme.Text).Render(m.searchQuery)+"_  ·  enter apply  esc cancel  ctrl+u clear")
 	} else if m.searchQuery != "" {
-		content = append(content, fmt.Sprintf(" Filter: %q · %d match(es) · / edit", m.searchQuery, visible))
+		content = append(content, fmt.Sprintf(" Filter: %q · %d match(es) · / edit", m.searchQuery, matched))
 	} else {
-		content = append(content, " ↑/↓ navigate  ·  enter details  ·  space select  ·  / filter  ·  c/m sort  ·  k/x terminate")
+		content = append(content, " ↑/↓ or j/k navigate  ·  enter details  ·  space select  ·  / filter  ·  c/m sort  ·  K/X terminate")
 	}
 	content = append(content, "")
 	if m.processTable != nil && len(m.processTable.Rows()) > 0 {
@@ -565,45 +620,141 @@ func (m Model) renderProcesses() string {
 	body := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, panel)
 	if m.showKillConfirm {
 		dialog := m.renderKillConfirmation()
-		body = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, dialog)
+		body = lipgloss.Place(m.width, m.processContentHeight(), lipgloss.Center, lipgloss.Center, dialog)
 	}
 	return body
 }
 
+func (m Model) processContentHeight() int {
+	headerHeight := lipgloss.Height(m.renderHeader())
+	if headerHeight < 1 {
+		headerHeight = 1
+	}
+	height := m.height - headerHeight - 1 // footer
+	if height < 1 {
+		height = 1
+	}
+	return height
+}
+
 func (m Model) renderKillConfirmation() string {
-	var lines []string
-	killType := "TERMINATE (SIGTERM)"
-	if m.forceKill {
-		killType = "FORCE KILL (SIGKILL)"
+	style := lipgloss.NewStyle().
+		Border(lipgloss.ThickBorder()).
+		BorderForeground(m.theme.Critical).
+		Padding(1, 2)
+	dialogWidth := m.width - 4
+	if dialogWidth > 76 {
+		dialogWidth = 76
 	}
-	lines = append(lines, fmt.Sprintf("⚠️  %s CONFIRMATION", killType), "")
-	lines = append(lines, fmt.Sprintf("  You are about to terminate %d process(es):", len(m.killConf.Processes)), "")
+	if dialogWidth < style.GetHorizontalFrameSize()+1 {
+		dialogWidth = style.GetHorizontalFrameSize() + 1
+	}
+	textWidth := dialogWidth - style.GetHorizontalFrameSize()
+
+	eligible, blocked := 0, 0
 	for _, p := range m.killConf.Processes {
-		safety := "✓ OK"
-		if p.IsProtected {
-			safety = "🛓 CRITICAL"
-		} else if p.IsSystem {
-			safety = "⚠️  CAUTION"
+		if p.IsProtected || p.IsSystem {
+			blocked++
+		} else {
+			eligible++
 		}
-		lines = append(lines, fmt.Sprintf("    PID %d: %s (%s)", p.PID, p.Name, safety))
 	}
-	lines = append(lines, "")
+
+	title := " TERMINATE (SIGTERM) CONFIRMATION "
 	if m.forceKill {
-		lines = append(lines, "  ⚠️  FORCE KILL will not allow the process to clean up!")
-		lines = append(lines, "  Press 'y' to FORCE KILL, 'n' to cancel")
-	} else {
-		lines = append(lines, "  Press 'y' to confirm, 'n' to cancel")
+		title = " FORCE KILL (SIGKILL) CONFIRMATION "
 	}
-	return lipgloss.NewStyle().Border(lipgloss.ThickBorder()).BorderForeground(lipgloss.Color("#BF616A")).Padding(1, 2).Render(strings.Join(lines, "\n"))
+	if textWidth < 38 {
+		if m.forceKill {
+			title = " FORCE KILL CONFIRMATION "
+		} else {
+			title = " TERMINATE CONFIRMATION "
+		}
+	}
+
+	summary := fmt.Sprintf("  %d requested · %d eligible · %d blocked", len(m.killConf.Processes), eligible, blocked)
+	if textWidth < 48 {
+		summary = fmt.Sprintf("%d eligible · %d blocked", eligible, blocked)
+	}
+	prompt := "  y confirm terminate · n/Esc cancel"
+	if m.forceKill {
+		prompt = "  y confirm force kill · n/Esc cancel"
+	}
+	if textWidth < 42 {
+		prompt = "  y confirm · n/Esc cancel"
+	}
+
+	prefix := []string{truncateStr(title, textWidth), "", truncateStr(summary, textWidth), ""}
+	suffix := []string{"", truncateStr(prompt, textWidth)}
+	if m.forceKill {
+		warning := "  SIGKILL does not allow process cleanup"
+		if textWidth < 42 {
+			warning = "  SIGKILL: no cleanup"
+		}
+		suffix = []string{"", truncateStr(warning, textWidth), truncateStr(prompt, textWidth)}
+	}
+
+	// Border + padding consume the style's vertical frame; every remaining
+	// content line is explicitly budgeted so the confirmation prompt cannot be
+	// clipped below either the compact or full shell.
+	textBudget := m.processContentHeight() - style.GetVerticalFrameSize()
+	if textBudget < 1 {
+		textBudget = 1
+	}
+	lines := make([]string, 0, textBudget)
+	minimum := len(prefix) + len(suffix)
+	if textBudget < minimum {
+		compact := []string{truncateStr(summary, textWidth)}
+		if len(m.killConf.Processes) > 0 {
+			compact = append(compact, truncateStr(fmt.Sprintf("... %d process row(s) hidden", len(m.killConf.Processes)), textWidth))
+		}
+		compact = append(compact, truncateStr(prompt, textWidth))
+		if len(compact) > textBudget {
+			compact = compact[len(compact)-textBudget:]
+		}
+		lines = append(lines, compact...)
+	} else {
+		lines = append(lines, prefix...)
+		rowBudget := textBudget - minimum
+		visibleRows := len(m.killConf.Processes)
+		if visibleRows > rowBudget {
+			// Reserve one row to make truncation explicit.
+			visibleRows = rowBudget - 1
+			if visibleRows < 0 {
+				visibleRows = 0
+			}
+		}
+		for _, p := range m.killConf.Processes[:visibleRows] {
+			lines = append(lines, killConfirmationProcessLine(p, textWidth))
+		}
+		if omitted := len(m.killConf.Processes) - visibleRows; omitted > 0 {
+			lines = append(lines, truncateStr(fmt.Sprintf("  ... %d more not shown", omitted), textWidth))
+		}
+		lines = append(lines, suffix...)
+	}
+
+	return style.Width(dialogWidth).Render(strings.Join(lines, "\n"))
+}
+
+func killConfirmationProcessLine(p collector.ProcessInfo, width int) string {
+	label := "ELIGIBLE"
+	if p.IsProtected || p.IsSystem {
+		label = "BLOCKED "
+	}
+	prefix := fmt.Sprintf("  [%-8s] PID %6d ", label, p.PID)
+	return prefix + truncateStr(p.Name, width-len([]rune(prefix)))
 }
 
 func truncateStr(s string, maxLen int) string {
-	if maxLen <= 3 {
-		return s
-	}
 	runes := []rune(s)
+	if maxLen <= 0 {
+		return ""
+	}
 	if len(runes) <= maxLen {
 		return s
+	}
+	if maxLen <= 3 {
+		return string(runes[:maxLen])
 	}
 	return string(runes[:maxLen-3]) + "..."
 }

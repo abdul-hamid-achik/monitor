@@ -135,8 +135,62 @@ func TestProcessDetailHandlesExitedPIDAndNarrowTerminal(t *testing.T) {
 	if width := lipgloss.Width(content); width > m.width {
 		t.Fatalf("narrow detail width=%d exceeds terminal width=%d", width, m.width)
 	}
-	if height := lipgloss.Height(content); height != m.height-2 {
-		t.Fatalf("detail height=%d, want content height=%d", height, m.height-2)
+	if height := lipgloss.Height(content); height != m.height-3 {
+		t.Fatalf("detail height=%d, want content height=%d", height, m.height-3)
+	}
+}
+
+func TestProcessDetailBoundedAtShortTerminalSizes(t *testing.T) {
+	longReason := "permission denied while reading a deliberately long platform-specific process metric reason that must remain bounded"
+	for _, size := range []struct {
+		name          string
+		width, height int
+		wantTwoColumn bool
+	}{
+		{name: "standard-short", width: 80, height: 24, wantTwoColumn: true},
+		{name: "compact-short", width: 40, height: 18, wantTwoColumn: false},
+	} {
+		t.Run(size.name, func(t *testing.T) {
+			m := processDetailFixture(t)
+			m.width, m.height = size.width, size.height
+			m.processDetailVisible = true
+			m.processDetailPID = 42
+			p := &m.last.Processes[0]
+			p.Status = ""
+			p.MetricStates = map[string]collector.MetricStatus{
+				"status":         {State: collector.MetricUnavailable, Reason: longReason},
+				"cpu":            {State: collector.MetricUnavailable, Reason: longReason},
+				"memory":         {State: collector.MetricUnavailable, Reason: longReason},
+				"memory_percent": {State: collector.MetricUnavailable, Reason: longReason},
+				"threads":        {State: collector.MetricUnavailable, Reason: longReason},
+			}
+
+			content := m.renderProcessDetail()
+			plain := ansi.Strip(content)
+			budget := size.height - 3
+			if got := lipgloss.Width(content); got > size.width {
+				t.Fatalf("detail width=%d exceeds terminal width=%d:\n%s", got, size.width, plain)
+			}
+			if got := lipgloss.Height(content); got != budget {
+				t.Fatalf("detail height=%d, want bounded content height=%d:\n%s", got, budget, plain)
+			}
+			for _, want := range []string{"Protection", "USER", "close", "refresh", "help"} {
+				if !strings.Contains(plain, want) {
+					t.Errorf("bounded detail missing %q:\n%s", want, plain)
+				}
+			}
+
+			twoColumn := false
+			for _, line := range strings.Split(plain, "\n") {
+				if strings.Contains(line, "Identity") && strings.Contains(line, "Resources") {
+					twoColumn = true
+					break
+				}
+			}
+			if twoColumn != size.wantTwoColumn {
+				t.Errorf("two-column layout=%v, want %v:\n%s", twoColumn, size.wantTwoColumn, plain)
+			}
+		})
 	}
 }
 

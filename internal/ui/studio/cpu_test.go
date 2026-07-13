@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/lipgloss/v2"
+
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 )
 
@@ -64,6 +66,35 @@ func TestCPUEmptyStatesGiveNextAction(t *testing.T) {
 	for _, want := range []string{"No CPU history yet", "next refresh", "No per-core samples yet", "press r to refresh"} {
 		if !strings.Contains(content, want) {
 			t.Errorf("CPU empty state missing %q; got:\n%s", want, content)
+		}
+	}
+}
+
+func TestCPUShortLayoutKeepsCoreFactsVisible(t *testing.T) {
+	for _, size := range []struct{ width, height int }{{80, 24}, {40, 18}} {
+		m := NewModelWithOptions(Options{DisableTemperatureSource: true})
+		t.Cleanup(m.cancel)
+		m.width, m.height = size.width, size.height
+		m.last.LastUpdate = time.Now()
+		m.last.CPU = collector.CPUInfo{
+			UsagePercent: 62.5,
+			FrequencyMHz: 3200,
+			CoreCount:    10,
+			ThreadCount:  10,
+			PerCoreUsage: []float64{20, 30, 40, 50, 60, 70, 80, 30, 20, 10},
+			History:      []float64{20, 35, 50, 62.5},
+		}
+		content := m.renderCPU()
+		if got := lipgloss.Width(content); got > size.width {
+			t.Errorf("%dx%d CPU width = %d", size.width, size.height, got)
+		}
+		if got, budget := lipgloss.Height(content), size.height-3; got > budget {
+			t.Errorf("%dx%d CPU height = %d, content budget = %d:\n%s", size.width, size.height, got, budget, content)
+		}
+		for _, want := range []string{"CPU Usage History", "Per-Core Usage", "62.5% total"} {
+			if !strings.Contains(content, want) {
+				t.Errorf("%dx%d CPU view missing %q", size.width, size.height, want)
+			}
 		}
 	}
 }

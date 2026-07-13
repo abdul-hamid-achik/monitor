@@ -1,6 +1,7 @@
 package widgets
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -143,5 +144,22 @@ func TestBarGaugeColorFunc(t *testing.T) {
 
 	if result == "" {
 		t.Error("Expected non-empty render output with ColorFunc")
+	}
+}
+
+func TestGaugesContainInvalidGeometryAndValues(t *testing.T) {
+	if got := (&BarGauge{Value: 50, Max: 100, Width: -4}).Render(); got != "" {
+		t.Fatalf("negative-width bar = %q, want empty", got)
+	}
+	if got := (&MiniGauge{Value: 50, Max: 100, Width: 0}).Render(); got != "" {
+		t.Fatalf("zero-width mini gauge = %q, want empty", got)
+	}
+
+	bar := &BarGauge{Value: math.NaN(), Max: math.Inf(1), Width: 8, ShowPercent: true}
+	if got := bar.Render(); got == "" || !strings.Contains(got, "0.0%") {
+		t.Fatalf("non-finite bar should degrade to zero, got %q", got)
+	}
+	if !math.IsInf(bar.Max, 1) {
+		t.Fatal("Render must not mutate caller-owned Max")
 	}
 }

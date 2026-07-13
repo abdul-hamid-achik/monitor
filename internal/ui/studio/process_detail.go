@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 )
@@ -13,52 +14,72 @@ import (
 // intentionally modal so a key intended to dismiss or inspect it cannot
 // trigger a destructive action in the process table underneath.
 func (m Model) renderProcessDetail() string {
-	panelWidth := m.width - 8
+	panelWidth := m.width - 4
 	if panelWidth > 86 {
 		panelWidth = 86
 	}
-	if panelWidth < 24 {
-		panelWidth = 24
+	if panelWidth < 20 {
+		panelWidth = 20
 	}
+	if m.width > 0 && panelWidth > m.width {
+		panelWidth = m.width
+	}
+	contentWidth := maxInt(1, panelWidth-m.panelStyle.GetHorizontalFrameSize())
+	contentBudget := m.processDetailContentBudget()
+	short := contentBudget <= 21
 
 	p, ok := m.processByPID(m.processDetailPID)
 	if !ok {
 		body := lipgloss.JoinVertical(lipgloss.Left,
-			m.titleStyle.Render(fmt.Sprintf(" Process Detail · PID %d ", m.processDetailPID)),
+			detailFitLine(m.titleStyle.Render(fmt.Sprintf(" Process Detail · PID %d ", m.processDetailPID)), contentWidth),
 			"",
-			"  This process is no longer present in the latest snapshot.",
-			"  It may have exited, or process collection may be unavailable.",
+			detailFitLine("This process is no longer present in the latest snapshot.", contentWidth),
+			detailFitLine("It may have exited or process collection may be unavailable.", contentWidth),
 			"",
-			m.processDetailFooter(),
+			m.processDetailFooter(contentWidth),
 		)
 		return m.centerProcessDetail(m.panelStyle.Width(panelWidth).Render(body))
 	}
 
-	safety, safetyNote := processSafety(p)
+	// A short narrow terminal gets a prioritized, single-line metric list.
+	// This guarantees that safety policy and controls stay visible without
+	// introducing modal scrolling state.
+	if short && m.width < 78 {
+		body := m.renderCompactProcessDetail(p, contentWidth)
+		return m.centerProcessDetail(m.panelStyle.Width(panelWidth).Render(body))
+	}
+
+	safety, safetyNote := m.processSafety(p)
 	title := fmt.Sprintf(" Process Detail · %s · PID %d ", displayProcessName(p), p.PID)
 	twoColumn := m.width >= 78
-	rowWidth := panelWidth
+	rowWidth := contentWidth
 	if twoColumn {
-		rowWidth = (panelWidth - 3) / 2
+		rowWidth = (contentWidth - 2) / 2
+	}
+	row := detailRow
+	if short {
+		// Long unavailable reasons are useful in a tall detail view, but must
+		// stay on one line in a bounded short-terminal presentation.
+		row = detailRowSingle
 	}
 	identity := []string{
 		m.titleStyle.Render(" Identity "),
 		"",
-		detailRow("PID", fmt.Sprintf("%d", p.PID), rowWidth),
-		detailRow("Name", processStringMetric(p, "name", p.Name, "process name was not reported"), rowWidth),
-		detailRow("User", processStringMetric(p, "user", p.User, "process owner was not reported"), rowWidth),
-		detailRow("Status", processStatusMetric(p), rowWidth),
-		detailRow("Parent", processParentMetric(p), rowWidth),
+		row("PID", fmt.Sprintf("%d", p.PID), rowWidth),
+		row("Name", processStringMetric(p, "name", p.Name, "process name was not reported"), rowWidth),
+		row("User", processStringMetric(p, "user", p.User, "process owner was not reported"), rowWidth),
+		row("Status", processStatusMetric(p), rowWidth),
+		row("Parent", processParentMetric(p), rowWidth),
 	}
 	resources := []string{
 		m.titleStyle.Render(" Resources "),
 		"",
-		detailRow("CPU", processMetric(p, []string{"cpu"}, fmt.Sprintf("%.1f%%", p.CPUPercent)), rowWidth),
-		detailRow("RSS", processMetric(p, []string{"memory"}, collector.FormatBytes(p.Memory)), rowWidth),
-		detailRow("Mem share", processMetric(p, []string{"memory_percent"}, fmt.Sprintf("%.1f%%", p.MemoryPercent)), rowWidth),
-		detailRow("I/O read", processMetric(p, []string{"io_read", "io"}, collector.FormatBytes(p.IOReadBytes)), rowWidth),
-		detailRow("I/O write", processMetric(p, []string{"io_write", "io"}, collector.FormatBytes(p.IOWriteBytes)), rowWidth),
-		detailRow("Threads", processMetric(p, []string{"threads"}, fmt.Sprintf("%d", p.Threads)), rowWidth),
+		row("CPU", processMetric(p, []string{"cpu"}, fmt.Sprintf("%.1f%%", p.CPUPercent)), rowWidth),
+		row("RSS", processMetric(p, []string{"memory"}, collector.FormatBytes(p.Memory)), rowWidth),
+		row("Mem share", processMetric(p, []string{"memory_percent"}, fmt.Sprintf("%.1f%%", p.MemoryPercent)), rowWidth),
+		row("I/O read", processMetric(p, []string{"io_read", "io"}, collector.FormatBytes(p.IOReadBytes)), rowWidth),
+		row("I/O write", processMetric(p, []string{"io_write", "io"}, collector.FormatBytes(p.IOWriteBytes)), rowWidth),
+		row("Threads", processMetric(p, []string{"threads"}, fmt.Sprintf("%d", p.Threads)), rowWidth),
 	}
 
 	var metrics string
@@ -70,17 +91,24 @@ func (m Model) renderProcessDetail() string {
 		metrics = lipgloss.JoinVertical(lipgloss.Left, strings.Join(identity, "\n"), "", strings.Join(resources, "\n"))
 	}
 
-	safetyLine := fmt.Sprintf("  Protection  %s · %s", safety, safetyNote)
+	safetyLine := detailFitLine(fmt.Sprintf("  Protection  %s · %s", safety, safetyNote), contentWidth)
 	body := lipgloss.JoinVertical(lipgloss.Left,
-		m.titleStyle.Render(title),
+		detailFitLine(m.titleStyle.Render(title), contentWidth),
 		"",
 		metrics,
 		"",
 		safetyLine,
 		"",
-		m.processDetailFooter(),
+		m.processDetailFooter(contentWidth),
 	)
-	return m.centerProcessDetail(m.panelStyle.Width(panelWidth).Render(body))
+	panel := m.panelStyle.Width(panelWidth).Render(body)
+	if lipgloss.Height(panel) > contentBudget {
+		// Defensive fallback for unusually verbose platform reasons. The
+		// compact body is intentionally complete enough to diagnose and safe
+		// enough to act, while remaining bounded.
+		panel = m.panelStyle.Width(panelWidth).Render(m.renderCompactProcessDetail(p, contentWidth))
+	}
+	return m.centerProcessDetail(panel)
 }
 
 func (m Model) centerProcessDetail(panel string) string {
@@ -88,17 +116,47 @@ func (m Model) centerProcessDetail(panel string) string {
 	if width < 1 {
 		width = lipgloss.Width(panel)
 	}
-	height := m.height - 2 // header and status bar remain visible
+	height := m.processDetailContentBudget()
 	if height < 1 {
 		height = lipgloss.Height(panel)
 	}
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, panel)
 }
 
-func (m Model) processDetailFooter() string {
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("#A3BE8C")).Render(
-		"  Enter / Esc / q close  ·  r refresh  ·  ? help",
-	)
+func (m Model) processDetailContentBudget() int {
+	// Studio's frame reserves two header rows and one footer row.
+	return m.height - 3
+}
+
+func (m Model) renderCompactProcessDetail(p collector.ProcessInfo, width int) string {
+	safety, _ := m.processSafety(p)
+	safetyAction := "confirm"
+	if p.IsProtected || p.IsSystem {
+		safetyAction = "blocked"
+	}
+	rows := []string{
+		detailFitLine(m.titleStyle.Render(fmt.Sprintf(" Process Detail · %s · PID %d ", displayProcessName(p), p.PID)), width),
+		detailRowSingle("PID", fmt.Sprintf("%d", p.PID), width),
+		detailRowSingle("Name", processStringMetric(p, "name", p.Name, "process name was not reported"), width),
+		detailRowSingle("User", processStringMetric(p, "user", p.User, "process owner was not reported"), width),
+		detailRowSingle("Status", processStatusMetric(p), width),
+		detailRowSingle("Parent", processParentMetric(p), width),
+		detailRowSingle("CPU", processMetric(p, []string{"cpu"}, fmt.Sprintf("%.1f%%", p.CPUPercent)), width),
+		detailRowSingle("RSS", processMetric(p, []string{"memory"}, collector.FormatBytes(p.Memory)), width),
+		detailRowSingle("Mem share", processMetric(p, []string{"memory_percent"}, fmt.Sprintf("%.1f%%", p.MemoryPercent)), width),
+		detailRowSingle("Threads", processMetric(p, []string{"threads"}, fmt.Sprintf("%d", p.Threads)), width),
+		detailFitLine(fmt.Sprintf("  Protection  %s · %s", safety, safetyAction), width),
+		m.processDetailFooter(width),
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
+}
+
+func (m Model) processDetailFooter(width int) string {
+	text := "  Enter / Esc / q close | r refresh | ? help"
+	if width < 46 {
+		text = "Esc close | r refresh | ? help"
+	}
+	return lipgloss.NewStyle().Foreground(m.theme.Good).Render(detailFitLine(text, width))
 }
 
 func (m Model) processByPID(pid int32) (collector.ProcessInfo, bool) {
@@ -128,10 +186,34 @@ func detailRow(label, value string, width int) string {
 	return strings.Join(lines, "\n")
 }
 
+// detailRowSingle is the bounded counterpart to detailRow. It keeps the
+// label and the most useful prefix of a value on one terminal row.
+func detailRowSingle(label, value string, width int) string {
+	prefix := fmt.Sprintf("  %-10s ", label)
+	if width <= len([]rune(prefix)) {
+		return detailFitLine(strings.TrimSpace(label)+" "+value, width)
+	}
+	return prefix + detailFitLine(value, width-len([]rune(prefix)))
+}
+
+func detailFitLine(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(value) <= width {
+		return value
+	}
+	tail := ""
+	if width >= 4 {
+		tail = "..."
+	}
+	return ansi.Truncate(value, width, tail)
+}
+
 func wrapDetailValue(value string, width int) []string {
 	words := strings.Fields(value)
 	if len(words) == 0 {
-		return []string{"—"}
+		return []string{"-"}
 	}
 	var lines []string
 	current := ""
@@ -244,13 +326,13 @@ func processMetricIssue(p collector.ProcessInfo, key string) string {
 	return "unavailable · " + reason
 }
 
-func processSafety(p collector.ProcessInfo) (string, string) {
+func (m Model) processSafety(p collector.ProcessInfo) (string, string) {
 	switch {
 	case p.IsProtected:
-		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#BF616A")).Render("PROTECTED"), "termination is blocked"
+		return lipgloss.NewStyle().Bold(true).Foreground(m.theme.Critical).Render("PROTECTED"), "termination is blocked"
 	case p.IsSystem:
-		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#EBCB8B")).Render("SYSTEM"), "termination is blocked by policy"
+		return lipgloss.NewStyle().Bold(true).Foreground(m.theme.Warning).Render("SYSTEM"), "termination is blocked by policy"
 	default:
-		return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#A3BE8C")).Render("USER"), "termination requires confirmation"
+		return lipgloss.NewStyle().Bold(true).Foreground(m.theme.Good).Render("USER"), "termination requires confirmation"
 	}
 }

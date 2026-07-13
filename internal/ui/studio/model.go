@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/abdul-hamid-achik/monitor/internal/analyzer"
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/config"
 	"github.com/abdul-hamid-achik/monitor/internal/history"
@@ -34,27 +35,30 @@ const (
 )
 
 type Model struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	collector   *collector.Collector
-	unsubscribe func()
+	ctx       context.Context
+	cancel    context.CancelFunc
+	collector *collector.Collector
+	analyzer  *analyzer.Engine
 
-	width, height int
-	ready         bool
-	quitting      bool
-	view          viewID
-	paused        bool
-	helpVisible   bool
+	width, height  int
+	ready          bool
+	quitting       bool
+	view           viewID
+	paused         bool
+	helpVisible    bool
+	darkBackground bool
 
 	settings *config.Settings
 
-	last collector.SystemInfo
+	last   collector.SystemInfo
+	alerts []collector.Alert
 
 	titleStyle  lipgloss.Style
 	panelStyle  lipgloss.Style
 	statusStyle lipgloss.Style
 	tabActive   lipgloss.Style
 	tabInactive lipgloss.Style
+	theme       studioTheme
 
 	processTable         *table.Model
 	selectedPids         map[int32]bool
@@ -125,6 +129,12 @@ func NewModelWithOptions(opts Options) Model {
 		interval = time.Second
 	}
 	c := collector.New(collector.Options{Interval: interval, HistorySize: 60})
+	engine := analyzer.NewEngine()
+	engine.AddRule(&analyzer.CPUSpikeRule{})
+	engine.AddRule(&analyzer.RSSGrowthRule{})
+	engine.AddRule(&analyzer.DiskFillRule{})
+	engine.AddRule(&analyzer.SwapPressureRule{})
+	engine.AddRule(&analyzer.ZombieRule{})
 
 	if !opts.DisableTemperatureSource {
 		ts := temperature.New(ctx, temperature.Options{
@@ -137,39 +147,24 @@ func NewModelWithOptions(opts Options) Model {
 		})
 	}
 
-	panelStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#3B4252")).
-		Padding(0, 1)
-
 	m := Model{
 		ctx:          ctx,
 		cancel:       cancel,
 		collector:    c,
+		analyzer:     engine,
 		settings:     settings,
 		view:         viewOverview,
 		selectedPids: make(map[int32]bool),
 		sortBy:       "cpu",
 		sortAsc:      false,
-		titleStyle:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#88C0D0")),
-		panelStyle:   panelStyle,
-		statusStyle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#D8DEE9")).
-			Background(lipgloss.Color("#2E3440")).
-			Bold(true),
-		tabActive:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#88C0D0")).Padding(0, 1),
-		tabInactive: lipgloss.NewStyle().Foreground(lipgloss.Color("#4C566A")).Padding(0, 1),
 	}
+	m.applyTheme(true)
 	m.setupProcessTable()
-	// Register the collector subscription here (on the model that is actually
-	// run) so m.unsubscribe is persisted and the quit-time cleanup can fire.
-	// Init() has a value receiver, so assigning there would be discarded.
-	m.unsubscribe = c.Subscribe(func(ev collector.Event) {})
 	return m
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.tickCmd(), m.startCollectorCmd())
+	return tea.Batch(m.tickCmd(), m.startCollectorCmd(), tea.RequestBackgroundColor)
 }
 
 func (m Model) tickCmd() tea.Cmd {
@@ -196,23 +191,30 @@ type externalReloadMsg struct{}
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.BackgroundColorMsg:
+		m.applyTheme(msg.IsDark())
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.ready = true
 		if m.processTable != nil {
-			overhead := 10
-			if m.height-overhead > 5 {
-				m.processTable.SetHeight(m.height - overhead)
+			tableHeight := m.height - 11
+			if tableHeight < 1 {
+				tableHeight = 1
 			}
-			if m.width > 6 {
-				m.processTable.SetWidth(m.width - 6)
+			tableWidth := m.width - 6
+			if tableWidth < 1 {
+				tableWidth = 1
 			}
+			m.processTable.SetHeight(tableHeight)
+			m.processTable.SetWidth(tableWidth)
 			m.configureProcessTable()
 		}
 		return m, nil
 	case tickMsg:
 		if !m.paused {
 			m.last = m.collector.Snapshot()
+			m.observeSnapshot()
 			if m.view == viewProcesses {
 				m.updateProcessTable()
 			}
@@ -240,6 +242,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// snapshot and redraw now rather than waiting for another UI tick.
 		if !m.paused {
 			m.last = m.collector.Snapshot()
+			m.observeSnapshot()
 			if m.view == viewProcesses {
 				m.updateProcessTable()
 			}
@@ -263,9 +266,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "ctrl+c":
 				m.quitting = true
-				if m.unsubscribe != nil {
-					m.unsubscribe()
-				}
 				m.cancel()
 				return m, tea.Quit
 			default:
@@ -289,9 +289,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "ctrl+c":
 				m.quitting = true
-				if m.unsubscribe != nil {
-					m.unsubscribe()
-				}
 				m.cancel()
 				return m, tea.Quit
 			default:
@@ -299,11 +296,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		switch msg.Keystroke() {
-		case "q", "ctrl+c", "esc":
+		case "q", "ctrl+c":
 			m.quitting = true
-			if m.unsubscribe != nil {
-				m.unsubscribe()
-			}
 			m.cancel()
 			return m, tea.Quit
 		case "?":
@@ -364,8 +358,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseClickMsg:
-		// A click on the header row (line 0) switches to the clicked tab.
-		if msg.Mouse().Y == 0 {
+		// The identity bar occupies row 0; navigation lives on row 1.
+		if msg.Mouse().Y == 1 {
 			if v, ok := m.headerTabAt(msg.Mouse().X); ok {
 				m.view = v
 				return m, nil
@@ -389,12 +383,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) refreshNow() {
 	m.last = m.collector.Snapshot()
+	m.observeSnapshot()
 	if m.view == viewProcesses {
 		m.updateProcessTable()
 	}
 	if m.view == viewTrends {
 		m.refreshTrends()
 	}
+}
+
+func (m *Model) observeSnapshot() {
+	if m.analyzer == nil || m.last.LastUpdate.IsZero() {
+		return
+	}
+	m.alerts = m.analyzer.Observe(collector.Event{
+		Timestamp: m.last.LastUpdate,
+		Hostname:  m.last.Hostname,
+		CPU:       m.last.CPU,
+		Memory:    m.last.Memory,
+		Network:   m.last.Network,
+		Disk:      m.last.Disk,
+		Processes: m.last.Processes,
+	})
 }
 
 func (m Model) View() tea.View {
@@ -409,6 +419,9 @@ func (m Model) View() tea.View {
 	body := m.render()
 	v := tea.NewView(body)
 	v.AltScreen = true
+	v.BackgroundColor = m.theme.Background
+	v.ForegroundColor = m.theme.Text
+	v.WindowTitle = "Monitor Studio"
 	if m.settings != nil && m.settings.MouseEnabled {
 		v.MouseMode = tea.MouseModeCellMotion
 	}
@@ -418,6 +431,9 @@ func (m Model) View() tea.View {
 func (m Model) render() string {
 	if m.helpVisible {
 		return m.renderHelp()
+	}
+	if m.width < 32 || m.height < 8 {
+		return m.renderTinyFrame()
 	}
 	header := m.renderHeader()
 	var content string
@@ -443,18 +459,18 @@ func (m Model) render() string {
 	default:
 		content = "Unknown view"
 	}
-	statusText := ""
+	footerText := ""
 	if m.killNotice != "" {
-		statusText = " ⚠ " + m.killNotice + " "
+		footerText = " ! " + m.killNotice + " "
 	} else {
-		statusText = m.statusText()
+		footerText = m.footerText()
 	}
 	statusWidth := m.width
 	if statusWidth < 1 {
 		statusWidth = 1
 	}
-	status := m.statusStyle.Width(statusWidth).Render(statusText)
-	contentHeight := m.height - 2
+	status := m.statusStyle.Width(statusWidth).Render(footerText)
+	contentHeight := m.height - lipgloss.Height(header) - 1
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
@@ -462,14 +478,11 @@ func (m Model) render() string {
 	return strings.Join([]string{header, content, status}, "\n")
 }
 
-// statusText keeps the most important telemetry and key hints visible without
-// overflowing narrow terminals. State is communicated with both a symbol and
-// a word, so it does not depend on color alone.
-func (m Model) statusText() string {
-	state := "LIVE"
-	when := "waiting"
+func (m Model) collectionState() (state, sampled string) {
+	state = "LIVE"
+	sampled = "waiting"
 	if !m.last.LastUpdate.IsZero() {
-		when = m.last.LastUpdate.Format("15:04:05")
+		sampled = m.last.LastUpdate.Format("15:04:05")
 	}
 	if m.paused {
 		state = "PAUSED"
@@ -484,17 +497,34 @@ func (m Model) statusText() string {
 			state = "STALE"
 		}
 	}
-	cpuMark, memMark := m.thresholdMarks()
-	if m.width >= 100 {
-		return fmt.Sprintf(" ● %-7s │ CPU %5.1f%%%s │ Mem %5.1f%%%s │ sampled %s │ p pause  r refresh  ? help  q quit ",
-			state, m.last.CPU.UsagePercent, cpuMark, m.last.Memory.UsagePercent, memMark, when)
+	return state, sampled
+}
+
+// statusText is the collection-state summary used by the identity row. The
+// explicit word keeps state legible when color is unavailable.
+func (m Model) statusText() string {
+	state, sampled := m.collectionState()
+	return fmt.Sprintf("● %s · sampled %s", state, sampled)
+}
+
+func (m Model) footerText() string {
+	left := " Tab/←→ switch · p pause · r refresh · ? help · q quit "
+	switch m.view {
+	case viewProcesses:
+		left = " ↑/↓ move · Enter inspect · / filter · K terminate · ? help "
+	case viewSettings:
+		left = " ↑/↓ select · Enter change · s save · ? help "
+	case viewTrends:
+		left = " r reload history · Tab switch · ? help · q quit "
 	}
-	if m.width >= 64 {
-		return fmt.Sprintf(" ● %-7s │ CPU %.1f%%%s  Mem %.1f%%%s │ %s │ p/r  ? help  q quit ",
-			state, m.last.CPU.UsagePercent, cpuMark, m.last.Memory.UsagePercent, memMark, when)
+	right := ""
+	if m.settings != nil && m.settings.UpdateInterval > 0 {
+		right = fmt.Sprintf("every %s ", m.settings.UpdateInterval)
 	}
-	return fmt.Sprintf(" ● %s │ C %.0f%%%s M %.0f%%%s │ p r ? q ",
-		state, m.last.CPU.UsagePercent, cpuMark, m.last.Memory.UsagePercent, memMark)
+	if m.width >= 80 {
+		return joinEnds(m.width, left, right)
+	}
+	return fitText(left, m.width)
 }
 
 // thresholdMarks returns a "!" for CPU / memory when the live value meets or
@@ -514,6 +544,33 @@ func (m Model) thresholdMarks() (cpu, mem string) {
 }
 
 func (m Model) renderHeader() string {
+	state, _ := m.collectionState()
+	host := strings.TrimSpace(m.last.Hostname)
+	if host == "" {
+		host = "local"
+	}
+	identity := " MONITOR"
+	if m.width >= 58 {
+		identity += " · " + fitText(host, 24)
+	}
+	stateSummary := "● " + state
+	if m.width >= 46 {
+		stateSummary = m.statusText()
+	}
+	stateColor := m.theme.Good
+	if state == "PAUSED" || state == "STALE" {
+		stateColor = m.theme.Warning
+	} else if state == "WAITING" {
+		stateColor = m.theme.Muted
+	}
+	left := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Accent).Render(identity)
+	right := lipgloss.NewStyle().Bold(true).Foreground(stateColor).Render(stateSummary + " ")
+	identityRow := lipgloss.NewStyle().
+		Width(maxInt(1, m.width)).
+		Foreground(m.theme.Text).
+		Background(m.theme.SurfaceAlt).
+		Render(joinEnds(m.width, left, right))
+
 	layout := m.headerLayout()
 	tabs := make([]string, 0, len(layout.labels))
 	for i, label := range layout.labels {
@@ -525,7 +582,59 @@ func (m Model) renderHeader() string {
 			tabs = append(tabs, m.headerTabStyle(false, layout.compact).Render(" "+label))
 		}
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, m.titleStyle.Render(layout.title), lipgloss.JoinHorizontal(lipgloss.Top, tabs...))
+	navigation := lipgloss.JoinHorizontal(lipgloss.Top, m.titleStyle.Render(layout.title), lipgloss.JoinHorizontal(lipgloss.Top, tabs...))
+	navigation = lipgloss.NewStyle().
+		Width(maxInt(1, m.width)).
+		Foreground(m.theme.Text).
+		Background(m.theme.Surface).
+		Render(navigation)
+	return lipgloss.JoinVertical(lipgloss.Left, identityRow, navigation)
+}
+
+func (m Model) renderTinyFrame() string {
+	if m.width <= 0 || m.height <= 0 {
+		return ""
+	}
+	state, _ := m.collectionState()
+	lines := []string{fitText("MONITOR · "+state, m.width)}
+	if m.height > 1 {
+		lines = append(lines, fitText("Enlarge terminal", m.width))
+	}
+	if m.height > 2 {
+		lines = append(lines, fitText("? help · q quit", m.width))
+	}
+	for len(lines) < m.height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines[:m.height], "\n")
+}
+
+func joinEnds(width int, left, right string) string {
+	if width <= 0 {
+		return ""
+	}
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if gap < 1 {
+		if lipgloss.Width(right) >= width {
+			return fitText(right, width)
+		}
+		return fitText(left, width-lipgloss.Width(right)) + right
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+func fitText(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= width {
+		return value
+	}
+	if width == 1 {
+		return string(runes[:1])
+	}
+	return string(runes[:width-1]) + "…"
 }
 
 func tempBadge(source string) string {
@@ -570,43 +679,7 @@ func (m Model) renderGauge(value float64, width int) string {
 }
 
 func (m Model) renderOverview() string {
-	if m.last.LastUpdate.IsZero() {
-		return m.panelStyle.Render(m.titleStyle.Render(" MONITOR (v2) ") + "\n\nWaiting for first tick…")
-	}
-	cpu := m.last.CPU
-	mem := m.last.Memory
-	net := m.last.Network
-	panelWidth := m.width/2 - 2
-	gaugeWidth := m.width/2 - 10
-	stacked := m.width < 88
-	if stacked {
-		panelWidth = m.width - 4
-		gaugeWidth = m.width - 12
-	}
-	if panelWidth < 20 {
-		panelWidth = 20
-	}
-	cpuPanel := m.panelStyle.Width(panelWidth).Render(
-		m.titleStyle.Render(" CPU ") + "\n\n" +
-			m.renderGauge(cpu.UsagePercent, gaugeWidth) +
-			fmt.Sprintf("\n  %.2f GHz  │  %d cores  │  %d threads", cpu.FrequencyMHz/1000, cpu.CoreCount, cpu.ThreadCount))
-	memTitle := " Memory "
-	if m.last.Cgroup.Limited && m.last.Cgroup.MemLimitBytes > 0 {
-		memTitle = " Memory [cgroup limit] "
-	}
-	memPanel := m.panelStyle.Width(panelWidth).Render(
-		m.titleStyle.Render(memTitle) + "\n\n" +
-			m.renderGauge(mem.UsagePercent, gaugeWidth) +
-			fmt.Sprintf("\n  %s / %s  │  swap %s", collector.FormatBytes(mem.UsedBytes), collector.FormatBytes(mem.TotalBytes), collector.FormatBytes(mem.SwapUsed)))
-	netPanel := m.panelStyle.Width(m.width - 4).Render(
-		m.titleStyle.Render(" Network ") + "\n\n" +
-			fmt.Sprintf("  ↓ %s/s    ↑ %s/s", collector.FormatBytes(net.BytesRecvPerSec), collector.FormatBytes(net.BytesSentPerSec)) +
-			fmt.Sprintf("\n  Total: ↓ %s    ↑ %s", collector.FormatBytes(net.BytesRecv), collector.FormatBytes(net.BytesSent)))
-	resourcePanels := cpuPanel + "  " + memPanel
-	if stacked {
-		resourcePanels = lipgloss.JoinVertical(lipgloss.Left, cpuPanel, memPanel)
-	}
-	return strings.Join([]string{resourcePanels, netPanel}, "\n")
+	return m.renderOperationalOverview()
 }
 
 func (m Model) renderSettings() string {
@@ -666,21 +739,29 @@ func (m Model) formatTemp(c float64) string {
 
 func (m Model) renderTemperature() string {
 	if m.last.LastUpdate.IsZero() {
-		return m.panelStyle.Render(m.titleStyle.Render(" Temperature ") + "\n\nWaiting for first tick…")
+		return m.renderMetricStatePanel("Temperature", "Waiting for first temperature sample…", "", false)
 	}
 	temp := m.last.Temperature
+	if temp.State.State != "" && temp.State.State != collector.MetricObserved {
+		reason := strings.TrimSpace(temp.State.Reason)
+		if reason == "" {
+			reason = string(temp.State.State)
+		}
+		return m.renderMetricStatePanel("Temperature", "Unavailable", reason, true)
+	}
+
 	badge := tempBadge(temp.Source)
-	rows := []string{
-		fmt.Sprintf("  CPU Package:  %s  %s%s", m.formatTemp(temp.CPUPackage), gaugeLabel(temp.CPUPackage), badge),
-		fmt.Sprintf("  CPU Cores:    %s  %s%s", m.formatTemp(temp.CPUCores), gaugeLabel(temp.CPUCores), badge),
-		fmt.Sprintf("  GPU:          %s  %s%s", m.formatTemp(temp.GPU), gaugeLabel(temp.GPU), badge),
-		fmt.Sprintf("  ANE:          %s  %s%s", m.formatTemp(temp.ANE), gaugeLabel(temp.ANE), badge),
-		fmt.Sprintf("  Battery:      %s  %s%s", m.formatTemp(temp.Battery), gaugeLabel(temp.Battery), badge),
+	rows := []string{m.titleStyle.Render(" Sensor Readings "), "", "  Source:" + badge,
+		fmt.Sprintf("  CPU Package  %s · %s", m.formatTemp(temp.CPUPackage), gaugeLabel(temp.CPUPackage)),
+		fmt.Sprintf("  CPU Cores    %s · %s", m.formatTemp(temp.CPUCores), gaugeLabel(temp.CPUCores)),
+		fmt.Sprintf("  GPU          %s · %s", m.formatTemp(temp.GPU), gaugeLabel(temp.GPU)),
+		fmt.Sprintf("  ANE          %s · %s", m.formatTemp(temp.ANE), gaugeLabel(temp.ANE)),
+		fmt.Sprintf("  Battery      %s · %s", m.formatTemp(temp.Battery), gaugeLabel(temp.Battery)),
 	}
-	fan := "  Fan telemetry unavailable on Apple Silicon (SMC keys restricted)"
+	fan := "  Fan unavailable · restricted SMC keys"
 	if temp.FanRPM > 0 || temp.FanMode != "" {
-		fan = fmt.Sprintf("  Fan: %d RPM  mode=%s", temp.FanRPM, temp.FanMode)
+		fan = fmt.Sprintf("  Fan          %d RPM · %s", temp.FanRPM, temp.FanMode)
 	}
-	body := strings.Join(rows, "\n") + "\n\n" + fan
-	return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Sensor Readings ") + "\n\n" + body)
+	rows = append(rows, "", fan)
+	return m.panelStyle.Width(metricPanelWidth(m.width)).Render(strings.Join(rows, "\n"))
 }

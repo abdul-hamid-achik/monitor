@@ -66,9 +66,6 @@ func RunWithOptions(opts Options) error {
 		if fm.cancel != nil {
 			fm.cancel()
 		}
-		if fm.unsubscribe != nil {
-			fm.unsubscribe()
-		}
 	}
 	return nil
 }

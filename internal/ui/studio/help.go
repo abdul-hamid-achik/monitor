@@ -11,6 +11,10 @@ import (
 // underlying frame while open so the text remains readable in small terminals
 // and destructive process actions cannot be triggered through the dialog.
 func (m Model) renderHelp() string {
+	keyHelp := func(binding, description string) string {
+		keyStyle := lipgloss.NewStyle().Foreground(m.theme.Warning).Bold(true)
+		return fmt.Sprintf("  %-22s %s", keyStyle.Render(binding), description)
+	}
 	lines := []string{
 		m.titleStyle.Render(" Keyboard Help "),
 		"",
@@ -33,7 +37,7 @@ func (m Model) renderHelp() string {
 			keyHelp("/", "edit the process filter"),
 			keyHelp("c / m", "sort by CPU or memory"),
 			keyHelp("ctrl+a / ctrl+d", "select all / clear selection"),
-			keyHelp("k / x", "terminate / force-kill (confirms first)"),
+			keyHelp("K / X", "terminate / force-kill (confirms first)"),
 		)
 		if m.processDetailVisible {
 			lines = append(lines,
@@ -56,7 +60,7 @@ func (m Model) renderHelp() string {
 		lines = append(lines, "", keyHelp("r", "reload recorded history now"))
 	}
 
-	lines = append(lines, "", lipgloss.NewStyle().Foreground(lipgloss.Color("#A3BE8C")).Render(" Press ? or Esc to close "))
+	lines = append(lines, "", lipgloss.NewStyle().Foreground(m.theme.Good).Render(" Press ? or Esc to close "))
 	width := m.width - 8
 	if width > 72 {
 		width = 72
@@ -66,7 +70,7 @@ func (m Model) renderHelp() string {
 	}
 	dialog := lipgloss.NewStyle().
 		Border(lipgloss.DoubleBorder()).
-		BorderForeground(lipgloss.Color("#88C0D0")).
+		BorderForeground(m.theme.Accent).
 		Padding(1, 2).
 		Width(width).
 		Render(strings.Join(lines, "\n"))
@@ -78,9 +82,4 @@ func (m Model) renderHelp() string {
 		placeHeight = len(lines) + 4
 	}
 	return lipgloss.Place(placeWidth, placeHeight, lipgloss.Center, lipgloss.Center, dialog)
-}
-
-func keyHelp(binding, description string) string {
-	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EBCB8B")).Bold(true)
-	return fmt.Sprintf("  %-22s %s", keyStyle.Render(binding), description)
 }

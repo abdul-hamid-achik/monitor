@@ -26,7 +26,7 @@ var (
 	sparklineStyleCache = make(map[string]lipgloss.Style)
 	sparklineGlyphCache = make(map[string][]string)
 	barFilledStyleCache = make(map[string]lipgloss.Style)
-	barEmptyStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#434C5E")) // Nord2
+	barEmptyStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#607089"))
 )
 
 func getSparklineStyle(color string) lipgloss.Style {
@@ -331,11 +331,19 @@ func NewBarGauge() *BarGauge {
 
 // Render renders the bar gauge
 func (b *BarGauge) Render() string {
-	if b.Max == 0 {
-		b.Max = 1
+	if b.Width <= 0 {
+		return ""
+	}
+	max := b.Max
+	if max <= 0 || math.IsNaN(max) || math.IsInf(max, 0) {
+		max = 1
+	}
+	value := b.Value
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		value = 0
 	}
 
-	percent := (b.Value / b.Max) * 100
+	percent := (value / max) * 100
 	if percent > 100 {
 		percent = 100
 	}
@@ -351,7 +359,7 @@ func (b *BarGauge) Render() string {
 	// Determine color
 	color := "#88C0D0"
 	if b.ColorFunc != nil {
-		color = b.ColorFunc(b.Value)
+		color = b.ColorFunc(value)
 	}
 
 	result := renderGaugeSegments(color, filled, b.Width-filled)
@@ -359,7 +367,7 @@ func (b *BarGauge) Render() string {
 	if b.ShowPercent {
 		result += fmt.Sprintf(" %5.1f%%", percent)
 	} else if b.ShowValue {
-		result += fmt.Sprintf(" %6.1f", b.Value)
+		result += fmt.Sprintf(" %6.1f", value)
 	}
 
 	return result
@@ -388,11 +396,19 @@ func NewMiniGauge() *MiniGauge {
 
 // Render renders the mini gauge
 func (m *MiniGauge) Render() string {
-	if m.Max == 0 {
-		m.Max = 1
+	if m.Width <= 0 {
+		return ""
+	}
+	max := m.Max
+	if max <= 0 || math.IsNaN(max) || math.IsInf(max, 0) {
+		max = 1
+	}
+	value := m.Value
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		value = 0
 	}
 
-	percent := (m.Value / m.Max) * 100
+	percent := (value / max) * 100
 	if percent > 100 {
 		percent = 100
 	}
@@ -412,13 +428,19 @@ func (m *MiniGauge) Render() string {
 		if unit != "" {
 			unit = " " + unit
 		}
-		return fmt.Sprintf("%s %6.1f%s", bar, m.Value, unit)
+		return fmt.Sprintf("%s %6.1f%s", bar, value, unit)
 	}
 
 	return bar
 }
 
 func renderGaugeSegments(color string, filledCount, emptyCount int) string {
+	if filledCount < 0 {
+		filledCount = 0
+	}
+	if emptyCount < 0 {
+		emptyCount = 0
+	}
 	var builder strings.Builder
 	if filledCount > 0 {
 		builder.WriteString(getBarFilledStyle(color).Render(strings.Repeat("▓", filledCount)))
