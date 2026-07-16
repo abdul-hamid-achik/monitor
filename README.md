@@ -84,6 +84,8 @@ requests still get a structured refusal rather than acting.
 
 ## Installation
 
+Release history is in the [Changelog](CHANGELOG.md).
+
 ### Install with Homebrew (recommended)
 
 Install Monitor from the project tap:
