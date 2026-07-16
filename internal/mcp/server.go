@@ -97,10 +97,11 @@ type Server struct {
 // NewServer creates an MCP server exposing monitor's read-only and mutating
 // surface. Mutating tools are registered unconditionally; they fail at call
 // time with a clear "confirm required" error if the agent omits the confirm
-// flag.
-func NewServer(svc *Service) *Server {
+// flag. version is reported in the MCP handshake and should be the build
+// version injected by the CLI (goreleaser's ldflags), not a hardcoded string.
+func NewServer(svc *Service, version string) *Server {
 	s := &Server{svc: svc}
-	impl := &mcp.Implementation{Name: "monitor", Version: "0.3.0"}
+	impl := &mcp.Implementation{Name: "monitor", Version: version}
 	opts := &mcp.ServerOptions{
 		Instructions: "monitor is an agent-harnessable local observability tool. " +
 			"Call monitor_snapshot first to orient, then drill down with monitor_processes " +

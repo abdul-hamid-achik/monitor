@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
@@ -130,7 +132,30 @@ func newTestServer(t *testing.T, svc *Service) *Server {
 	if svc == nil {
 		svc = &Service{}
 	}
-	return NewServer(svc)
+	return NewServer(svc, "test")
+}
+
+// TestNewServerReportsInjectedVersion runs a real in-memory MCP handshake
+// and asserts the server advertises the version passed to NewServer (the CLI
+// injects the goreleaser build version) rather than a hardcoded literal.
+func TestNewServerReportsInjectedVersion(t *testing.T) {
+	ctx := context.Background()
+	s := NewServer(&Service{}, "9.9.9")
+	clientTr, serverTr := mcp.NewInMemoryTransports()
+	ss, err := s.srv.Connect(ctx, serverTr, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer ss.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.0.0"}, nil)
+	cs, err := client.Connect(ctx, clientTr, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer cs.Close()
+	if got := cs.InitializeResult().ServerInfo.Version; got != "9.9.9" {
+		t.Errorf("handshake version = %q, want %q", got, "9.9.9")
+	}
 }
 
 // TestRequireConfirm asserts the confirm gate: nil error when confirmed,

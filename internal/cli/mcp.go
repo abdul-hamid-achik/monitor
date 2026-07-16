@@ -84,7 +84,7 @@ func newMCPServeCmd() *cobra.Command {
 					return ecosystem.RecordScreen(ctx, durationSeconds)
 				},
 			}
-			s := mcp.NewServer(svc)
+			s := mcp.NewServer(svc, Version)
 			if err := s.Run(ctx); err != nil {
 				return fmt.Errorf("mcp serve: %w", err)
 			}

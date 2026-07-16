@@ -84,7 +84,24 @@ requests still get a structured refusal rather than acting.
 
 ## Installation
 
-### Prerequisites
+### Install with Homebrew (recommended)
+
+Install Monitor from the project tap:
+
+```bash
+brew install --cask abdul-hamid-achik/tap/monitor
+```
+
+The tap is added automatically. You do not need to run `brew tap` first.
+
+Confirm that the binary is available, then open the interactive Studio:
+
+```bash
+monitor --version
+monitor studio
+```
+
+### Prerequisites (build from source only)
 
 - Go 1.25 or higher
 - macOS (Apple Silicon, full feature set) or Linux (core metrics; temperature

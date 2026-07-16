@@ -18,8 +18,13 @@ tasks:
 
   release:
     desc: Build optimized release binary
+    vars:
+      # Same injection path as .goreleaser.yaml so `monitor --version`
+      # reports the git-describe version instead of "dev".
+      VERSION:
+        sh: git describe --tags --always --dirty
     cmds:
-      - go build -ldflags="-s -w" -o {{.BINARY}} ./cmd/monitor
+      - go build -ldflags="-s -w -X github.com/abdul-hamid-achik/monitor/internal/cli.Version={{.VERSION}}" -o {{.BINARY}} ./cmd/monitor
 
   run:
     desc: Build and run the monitor TUI (monitor studio)
