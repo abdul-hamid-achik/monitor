@@ -30,6 +30,17 @@ import (
 type Options struct {
 	Interval    time.Duration // tick interval (default 1s)
 	HistorySize int           // samples retained for sparklines (default 60)
+	// Profile selects the collection plan. The zero value preserves the full
+	// interactive snapshot used by existing TUI, CLI, and MCP callers.
+	Profile CollectionProfile
+	// DisableProcesses skips process enumeration while preserving every host
+	// metric. The zero value intentionally keeps the established behavior for
+	// TUI, CLI, and MCP callers; privacy-constrained exporters opt out.
+	DisableProcesses bool
+	// DisableCgroupOverride keeps host memory semantics even when the collector
+	// itself runs inside a limited cgroup. This prevents an external host-level
+	// exporter from presenting its own service limit as workload memory.
+	DisableCgroupOverride bool
 	// Capabilities and LoadAverage are injectable seams for cross-platform
 	// tests. Nil selects detection and gopsutil collection for the current host.
 	Capabilities *capability.Set
@@ -39,6 +50,19 @@ type Options struct {
 	// the gopsutil aggregate counter implementation.
 	NetworkCounters func(context.Context) ([]net.IOCountersStat, error)
 }
+
+// CollectionProfile identifies a closed collection plan. Profiles are
+// enforced before any platform collector runs so restricted callers cannot
+// accidentally inherit newly added full-snapshot collectors.
+type CollectionProfile uint8
+
+const (
+	// ProfileFull is the established full system snapshot.
+	ProfileFull CollectionProfile = iota
+	// ProfileTelemetry collects only the fixed, identity-free scalar inputs
+	// required by the versioned telemetry exporter.
+	ProfileTelemetry
+)
 
 // Subscriber is a non-blocking callback invoked on every tick.
 type Subscriber func(Event)
@@ -119,6 +143,13 @@ type Collector struct {
 	// WithTemperatureHook (typically to a temperature.Source backed by
 	// sudo powermetrics).
 	temperatureHook func() (tempCPUPackage, tempCPUCores, tempGPU, tempANE, tempBattery, tempAmbient float64, tempFanRPM int, tempFanMode, tempSource string, tempAvailable bool)
+
+	telemetrySources telemetrySourceSet
+	telemetryState   telemetryRateState
+
+	// collectionObserver is package-private instrumentation used by regression
+	// tests to assert which logical collectors a closed profile invokes.
+	collectionObserver func(collectionStage)
 }
 
 // New creates a Collector with the given options.
@@ -143,20 +174,24 @@ func New(opts Options) *Collector {
 			return net.IOCountersWithContext(ctx, false)
 		}
 	}
-	return &Collector{
+	collector := &Collector{
 		opts:            opts,
 		subs:            make(map[int]Subscriber),
-		cpuHist:         NewRingBuffer[float64](opts.HistorySize),
-		memHist:         NewRingBuffer[float64](opts.HistorySize),
-		netDownHist:     NewRingBuffer[float64](opts.HistorySize),
-		netUpHist:       NewRingBuffer[float64](opts.HistorySize),
-		diskRHist:       NewRingBuffer[float64](opts.HistorySize),
-		diskWHist:       NewRingBuffer[float64](opts.HistorySize),
 		capabilities:    caps,
 		loadAverage:     loadAverage,
 		networkCounters: networkCounters,
 		intervalCh:      make(chan time.Duration, 1),
 	}
+	if opts.Profile != ProfileTelemetry {
+		collector.cpuHist = NewRingBuffer[float64](opts.HistorySize)
+		collector.memHist = NewRingBuffer[float64](opts.HistorySize)
+		collector.netDownHist = NewRingBuffer[float64](opts.HistorySize)
+		collector.netUpHist = NewRingBuffer[float64](opts.HistorySize)
+		collector.diskRHist = NewRingBuffer[float64](opts.HistorySize)
+		collector.diskWHist = NewRingBuffer[float64](opts.HistorySize)
+	}
+	collector.telemetrySources = newTelemetrySourceSet(loadAverage)
+	return collector
 }
 
 // Subscribe registers fn to receive every tick. The returned func
@@ -218,9 +253,22 @@ func (c *Collector) Snapshot() SystemInfo {
 // capabilities before invoking any collector and returns a structured
 // unsupported/unavailable snapshot together with the capability error.
 func (c *Collector) Capture(ctx context.Context) (SystemInfo, error) {
-	if err := c.capabilities.Require(capability.SystemMetrics, capability.ProcessMetrics); err != nil {
+	switch c.opts.Profile {
+	case ProfileTelemetry:
+		return c.captureTelemetry(ctx)
+	case ProfileFull:
+		// Continue through the established full-snapshot plan.
+	default:
+		return SystemInfo{}, fmt.Errorf("unknown collector profile %d", c.opts.Profile)
+	}
+
+	required := []capability.Name{capability.SystemMetrics}
+	if !c.opts.DisableProcesses {
+		required = append(required, capability.ProcessMetrics)
+	}
+	if err := c.capabilities.Require(required...); err != nil {
 		support := c.capabilities.SupportFor(capability.SystemMetrics)
-		if c.capabilities.SupportFor(capability.ProcessMetrics).State != capability.Supported {
+		if !c.opts.DisableProcesses && c.capabilities.SupportFor(capability.ProcessMetrics).State != capability.Supported {
 			support = c.capabilities.SupportFor(capability.ProcessMetrics)
 		}
 		c.info = SystemInfo{
@@ -243,17 +291,34 @@ func (c *Collector) Capture(ctx context.Context) (SystemInfo, error) {
 	c.info.Disk.MetricStates = make(map[string]MetricStatus)
 	c.collectCPU(ctx)
 	c.collectMemory(ctx)
-	c.collectCgroup()
+	if c.opts.DisableCgroupOverride {
+		c.info.Cgroup = CgroupInfo{
+			State: metricStatus(MetricUnavailable, "cgroup override was disabled by the caller"),
+		}
+	} else {
+		c.collectCgroup()
+	}
 	// Push the memory sparkline AFTER any cgroup override so the plotted
 	// history matches the reported UsagePercent.
+	c.observeCollection(collectionHistory)
 	c.memHist.Push(c.info.Memory.UsagePercent)
 	c.info.Memory.History = c.memHist.ToSlice()
 	c.collectTemperature()
 	c.collectNetwork(ctx)
 	c.collectDisk(ctx)
-	c.collectProcesses(ctx)
+	if c.opts.DisableProcesses {
+		c.info.Processes = nil
+		c.info.ProcessesState = metricStatus(MetricUnavailable, "process collection was disabled by the caller")
+		c.info.ProcessesLastUpdate = time.Time{}
+	} else {
+		c.collectProcesses(ctx)
+	}
 	c.collectHost()
 
+	return c.publishCurrent(), nil
+}
+
+func (c *Collector) publishCurrent() SystemInfo {
 	c.mu.Lock()
 	c.published = c.info
 	info := c.published
@@ -272,7 +337,7 @@ func (c *Collector) Capture(ctx context.Context) (SystemInfo, error) {
 			Processes: info.Processes,
 		})
 	}
-	return info, nil
+	return info
 }
 
 // Collect preserves the original convenience API while delegating to Capture,
@@ -305,6 +370,7 @@ func (c *Collector) Run(ctx context.Context) error {
 }
 
 func (c *Collector) collectCPU(ctx context.Context) {
+	c.observeCollection(collectionCPUUsage)
 	percent, err := cpu.PercentWithContext(ctx, 0, false)
 	if err == nil && len(percent) > 0 {
 		c.info.CPU.UsagePercent = percent[0]
@@ -318,6 +384,7 @@ func (c *Collector) collectCPU(ctx context.Context) {
 		c.info.CPU.MetricStates[metricCPUUsage] = metricStatus(MetricUnavailable, reason)
 	}
 
+	c.observeCollection(collectionCPUPerCore)
 	perCore, err := cpu.PercentWithContext(ctx, 0, true)
 	if err == nil && len(perCore) > 0 {
 		c.info.CPU.PerCoreUsage = perCore
@@ -333,6 +400,7 @@ func (c *Collector) collectCPU(ctx context.Context) {
 		c.info.CPU.MetricStates[metricCPUPerCore] = metricStatus(MetricUnavailable, reason)
 	}
 
+	c.observeCollection(collectionCPUTopology)
 	info, err := cpu.InfoWithContext(ctx)
 	if err == nil && len(info) > 0 {
 		c.info.CPU.FrequencyMHz = info[0].Mhz
@@ -348,6 +416,7 @@ func (c *Collector) collectCPU(ctx context.Context) {
 		c.info.CPU.MetricStates[metricCPUInfo] = metricStatus(MetricUnavailable, reason)
 	}
 
+	c.observeCollection(collectionCPULoad)
 	c.info.CPU.LoadAvg1 = 0
 	c.info.CPU.LoadAvg5 = 0
 	c.info.CPU.LoadAvg15 = 0
@@ -365,12 +434,14 @@ func (c *Collector) collectCPU(ctx context.Context) {
 		c.info.CPU.MetricStates[metricCPULoad] = metricStatus(MetricObserved, "")
 	}
 
+	c.observeCollection(collectionHistory)
 	c.cpuHist.Push(c.info.CPU.UsagePercent)
 	c.info.CPU.History = c.cpuHist.ToSlice()
 	c.info.CPU.LastUpdate = time.Now()
 }
 
 func (c *Collector) collectMemory(ctx context.Context) {
+	c.observeCollection(collectionMemoryVirtual)
 	vm, err := mem.VirtualMemoryWithContext(ctx)
 	if err != nil {
 		c.info.Memory.MetricStates[metricMemoryVirtual] = metricStatus(MetricUnavailable, err.Error())
@@ -392,6 +463,7 @@ func (c *Collector) collectMemory(ctx context.Context) {
 		c.info.Memory.MetricStates[metricMemoryBreakdown] = metricStatus(MetricUnavailable, "platform memory breakdown is not exposed by this collector")
 	}
 
+	c.observeCollection(collectionMemorySwap)
 	if swap, swapErr := mem.SwapMemoryWithContext(ctx); swapErr == nil {
 		c.info.Memory.SwapTotal = swap.Total
 		c.info.Memory.SwapUsed = swap.Used
@@ -413,6 +485,7 @@ func (c *Collector) collectMemory(ctx context.Context) {
 // reflects the container rather than the whole machine. No-op on the host /
 // macOS (Active=false).
 func (c *Collector) collectCgroup() {
+	c.observeCollection(collectionCgroup)
 	support := c.capabilities.SupportFor(capability.CgroupV2)
 	if support.State != capability.Supported {
 		c.info.Cgroup = CgroupInfo{State: statusFromCapability(support)}
@@ -441,6 +514,7 @@ func (c *Collector) collectCgroup() {
 }
 
 func (c *Collector) collectTemperature() {
+	c.observeCollection(collectionTemperature)
 	c.mu.RLock()
 	hook := c.temperatureHook
 	c.mu.RUnlock()
@@ -505,6 +579,7 @@ func perSecond(prev, cur uint64, elapsed float64) uint64 {
 }
 
 func (c *Collector) collectNetwork(ctx context.Context) {
+	c.observeCollection(collectionNetworkAggregate)
 	counters, err := safeNetworkCounters(ctx, c.networkCounters)
 	if err != nil || len(counters) == 0 {
 		reason := "network collector returned no counters"
@@ -523,6 +598,7 @@ func (c *Collector) collectNetwork(ctx context.Context) {
 		if elapsed > 0 {
 			c.info.Network.BytesSentPerSec = perSecond(c.lastNet.BytesSent, cur.BytesSent, elapsed)
 			c.info.Network.BytesRecvPerSec = perSecond(c.lastNet.BytesRecv, cur.BytesRecv, elapsed)
+			c.observeCollection(collectionHistory)
 			c.netDownHist.Push(float64(c.info.Network.BytesRecvPerSec))
 			c.netUpHist.Push(float64(c.info.Network.BytesSentPerSec))
 			c.info.Network.MetricStates[metricNetworkRate] = metricStatus(MetricObserved, "")
@@ -556,6 +632,7 @@ func safeNetworkCounters(ctx context.Context, collect func(context.Context) ([]n
 }
 
 func (c *Collector) collectDisk(ctx context.Context) {
+	c.observeCollection(collectionDiskPartitions)
 	parts, err := disk.PartitionsWithContext(ctx, false)
 	if err != nil {
 		c.info.Disk.Partitions = nil
@@ -584,6 +661,7 @@ func (c *Collector) collectDisk(ctx context.Context) {
 		c.info.Disk.MetricStates[metricDiskParts] = metricStatus(MetricObserved, reason)
 	}
 
+	c.observeCollection(collectionDiskAggregate)
 	ioCounters, ioErr := disk.IOCountersWithContext(ctx)
 	if ioErr != nil {
 		c.info.Disk.MetricStates[metricDiskIO] = metricStatus(MetricUnavailable, ioErr.Error())
@@ -605,6 +683,7 @@ func (c *Collector) collectDisk(ctx context.Context) {
 		if elapsed > 0 {
 			c.info.Disk.ReadPerSec = perSecond(c.lastDisk.ReadBytes, read, elapsed)
 			c.info.Disk.WritePerSec = perSecond(c.lastDisk.WriteBytes, write, elapsed)
+			c.observeCollection(collectionHistory)
 			c.diskRHist.Push(float64(c.info.Disk.ReadPerSec))
 			c.diskWHist.Push(float64(c.info.Disk.WritePerSec))
 			c.info.Disk.ReadHistory = c.diskRHist.ToSlice()
@@ -622,6 +701,7 @@ func (c *Collector) collectDisk(ctx context.Context) {
 }
 
 func (c *Collector) collectProcesses(ctx context.Context) {
+	c.observeCollection(collectionProcesses)
 	procs, err := process.ProcessesWithContext(ctx)
 	if err != nil {
 		c.info.Processes = nil
@@ -756,6 +836,7 @@ func bulkProcessStatuses(ctx context.Context) (map[int32]string, error) {
 }
 
 func (c *Collector) collectHost() {
+	c.observeCollection(collectionHostIdentity)
 	if h, err := os.Hostname(); err == nil {
 		c.info.Hostname = h
 	}

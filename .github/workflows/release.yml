@@ -6,31 +6,95 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  specs:
+    name: release behavioral specs
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go for Glyphrun
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          # Glyphrun requires Go 1.26. The release build below remains on
+          # Monitor's exact Go 1.25.5 baseline.
+          go-version: "1.26.5"
+          cache: true
+
+      - name: Install Glyphrun
+        run: |
+          go install github.com/abdul-hamid-achik/glyphrun/cmd/glyph@v0.14.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Build Monitor
+        run: go build -o bin/monitor ./cmd/monitor
+
+      - name: Run behavioral specs
+        # The two exceptions require a locally installed integration or a
+        # macOS-only utility. Their behavior is covered by unit tests.
+        run: |
+          fail=0
+          for spec in specs/*.yml; do
+            case "$spec" in
+              */stash.yml) echo "skip $spec (needs fcheap)"; continue ;;
+              */profile_sample.yml) echo "skip $spec (needs macOS sample)"; continue ;;
+            esac
+            result=$(glyph run "$spec" --format json | python3 -c "import sys, json; print(json.load(sys.stdin).get('status', ''))")
+            if [ "$result" = "passed" ]; then
+              echo "PASS $spec"
+            else
+              echo "FAIL $spec ($result)"
+              fail=1
+            fi
+          done
+          exit "$fail"
+
   release:
-    runs-on: ubuntu-latest
+    needs: specs
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: "1.25"
+          go-version: "1.25.5"
           cache: true
 
-      - name: Run tests
-        run: go test ./... -count=1
+      - name: Validate release configuration
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: "v2.17.0"
+          args: check
+
+      - name: Run static analysis
+        run: go vet ./...
+
+      - name: Run race-enabled tests
+        run: go test -race -count=1 ./...
+
+      - name: Verify Linux targets compile
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o /tmp/monitor-linux-amd64 ./cmd/monitor
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o /tmp/monitor-linux-arm64 ./cmd/monitor
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
-          version: "~> v2"
+          version: "v2.17.0"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

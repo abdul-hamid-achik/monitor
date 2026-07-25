@@ -113,6 +113,7 @@ export default defineConfig({
           text: 'Reference',
           items: [
             { text: 'Architecture', link: '/reference/architecture' },
+            { text: 'Telemetry Contract', link: '/reference/telemetry' },
             { text: 'Configuration', link: '/reference/configuration' },
           ],
         },

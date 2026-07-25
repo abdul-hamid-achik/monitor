@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,6 +164,308 @@ func TestCaptureBlocksUnsupportedPlatformBeforeCollectors(t *testing.T) {
 	}
 	if info.Capture.State != MetricUnsupported {
 		t.Fatalf("capture state = %q, want unsupported", info.Capture.State)
+	}
+}
+
+func TestCaptureCanSkipUnsupportedProcessCollection(t *testing.T) {
+	caps := capability.Detect(capability.Detector{
+		GOOS:     "linux",
+		LookPath: func(string) (string, error) { return "", errors.New("missing") },
+	})
+	caps.Items[capability.ProcessMetrics] = capability.Support{
+		State:  capability.Unsupported,
+		Reason: "fixture disables process inspection",
+	}
+
+	disabled := New(Options{Capabilities: &caps, DisableProcesses: true})
+	info, err := disabled.Capture(context.Background())
+	if err != nil {
+		t.Fatalf("Capture with process collection disabled: %v", err)
+	}
+	if info.Processes != nil {
+		t.Fatalf("Processes = %+v, want nil", info.Processes)
+	}
+	if info.ProcessesState.State != MetricUnavailable {
+		t.Fatalf("ProcessesState = %+v, want unavailable", info.ProcessesState)
+	}
+	if !strings.Contains(info.ProcessesState.Reason, "disabled") {
+		t.Fatalf("ProcessesState reason = %q, want disabled explanation", info.ProcessesState.Reason)
+	}
+
+	enabled := New(Options{Capabilities: &caps})
+	if _, err := enabled.Capture(context.Background()); err == nil {
+		t.Fatal("default collector should still require process metrics")
+	}
+}
+
+func TestCaptureCanPreserveHostMemoryWhenCgroupOverrideIsDisabled(t *testing.T) {
+	c := New(Options{DisableProcesses: true, DisableCgroupOverride: true})
+	info, err := c.Capture(context.Background())
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if info.Cgroup.Limited {
+		t.Fatalf("Cgroup = %+v, want no self-cgroup interpretation", info.Cgroup)
+	}
+	if info.Cgroup.State.State != MetricUnavailable ||
+		!strings.Contains(info.Cgroup.State.Reason, "disabled") {
+		t.Fatalf("Cgroup state = %+v", info.Cgroup.State)
+	}
+}
+
+func TestTelemetryProfileRunsOnlyClosedScalarCollectionPlan(t *testing.T) {
+	caps := capability.Detect(capability.Detector{GOOS: "linux"})
+	caps.Items[capability.ProcessMetrics] = capability.Support{
+		State:  capability.Unsupported,
+		Reason: "process inspection must not be required",
+	}
+	c := New(Options{Profile: ProfileTelemetry, Capabilities: &caps})
+
+	base := time.Unix(1_700_000_000, 0)
+	networkCall := 0
+	diskCall := 0
+	c.telemetrySources = telemetrySourceSet{
+		now:      func() time.Time { return base },
+		cpuUsage: func(context.Context) (float64, error) { return 42, nil },
+		loadOne:  func(context.Context) (float64, error) { return 1.5, nil },
+		virtualMemory: func(context.Context) (telemetryVirtualMemory, error) {
+			return telemetryVirtualMemory{
+				usedBytes: 2048, availableBytes: 4096,
+				usagePercent: 33, pressure: 25,
+			}, nil
+		},
+		swap: func(context.Context) (telemetrySwap, error) {
+			return telemetrySwap{usedBytes: 600, totalBytes: 1000}, nil
+		},
+		network: func(context.Context) (telemetryCounterSample, error) {
+			values := []telemetryCounterSample{
+				{counters: telemetryByteCounters{readBytes: 1000, writeBytes: 2000}, at: base},
+				{counters: telemetryByteCounters{readBytes: 5000, writeBytes: 8000}, at: base.Add(2 * time.Second)},
+			}
+			value := values[networkCall]
+			networkCall++
+			return value, nil
+		},
+		disk: func(context.Context) (telemetryCounterSample, error) {
+			values := []telemetryCounterSample{
+				{counters: telemetryByteCounters{readBytes: 100, writeBytes: 200}, at: base.Add(500 * time.Millisecond)},
+				{counters: telemetryByteCounters{readBytes: 2100, writeBytes: 4200}, at: base.Add(2500 * time.Millisecond)},
+			}
+			value := values[diskCall]
+			diskCall++
+			return value, nil
+		},
+	}
+
+	allowed := map[collectionStage]bool{
+		collectionCPUUsage: true, collectionCPULoad: true,
+		collectionMemoryVirtual: true, collectionMemorySwap: true,
+		collectionNetworkAggregate: true, collectionDiskAggregate: true,
+	}
+	var stages []collectionStage
+	c.collectionObserver = func(stage collectionStage) {
+		if !allowed[stage] {
+			t.Fatalf("telemetry profile invoked forbidden collector %q", stage)
+		}
+		stages = append(stages, stage)
+	}
+	c.WithTemperatureHook(func() (float64, float64, float64, float64, float64, float64, int, string, string, bool) {
+		panic("telemetry profile invoked the temperature hook")
+	})
+
+	first, err := c.Capture(context.Background())
+	if err != nil {
+		t.Fatalf("first Capture: %v", err)
+	}
+	if first.Network.MetricStates[metricNetworkRate].State != MetricUnavailable ||
+		first.Disk.MetricStates[metricDiskRate].State != MetricUnavailable {
+		t.Fatalf("first sample should prewarm rates: network=%+v disk=%+v",
+			first.Network.MetricStates, first.Disk.MetricStates)
+	}
+	info, err := c.Capture(context.Background())
+	if err != nil {
+		t.Fatalf("second Capture: %v", err)
+	}
+
+	wantOneCapture := []collectionStage{
+		collectionCPUUsage, collectionCPULoad,
+		collectionMemoryVirtual, collectionMemorySwap,
+		collectionNetworkAggregate, collectionDiskAggregate,
+	}
+	wantStages := append(append([]collectionStage(nil), wantOneCapture...), wantOneCapture...)
+	if !reflect.DeepEqual(stages, wantStages) {
+		t.Fatalf("collection stages = %v, want %v", stages, wantStages)
+	}
+	if info.CPU.UsagePercent != 42 || info.CPU.LoadAvg1 != 1.5 {
+		t.Fatalf("CPU telemetry = %+v", info.CPU)
+	}
+	if info.CPU.LoadAvg5 != 0 || info.CPU.LoadAvg15 != 0 ||
+		info.CPU.PerCoreUsage != nil || info.CPU.CoreCount != 0 ||
+		info.CPU.ThreadCount != 0 || info.CPU.FrequencyMHz != 0 {
+		t.Fatalf("telemetry collected CPU detail/topology: %+v", info.CPU)
+	}
+	if info.Memory.UsedBytes != 2048 || info.Memory.AvailableBytes != 4096 ||
+		info.Memory.UsagePercent != 33 || info.Memory.MemoryPressure != 25 ||
+		info.Memory.SwapUsed != 600 || info.Memory.SwapTotal != 1000 {
+		t.Fatalf("memory telemetry = %+v", info.Memory)
+	}
+	if info.Network.BytesRecvPerSec != 2000 || info.Network.BytesSentPerSec != 3000 {
+		t.Fatalf("network rates = %+v", info.Network)
+	}
+	if info.Network.BytesRecv != 0 || info.Network.BytesSent != 0 ||
+		info.Network.PacketsRecv != 0 || info.Network.PacketsSent != 0 {
+		t.Fatalf("telemetry retained network counters: %+v", info.Network)
+	}
+	if info.Disk.ReadPerSec != 1000 || info.Disk.WritePerSec != 2000 {
+		t.Fatalf("disk telemetry = %+v", info.Disk)
+	}
+	if info.Disk.Partitions != nil || info.Disk.ReadBytes != 0 || info.Disk.WriteBytes != 0 {
+		t.Fatalf("telemetry retained disk identities/counters: %+v", info.Disk)
+	}
+	if info.Hostname != "" || info.OS != "" || info.Platform != "" ||
+		info.Kernel != "" || info.Uptime != 0 || info.BootTime != 0 {
+		t.Fatalf("telemetry collected host identity: %+v", info)
+	}
+	if info.Processes != nil || !info.ProcessesLastUpdate.IsZero() {
+		t.Fatalf("telemetry collected process data: %+v", info.Processes)
+	}
+	if !reflect.DeepEqual(info.Temperature, TemperatureInfo{}) || info.Cgroup != (CgroupInfo{}) {
+		t.Fatalf("telemetry collected temperature/cgroup: temperature=%+v cgroup=%+v",
+			info.Temperature, info.Cgroup)
+	}
+	if c.cpuHist != nil || c.memHist != nil || c.netDownHist != nil ||
+		c.netUpHist != nil || c.diskRHist != nil || c.diskWHist != nil {
+		t.Fatal("telemetry profile allocated history buffers")
+	}
+}
+
+func TestTelemetryProfileDoesNotRetainRawSourceErrors(t *testing.T) {
+	caps := capability.Detect(capability.Detector{GOOS: "linux"})
+	c := New(Options{Profile: ProfileTelemetry, Capabilities: &caps})
+	c.telemetrySources.network = func(context.Context) (telemetryCounterSample, error) {
+		return telemetryCounterSample{}, errors.New("SECRET_INTERFACE customer0")
+	}
+	c.telemetrySources.disk = func(context.Context) (telemetryCounterSample, error) {
+		return telemetryCounterSample{}, errors.New("SECRET_DEVICE /dev/private0")
+	}
+
+	info, err := c.Capture(context.Background())
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, forbidden := range []string{
+		"SECRET_INTERFACE", "customer0", "SECRET_DEVICE", "/dev/private0",
+	} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("restricted snapshot retained %q: %s", forbidden, data)
+		}
+	}
+}
+
+func TestTelemetryProfileSanitizesCapabilityReasons(t *testing.T) {
+	caps := capability.Detect(capability.Detector{GOOS: "linux"})
+	caps.Items[capability.SystemMetrics] = capability.Support{
+		State: capability.Unavailable, Reason: "SECRET_PATH /private/customer",
+	}
+	c := New(Options{Profile: ProfileTelemetry, Capabilities: &caps})
+	info, err := c.Capture(context.Background())
+	if err == nil {
+		t.Fatal("Capture succeeded with unavailable system metrics")
+	}
+	data, marshalErr := json.Marshal(info)
+	if marshalErr != nil {
+		t.Fatalf("Marshal: %v", marshalErr)
+	}
+	for _, forbidden := range []string{"SECRET_PATH", "/private/customer"} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("restricted snapshot retained %q: %s", forbidden, data)
+		}
+	}
+}
+
+func TestParseAnonymousDiskCounters(t *testing.T) {
+	counters, err := parseAnonymousDiskCounters(strings.NewReader(
+		"nr_free_pages 10\npgpgin 12\npgpgout 34\npswpin 99\n",
+	))
+	if err != nil {
+		t.Fatalf("parseAnonymousDiskCounters: %v", err)
+	}
+	if counters.readBytes != 12*1024 || counters.writeBytes != 34*1024 {
+		t.Fatalf("counters = %+v", counters)
+	}
+
+	for _, input := range []string{
+		"pgpgin 12\n",
+		"pgpgin invalid\npgpgout 34\n",
+		"pgpgin 18014398509481984\npgpgout 34\n",
+	} {
+		if _, err := parseAnonymousDiskCounters(strings.NewReader(input)); err == nil {
+			t.Fatalf("parseAnonymousDiskCounters(%q) succeeded, want error", input)
+		}
+	}
+}
+
+func TestParseAnonymousNetworkCounters(t *testing.T) {
+	ipv4, err := parseAnonymousIPv4Counters(strings.NewReader(
+		"TcpExt: Other\nTcpExt: 1\n" +
+			"IpExt: InNoRoutes InOctets OutOctets InMcastOctets\n" +
+			"IpExt: 0 1200 3400 5\n",
+	))
+	if err != nil {
+		t.Fatalf("parseAnonymousIPv4Counters: %v", err)
+	}
+	ipv6, err := parseAnonymousIPv6Counters(strings.NewReader(
+		"Ip6InReceives 10\nIp6InOctets 56\nIp6OutOctets 78\n",
+	))
+	if err != nil {
+		t.Fatalf("parseAnonymousIPv6Counters: %v", err)
+	}
+	total, err := addAnonymousByteCounters(ipv4, ipv6)
+	if err != nil {
+		t.Fatalf("addAnonymousByteCounters: %v", err)
+	}
+	if total.readBytes != 1256 || total.writeBytes != 3478 {
+		t.Fatalf("network counters = %+v", total)
+	}
+
+	for name, test := range map[string]func() error{
+		"IPv4 missing": func() error {
+			_, err := parseAnonymousIPv4Counters(strings.NewReader("IpExt: InOctets\nIpExt: 1\n"))
+			return err
+		},
+		"IPv4 malformed": func() error {
+			_, err := parseAnonymousIPv4Counters(strings.NewReader(
+				"IpExt: InOctets OutOctets\nIpExt: invalid 2\n",
+			))
+			return err
+		},
+		"IPv6 missing": func() error {
+			_, err := parseAnonymousIPv6Counters(strings.NewReader("Ip6InOctets 1\n"))
+			return err
+		},
+		"IPv6 malformed": func() error {
+			_, err := parseAnonymousIPv6Counters(strings.NewReader(
+				"Ip6InOctets invalid\nIp6OutOctets 2\n",
+			))
+			return err
+		},
+		"sum overflow": func() error {
+			_, err := addAnonymousByteCounters(
+				telemetryByteCounters{readBytes: math.MaxUint64},
+				telemetryByteCounters{readBytes: 1},
+			)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := test(); err == nil {
+				t.Fatal("expected error")
+			}
+		})
 	}
 }
 

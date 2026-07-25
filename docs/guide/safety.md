@@ -73,3 +73,25 @@ $ monitor kill 1 --json
 A protected or system target like `launchd` is refused identically across the
 CLI, TUI, and MCP — the `kill.CheckSafety` classification lives in one place, so
 the three surfaces can't drift apart.
+
+## Telemetry export safety
+
+`monitor telemetry` is the only Monitor stream designed to cross a host
+boundary by default. Its V1 schema uses a fixed metric allowlist and excludes
+hostname, IP addresses, PID/process/user identity, command arguments,
+environment variables, devices, mounts, paths, raw availability reasons,
+profile data, alert details, and diagnoses.
+
+Do not forward `monitor watch --json`, `monitor snapshot --json`, or
+`monitor snapshot --compact` as a substitute. Those local inspection surfaces
+intentionally contain identity and diagnostic detail that the telemetry
+contract removes.
+
+Monitor writes telemetry only to stdout. A consuming adapter should:
+
+- add deployment identity only after parsing and validating the V1 event;
+- keep authentication credentials out of Monitor's environment;
+- apply bounded retry storage in an ephemeral runtime directory;
+- reject unknown major schema versions, object fields, metric IDs, units,
+  availability states, alert rules, and severities;
+- retain raw profiles only through an explicit, separate artifact workflow.

@@ -1,0 +1,71 @@
+version: 1
+name: monitor_telemetry_emits_private_v1_window
+
+intent: |
+  `monitor telemetry --once` emits one bounded, versioned, privacy-safe NDJSON
+  window and exits without requiring a network service or persistent store.
+
+target:
+  cmd:
+    - "/bin/sh"
+    - "-lc"
+    - >-
+      ./bin/monitor telemetry --once --interval 1s --window 1s |
+      python3 -c 'import json,re,sys; raw=sys.stdin.buffer.readline();
+      assert raw and not sys.stdin.buffer.readline();
+      assert len(raw)<=32768; value=json.loads(raw);
+      assert value["schema_version"]==1;
+      assert value["kind"]=="monitor.telemetry_window";
+      assert value["window"]["partial"] is True;
+      assert len(value["availability"])==11;
+      assert "system.cpu.usage" in value["metrics"];
+      assert "system.memory.used" in value["metrics"];
+      assert not re.search(rb"\"(hostname|pid|process|path|mount_point|device|reason|detail|diagnosis)\":",raw);
+      print("TELEMETRY_VALID");
+      print("TELEMETRY_FIXED_METRICS");
+      print("TELEMETRY_PRIVATE");
+      print("TELEMETRY_BOUNDED")'
+  cwd: "."
+
+terminal:
+  cols: 160
+  rows: 40
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: one_valid_v1_line
+    description: output is exactly one V1 telemetry window
+    verify:
+      screen:
+        contains: "TELEMETRY_VALID"
+  - id: includes_fixed_metrics
+    description: output includes the fixed CPU and memory metric identifiers
+    verify:
+      screen:
+        contains: "TELEMETRY_FIXED_METRICS"
+  - id: excludes_sensitive_fields
+    description: output excludes host, process, path, mount, and raw detail fields
+    verify:
+      screen:
+        contains: "TELEMETRY_PRIVATE"
+  - id: line_is_bounded
+    description: the complete NDJSON line is at most 32 KiB
+    verify:
+      screen:
+        contains: "TELEMETRY_BOUNDED"
+  - id: clean_exit
+    description: command exits cleanly after one window
+    verify:
+      process:
+        exitCode: 0

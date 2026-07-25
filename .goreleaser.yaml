@@ -12,6 +12,10 @@ builds:
     binary: monitor
     env:
       - CGO_ENABLED=0
+    # Keep absolute checkout paths out of the shipped binary so independently
+    # built Linux archives have the same source path metadata.
+    flags:
+      - -trimpath
     goos:
       - linux
       - darwin

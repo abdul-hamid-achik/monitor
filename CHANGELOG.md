@@ -4,6 +4,23 @@ All notable changes to Monitor are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/), and the project
 follows [Semantic Versioning](https://semver.org/).
 
+## [1.14.0] - 2026-07-24
+
+### Added
+
+- `monitor telemetry` streams bounded `monitor.telemetry_window` V1 NDJSON
+  rollups for external control planes. The fixed CPU, memory, swap, network,
+  disk, and load schema includes explicit availability and sanitized system
+  alert counts while excluding host/process identity, paths, mounts, raw
+  errors, and alert details.
+- The collector can skip process enumeration for privacy-constrained,
+  host-metric-only consumers without changing the default TUI, CLI, or MCP
+  behavior.
+- Telemetry uses a closed scalar-only collection profile and monotonic
+  deadlines. It skips identity, filesystem, topology, temperature, cgroup, and
+  history work; delayed or missed sampling produces a partial window instead
+  of stretching an elapsed one.
+
 ## [1.13.0] - 2026-07-16
 
 ### Fixed
@@ -305,6 +322,7 @@ remaining pure CLI helpers.
 Initial release: a terminal system monitor for macOS with a Network tab,
 Settings documentation, and a GoReleaser + GitHub Actions release workflow.
 
+[1.14.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.13.0...v1.14.0
 [1.13.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.12.1...v1.13.0
 [1.12.1]: https://github.com/abdul-hamid-achik/monitor/compare/v1.12.0...v1.12.1
 [1.12.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.11.0...v1.12.0

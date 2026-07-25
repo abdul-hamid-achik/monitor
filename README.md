@@ -15,6 +15,9 @@ scripts, and agents alike. Running bare `monitor` prints help.
 
 - 📊 **Real-time TUI** — CPU, Memory, Temperature, Network, Disk, and Processes
 - 🤖 **Agent-harnessable** — every view is also a JSON CLI command + an MCP server
+- 🔒 **Private telemetry export** — bounded, versioned NDJSON rollups without
+  hostnames, process identity, paths, raw errors, network delivery, or local
+  persistence
 - 🌡️ **Real temperature** — SMC sensors via `powermetrics` on macOS, with a
   transparent CPU-load estimate fallback when sudo isn't available
 - 🔍 **Process tools** — sort, search, inspect PID-pinned diagnostics,
@@ -43,6 +46,7 @@ machine-readable workflows:
 ./bin/monitor snapshot --json | jq '.cpu'      # one-shot system snapshot
 ./bin/monitor snapshot --compact                # bounded v1 payload for agent context
 ./bin/monitor watch --json                      # stream NDJSON metric events
+./bin/monitor telemetry                         # privacy-safe 30s metric rollups
 ./bin/monitor analyze --window 10s --json       # bounded cross-signal diagnosis
 ./bin/monitor process 1234 --json               # detailed process info
 ./bin/monitor ps --sort memory --limit 10 --json # bounded/filterable process inventory
@@ -176,6 +180,7 @@ monitor/
 ├── cmd/monitor/main.go        # entry point; dispatches CLI vs TUI
 ├── internal/
 │   ├── collector/             # pub/sub metric collector (canonical pattern)
+│   ├── telemetry/             # bounded, identity-free NDJSON metric windows
 │   ├── cli/                   # cobra subcommands (snapshot, watch, kill, ...)
 │   ├── mcp/                   # MCP stdio server (8 tools; mutations confirm-gated)
 │   ├── analyzer/              # anomaly rules (CPU spike, RSS growth)
@@ -212,6 +217,11 @@ monitor/
   estimate.
 - **CPU profiles** — the pprof scrape targets `localhost:6060`; heap/goroutine
   profiles are symbolicated, CPU profiles are returned as raw protobuf.
+- **Telemetry scope** — `monitor telemetry` reports host-level metrics. The
+  closed telemetry profile skips Monitor's own cgroup and all identity,
+  process, filesystem, topology, temperature, and history collectors. Linux
+  network and disk rates use anonymous system-wide counters; other platforms
+  report those rates unavailable.
 
 ## Contributing
 

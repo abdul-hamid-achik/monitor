@@ -24,6 +24,7 @@ monitor/
 ├── cmd/monitor/main.go        # entry point; dispatches CLI vs TUI
 ├── internal/
 │   ├── collector/             # pub/sub metric collector (canonical pattern)
+│   ├── telemetry/             # bounded, identity-free NDJSON metric windows
 │   ├── cli/                   # cobra subcommands (snapshot, watch, kill, ...)
 │   ├── mcp/                   # MCP stdio server (8 tools, confirm-gated)
 │   ├── analyzer/              # anomaly rules (CPU spike, RSS growth)
@@ -48,7 +49,8 @@ monitor/
 | Package | Role |
 |---------|------|
 | `internal/collector` | Pub/sub metric collector — publishes an `Event` on every tick; the canonical pattern other packages follow. Holds the metric types (`CPUInfo`, `MemoryInfo`, `ProcessInfo`, ...) and a generic ring buffer. |
-| `internal/cli` | Cobra subcommands (`snapshot`, `watch`, `analyze`, `process`, `processes`, `tree`, `kill`, `profile`, `investigate`, `stash`, `incidents`, `logs`, `history`, `baseline`, `diff`, `config`, `doctor`, `run`, `reload`, `mcp`, `vault`, `studio`) plus the JSON/NDJSON output helpers. |
+| `internal/telemetry` | Fixed, bounded `monitor.telemetry_window` V1 aggregation and NDJSON serialization. This package is the privacy boundary for external adapters and contains no transport or persistence. |
+| `internal/cli` | Cobra subcommands (`snapshot`, `watch`, `telemetry`, `analyze`, `process`, `processes`, `tree`, `kill`, `profile`, `investigate`, `stash`, `incidents`, `logs`, `history`, `baseline`, `diff`, `config`, `doctor`, `run`, `reload`, `mcp`, `vault`, `studio`) plus the JSON/NDJSON output helpers. |
 | `internal/mcp` | MCP stdio server: 8 tools (4 read-only, 4 mutating) over the standard Model Context Protocol transport, with confirm-gated mutation. |
 | `internal/analyzer` | Pluggable anomaly rules — `CPUSpikeRule` (current CPU versus a rolling per-PID median plus an absolute floor), `RSSGrowthRule` (wall-clock-normalized RSS regression), `ZombieRule`, `DiskFillRule`, `SwapPressureRule`, and a config-driven `ThresholdRule`. Per-process alerts attach a `Diagnosis` when their cross-signal history can interpret the signal; `internal/analyzer/diagnosis.go` classifies memory-leak / hot-loop / load / GC-pressure patterns for CLI, MCP, and watch consumers. |
 | `internal/capture` | Log capture pipeline — pumps a child process's stdout/stderr into the veclite log store. |
@@ -87,7 +89,11 @@ the streaming CLI, the analyzer, the MCP surface, and log capture:
 - **TUI** (`internal/ui/studio`) subscribes and re-renders each tab as events arrive.
 - **CLI** (`internal/cli`) reads a single `Event` for `snapshot`, projects it
   through `collector.BuildCompactSnapshot` when `--compact` is requested, or
-  streams NDJSON for `watch`.
+  streams NDJSON for `watch`. `telemetry` selects a closed scalar-only
+  collection profile that never invokes identity, process, filesystem,
+  per-core/topology, temperature, cgroup, or history collectors, then projects
+  the fixed host metrics through `internal/telemetry` into bounded,
+  identity-free windows.
 - **MCP** (`internal/mcp`) answers `monitor_snapshot` / `monitor_processes`
   from the same data (including the same bounded compact projection), samples
   a short window through `internal/analyzer` for
@@ -95,6 +101,19 @@ the streaming CLI, the analyzer, the MCP surface, and log capture:
   `internal/profiler`.
 - **Analyzer, capture, incidents** observe events to flag anomalies, ingest
   logs, and assemble incident bundles.
+
+The telemetry command is intentionally a producer, not an exporter SDK:
+
+```
+collector → telemetry window → NDJSON stdout → caller-owned adapter
+```
+
+Monitor owns the closed collection plan, monotonic scheduling, schema
+validation, privacy projection, aggregation, and a bounded partial flush. The
+adapter owns deployment labels, authentication, delivery, bounded retry
+buffering, and durable storage. Keeping those responsibilities outside Monitor
+prevents transport credentials and vendor-specific concepts from entering the
+local observability core.
 
 Process termination, wherever it is requested, funnels through the shared safety
 check in `internal/kill`: protected and system processes are refused, and an

@@ -40,6 +40,7 @@ child can detect it is being observed.`,
 	root.AddCommand(
 		newSnapshotCmd(),
 		newWatchCmd(),
+		newTelemetryCmd(),
 		newAnalyzeCmd(),
 		newProcessCmd(),
 		newProcessesCmd(),

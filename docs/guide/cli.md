@@ -14,8 +14,8 @@ monitor --version       # prints: monitor <version>
 The subcommands group into four purposes:
 
 - **Inspect** — read current state: [`snapshot`](#snapshot),
-  [`watch`](#watch), [`process`](#process), [`processes`](#processes),
-  [`tree`](#tree).
+  [`watch`](#watch), [`telemetry`](#telemetry), [`process`](#process),
+  [`processes`](#processes), [`tree`](#tree).
 - **Act** — change something: [`kill`](#kill).
 - **Diagnose** — capture and analyze: [`analyze`](#analyze), [`profile`](#profile),
   [`investigate`](#investigate), [`stash`](#stash), [`incidents`](#incidents),
@@ -30,7 +30,7 @@ The subcommands group into four purposes:
 | Flag | Effect |
 |------|--------|
 | `--no-temperature-source` | Skip `powermetrics`; use the CPU-load estimation fallback (no sudo required). Persistent — available under every subcommand. |
-| `--json` | Emit JSON (or NDJSON for [`watch`](#watch)) to stdout. Supported by every subcommand except [`run`](#run), [`reload`](#reload), [`mcp`](#mcp), [`vault`](#vault), and [`studio`](#studio). |
+| `--json` | Emit JSON (or NDJSON for [`watch`](#watch)) to stdout. Supported by every subcommand except [`telemetry`](#telemetry), which is always NDJSON, and [`run`](#run), [`reload`](#reload), [`mcp`](#mcp), [`vault`](#vault), and [`studio`](#studio). |
 | `--pprof <addr>` | Expose Monitor's **own** `net/http/pprof` on `addr` (e.g. `localhost:6060`). Off by default. |
 | `--version` | Print the version and exit. |
 
@@ -192,6 +192,64 @@ monitor watch --json --webhook https://hooks.example.com/alerts --notify
 {"type":"alert","timestamp":"2026-06-27T00:02:41Z","alert":{"rule":"cpu_spike","severity":"warning","pid":1133,"process":"node","detail":"cpu spike","diagnosis":{"summary":"node pinned a core for 45s while RSS stayed flat — consistent with a hot loop","evidence":["cpu 150% for 45s","rss flat"],"confidence":"medium","next_actions":["monitor profile 1133 --type cpu","monitor investigate 1133"]}}}
 {"type":"alert","timestamp":"2026-06-27T00:02:44Z","alert":{"rule":"cpu_threshold","severity":"warning","detail":"CPU 91% >= threshold 90%"}}
 ```
+
+### `telemetry`
+
+Stream bounded, versioned host-metric rollups as NDJSON. Unlike `watch` and
+`snapshot`, this is a privacy boundary for an external control-plane adapter:
+it excludes hostname, IP addresses, PIDs, process names, users, command
+arguments, environment variables, devices, mounts, paths, raw collector
+errors, alert details, and diagnoses.
+
+Monitor only writes the stream to stdout. It makes no network request and does
+not persist a spool or credentials. The consuming adapter owns authentication,
+delivery, retry limits, deployment identity, and durable storage.
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `-i`, `--interval` | `5s` | Interval between source samples; minimum 1 second. |
+| `-w`, `--window` | `30s` | Rollup period; must be at least the interval and contain at most 3,600 samples. |
+| `--once` | `false` | Prewarm rate counters, wait one interval, emit one partial window, and exit. |
+
+```bash
+monitor telemetry
+monitor telemetry --interval 1s --window 10s
+monitor telemetry --once --interval 1s --window 1s | jq .
+```
+
+Every line uses `schema_version: 1` and
+`kind: "monitor.telemetry_window"`. `session_id` plus `sequence` is a stable
+idempotency identity for a consumer. Completed windows set `partial: false`;
+normal SIGINT/SIGTERM flushes a non-empty partial window and exits cleanly.
+Each line, including its newline, is at most 32 KiB.
+
+The fixed metric IDs and their units are:
+
+| Metric ID | Unit |
+|-----------|------|
+| `system.cpu.usage` | `percent` |
+| `system.memory.used` | `bytes` |
+| `system.memory.available` | `bytes` |
+| `system.memory.usage` | `percent` |
+| `system.memory.pressure` | `percent` |
+| `system.swap.used` | `bytes` |
+| `system.network.receive_rate` | `bytes_per_second` |
+| `system.network.transmit_rate` | `bytes_per_second` |
+| `system.disk.read_rate` | `bytes_per_second` |
+| `system.disk.write_rate` | `bytes_per_second` |
+| `system.load.one_minute` | `load` |
+
+Each observed metric carries `count`, `min`, `avg`, nearest-rank `p95`, `max`,
+and `last`. `availability` always describes all eleven metrics with
+`observed`, `partial`, `unsupported`, or `unavailable`, plus observed/missing
+sample counts. Alerts are reduced to allowlisted system rules
+(`cpu_threshold`, `mem_threshold`, `disk_fill`, `swap_pressure`), a safe
+severity, and the number of affected samples. The current strict collector
+emits only `swap_pressure`; it does not enumerate filesystems to calculate
+`disk_fill`.
+
+See the [Telemetry contract](/reference/telemetry) for the complete schema and
+compatibility policy.
 
 ### `process`
 

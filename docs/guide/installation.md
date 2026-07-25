@@ -75,14 +75,18 @@ release is named `monitor_1.2.3_Darwin_arm64.tar.gz`.
 Extract the archive and install the binary somewhere on your `PATH`:
 
 ```bash
-tar -xzf monitor_VERSION_SYSTEM_ARCH.tar.gz
+archive="monitor_VERSION_SYSTEM_ARCH.tar.gz"
+grep "  $archive$" checksums.txt | sha256sum --check --strict -
+tar -xzf "$archive"
 sudo install -m 0755 monitor /usr/local/bin/monitor
 monitor --version
 ```
 
 Replace `VERSION`, `SYSTEM`, and `ARCH` with the values from the downloaded
-file. Each release also publishes `checksums.txt` so you can verify the archive
-before installing it.
+file, and download the matching `checksums.txt` beside the archive. The
+checksum command must succeed before extraction; it verifies the exact archive
+name rather than trusting a mutable download URL. On macOS, replace
+`sha256sum` with `shasum -a 256 -c`.
 
 ## Build from source
 
