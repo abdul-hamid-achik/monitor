@@ -3,9 +3,9 @@ name: monitor_stash
 
 intent: |
   `monitor stash --json` captures the current system snapshot into a
-  content-addressed fcheap stash and returns the stash ID + tree-hash.
-  The same incident captured twice produces the same tree-hash, so
-  fcheap dedups naturally.
+  file.cheap stash and returns its opaque stash ID plus Monitor's stable
+  integrity tree-hash. The hash is a receipt/tag; no provider deduplication
+  behavior is assumed.
   `monitor incidents --json` lists recent monitor-tagged stashes.
 
 target:

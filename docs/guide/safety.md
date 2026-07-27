@@ -74,6 +74,30 @@ A protected or system target like `launchd` is refused identically across the
 CLI, TUI, and MCP — the `kill.CheckSafety` classification lives in one place, so
 the three surfaces can't drift apart.
 
+## Diagnostic evidence safety
+
+Profiles, logs, process bindings, and incident bundles can contain sensitive
+local context, so they do not share telemetry's export boundary.
+
+- Process argv is inspected in memory to infer runtime, entrypoint, and an
+  inspector address, then redacted from JSON bindings, issue records, and
+  incident bundles. Environment variables are not captured.
+- The default issue and log data directory is mode `0700`; the issue database
+  is mode `0600`. The incident registry uses `0700` directories and `0600`
+  evidence files.
+- Incident bundles are flat and accept only regular files. Monitor rejects
+  symlink/non-regular entries, derives registered paths from validated IDs,
+  and verifies the recorded SHA-256 tree hash before archival or cleanup.
+- A copied raw profile is capped at 128 MiB. Failed file.cheap archivals are
+  retained in a bounded recovery registry containing at most the 20 newest
+  bundles.
+- ArtifactRefV1 is credential-free. It points to local file.cheap evidence;
+  it does not contain authentication material or embed the profile bytes.
+
+The issue database and incident registry are local evidence stores, not safe
+public exports. Use `monitor telemetry` for host metrics intended to cross a
+machine boundary.
+
 ## Telemetry export safety
 
 `monitor telemetry` is the only Monitor stream designed to cross a host

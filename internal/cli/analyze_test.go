@@ -18,6 +18,7 @@ func TestValidateAnalyzeOptions(t *testing.T) {
 	}{
 		{name: "valid", window: 10 * time.Second, interval: time.Second},
 		{name: "focused", window: time.Second, interval: 100 * time.Millisecond, pid: 42},
+		{name: "unsafe full-profile cadence", window: time.Second, interval: 99 * time.Millisecond, wantErr: true},
 		{name: "zero window", interval: time.Second, wantErr: true},
 		{name: "too long", window: 61 * time.Second, interval: time.Second, wantErr: true},
 		{name: "interval longer", window: time.Second, interval: 2 * time.Second, wantErr: true},

@@ -8,6 +8,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.4
 	github.com/abdul-hamid-achik/veclite v0.22.1
 	github.com/charmbracelet/x/ansi v0.11.7
+	github.com/coder/websocket v1.8.15
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/shirou/gopsutil/v4 v4.26.2
 	github.com/spf13/cobra v1.10.2

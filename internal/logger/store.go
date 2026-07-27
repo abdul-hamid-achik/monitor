@@ -32,13 +32,47 @@ type Entry struct {
 
 // Store is a veclite-backed log store.
 type Store struct {
-	mu       sync.Mutex
-	db       *veclite.DB
-	collName string
-	path     string
+	mu        sync.Mutex
+	db        *veclite.DB
+	collName  string
+	path      string
+	retention RetentionPolicy
+	lastSweep time.Time
 }
 
-const defaultCollection = "logs"
+const (
+	defaultCollection = "logs"
+
+	// DefaultMaxRecords bounds the durable log store even for long-running
+	// capture sessions. FIFO eviction keeps the newest observations.
+	DefaultMaxRecords = 100_000
+	// DefaultMaxAge is how long captured log entries are retained.
+	DefaultMaxAge = 7 * 24 * time.Hour
+	// DefaultSearchLimit is used when callers omit a positive limit.
+	DefaultSearchLimit = 50
+	// MaxSearchLimit prevents a malformed or agent-generated query from
+	// returning an unbounded response.
+	MaxSearchLimit = 1_000
+
+	defaultSweepInterval = 5 * time.Minute
+)
+
+// RetentionPolicy bounds a writer by record age and count. Sweeps run inside
+// the Store writer mutex; no background goroutine mutates the database, so
+// read-only shared readers retain their point-in-time snapshot semantics.
+type RetentionPolicy struct {
+	MaxAge        time.Duration
+	MaxRecords    int
+	SweepInterval time.Duration
+}
+
+func defaultRetentionPolicy() RetentionPolicy {
+	return RetentionPolicy{
+		MaxAge:        DefaultMaxAge,
+		MaxRecords:    DefaultMaxRecords,
+		SweepInterval: defaultSweepInterval,
+	}
+}
 
 // StorePathEnv overrides the default log database for every logs command.
 // A command's explicit --store flag takes precedence over this variable.
@@ -53,8 +87,13 @@ func DefaultPath() (string, error) {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
 	dir := filepath.Join(home, ".local", "share", "monitor")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create log store directory: %w", err)
+	}
+	// MkdirAll preserves an existing directory's mode. Tighten it explicitly
+	// because captured logs can contain credentials and other sensitive data.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", fmt.Errorf("secure log store directory: %w", err)
 	}
 	return filepath.Join(dir, "logs.veclite"), nil
 }
@@ -87,14 +126,30 @@ func ResolvePath(override string) (string, error) {
 // OpenStore opens (and creates) a log store at path. The writer does NOT use
 // shared-read; only readers do.
 func OpenStore(path string) (*Store, error) {
+	return OpenStoreWithRetention(path, defaultRetentionPolicy())
+}
+
+// OpenStoreWithRetention opens a writer with an explicit retention policy.
+// Zero or negative fields use the safe defaults.
+func OpenStoreWithRetention(path string, retention RetentionPolicy) (*Store, error) {
+	retention = normalizeRetentionPolicy(retention)
 	db, err := veclite.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, path: path, collName: defaultCollection}
+	s := &Store{
+		db:        db,
+		path:      path,
+		collName:  defaultCollection,
+		retention: retention,
+	}
 	if err := s.ensureCollection(); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	if _, err := s.applyRetention(time.Now(), true); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("apply log retention: %w", err)
 	}
 	return s, nil
 }
@@ -108,7 +163,12 @@ func OpenReadOnly(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db, path: path, collName: defaultCollection}, nil
+	return &Store{
+		db:        db,
+		path:      path,
+		collName:  defaultCollection,
+		retention: defaultRetentionPolicy(),
+	}, nil
 }
 
 func (s *Store) ensureCollection() error {
@@ -118,8 +178,26 @@ func (s *Store) ensureCollection() error {
 	if s.db.HasCollection(defaultCollection) {
 		return nil
 	}
-	_, err := s.db.CreateCollection(defaultCollection)
+	_, err := s.db.CreateCollection(defaultCollection, veclite.WithMemoryLimits(veclite.MemoryConfig{
+		MaxRecords:        s.retention.MaxRecords,
+		EvictionPolicy:    "fifo",
+		EvictionBatchSize: max(1, s.retention.MaxRecords/10),
+	}))
 	return err
+}
+
+func normalizeRetentionPolicy(policy RetentionPolicy) RetentionPolicy {
+	defaults := defaultRetentionPolicy()
+	if policy.MaxAge <= 0 {
+		policy.MaxAge = defaults.MaxAge
+	}
+	if policy.MaxRecords <= 0 {
+		policy.MaxRecords = defaults.MaxRecords
+	}
+	if policy.SweepInterval <= 0 {
+		policy.SweepInterval = defaults.SweepInterval
+	}
+	return policy
 }
 
 // Append writes one entry as a text document with payload metadata.
@@ -132,6 +210,12 @@ func (s *Store) Append(e Entry) error {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now()
 	}
+	expiresAt := e.Timestamp.Add(s.retention.MaxAge)
+	if !expiresAt.After(time.Now()) {
+		// Do not briefly admit an already-expired line between scheduled
+		// sweeps (for example when importing an old log file).
+		return nil
+	}
 	coll := s.db.Collection(defaultCollection)
 	payload := map[string]any{
 		"timestamp": e.Timestamp,
@@ -140,8 +224,90 @@ func (s *Store) Append(e Entry) error {
 		"level":     e.Level,
 		"raw":       e.Raw,
 	}
-	_, err := coll.InsertTextDocument(e.Message, payload)
+	_, err := coll.InsertTextDocumentWithOptions(
+		e.Message,
+		payload,
+		veclite.WithExpiresAt(expiresAt),
+	)
+	if err != nil {
+		return err
+	}
+	_, err = s.applyRetention(time.Now(), false)
 	return err
+}
+
+// applyRetention removes expired/legacy-old entries and enforces FIFO record
+// bounds. It runs only on writers while Store.mu is held. When it deletes
+// anything, Sync publishes a compact atomic snapshot that new shared readers
+// can open without contending with the writer.
+func (s *Store) applyRetention(now time.Time, force bool) (int, error) {
+	if !force && !s.lastSweep.IsZero() && now.Sub(s.lastSweep) < s.retention.SweepInterval {
+		return s.enforceRecordLimit()
+	}
+	s.lastSweep = now
+
+	coll := s.db.Collection(defaultCollection)
+	deleted, err := coll.CleanupExpired()
+	if err != nil {
+		return 0, err
+	}
+
+	// Records written before retention was introduced do not have ExpiresAt.
+	// Migrate them lazily based on their captured timestamp (or insertion time
+	// if legacy payload metadata is missing).
+	cutoff := now.Add(-s.retention.MaxAge)
+	records, err := coll.Find()
+	if err != nil {
+		return deleted, err
+	}
+	for _, rec := range records {
+		if rec == nil || !recordTime(rec).Before(cutoff) {
+			continue
+		}
+		if err := coll.Delete(rec.ID); err != nil {
+			return deleted, err
+		}
+		deleted++
+	}
+
+	evicted, err := s.enforceRecordLimit()
+	deleted += evicted
+	if err != nil {
+		return deleted, err
+	}
+	if deleted > 0 {
+		if err := s.db.Sync(); err != nil {
+			return deleted, err
+		}
+	}
+	return deleted, nil
+}
+
+func (s *Store) enforceRecordLimit() (int, error) {
+	coll := s.db.Collection(defaultCollection)
+	count := coll.Count()
+	if count <= s.retention.MaxRecords {
+		return 0, nil
+	}
+	evicted := coll.EnforceMemoryLimit(veclite.MemoryConfig{
+		MaxRecords:        s.retention.MaxRecords,
+		EvictionPolicy:    "fifo",
+		EvictionBatchSize: count,
+	})
+	if evicted > 0 {
+		if err := s.db.Sync(); err != nil {
+			return evicted, err
+		}
+	}
+	return evicted, nil
+}
+
+func recordTime(rec *veclite.Record) time.Time {
+	entryTime := entryFromRecord(rec).Timestamp
+	if !entryTime.IsZero() {
+		return entryTime
+	}
+	return rec.CreatedAt
 }
 
 // SearchOptions narrows a log search. Empty filter fields match everything.
@@ -172,7 +338,9 @@ func (s *Store) SearchWithOptions(opts SearchOptions) ([]Entry, error) {
 		return nil, errors.New("store not open")
 	}
 	if opts.Limit <= 0 {
-		opts.Limit = 50
+		opts.Limit = DefaultSearchLimit
+	} else if opts.Limit > MaxSearchLimit {
+		opts.Limit = MaxSearchLimit
 	}
 	// A read-only search may legitimately open before the first capture has
 	// created the collection. Treat that as an empty store instead of asking
@@ -192,6 +360,8 @@ func (s *Store) SearchWithOptions(opts SearchOptions) ([]Entry, error) {
 	// result marshals as `[]`, not `null`.
 	query := strings.ToLower(opts.Query)
 	process := strings.ToLower(opts.Process)
+	now := time.Now()
+	retentionCutoff := now.Add(-s.retention.MaxAge)
 	levels := make(map[string]struct{}, len(opts.Levels))
 	for _, level := range opts.Levels {
 		level = strings.ToLower(strings.TrimSpace(level))
@@ -202,6 +372,9 @@ func (s *Store) SearchWithOptions(opts SearchOptions) ([]Entry, error) {
 	matches := make([]Entry, 0, opts.Limit)
 	for _, rec := range res {
 		if rec == nil {
+			continue
+		}
+		if (!rec.ExpiresAt.IsZero() && !rec.ExpiresAt.After(now)) || recordTime(rec).Before(retentionCutoff) {
 			continue
 		}
 		e := entryFromRecord(rec)

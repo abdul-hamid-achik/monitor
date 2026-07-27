@@ -1,24 +1,25 @@
 # AGENTS.md - Monitor CLI Development Guide
 
-Local-first observability hub for macOS. Built with Go, Bubble Tea, and the Charm
+Local-first observability hub for macOS and Linux. Built with Go, Bubble Tea, and the Charm
 ecosystem. Designed for both human use (TUI) and agent use (JSON CLI + MCP
 server).
 
 ## Project Overview
 
-**Monitor** is an agent-harnessable local observability tool for macOS (optimized
-for Apple Silicon). It features:
+**Monitor** is an agent-harnessable local observability tool with its fullest
+hardware support on Apple Silicon. It features:
 
 - Interactive Bubble Tea TUI (Nord theme)
-- JSON CLI commands (`snapshot`, `watch`, `process`, `kill`, `profile`,
-  `investigate`, `logs`, `doctor`, `mcp`)
+- JSON CLI commands for metrics, processes, diagnosis, grouped issues,
+  incident evidence, history, configuration, and ecosystem health
 - MCP stdio server (read-only + mutating tools; mutating require
   `confirm: true` in the typed input)
 - Process profiling (pprof HTTP scraping + macOS `sample`)
 - Anomaly detection (CPU spike, RSS growth with linear regression)
+- Durable Run/Event/Issue/Evidence grouping with open/resolved/ignored state
 - Ecosystem integrations: codemap, fcheap, vecgrep, vidtrace, glyphrun,
   cairntrace, tinyvault, veclite, tmux
-- veclite-backed log store with shared-read for CLI search
+- Bounded veclite log store with shared-read for CLI search
 - Glyphrun behavioral specs
 
 **Platform**: macOS Apple Silicon (M1/M2/M3/M5)
@@ -73,9 +74,9 @@ monitor/
 ├── cmd/monitor/
 │   └── main.go                  # Entry: dispatches CLI vs TUI based on args
 ├── internal/
-│   ├── analyzer/                # NEW: anomaly detection (CPU spike, RSS growth)
+│   ├── analyzer/                # anomaly detection (CPU spike, RSS growth)
 │   │   └── analyzer_test.go
-│   ├── cli/                     # NEW: cobra subcommands
+│   ├── cli/                     # cobra subcommands
 │   │   ├── root.go              # Root + subcommand registration
 │   │   ├── snapshot.go          # `monitor snapshot`
 │   │   ├── watch.go             # `monitor watch` (NDJSON)
@@ -86,7 +87,7 @@ monitor/
 │   │   ├── studio.go            # `monitor studio` (the TUI; alias `tui`)
 │   │   ├── util.go              # JSON output helpers, context handling
 │   │   └── cli_test.go
-│   ├── collector/               # NEW: pub/sub metric collector
+│   ├── collector/               # pub/sub metric collector
 │   │   ├── collector.go         # Collector + Subscribe
 │   │   ├── types.go             # CPUInfo, MemoryInfo, ProcessInfo, etc.
 │   │   ├── ringbuffer.go        # Generic ring buffer
@@ -96,31 +97,35 @@ monitor/
 │   ├── config/                  # Settings (JSON at ~/.config/monitor/config.json)
 │   │   ├── config.go
 │   │   └── config_test.go
-│   ├── ecosystem/               # NEW: CLI wrappers for codemap/fcheap/tvault/etc.
+│   ├── ecosystem/               # CLI wrappers for codemap/fcheap/vecgrep/etc.
 │   │   ├── registry.go          # Status + TinyvaultRun + RunGlyphrun
 │   │   └── registry_test.go
-│   ├── incidents/               # NEW: fcheap content-addressed incident stash
+│   ├── contextids/              # MONITOR/CHALUPA_CI run correlation
+│   ├── procbind/                # redacted process→runtime/codebase binding
+│   ├── issues/                  # durable Run/Event/Issue/Evidence store
+│   ├── incidents/               # integrity-hashed file.cheap evidence bundles
 │   │   ├── incidents.go         # Capture (bundle + tree-hash + fcheap save)
 │   │   └── incidents_test.go    # tree-hash stability, no-fcheap fallback, bundle round-trip
-│   ├── capture/                  # NEW: log capture pipeline
+│   ├── capture/                 # log capture pipeline
 │   │   ├── capture.go            # Source, Runner, parseLevel, looksLikeLogPath
 │   │   └── capture_test.go       # 9 unit tests
-│   ├── kill/                    # NEW: safe process termination
+│   ├── kill/                    # safe process termination
 │   │   ├── kill.go
 │   │   └── kill_test.go
-│   ├── reload/                  # NEW: /reload HTTP endpoint for the TUI
+│   ├── reload/                  # /reload HTTP endpoint for the TUI
 │   │   ├── reload.go            # Reloader, NoopReloader, Server, DefaultAddr
 │   │   └── reload_test.go       # 7 unit tests (healthz, reload, idempotence, ...)
-│   ├── logger/                  # NEW: veclite-backed log store
+│   ├── logger/                  # bounded veclite-backed log store
 │   │   ├── store.go
 │   │   └── store_test.go
-│   ├── mcp/                     # MCP stdio server (8 tools: 4 read-only + 4 mutating)
+│   ├── mcp/                     # MCP stdio server (10 tools: 6 read-only + 4 mutating)
 │   │   ├── server.go            # Service, Server, tool handlers, confirm gate
 │   │   └── server_test.go       # handler unit tests
-│   ├── temperature/             # NEW: real SMC temperature via sudo powermetrics
+│   ├── telemetry/               # bounded identity-free telemetry windows
+│   ├── temperature/             # real SMC temperature via sudo powermetrics
 │   │   ├── temperature.go       # Source, Kind, Reading; streaming subprocess lifecycle
 │   │   └── temperature_test.go  # parser variants, fallback, fake-binary upgrade
-│   ├── profiler/                # NEW: pprof + sample profiling
+│   ├── profiler/                # pprof + sample + Node inspector profiling
 │   │   ├── profiler.go
 │   │   └── profiler_test.go
 │   ├── ui/studio/               # The TUI (Bubble Tea v2 — charm.land/bubbletea/v2 + lipgloss/v2)
@@ -135,7 +140,7 @@ monitor/
 │   └── widgets/                 # Reusable widgets (sparklines, gauges; lipgloss v2)
 │       ├── gauge.go
 │       └── gauge_test.go
-├── specs/                       # glyphrun behavioral specs (31 specs)
+├── specs/                       # glyphrun behavioral specs (35 currently)
 │   ├── baseline.yml             # save/list/delete + path-traversal guard
 │   ├── cli_help.yml
 │   ├── diff.yml                 # baseline vs live diff
@@ -188,9 +193,9 @@ Collector → [subs] → TUI renderer, analyzer, MCP stream, log capture
 
 ### Ecosystem Layer (`internal/ecosystem`)
 
-Each tool has an `Available() bool` and typed methods. The `Status(ctx)` function
-returns JSON-ready aggregate health. Wrappers follow the vidtrace pattern:
-`run(ctx, bin, args)` + `decodeJSON[T]`.
+Each tool has availability and typed methods. `Probe(ctx)` returns JSON-ready
+aggregate health. `codeintel.go` additionally preserves codemap project binding,
+vecgrep index readiness/warnings, and the strict ArtifactRefV1 contract.
 
 ### MCP Server (`internal/mcp`)
 
@@ -204,6 +209,8 @@ Read-only tools shipped:
 - `monitor_processes` — top processes
 - `monitor_doctor` — ecosystem health
 - `monitor_analyze` — bounded cross-signal process diagnosis
+- `monitor_issues` — bounded grouped-issue list
+- `monitor_issue` — one issue with bounded recent occurrences
 
 Mutating tools (all require `confirm: true` in the typed input):
 
@@ -227,9 +234,16 @@ writer never blocks a search. Readers see a point-in-time snapshot. The
 injects a refresh into the active Studio model; `monitor studio --reload-server`
 starts it and `monitor reload` posts to it.
 
+Default retention is 7 days and 100,000 FIFO records. Search defaults to 50
+and clamps to 1,000. The default data directory is mode 0700. Capture
+`--max-lines` / `--max-bytes` limits one session; it does not configure durable
+retention.
+
 ### Profiler (`internal/profiler`)
 
 - Go processes: scrape `net/http/pprof` over HTTP
+- Node/Bun/Deno: ownership-verified CDP inspector CPU profile when `--inspect`
+  is detected
 - Any process: macOS `sample <pid> 1 -mayDie`
 - Parses pprof text into `Symbol{Func, File, Line}`
 
@@ -243,6 +257,26 @@ Pluggable rules:
 
 Engine observes every `collector.Event` and returns fired alerts.
 
+Per-process CPU is computed from consecutive cumulative user+system counters
+divided by wall time. One core is 100%; multithreaded processes can exceed it.
+The first observation, PID reuse, backwards counters, and invalid intervals are
+explicitly unavailable. Full process collection has a 100ms minimum interval.
+
+### Issues and Evidence (`internal/issues`, `internal/incidents`)
+
+`monitor investigate` runs seven steps: identify, snapshot, profile, correlate,
+semantic, stash, issue. `watch --stash` also records an occurrence after the
+evidence capture. Fingerprint V1 groups stable project/service/kind/message/
+symbol identity; run, release, PID, timestamp, tree hash, and artifact identity
+stay on the occurrence. Resolved issues reopen on a later occurrence; ignored
+issues continue accumulating until explicitly reopened.
+
+Incident bundles are flat, private (0700 directories / 0600 files), reject
+symlinks and undeclared/non-regular entries, cap raw profiles at 128 MiB, and
+verify their tree hash before resume. The failed-archive registry keeps the 20
+newest bundles. A tree hash is an integrity/correlation key, not a promise that
+two captures receive the same fcheap stash ID.
+
 ### Environment Detection
 
 When monitor launches a child process or spec, it sets:
@@ -252,6 +286,12 @@ When monitor launches a child process or spec, it sets:
 
 So child processes can detect they are being observed. Mirrors glyphrun's
 `GLYPHRUN=1` / `GLYPHRUN_RUN_DIR` pattern.
+
+Diagnostic context also reads `MONITOR_*` and Chalupa's
+`CHALUPA_CI_ENVIRONMENT`, `CHALUPA_CI_RUN_ID`, `CHALUPA_CI_STEP_ID`,
+`CHALUPA_CI_SUITE`, and `CHALUPA_CI_ATTEMPT`, with legacy `CHALUPA_*`
+fallbacks. These IDs belong to occurrences/manifests/tags and never enter
+telemetry V1.
 
 ---
 
@@ -349,6 +389,16 @@ and `internal/widgets` are on v2.
    sudo can't be obtained; the `temperature.source` field on the
    `SystemInfo` JSON (`"estimated"` or `"powermetrics"`) and the TUI's
    `● real` / `● est` badge tell the caller which.
+6. **Process CPU needs two samples** — one-shot process surfaces must use
+   `collectFullSnapshot`; the first collector observation is intentionally
+   unavailable. Preserve PID creation time checks to avoid PID-reuse spikes.
+7. **Issue identity excludes occurrence context** — never add PID, run,
+   release, timestamp, tree hash, or artifact ID to Fingerprint V1.
+8. **Incident bundles persist no argv** — `procbind` may inspect argv in
+   memory, but JSON bindings and bundle `process.json` must remain redacted.
+9. **file.cheap contracts are strict** — save/info fields use `source_path`,
+   `total_size`, `file_count`, `files`, and `content_hash`; validate the exact
+   local ArtifactRefV1 before returning it.
 
 ---
 

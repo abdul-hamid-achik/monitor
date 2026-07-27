@@ -8,6 +8,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,18 @@ func TestNewDefaults(t *testing.T) {
 	}
 	if c.opts.HistorySize != 60 {
 		t.Errorf("default history size = %d, want 60", c.opts.HistorySize)
+	}
+}
+
+func TestNewClampsFullCollectionInterval(t *testing.T) {
+	c := New(Options{Interval: time.Nanosecond})
+	if c.opts.Interval != MinFullCollectionInterval {
+		t.Fatalf("full interval = %v, want %v", c.opts.Interval, MinFullCollectionInterval)
+	}
+
+	telemetry := New(Options{Interval: time.Nanosecond, Profile: ProfileTelemetry})
+	if telemetry.opts.Interval != time.Nanosecond {
+		t.Fatalf("telemetry interval = %v, want 1ns", telemetry.opts.Interval)
 	}
 }
 
@@ -65,16 +78,9 @@ func TestCollectRuns(t *testing.T) {
 
 func TestCollectProcessTelemetryDeclaresStatusAndIO(t *testing.T) {
 	c := New(Options{})
-	info := c.Collect(context.Background())
-	var self *ProcessInfo
-	for i := range info.Processes {
-		if info.Processes[i].PID == int32(os.Getpid()) {
-			self = &info.Processes[i]
-			break
-		}
-	}
-	if self == nil {
-		t.Fatal("collector did not return the test process")
+	self, err := c.Process(context.Background(), int32(os.Getpid()))
+	if err != nil {
+		t.Fatalf("targeted Process(self): %v", err)
 	}
 	for _, key := range []string{metricProcessStatus, metricProcessIO} {
 		state, ok := self.MetricStates[key]
@@ -88,6 +94,128 @@ func TestCollectProcessTelemetryDeclaresStatusAndIO(t *testing.T) {
 	}
 	if self.MetricStates[metricProcessStatus].State == MetricObserved && self.Status == "" {
 		t.Error("observed process status is empty")
+	}
+	if state := self.MetricStates[metricProcessCPU]; state.State != MetricUnavailable ||
+		!strings.Contains(state.Reason, "first sample") {
+		t.Fatalf("first process CPU state = %+v, want explicit first-sample unavailability", state)
+	}
+}
+
+func TestTargetedProcessWarmsCPUAcrossSamples(t *testing.T) {
+	c := New(Options{})
+	pid := int32(os.Getpid())
+
+	first, err := c.Process(context.Background(), pid)
+	if err != nil {
+		t.Fatalf("first targeted Process(self): %v", err)
+	}
+	if state := first.MetricStates[metricProcessCPU]; state.State != MetricUnavailable ||
+		!strings.Contains(state.Reason, "first sample") {
+		t.Fatalf("first CPU state = %+v, want explicit warm-up state", state)
+	}
+
+	// The cumulative counter may legitimately remain unchanged, but the
+	// second observation still has a real positive wall interval and must
+	// therefore report an observed 0% instead of another warm-up placeholder.
+	time.Sleep(time.Millisecond)
+	second, err := c.Process(context.Background(), pid)
+	if err != nil {
+		t.Fatalf("second targeted Process(self): %v", err)
+	}
+	if state := second.MetricStates[metricProcessCPU]; state.State != MetricObserved {
+		t.Fatalf("second CPU state = %+v, want observed", state)
+	}
+}
+
+func TestTargetedProcessConcurrentSamples(t *testing.T) {
+	c := New(Options{})
+	pid := int32(os.Getpid())
+	const workers = 8
+
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := c.Process(context.Background(), pid)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent targeted Process(self): %v", err)
+		}
+	}
+}
+
+func TestProcessCPUPercentUsesCounterDelta(t *testing.T) {
+	start := time.Unix(100, 0)
+	previous := processCPUSample{createTime: 10, cpuSeconds: 4, sampledAt: start}
+	current := processCPUSample{createTime: 10, cpuSeconds: 4.5, sampledAt: start.Add(2 * time.Second)}
+
+	got, ok, reason := processCPUPercent(previous, current)
+	if !ok || reason != "" {
+		t.Fatalf("processCPUPercent valid sample = (%v, %v, %q)", got, ok, reason)
+	}
+	if math.Abs(got-25) > 0.0001 {
+		t.Fatalf("processCPUPercent = %v, want 25", got)
+	}
+
+	current.cpuSeconds = previous.cpuSeconds
+	got, ok, reason = processCPUPercent(previous, current)
+	if !ok || got != 0 || reason != "" {
+		t.Fatalf("idle process = (%v, %v, %q), want observed zero", got, ok, reason)
+	}
+}
+
+func TestProcessCPUPercentRejectsInvalidDeltas(t *testing.T) {
+	start := time.Unix(100, 0)
+	base := processCPUSample{createTime: 10, cpuSeconds: 4, sampledAt: start}
+	tests := []struct {
+		name    string
+		current processCPUSample
+		want    string
+	}{
+		{
+			name:    "pid reused",
+			current: processCPUSample{createTime: 11, cpuSeconds: 1, sampledAt: start.Add(time.Second)},
+			want:    "PID was reused",
+		},
+		{
+			name:    "non-positive wall interval",
+			current: processCPUSample{createTime: 10, cpuSeconds: 5, sampledAt: start},
+			want:    "interval was not positive",
+		},
+		{
+			name:    "counter reset",
+			current: processCPUSample{createTime: 10, cpuSeconds: 3, sampledAt: start.Add(time.Second)},
+			want:    "counter moved backwards",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok, reason := processCPUPercent(base, tt.current)
+			if ok || got != 0 || !strings.Contains(reason, tt.want) {
+				t.Fatalf("result = (%v, %v, %q), want refusal containing %q", got, ok, reason, tt.want)
+			}
+		})
+	}
+}
+
+func TestPruneProcessCPUSamplesRemovesExitedPIDs(t *testing.T) {
+	c := New(Options{})
+	c.processCPU[10] = processCPUSample{createTime: 1}
+	c.processCPU[20] = processCPUSample{createTime: 2}
+	c.pruneProcessCPUSamples(map[int32]struct{}{20: {}})
+
+	if _, exists := c.processCPU[10]; exists {
+		t.Fatal("exited PID sample was retained")
+	}
+	if _, exists := c.processCPU[20]; !exists {
+		t.Fatal("live PID sample was removed")
 	}
 }
 func TestLoadAverageObservedZeroVersusUnavailable(t *testing.T) {
@@ -592,6 +720,10 @@ func TestSnapshotConcurrentWithCollect(t *testing.T) {
 func TestSetInterval(t *testing.T) {
 	c := New(Options{})
 	c.SetInterval(0) // no-op for invalid
+	c.SetInterval(time.Nanosecond)
+	if c.opts.Interval != MinFullCollectionInterval {
+		t.Errorf("clamped interval = %v, want %v", c.opts.Interval, MinFullCollectionInterval)
+	}
 	c.SetInterval(250_000_000)
 	if c.opts.Interval != 250_000_000 {
 		t.Errorf("interval = %v, want 250ms", c.opts.Interval)

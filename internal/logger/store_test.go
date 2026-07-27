@@ -180,6 +180,13 @@ func TestResolvePathPrecedenceAndDurableDefault(t *testing.T) {
 	if _, err := os.Stat(filepath.Dir(got)); err != nil {
 		t.Fatalf("default parent was not created: %v", err)
 	}
+	info, err := os.Stat(filepath.Dir(got))
+	if err != nil {
+		t.Fatalf("stat default parent: %v", err)
+	}
+	if gotMode := info.Mode().Perm(); gotMode != 0o700 {
+		t.Fatalf("default parent mode = %o, want 700", gotMode)
+	}
 
 	envPath := filepath.Join(home, "from-env.veclite")
 	t.Setenv(StorePathEnv, envPath)
@@ -189,6 +196,66 @@ func TestResolvePathPrecedenceAndDurableDefault(t *testing.T) {
 	override := filepath.Join(home, "explicit.veclite")
 	if got, err := ResolvePath(override); err != nil || got != override {
 		t.Fatalf("explicit path = (%q, %v), want %q", got, err, override)
+	}
+}
+
+func TestStoreRetentionEvictsOldestAndExpired(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs.veclite")
+	store, err := OpenStoreWithRetention(path, RetentionPolicy{
+		MaxAge:        time.Hour,
+		MaxRecords:    3,
+		SweepInterval: time.Nanosecond,
+	})
+	if err != nil {
+		t.Fatalf("openStore: %v", err)
+	}
+	closeStoreOnCleanup(t, store)
+
+	now := time.Now()
+	entries := []Entry{
+		{Timestamp: now.Add(-2 * time.Hour), Message: "expired", Raw: "expired"},
+		{Timestamp: now.Add(-4 * time.Minute), Message: "first", Raw: "first"},
+		{Timestamp: now.Add(-3 * time.Minute), Message: "second", Raw: "second"},
+		{Timestamp: now.Add(-2 * time.Minute), Message: "third", Raw: "third"},
+		{Timestamp: now.Add(-time.Minute), Message: "fourth", Raw: "fourth"},
+	}
+	for _, entry := range entries {
+		if err := store.Append(entry); err != nil {
+			t.Fatalf("Append %q: %v", entry.Message, err)
+		}
+	}
+
+	got, err := store.Search("", 100)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("retained entries = %d, want 3: %+v", len(got), got)
+	}
+	if got[0].Message != "fourth" || got[2].Message != "second" {
+		t.Fatalf("retained entries = %+v, want fourth through second", got)
+	}
+}
+
+func TestSearchCapsExcessiveLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs.veclite")
+	store, err := OpenStoreWithRetention(path, RetentionPolicy{MaxRecords: MaxSearchLimit + 10})
+	if err != nil {
+		t.Fatalf("openStore: %v", err)
+	}
+	closeStoreOnCleanup(t, store)
+
+	for i := 0; i < MaxSearchLimit+1; i++ {
+		if err := store.Append(Entry{Message: "match", Raw: "match"}); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	got, err := store.Search("match", MaxSearchLimit+100)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(got) != MaxSearchLimit {
+		t.Fatalf("Search returned %d, want hard cap %d", len(got), MaxSearchLimit)
 	}
 }
 

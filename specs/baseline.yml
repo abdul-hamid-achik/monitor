@@ -10,6 +10,8 @@ intent: |
 target:
   cmd: ["./bin/monitor", "baseline", "save", "glyph-spec-baseline", "--json"]
   cwd: "."
+  env:
+    HOME: "/tmp/monitor-baseline-spec-home"
 
 terminal:
   cols: 120
@@ -20,8 +22,10 @@ preconditions:
   commands:
     - run: "test -x ./bin/monitor"
       timeoutMs: 5000
+    - run: "mkdir -p /tmp/monitor-baseline-spec-home"
+      timeoutMs: 5000
     # Start from a clean slate (ignore "not found").
-    - run: "./bin/monitor baseline delete glyph-spec-baseline 2>/dev/null || true"
+    - run: "HOME=/tmp/monitor-baseline-spec-home ./bin/monitor baseline delete glyph-spec-baseline 2>/dev/null || true"
       timeoutMs: 5000
 
 steps:
@@ -35,22 +39,22 @@ outcomes:
     description: save echoes the baseline name
     verify:
       command:
-        run: "./bin/monitor baseline save glyph-spec-baseline --json | grep -q 'glyph-spec-baseline'"
+        run: "HOME=/tmp/monitor-baseline-spec-home ./bin/monitor baseline save glyph-spec-baseline --json | grep -q 'glyph-spec-baseline'"
   - id: list_includes_it
     description: list shows the saved baseline
     verify:
       command:
-        run: "./bin/monitor baseline list | grep -q 'glyph-spec-baseline'"
+        run: "HOME=/tmp/monitor-baseline-spec-home ./bin/monitor baseline list | grep -q 'glyph-spec-baseline'"
   - id: rejects_path_traversal
     description: a traversal name is refused (security guard, no file written)
     verify:
       command:
-        run: "./bin/monitor baseline save ../evil 2>&1 | grep -qi 'invalid baseline name'"
+        run: "HOME=/tmp/monitor-baseline-spec-home ./bin/monitor baseline save ../evil 2>&1 | grep -qi 'invalid baseline name'"
   - id: delete_removes_it
     description: delete removes the baseline from the list
     verify:
       command:
-        run: "./bin/monitor baseline delete glyph-spec-baseline && ! ./bin/monitor baseline list | grep -q 'glyph-spec-baseline'"
+        run: "HOME=/tmp/monitor-baseline-spec-home ./bin/monitor baseline delete glyph-spec-baseline && ! HOME=/tmp/monitor-baseline-spec-home ./bin/monitor baseline list | grep -q 'glyph-spec-baseline'"
   - id: clean_exit
     description: save exits cleanly
     verify:

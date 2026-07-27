@@ -51,6 +51,12 @@ type Options struct {
 	NetworkCounters func(context.Context) ([]net.IOCountersStat, error)
 }
 
+// MinFullCollectionInterval is the shortest supported cadence for collectors
+// that enumerate and inspect every process. Faster loops can spend all their
+// time sampling (especially on macOS, where some process fields require ps)
+// and do not leave enough wall time for meaningful counter deltas.
+const MinFullCollectionInterval = 100 * time.Millisecond
+
 // CollectionProfile identifies a closed collection plan. Profiles are
 // enforced before any platform collector runs so restricted callers cannot
 // accidentally inherit newly added full-snapshot collectors.
@@ -124,6 +130,8 @@ type Collector struct {
 	loadAverage     func(context.Context) (*load.AvgStat, error)
 	networkCounters func(context.Context) ([]net.IOCountersStat, error)
 	intervalCh      chan time.Duration
+	processMu       sync.Mutex
+	processCPU      map[int32]processCPUSample
 
 	cpuHist     *RingBuffer[float64]
 	memHist     *RingBuffer[float64]
@@ -152,10 +160,21 @@ type Collector struct {
 	collectionObserver func(collectionStage)
 }
 
+// processCPUSample is a cumulative process CPU counter tied to a specific
+// process lifetime. createTime distinguishes a reused PID from the process
+// sampled on the previous tick.
+type processCPUSample struct {
+	createTime int64
+	cpuSeconds float64
+	sampledAt  time.Time
+}
+
 // New creates a Collector with the given options.
 func New(opts Options) *Collector {
 	if opts.Interval <= 0 {
 		opts.Interval = time.Second
+	} else if opts.Profile == ProfileFull && opts.Interval < MinFullCollectionInterval {
+		opts.Interval = MinFullCollectionInterval
 	}
 	if opts.HistorySize <= 0 {
 		opts.HistorySize = 60
@@ -181,6 +200,7 @@ func New(opts Options) *Collector {
 		loadAverage:     loadAverage,
 		networkCounters: networkCounters,
 		intervalCh:      make(chan time.Duration, 1),
+		processCPU:      make(map[int32]processCPUSample),
 	}
 	if opts.Profile != ProfileTelemetry {
 		collector.cpuHist = NewRingBuffer[float64](opts.HistorySize)
@@ -220,6 +240,9 @@ func (c *Collector) Subscribe(fn Subscriber) func() {
 func (c *Collector) SetInterval(d time.Duration) {
 	if d <= 0 {
 		return
+	}
+	if c.opts.Profile == ProfileFull && d < MinFullCollectionInterval {
+		d = MinFullCollectionInterval
 	}
 	c.mu.Lock()
 	c.opts.Interval = d
@@ -711,17 +734,32 @@ func (c *Collector) collectProcesses(ctx context.Context) {
 	}
 	statusByPID, statusErr := bulkProcessStatuses(ctx)
 	out := make([]ProcessInfo, 0, len(procs))
+	seen := make(map[int32]struct{}, len(procs))
 	for _, p := range procs {
+		seen[p.Pid] = struct{}{}
 		pi, processErr := c.processInfo(ctx, p, statusByPID, statusErr)
 		if processErr != nil {
 			continue
 		}
 		out = append(out, pi)
 	}
+	c.pruneProcessCPUSamples(seen)
 	sort.Slice(out, func(i, j int) bool { return out[i].CPUPercent > out[j].CPUPercent })
 	c.info.Processes = out
 	c.info.ProcessesState = metricStatus(MetricObserved, "")
 	c.info.ProcessesLastUpdate = c.info.LastUpdate
+}
+
+// Process collects one PID directly. It is the targeted fallback for callers
+// that must inspect a known live process even when a platform-wide enumeration
+// transiently omits it (which can happen under macOS sandbox restrictions).
+func (c *Collector) Process(ctx context.Context, pid int32) (ProcessInfo, error) {
+	p, err := process.NewProcessWithContext(ctx, pid)
+	if err != nil {
+		return ProcessInfo{}, err
+	}
+	statusByPID, statusErr := bulkProcessStatuses(ctx)
+	return c.processInfo(ctx, p, statusByPID, statusErr)
 }
 
 func (c *Collector) processInfo(ctx context.Context, p *process.Process, statusByPID map[int32]string, bulkStatusErr error) (ProcessInfo, error) {
@@ -733,11 +771,33 @@ func (c *Collector) processInfo(ctx context.Context, p *process.Process, statusB
 		pi.Name = "unknown"
 		pi.MetricStates[metricProcessName] = metricStatus(MetricUnavailable, err.Error())
 	}
-	if value, err := p.CPUPercentWithContext(ctx); err == nil {
-		pi.CPUPercent = value
-		pi.MetricStates[metricProcessCPU] = metricStatus(MetricObserved, "")
-	} else {
-		pi.MetricStates[metricProcessCPU] = metricStatus(MetricUnavailable, err.Error())
+	createTime, createErr := p.CreateTimeWithContext(ctx)
+	times, timesErr := p.TimesWithContext(ctx)
+	switch {
+	case createErr != nil:
+		pi.MetricStates[metricProcessCPU] = metricStatus(MetricUnavailable, createErr.Error())
+	case createTime <= 0:
+		pi.MetricStates[metricProcessCPU] = metricStatus(MetricUnavailable, "process creation time was not positive")
+	case timesErr != nil:
+		pi.MetricStates[metricProcessCPU] = metricStatus(MetricUnavailable, timesErr.Error())
+	default:
+		current := processCPUSample{
+			createTime: createTime,
+			cpuSeconds: times.User + times.System,
+			sampledAt:  time.Now(),
+		}
+		c.processMu.Lock()
+		previous, exists := c.processCPU[p.Pid]
+		c.processCPU[p.Pid] = current
+		c.processMu.Unlock()
+		if !exists {
+			pi.MetricStates[metricProcessCPU] = metricStatus(MetricUnavailable, "first sample has no prior process CPU counter")
+		} else if value, ok, reason := processCPUPercent(previous, current); ok {
+			pi.CPUPercent = value
+			pi.MetricStates[metricProcessCPU] = metricStatus(MetricObserved, "")
+		} else {
+			pi.MetricStates[metricProcessCPU] = metricStatus(MetricUnavailable, reason)
+		}
 	}
 	if value, err := p.MemoryInfoWithContext(ctx); err == nil {
 		pi.Memory = value.RSS
@@ -806,6 +866,34 @@ func (c *Collector) processInfo(ctx context.Context, p *process.Process, statusB
 	}
 	pi.IsProtected = IsProtectedProcess(pi.Name, pi.PID)
 	return pi, nil
+}
+
+// processCPUPercent converts two cumulative process counters into the CPU
+// percentage consumed during the wall-clock interval. A process saturating
+// one core reports 100%; multi-threaded processes may legitimately exceed it.
+func processCPUPercent(previous, current processCPUSample) (float64, bool, string) {
+	if previous.createTime != current.createTime {
+		return 0, false, "PID was reused; waiting for a second sample of the new process"
+	}
+	elapsed := current.sampledAt.Sub(previous.sampledAt).Seconds()
+	if elapsed <= 0 {
+		return 0, false, "sampling interval was not positive"
+	}
+	delta := current.cpuSeconds - previous.cpuSeconds
+	if delta < 0 {
+		return 0, false, "process CPU counter moved backwards"
+	}
+	return delta / elapsed * 100, true, ""
+}
+
+func (c *Collector) pruneProcessCPUSamples(seen map[int32]struct{}) {
+	c.processMu.Lock()
+	defer c.processMu.Unlock()
+	for pid := range c.processCPU {
+		if _, ok := seen[pid]; !ok {
+			delete(c.processCPU, pid)
+		}
+	}
 }
 
 // bulkProcessStatuses avoids gopsutil's macOS StatusWithContext implementation,

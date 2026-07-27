@@ -64,7 +64,10 @@ Examples:
 			c := NewCollector(0)
 			ctx, cancel := Context()
 			defer cancel()
-			info := c.Collect(ctx)
+			info, err := collectFullSnapshot(ctx, c)
+			if err != nil {
+				return err
+			}
 			list, err := buildProcessList(info.Processes, info.ProcessesState, processListOptions{
 				Limit: limit, Sort: sortBy, Filter: filter, IncludeSystem: includeSystem,
 			})

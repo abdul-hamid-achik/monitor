@@ -7,7 +7,7 @@ intent: |
   error.
 
 target:
-  cmd: ["./bin/monitor", "logs", "search", "should-not-match-anything", "--json"]
+  cmd: ["./bin/monitor", "logs", "search", "should-not-match-anything", "--store", "/tmp/monitor-logs-search-spec.veclite", "--json"]
   cwd: "."
 
 terminal:
@@ -33,17 +33,17 @@ outcomes:
     description: stdout is a valid JSON array
     verify:
       command:
-        run: "./bin/monitor logs search should-not-match --json | python3 -c 'import json,sys; json.load(sys.stdin); print(\"ok\")'"
+        run: "./bin/monitor logs search should-not-match --store /tmp/monitor-logs-search-spec.veclite --json | python3 -c 'import json,sys; json.load(sys.stdin); print(\"ok\")'"
   - id: empty_array_for_no_match
     description: a query with no matches returns an empty array
     verify:
       command:
-        run: "./bin/monitor logs search zz_should_not_match_zz --json | grep -q '^\\[\\]$'"
+        run: "./bin/monitor logs search zz_should_not_match_zz --store /tmp/monitor-logs-search-spec.veclite --json | grep -q '^\\[\\]$'"
   - id: supports_limit_flag
     description: the --limit flag is accepted
     verify:
       command:
-        run: "./bin/monitor logs search foo --limit 5 --json | grep -qE '^\\[|^\\{'"
+        run: "./bin/monitor logs search foo --store /tmp/monitor-logs-search-spec.veclite --limit 5 --json | grep -qE '^\\[|^\\{'"
   - id: filters_by_level_and_process
     description: metadata filters select only the matching process error
     verify:

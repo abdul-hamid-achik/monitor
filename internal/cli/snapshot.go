@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/shirou/gopsutil/v4/process"
 	"github.com/spf13/cobra"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
@@ -71,9 +72,9 @@ Examples:
 // are therefore real instead of first-sample zeroes. A zero interval retains
 // the fast orientation path for callers that do not need rates.
 func collectSnapshot(ctx context.Context, c *collector.Collector, interval time.Duration) (collector.SystemInfo, error) {
-	info := c.Collect(ctx)
+	first := c.Collect(ctx)
 	if interval == 0 {
-		return info, nil
+		return first, nil
 	}
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
@@ -81,8 +82,32 @@ func collectSnapshot(ctx context.Context, c *collector.Collector, interval time.
 	case <-ctx.Done():
 		return collector.SystemInfo{}, ctx.Err()
 	case <-timer.C:
-		return c.Collect(ctx), nil
+		second := c.Collect(ctx)
+		second.Processes = mergeLiveProcesses(ctx, second.Processes, first.Processes)
+		return second, nil
 	}
+}
+
+// mergeLiveProcesses preserves a process that was visible during warm-up but
+// was transiently omitted by the second platform enumeration. We only retain
+// it if the PID still exists, so a process that really exited is not resurrected
+// in the returned snapshot. Its first-sample CPU state remains explicitly
+// unavailable rather than inventing a rate.
+func mergeLiveProcesses(ctx context.Context, current, previous []collector.ProcessInfo) []collector.ProcessInfo {
+	seen := make(map[int32]struct{}, len(current))
+	for _, item := range current {
+		seen[item.PID] = struct{}{}
+	}
+	for _, item := range previous {
+		if _, ok := seen[item.PID]; ok {
+			continue
+		}
+		exists, err := process.PidExistsWithContext(ctx, item.PID)
+		if err == nil && exists {
+			current = append(current, item)
+		}
+	}
+	return current
 }
 
 func printHumanSnapshot(info collector.SystemInfo) {

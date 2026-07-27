@@ -1,7 +1,7 @@
 # Ecosystem Integration
 
 Monitor lives in a family of small, local-first tools. Rather than reimplement
-secret storage, content-addressed stashing, or behavioral specs, it shells out
+secret storage, artifact archival, or behavioral specs, it shells out
 to sibling binaries when they happen to be on your `$PATH` and adds value on top
 of them.
 
@@ -11,18 +11,17 @@ surfaces never depend on any of them. When a tool is absent, the wrapping
 command tells you so (or, for incident capture, keeps the bundle locally) — it
 never crashes.
 
-The tools Monitor knows about are wrapped in
-[`internal/ecosystem/registry.go`](https://github.com/abdul-hamid-achik/monitor),
-which exposes a typed `Probe()` health check and thin `run`/`runJSON` helpers
-around each binary's `--json` output.
+The tools Monitor knows about are wrapped in `internal/ecosystem`. The registry
+provides typed health probes, while the code-intelligence adapter owns the
+codemap, vecgrep, and ArtifactRefV1 contracts.
 
 | Tool | Binary on `$PATH` | What Monitor uses it for |
 |------|-------------------|--------------------------|
-| fcheap | `fcheap` | Content-addressed incident stashes (`stash`, `investigate`, `watch --stash`, `incidents`) |
+| file.cheap | `fcheap` | Incident evidence (`stash`, `investigate`, `watch --stash`, `incidents`) plus validated `artifact-ref` handoff |
 | tinyvault | `tvault` | Secret injection into a child process (`vault`) |
 | glyphrun | `glyph` | Running behavioral specs (`run`) |
-| codemap | `codemap` | Process→code correlation, surfaced as availability in `doctor` |
-| vecgrep | `vecgrep` | Reported by `doctor` |
+| codemap | `codemap` | Auto-correlate profile frames and entry scripts during `investigate` (`symbol-at` + `impact`, bound with `-C <codebase>`) |
+| vecgrep | `vecgrep` | Semantic/similar code search during `investigate` against the bound codebase |
 | vidtrace | `vidtrace` | Reported by `doctor` |
 | cairntrace | `cairn` | Reported by `doctor` |
 | veclite | `veclite` | Reported by `doctor` (also the embedded log store) |
@@ -66,8 +65,10 @@ computes a `sha256` tree-hash of the bundle's contents, and shells out to
 `fcheap save` with that hash as a tag. The implementation lives in
 [`internal/incidents/incidents.go`](https://github.com/abdul-hamid-achik/monitor).
 
-Because the stash is content-addressed and tagged, you can search incidents
-later by trigger, alert rule, or PID. Every monitor stash carries the
+The tree hash is an integrity and correlation key; it does not promise that
+two captures receive the same file.cheap stash ID. Snapshots and profiles
+normally contain timestamps, so repeated real captures generally differ. Tags
+still let you search incidents by trigger, alert rule, or PID. Every Monitor stash carries the
 `monitor-incident` tag plus tags like `trigger:investigate`,
 `snapshot:<hash12>`, `alert:<rule>`, and `pid:<n>`.
 
@@ -95,15 +96,18 @@ monitor investigate 1234 --json
 monitor investigate 1234 --no-save   # bundle locally, skip fcheap
 ```
 
-`investigate` runs a snapshot → profile → stash pipeline against one process: it
-captures a heap profile of the PID, takes a full system snapshot, records the
-process name, and stashes the bundle. The output reports the `steps` taken and
-the resulting stash. Flags:
+`investigate` runs `identify` → `snapshot` → `profile` → `correlate` →
+`semantic` → `stash` → `issue`. It binds the target to a runtime/codebase,
+prefers an ownership-verified Node inspector profile when available, adds
+bounded codemap and vecgrep context, archives the evidence, and groups the
+occurrence. The output reports every step and its limitations.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--ttl` | `7d` | Stash lifetime, passed through to `fcheap --ttl` |
-| `--no-save` | `false` | Capture the bundle to a temp dir but skip the `fcheap save` step (useful in sandboxed environments — the profile is returned inline in the JSON) |
+| `--no-save` | `false` | Skip file.cheap archival; keep the profile in JSON and still record the issue occurrence |
+| `--codebase` | auto-detect | Project root used by codemap and vecgrep |
+| correlation flags | environment | `--environment`, `--deployment-id`, `--run-id`, `--release`, `--service`, `--git-sha` |
 | `--json` | `false` | Emit JSON |
 
 ### `monitor incidents` — list what you've captured
@@ -140,12 +144,26 @@ outcome as a separate NDJSON line (`{"type":"stash",...}`). `--stash-ttl`
 
 ### Graceful degradation
 
-If `fcheap` is not on `$PATH`, capture does **not** fail hard. Monitor still
-writes the complete bundle to a temp directory and returns it with a note like
-`fcheap not on PATH; bundle saved locally only`, leaving the directory in place
-so you can recover the bytes. If `fcheap save` itself fails, the bundle is again
-kept locally and the error surfaces in the `stash_error` field rather than
-aborting the command.
+If `fcheap` is not on `$PATH`, capture does **not** discard the evidence.
+Monitor moves the complete bundle into its durable recovery registry under
+`$XDG_STATE_HOME/monitor/incidents` (or
+`~/.local/state/monitor/incidents`) and returns a registry ID. If registration
+itself fails, the original temporary bundle remains as a last-resort recovery
+path. The registry keeps the 20 newest entries.
+
+### ArtifactRefV1 handoff
+
+After a successful save, Monitor asks fcheap for a credential-free reference.
+It only surfaces the result when the strict local contract validates:
+
+- `$schema` is `urn:filecheap.dev:artifact-ref:v1` and `version` is `1`;
+- `provider` is `fcheap-local`;
+- `artifact_id` is portable and `uri` exactly equals
+  `fcheap://stash/<artifact_id>`;
+- `kind` is present and local references do not include `web_url`.
+
+Chalupa can store this reference beside a run without copying profile or
+incident bytes into telemetry. file.cheap remains the evidence owner.
 
 ## Secret injection with tinyvault
 
@@ -185,28 +203,41 @@ Monitor invokes `glyph run --format json <spec>`. When Monitor launches a child
 process or spec it sets `MONITOR=1` in the child's environment, so the spec (or
 any process it spawns) can detect that it is being observed.
 
-## Code correlation with codemap
+## Code correlation with codemap + vecgrep
 
-Monitor reports **codemap** availability through `monitor doctor`, and the
-incident bundle is built to support code correlation: when you
-`monitor investigate <pid>`, the stash records the process name and PID
-alongside the snapshot and profile. That preserved identity is what lets you
-hand an incident off to codemap to trace a misbehaving process back to the code
-that owns it.
+`monitor investigate <pid>` automatically binds the process to a codebase
+(auto-detected from cwd/`package.json`/`go.mod`, or `--codebase`) and then:
 
-Monitor does not call codemap automatically — the correlation is a workflow you
-drive yourself once `doctor` confirms codemap is installed. As with every other
-integration, codemap being absent changes nothing about Monitor's core
-behavior; `doctor` simply reports it as not on `$PATH`.
+1. **codemap** — bounded `symbol-at` + `impact` calls with `-C <codebase>` on
+   profile frames and the process main script. Only resolvable file/line
+   positions become correlations.
+2. **vecgrep** — a bounded `json-envelope` readiness query first verifies that
+   the index exists and is fresh. Similar/search hits are capped; a stale or
+   missing index remains visible as a limitation instead of being hidden.
+
+Results land in the investigate JSON (`correlations`, `semantic_hits`) and,
+when stashed, in `correlations.json` / `semantic.json` inside the fcheap
+bundle. Missing binaries degrade to step status `skipped` with a recovery
+hint — core Monitor behavior never hard-fails on them.
+
+```bash
+monitor doctor --require codemap,vecgrep,fcheap
+monitor process 1234 --codebase ~/projects/my-app --json   # binding preview
+monitor investigate 1234 --codebase ~/projects/my-app --json
+```
+
+Cross-repo handoff (Chalupa CI + file.cheap ArtifactRefV1) is specified in
+the [Monitor incident v1 contract](../contracts/monitor-incident-v1.md).
 
 ## Summary
 
 - Run [`monitor doctor`](./cli.md) first to see what is installed.
 - fcheap powers `stash`, `investigate`, `incidents`, and `watch --stash`; all
-  of them keep a local bundle when fcheap is missing.
+  keep recoverable local evidence when archival fails, and successful saves
+  may emit a validated ArtifactRefV1.
 - tinyvault powers `vault` for leak-free secret injection.
 - glyphrun powers `run` for behavioral specs.
-- codemap availability is surfaced for process→code correlation workflows.
+- codemap + vecgrep power automatic process→code correlation in `investigate`.
 
 None of these are required to use Monitor — they are bonuses that light up when
 the matching tool is on your `$PATH`.

@@ -384,18 +384,34 @@ func writeLogEntries(w io.Writer, entries []logger.Entry, format string) error {
 
 func newInvestigateCmd() *cobra.Command {
 	var (
-		ttl    string
-		noSave bool
+		ttl          string
+		noSave       bool
+		codebase     string
+		environment  string
+		deploymentID string
+		runID        string
+		stepID       string
+		suite        string
+		attempt      string
+		release      string
+		service      string
+		gitSHA       string
 	)
 	cmd := &cobra.Command{
 		Use:   "investigate <pid>",
-		Short: "Run the diagnostic pipeline for a process",
-		Long: `investigate captures the current system snapshot + a process
-profile into an fcheap stash (via internal/incidents), then prints the
-stash ID so the bundle can be searched or restored later.
+		Short: "Run the diagnostic pipeline for a process (profile + code correlate + stash)",
+		Long: `investigate binds a process to its codebase (Node/Bun/Go/…), captures a
+profile, correlates hot frames via codemap, searches related code via
+vecgrep, groups the occurrence into a durable local issue, and optionally
+stashes an integrity-verified incident bundle to fcheap.
 
-Pass --no-save to capture the bundle into a temp dir but skip the
-fcheap stash step (useful for sandboxed environments).`,
+For Node processes, monitor reads cmdline/cwd, detects --inspect, finds the
+nearest package.json root (or uses --codebase), and prefers host sampling
+over Go pprof. Pass --codebase when auto-detection fails or the process
+cwd is not the indexed project.
+
+Correlation IDs (Chalupa CI) are read from the environment or flags and
+attached as fcheap tags + manifest context — never mixed into telemetry.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pid, err := parsePID(args[0])
@@ -405,7 +421,20 @@ fcheap stash step (useful for sandboxed environments).`,
 			ctx, cancel := Context()
 			defer cancel()
 
-			report := investigatePipeline(ctx, pid, ttl, noSave)
+			report := investigatePipeline(ctx, pid, InvestigateOptions{
+				TTL:          ttl,
+				NoSave:       noSave,
+				Codebase:     codebase,
+				Environment:  environment,
+				DeploymentID: deploymentID,
+				RunID:        runID,
+				StepID:       stepID,
+				Suite:        suite,
+				Attempt:      attempt,
+				Release:      release,
+				Service:      service,
+				GitSHA:       gitSHA,
+			})
 			if noSave {
 				return WriteJSON(report)
 			}
@@ -420,24 +449,43 @@ fcheap stash step (useful for sandboxed environments).`,
 	cmd.Flags().Bool("json", false, "emit JSON output")
 	cmd.Flags().StringVar(&ttl, "ttl", "7d", "TTL for the stash (fcheap --ttl)")
 	cmd.Flags().BoolVar(&noSave, "no-save", false, "skip the fcheap stash step")
+	cmd.Flags().StringVar(&codebase, "codebase", "", "project root for codemap/vecgrep (default: auto-detect from process cwd)")
+	cmd.Flags().StringVar(&environment, "environment", "", "correlation env (or MONITOR_ENVIRONMENT / CHALUPA_CI_ENVIRONMENT)")
+	cmd.Flags().StringVar(&deploymentID, "deployment-id", "", "correlation deployment id (or MONITOR_DEPLOYMENT_ID / CHALUPA_DEPLOYMENT_ID)")
+	cmd.Flags().StringVar(&runID, "run-id", "", "correlation run id (or MONITOR_RUN_ID / CHALUPA_CI_RUN_ID)")
+	cmd.Flags().StringVar(&stepID, "step-id", "", "correlation step id (or MONITOR_STEP_ID / CHALUPA_CI_STEP_ID)")
+	cmd.Flags().StringVar(&suite, "suite", "", "correlation suite (or MONITOR_SUITE / CHALUPA_CI_SUITE)")
+	cmd.Flags().StringVar(&attempt, "attempt", "", "correlation attempt (or MONITOR_ATTEMPT / CHALUPA_CI_ATTEMPT)")
+	cmd.Flags().StringVar(&release, "release", "", "correlation release (or MONITOR_RELEASE)")
+	cmd.Flags().StringVar(&service, "service", "", "correlation service name")
+	cmd.Flags().StringVar(&gitSHA, "git-sha", "", "correlation git sha")
 	return cmd
 }
 
 // correlateProfile resolves each profile frame's file:line to its enclosing
 // codemap symbol (FQN/kind), enriching the diagnose flow. Best-effort: it
 // returns nil when codemap isn't on PATH or there are no frames, and silently
-// skips frames codemap can't resolve (e.g. the profiled process's source
-// isn't part of a codemap-indexed project). Paths must match the indexed
-// project's layout for resolution to succeed.
-func correlateProfile(ctx context.Context, syms []profiler.Symbol) []map[string]any {
+// skips frames codemap can't resolve. codebase, when non-empty, is passed as
+// `codemap -C` so the correct index is used.
+func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase string) []map[string]any {
 	if !ecosystem.CodemapAvailable() || len(syms) == 0 {
 		return nil
 	}
+	opts := ecosystem.CodemapOpts{Path: codebase}
 	var out []map[string]any
+	// One total budget and a fixed frame cap keep a profile with thousands of
+	// symbols from multiplying subprocess timeouts.
+	correlateCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	resolvedFrames := 0
 	for _, s := range syms {
 		if s.File == "" || s.Line <= 0 {
 			continue
 		}
+		if resolvedFrames >= 12 || correlateCtx.Err() != nil {
+			break
+		}
+		resolvedFrames++
 		entry := map[string]any{"func": s.Func, "file": s.File, "line": s.Line}
 		if s.Weight > 0 {
 			entry["weight_pct"] = s.Weight
@@ -445,32 +493,38 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol) []map[string]
 		// Bound each codemap subprocess so one slow/hung invocation can't stall
 		// the whole pipeline (and hang the stdio MCP server, whose ctx has no
 		// deadline). Mirrors ecosystem.probe()'s per-call timeout.
-		symCtx, symCancel := context.WithTimeout(ctx, 5*time.Second)
-		sym, err := ecosystem.CodemapSymbolAt(symCtx, s.File, s.Line)
-		symCancel()
+		sym, err := ecosystem.CodemapSymbolAtPath(correlateCtx, s.File, s.Line, opts)
 		if err == nil {
 			entry["resolution"] = sym.Resolution
+			entry["indexed"] = sym.Indexed
+			if !sym.Indexed {
+				entry["limitation"] = "codemap project is not indexed"
+			}
 			if sym.FQN != "" {
 				entry["fqn"] = sym.FQN
 				entry["kind"] = sym.Kind
 				// Enrich resolved frames with blast radius + test coverage,
 				// turning the frame list into a "fix this first" ranking.
-				impCtx, impCancel := context.WithTimeout(ctx, 5*time.Second)
-				imp, ierr := ecosystem.CodemapImpactAt(impCtx, s.File, s.Line, 0)
-				impCancel()
+				imp, ierr := ecosystem.CodemapImpactAtPath(correlateCtx, s.File, s.Line, 0, opts)
 				if ierr == nil && imp.Found {
-					blast := len(imp.BlastRadius)
-					entry["callers"] = len(imp.DirectCallers)
-					entry["blast"] = blast
-					entry["tests"] = len(imp.Tests)
-					entry["untested"] = imp.Untested
-					// Score = runtime cost x blast radius. Frames that are both
-					// hot AND central rank highest. Without a per-frame weight
-					// (heap profiles), rank by blast radius alone.
-					if s.Weight > 0 {
-						entry["score"] = s.Weight * float64(blast)
-					} else {
-						entry["score"] = float64(blast)
+					entry["call_graph"] = imp.CallGraph
+					if imp.Resolution != "" {
+						entry["impact_resolution"] = imp.Resolution
+					}
+					if imp.Note != "" {
+						entry["impact_note"] = imp.Note
+					}
+					if imp.CallGraph == "resolved" || imp.CallGraph == "name" {
+						blast := len(imp.BlastRadius)
+						entry["callers"] = len(imp.DirectCallers)
+						entry["blast"] = blast
+						entry["tests"] = len(imp.Tests)
+						entry["untested"] = imp.Untested
+						if s.Weight > 0 {
+							entry["score"] = s.Weight * float64(blast)
+						} else {
+							entry["score"] = float64(blast)
+						}
 					}
 				}
 			}
@@ -515,8 +569,8 @@ func newStashCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "stash",
 		Short: "Capture the current system snapshot to fcheap",
-		Long: `stash bundles the current system snapshot into a content-addressed
-fcheap stash and returns the stash ID. Useful for capturing "before"
+		Long: `stash bundles the current system snapshot, computes a stable integrity
+hash, saves it to fcheap, and returns the provider's opaque stash ID. Useful for capturing "before"
 states before risky operations, or manual incident triage.
 
 The trigger tag defaults to "manual"; pass --note to record context
@@ -525,7 +579,10 @@ that downstream search can pick up via fcheap analyze.`,
 			ctx, cancel := Context()
 			defer cancel()
 
-			snapshot := NewCollector(0).Collect(ctx)
+			snapshot, err := collectFullSnapshot(ctx, NewCollector(0))
+			if err != nil {
+				return err
+			}
 			req := incidents.CaptureRequest{
 				Snapshot: snapshot,
 				Alert: incidents.AlertDetail{

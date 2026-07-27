@@ -26,12 +26,15 @@ monitor/
 │   ├── collector/             # pub/sub metric collector (canonical pattern)
 │   ├── telemetry/             # bounded, identity-free NDJSON metric windows
 │   ├── cli/                   # cobra subcommands (snapshot, watch, kill, ...)
-│   ├── mcp/                   # MCP stdio server (8 tools, confirm-gated)
+│   ├── mcp/                   # MCP stdio server (10 tools, mutations confirm-gated)
 │   ├── analyzer/              # anomaly rules (CPU spike, RSS growth)
 │   ├── capture/               # process stdout/stderr → veclite log store
-│   ├── logger/                # veclite-backed log store + keyword search
+│   ├── logger/                # bounded veclite log store + keyword search
 │   ├── profiler/              # pprof scrape + macOS `sample`
-│   ├── incidents/             # fcheap content-addressed incident stash
+│   ├── procbind/              # process runtime/codebase binding
+│   ├── contextids/            # Monitor/Chalupa run correlation
+│   ├── issues/                # Run/Event/Issue/Evidence persistence
+│   ├── incidents/             # integrity-hashed file.cheap evidence
 │   ├── reload/                # localhost HTTP /reload endpoint
 │   ├── temperature/           # real SMC temperature via powermetrics (+fallback)
 │   ├── ecosystem/             # CLI wrappers for codemap/fcheap/tvault/glyphrun
@@ -50,16 +53,19 @@ monitor/
 |---------|------|
 | `internal/collector` | Pub/sub metric collector — publishes an `Event` on every tick; the canonical pattern other packages follow. Holds the metric types (`CPUInfo`, `MemoryInfo`, `ProcessInfo`, ...) and a generic ring buffer. |
 | `internal/telemetry` | Fixed, bounded `monitor.telemetry_window` V1 aggregation and NDJSON serialization. This package is the privacy boundary for external adapters and contains no transport or persistence. |
-| `internal/cli` | Cobra subcommands (`snapshot`, `watch`, `telemetry`, `analyze`, `process`, `processes`, `tree`, `kill`, `profile`, `investigate`, `stash`, `incidents`, `logs`, `history`, `baseline`, `diff`, `config`, `doctor`, `run`, `reload`, `mcp`, `vault`, `studio`) plus the JSON/NDJSON output helpers. |
-| `internal/mcp` | MCP stdio server: 8 tools (4 read-only, 4 mutating) over the standard Model Context Protocol transport, with confirm-gated mutation. |
+| `internal/cli` | Cobra subcommands (`snapshot`, `watch`, `telemetry`, `analyze`, `process`, `processes`, `tree`, `kill`, `profile`, `investigate`, `issues`, `stash`, `incidents`, `logs`, `history`, `baseline`, `diff`, `config`, `doctor`, `run`, `reload`, `mcp`, `vault`, `studio`) plus the JSON/NDJSON output helpers. |
+| `internal/mcp` | MCP stdio server: 10 tools (6 read-only, 4 mutating) over the standard Model Context Protocol transport, with confirm-gated mutation. |
 | `internal/analyzer` | Pluggable anomaly rules — `CPUSpikeRule` (current CPU versus a rolling per-PID median plus an absolute floor), `RSSGrowthRule` (wall-clock-normalized RSS regression), `ZombieRule`, `DiskFillRule`, `SwapPressureRule`, and a config-driven `ThresholdRule`. Per-process alerts attach a `Diagnosis` when their cross-signal history can interpret the signal; `internal/analyzer/diagnosis.go` classifies memory-leak / hot-loop / load / GC-pressure patterns for CLI, MCP, and watch consumers. |
 | `internal/capture` | Log capture pipeline — pumps a child process's stdout/stderr into the veclite log store. |
-| `internal/logger` | Durable veclite-backed log store with metadata/time filtering and export; `logs capture` holds the writer while search opens read-only with shared-read. |
+| `internal/logger` | Durable veclite-backed log store with metadata/time filtering and export; default retention is 7 days / 100,000 FIFO records, and searches are capped at 1,000. `logs capture` holds the writer while search opens read-only with shared-read. |
 | `internal/profiler` | Process profiling — scrapes `net/http/pprof` over HTTP for Go processes, and runs macOS `sample` for any process. |
-| `internal/incidents` | Content-addressed incident stash — bundles a snapshot, tree-hashes it, and saves it to fcheap (with a no-fcheap fallback). Bundles embed the triggering alert's `Diagnosis`; a failed fcheap archive retains the bundle in a durable local registry, recoverable later via `monitor incidents resume-stash`. |
+| `internal/procbind` | Inspects one process in the diagnostic path, classifies its runtime, detects Node inspector metadata, and resolves the nearest codebase root. Argv is used in memory and redacted from serialized bindings. |
+| `internal/contextids` | Resolves explicit, `MONITOR_*`, and `CHALUPA_CI_*` identifiers into run context and searchable incident tags without changing telemetry V1. |
+| `internal/issues` | Groups occurrences into issues using Fingerprint V1 and stores Run/Event/Issue/Evidence data in a private veclite database. Resolved issues reopen on a later occurrence; ignored issues continue accumulating without reopening. |
+| `internal/incidents` | Integrity-hashed incident evidence — bundles a snapshot and optional profile/code context, validates regular-file layout, and saves it to fcheap. Failed archival uses a private, 20-entry recovery registry; successful saves may yield validated ArtifactRefV1. |
 | `internal/reload` | Localhost HTTP `/reload` endpoint (POST on `127.0.0.1:7351`) signalling external processes that data changed. |
 | `internal/temperature` | Real SMC temperature via `sudo powermetrics`, with a transparent CPU-load estimate fallback and a `real`/`est` source badge. |
-| `internal/ecosystem` | CLI wrappers for the surrounding tools (codemap, fcheap, tinyvault, glyphrun, ...); `Status(ctx)` returns aggregate health for `doctor`. |
+| `internal/ecosystem` | CLI wrappers for the surrounding tools (codemap, fcheap, vecgrep, tinyvault, glyphrun, ...); `Probe(ctx)` returns aggregate health for `doctor`, while typed adapters preserve code-index readiness and ArtifactRefV1 validation. |
 | `internal/kill` | Safe process termination — the shared safety check used by the TUI, CLI, and MCP alike. |
 | `internal/config` | JSON settings read from and written atomically to `~/.config/monitor/config.json`. |
 | `internal/ui/studio` | The TUI (`monitor studio`), on Bubble Tea v2 (`charm.land/bubbletea/v2`) — all 9 tabs with full keyboard and mouse interactivity. |
@@ -101,6 +107,28 @@ the streaming CLI, the analyzer, the MCP surface, and log capture:
   `internal/profiler`.
 - **Analyzer, capture, incidents** observe events to flag anomalies, ingest
   logs, and assemble incident bundles.
+
+## Run, Event, Issue, and Evidence
+
+The local issue plane sits beside metric collection; it is not part of the
+telemetry export schema:
+
+```text
+collector/analyzer ──→ Event (occurrence) ── fingerprint v1 ──→ Issue
+                              │                              │
+Chalupa/Monitor Run context ─┘                              └── lifecycle
+                              └── EvidenceRef ──→ file.cheap or local registry
+```
+
+`monitor investigate` creates an occurrence in its seventh `issue` step.
+`monitor watch --stash` creates one after capturing an alert bundle. Stable
+identity uses project, service, kind, normalized message/exception type, and
+symbols. Run, release, PID, tree hash, timestamp, and artifact references stay
+on the occurrence so retries and restarts group correctly.
+
+The MCP issue tools are read-only. CLI commands own lifecycle mutations
+(`resolve`, `ignore`, `reopen`), while evidence bytes remain in file.cheap or
+the bounded local recovery registry.
 
 The telemetry command is intentionally a producer, not an exporter SDK:
 

@@ -1,0 +1,93 @@
+version: 1
+name: monitor_mcp_issues
+
+intent: |
+  The read-only `monitor_issues` and `monitor_issue` MCP tools expose the
+  durable Run/Event/Issue/Evidence index without a confirm gate. A fresh,
+  isolated store returns a bounded empty array and an unknown issue returns a
+  structured not_found response instead of a protocol error or panic.
+
+target:
+  cmd:
+    - "/bin/sh"
+    - "-lc"
+    - |
+      d="$(mktemp -d)"
+      trap 'rm -rf "$d"' EXIT
+      export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state"
+      export MONITOR_ISSUES_STORE="$d/issues.veclite"
+      mkdir -p "$HOME"
+      { printf '%s\n%s\n%s\n' \
+          '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}' \
+          '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+          '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"monitor_issues","arguments":{"limit":5}}}';
+        sleep 1;
+      } | ./bin/monitor mcp serve 2>&1 | tail -2
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 80
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: |
+        python3 - <<'PY'
+        from pathlib import Path
+        Path('/tmp/monitor-mcp-issues-parse.py').write_text(r'''
+        import json, sys
+        lines = [line for line in sys.stdin if line.strip().startswith('{')]
+        response = json.loads(lines[-1])
+        print(json.dumps(json.loads(response['result']['content'][0]['text'])))
+        ''')
+        PY
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exited: true
+      timeoutMs: 10000
+
+outcomes:
+  - id: empty_issue_index_is_bounded
+    description: monitor_issues returns a non-null empty list with honest counts
+    verify:
+      command:
+        run: |
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/issues.veclite"
+          mkdir -p "$HOME"
+          { printf '%s\n%s\n%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}' \
+              '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"monitor_issues","arguments":{"limit":5}}}';
+            sleep 1;
+          } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 /tmp/monitor-mcp-issues-parse.py | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p["issues"] == [] and p["total"] == 0 and p["truncated"] is False, p'
+  - id: unknown_issue_is_structured
+    description: monitor_issue reports not_found and keeps occurrences as an array
+    verify:
+      command:
+        run: |
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/issues.veclite"
+          mkdir -p "$HOME"
+          { printf '%s\n%s\n%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}' \
+              '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"monitor_issue","arguments":{"id":"ISS-MISSING","occurrence_limit":999}}}';
+            sleep 1;
+          } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 /tmp/monitor-mcp-issues-parse.py | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p["not_found"] is True and p["occurrences"] == [] and "ISS-MISSING" in p["error"], p'
+  - id: issue_tools_have_no_confirm_gate
+    description: the read-only issue schemas do not expose or require confirm
+    verify:
+      command:
+        run: |
+          { printf '%s\n%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/list"}';
+            sleep 1;
+          } | ./bin/monitor mcp serve 2>&1 | python3 -c 'import json,sys; lines=[l for l in sys.stdin if l.strip().startswith("{") and "monitor_issues" in l]; p=json.loads(lines[-1]); tools={t["name"]:t for t in p["result"]["tools"]}; assert all("confirm" not in tools[n]["inputSchema"].get("properties",{}) and "confirm" not in tools[n]["inputSchema"].get("required",[]) for n in ("monitor_issues","monitor_issue"))'

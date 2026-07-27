@@ -22,7 +22,7 @@ func TestCorrelateProfileSkipsFramesWithoutFileLine(t *testing.T) {
 		{Func: "a", File: "", Line: 0},
 		{Func: "b", File: "x.go", Line: 0},
 	}
-	if got := correlateProfile(context.Background(), syms); len(got) != 0 {
+	if got := correlateProfile(context.Background(), syms, ""); len(got) != 0 {
 		t.Errorf("frames without file:line should be skipped; got %v", got)
 	}
 }

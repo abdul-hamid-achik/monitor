@@ -14,7 +14,11 @@ scripts, and agents alike. Running bare `monitor` prints help.
 ## Features
 
 - 📊 **Real-time TUI** — CPU, Memory, Temperature, Network, Disk, and Processes
-- 🤖 **Agent-harnessable** — every view is also a JSON CLI command + an MCP server
+- 🤖 **Agent-harnessable** — automation-ready JSON/NDJSON commands plus
+  a typed MCP server with bounded read tools and confirmation-gated actions
+- 🛠️ **Local issue workflow** — recurring observations are grouped by a stable
+  fingerprint, with durable occurrences, run context, evidence references, and
+  `open` / `resolved` / `ignored` lifecycle state
 - 🔒 **Private telemetry export** — bounded, versioned NDJSON rollups without
   hostnames, process identity, paths, raw errors, network delivery, or local
   persistence
@@ -24,8 +28,9 @@ scripts, and agents alike. Running bare `monitor` prints help.
   multi-select, and safely terminate
 - ⚠️ **Safe process killing** — protected/system processes refuse termination,
   consistently across the TUI, CLI, and MCP surfaces
-- 🧩 **Ecosystem integration** — fcheap incident stashes, tinyvault secret
-  injection, glyphrun specs, codemap, and more
+- 🧩 **Ecosystem integration** — file.cheap incident evidence, Chalupa CI
+  correlation, codemap symbol impact, vecgrep semantic context, tinyvault
+  secret injection, and glyphrun specs
 - 🎨 **Nord theme** + full keyboard & mouse navigation
 
 ## Two ways to use it
@@ -56,12 +61,14 @@ machine-readable workflows:
 ./bin/monitor logs capture -- mycommand --verbose # ingest exact argv into the durable log store
 ./bin/monitor logs search "error" --level error --since 1h --json # filtered log search
 ./bin/monitor stash --json                        # capture an incident bundle to fcheap
-./bin/monitor investigate 1234 --json             # snapshot + profile + codemap-ranked stash
+./bin/monitor investigate 1234 --codebase "$PWD" --json # diagnose + evidence + grouped issue
+./bin/monitor issues list --status open --json     # recurring local issues
+./bin/monitor issues show ISS-... --json            # occurrences + evidence refs
 ./bin/monitor history record                       # persist metric samples over time
 ./bin/monitor history query cpu.usage --since 1h --json   # time-series + trend stats
 ./bin/monitor baseline save pre-deploy             # capture a labeled snapshot
 ./bin/monitor diff pre-deploy                       # what changed since the baseline
-./bin/monitor watch --webhook https://… --notify    # deduplicated alert delivery
+./bin/monitor watch --webhook https://… --notify    # cooldown-bounded alert delivery
 ./bin/monitor doctor --json                       # ecosystem tool availability
 ./bin/monitor doctor --require fcheap,codemap     # CI gate for required integrations
 ./bin/monitor config set update-interval 500ms    # validated, atomic settings update
@@ -78,8 +85,8 @@ can detect it is being observed.
 ./bin/monitor mcp serve     # speaks MCP over stdio
 ```
 
-Exposes 8 tools — 4 read-only (`monitor_snapshot`, `monitor_processes`,
-`monitor_doctor`, `monitor_analyze`) and 4 mutating (`monitor_kill`,
+Exposes 10 tools — 6 read-only (`monitor_snapshot`, `monitor_processes`,
+`monitor_doctor`, `monitor_analyze`, `monitor_issues`, `monitor_issue`) and 4 mutating (`monitor_kill`,
 `monitor_profile_capture`, `monitor_investigate`, `monitor_record`). For small
 model contexts, call `monitor_snapshot` with `{"compact":true}`; the response
 omits histories and bounds process/filesystem lists. Every mutating tool requires
@@ -173,6 +180,13 @@ and MCP server alike:
    and MCP tools require `confirm: true`; `--yes` never bypasses protection.
 4. **SIGTERM vs SIGKILL** — both modes are offered explicitly.
 
+Diagnostic evidence has a separate privacy boundary. Process argv is inspected
+in memory for runtime binding but is never serialized into process JSON, issue
+records, incident bundles, or telemetry. The default issue/log directories and
+incident registry are private to the current user. Incident bundles accept only
+regular files, verify their integrity hash before archival, and cap copied raw
+profiles at 128 MiB.
+
 ## Architecture
 
 ```
@@ -182,12 +196,15 @@ monitor/
 │   ├── collector/             # pub/sub metric collector (canonical pattern)
 │   ├── telemetry/             # bounded, identity-free NDJSON metric windows
 │   ├── cli/                   # cobra subcommands (snapshot, watch, kill, ...)
-│   ├── mcp/                   # MCP stdio server (8 tools; mutations confirm-gated)
+│   ├── mcp/                   # MCP stdio server (10 tools; mutations confirm-gated)
 │   ├── analyzer/              # anomaly rules (CPU spike, RSS growth)
 │   ├── capture/               # process stdout/stderr → veclite log store
-│   ├── logger/                # veclite-backed log store + keyword search
+│   ├── logger/                # bounded veclite log store + keyword search
 │   ├── profiler/              # pprof scrape + macOS `sample`
-│   ├── incidents/             # fcheap content-addressed incident stash
+│   ├── procbind/              # process → runtime/codebase binding
+│   ├── contextids/            # Monitor/Chalupa run correlation
+│   ├── issues/                # Run/Event/Issue/Evidence persistence
+│   ├── incidents/             # integrity-hashed file.cheap evidence bundles
 │   ├── reload/                # localhost HTTP /reload endpoint
 │   ├── temperature/           # real SMC temperature via powermetrics (+fallback)
 │   ├── ecosystem/             # CLI wrappers for codemap/fcheap/tvault/glyphrun
@@ -217,6 +234,16 @@ monitor/
   estimate.
 - **CPU profiles** — the pprof scrape targets `localhost:6060`; heap/goroutine
   profiles are symbolicated, CPU profiles are returned as raw protobuf.
+- **Per-process CPU** — computed from consecutive cumulative CPU counters.
+  `100%` means one fully used core and multithreaded processes may exceed it;
+  first observations and reused PIDs are marked unavailable instead of
+  fabricating a zero.
+- **Local storage bounds** — captured logs retain at most 100,000 records for
+  7 days (FIFO eviction). The failed-archive incident registry retains the 20
+  newest bundles. These stores are local evidence, not permanent archives.
+- **Issue scope** — the issue workflow is Sentry-like grouping and lifecycle
+  for Monitor observations. It is not a Sentry SDK, source-map service, or
+  hosted event backend.
 - **Telemetry scope** — `monitor telemetry` reports host-level metrics. The
   closed telemetry profile skips Monitor's own cgroup and all identity,
   process, filesystem, topology, temperature, and history collectors. Linux

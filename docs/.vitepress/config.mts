@@ -6,7 +6,7 @@ const base = process.env.DOCS_BASE ?? '/'
 export default defineConfig({
   title: 'Monitor',
   description:
-    'Local-first observability for macOS and Linux with a terminal Studio, JSON CLI, and safe MCP server.',
+    'Local-first observability for macOS and Linux with grouped issues, incident evidence, a terminal Studio, JSON CLI, and safe MCP server.',
   lastUpdated: true,
   cleanUrls: true,
 
@@ -21,7 +21,7 @@ export default defineConfig({
     ['link', { rel: 'apple-touch-icon', href: `${base}apple-touch-icon.png` }],
 
     // Primary meta
-    ['meta', { name: 'keywords', content: 'system monitor, terminal monitor, macOS monitor, Linux monitor, CLI monitor, MCP server, process monitor, anomaly detection, pprof profiler, Bubble Tea TUI, Go system monitor, agent monitoring tool, htop alternative' }],
+    ['meta', { name: 'keywords', content: 'local observability, local issue tracker, system monitor, terminal monitor, macOS monitor, Linux monitor, CLI monitor, MCP server, process monitor, anomaly detection, pprof profiler, Bubble Tea TUI, Go system monitor, agent monitoring tool' }],
     ['meta', { name: 'author', content: 'Abdul Hamid Achik' }],
     ['meta', { name: 'robots', content: 'index, follow' }],
 
@@ -97,6 +97,7 @@ export default defineConfig({
           items: [
             { text: 'CLI Reference', link: '/guide/cli' },
             { text: 'MCP Server', link: '/guide/mcp' },
+            { text: 'Local Issues', link: '/guide/issues' },
             { text: 'Ecosystem Integration', link: '/guide/ecosystem' },
           ],
         },
@@ -114,7 +115,16 @@ export default defineConfig({
           items: [
             { text: 'Architecture', link: '/reference/architecture' },
             { text: 'Telemetry Contract', link: '/reference/telemetry' },
+            { text: 'Incident Bundle Contract', link: '/contracts/monitor-incident-v1' },
             { text: 'Configuration', link: '/reference/configuration' },
+          ],
+        },
+      ],
+      '/contracts/': [
+        {
+          text: 'Contracts',
+          items: [
+            { text: 'Monitor Incident v1', link: '/contracts/monitor-incident-v1' },
           ],
         },
       ],

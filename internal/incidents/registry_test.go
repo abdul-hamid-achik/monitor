@@ -2,6 +2,7 @@ package incidents
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -133,8 +134,8 @@ func TestResumeByBundlePath(t *testing.T) {
 			t.Errorf("tags %v missing %q", gotTags, want)
 		}
 	}
-	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
-		t.Errorf("bare bundle dir should be removed after resume; stat err = %v", statErr)
+	if _, statErr := os.Stat(dir); statErr != nil {
+		t.Errorf("external bare bundle dir should be preserved after resume; stat err = %v", statErr)
 	}
 }
 
@@ -418,5 +419,184 @@ func TestReadEntryRejectsMissingIDOrHash(t *testing.T) {
 	}
 	if _, err := readEntry(path); err == nil {
 		t.Fatal("readEntry should reject an entry missing id/tree_hash")
+	}
+}
+
+func TestLoadBareRejectsWrongKindVersionAndMissingFiles(t *testing.T) {
+	for name, mutate := range map[string]func(*bundleManifest){
+		"wrong kind":    func(m *bundleManifest) { m.Kind = "other" },
+		"wrong version": func(m *bundleManifest) { m.SchemaVersion = "999" },
+		"missing file":  func(m *bundleManifest) { m.Files = []string{"manifest.json"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := writeBundle(dir, &CaptureRequest{Snapshot: collector.SystemInfo{Hostname: "h"}, Trigger: "manual"}); err != nil {
+				t.Fatal(err)
+			}
+			data, _ := os.ReadFile(filepath.Join(dir, "manifest.json"))
+			var manifest bundleManifest
+			if err := json.Unmarshal(data, &manifest); err != nil {
+				t.Fatal(err)
+			}
+			mutate(&manifest)
+			if err := writeJSON(filepath.Join(dir, "manifest.json"), manifest); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadEntry(dir); err == nil {
+				t.Fatal("invalid bare bundle accepted")
+			}
+		})
+	}
+}
+
+func TestCopyFlatDirRejectsTooManyEntries(t *testing.T) {
+	src := t.TempDir()
+	dst := filepath.Join(t.TempDir(), "copy")
+	for i := 0; i < maxBundleFiles+1; i++ {
+		name := filepath.Join(src, fmt.Sprintf("entry-%02d", i))
+		if err := os.WriteFile(name, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := copyFlatDir(src, dst); err == nil {
+		t.Fatal("copyFlatDir accepted an unbounded bundle")
+	}
+}
+
+func TestValidateBundleRejectsManifestAndByteBounds(t *testing.T) {
+	t.Run("oversized manifest", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "snapshot.json"), []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(filepath.Join(dir, "manifest.json"), maxManifestBytes+1); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateBundle(dir); err == nil || !strings.Contains(err.Error(), "manifest.json") {
+			t.Fatalf("oversized manifest error = %v", err)
+		}
+	})
+
+	t.Run("oversized entry", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := writeBundle(dir, &CaptureRequest{Snapshot: collector.SystemInfo{Hostname: "h"}, Trigger: "manual"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(filepath.Join(dir, "snapshot.json"), maxBundleFileBytes+1); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateBundle(dir); err == nil || !strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("oversized entry error = %v", err)
+		}
+	})
+
+	t.Run("total bytes", func(t *testing.T) {
+		dir := t.TempDir()
+		files := []string{"manifest.json", "snapshot.json", "one.data", "two.data", "three.data"}
+		manifest := bundleManifest{
+			SchemaVersion: bundleSchemaVersion, Kind: bundleKind, Trigger: "manual", Files: files,
+		}
+		if err := writeJSON(filepath.Join(dir, "manifest.json"), manifest); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "snapshot.json"), []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"one.data", "two.data", "three.data"} {
+			path := filepath.Join(dir, name)
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Truncate(path, 90<<20); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := validateBundle(dir); err == nil || !strings.Contains(err.Error(), "total bytes") {
+			t.Fatalf("total byte bound error = %v", err)
+		}
+	})
+}
+
+func TestValidateBundleRejectsAmbiguousOrUnexpectedFiles(t *testing.T) {
+	tests := map[string]func(string, *bundleManifest){
+		"duplicate": func(_ string, manifest *bundleManifest) {
+			manifest.Files = append(manifest.Files, "snapshot.json")
+		},
+		"traversal": func(_ string, manifest *bundleManifest) {
+			manifest.Files = append(manifest.Files, "../secret")
+		},
+		"undeclared file": func(dir string, _ *bundleManifest) {
+			if err := os.WriteFile(filepath.Join(dir, "extra.json"), []byte(`{}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"undeclared raw profile": func(_ string, manifest *bundleManifest) {
+			manifest.RawProfile = "profile.data"
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := writeBundle(dir, &CaptureRequest{Snapshot: collector.SystemInfo{Hostname: "h"}, Trigger: "manual"}); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var manifest bundleManifest
+			if err := json.Unmarshal(data, &manifest); err != nil {
+				t.Fatal(err)
+			}
+			mutate(dir, &manifest)
+			if name != "undeclared file" {
+				if err := writeJSON(filepath.Join(dir, "manifest.json"), manifest); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := validateBundle(dir); err == nil {
+				t.Fatal("invalid bundle accepted")
+			}
+		})
+	}
+}
+
+func TestRegistryIgnoresTamperedBundlePathAndUsesPrivateModes(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	stubFcheap(t, false, nil)
+	res, err := Capture(context.Background(), CaptureRequest{Snapshot: collector.SystemInfo{Hostname: "h"}, Trigger: "manual"})
+	if err == nil {
+		t.Fatal("expected missing fcheap error")
+	}
+	entryPath := filepath.Join(filepath.Dir(res.Path), "entry.json")
+	entry, err := readEntry(entryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.BundlePath = t.TempDir()
+	if err := writeJSON(entryPath, entry); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadEntry(entry.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.BundlePath != res.Path {
+		t.Fatalf("trusted tampered bundle path %q; want %q", loaded.BundlePath, res.Path)
+	}
+	for _, path := range []string{filepath.Dir(res.Path), res.Path} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("mode(%s) = %v, %v; want 0700", path, info.Mode().Perm(), err)
+		}
+	}
+	for _, path := range []string{entryPath, filepath.Join(res.Path, "manifest.json"), filepath.Join(res.Path, "snapshot.json")} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("mode(%s) = %v, %v; want 0600", path, info.Mode().Perm(), err)
+		}
 	}
 }

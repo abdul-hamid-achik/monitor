@@ -4,6 +4,100 @@ All notable changes to Monitor are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/), and the project
 follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [1.15.0] - 2026-07-27
+
+### Added
+
+- **Local issue intelligence.** Monitor now persists a local-first
+  `Run → Event/Occurrence → Issue → Evidence` model in veclite. Stable v1
+  fingerprints group recurring failures without mixing PID, run, release, or
+  artifact identity; resolved issues reopen on a later regression while
+  ignored issues keep recording occurrences without reopening.
+- **Issue CLI and MCP surfaces.** `monitor issues list/show/resolve/reopen/ignore`
+  (alias `issue`) provide bounded JSON and human workflows. Read-only MCP
+  tools `monitor_issues` and `monitor_issue` expose the same groups,
+  occurrences, run context, and evidence to agents; the MCP server now has ten
+  tools (six read-only and four confirm-gated mutations).
+- **Node/process→codebase binding.** `monitor process <pid>` and
+  `monitor investigate` resolve cmdline/cwd/exe, classify runtime
+  (`node`/`bun`/`deno`/`go`/`python`), detect Node `--inspect`, find the
+  nearest `package.json`/`go.mod` root (or `--codebase`), and attach the
+  binding to the investigation report.
+- **Node CDP inspector profiler.** `monitor investigate` now captures a
+  CPU profile via the Chrome DevTools Protocol when a Node/Bun/Deno process
+  has `--inspect` enabled. Frames carry real `file:line` (e.g.
+  `node:internal/timers:508`, `[eval]:1`), so codemap correlation works
+  for JS runtimes — not just Go. Falls back to macOS `sample` when the
+  inspector is absent or unreachable.
+- **Investigate pipeline extensions:** steps `identify` → `snapshot` →
+  `profile` → `correlate` → `semantic` → `stash` → `issue`. Codemap calls take
+  `-C <codebase>`; vecgrep runs similar/search against the bound project.
+  Chalupa correlation IDs (environment, deployment, run, step, suite,
+  attempt, release, service, git SHA) become typed run context, fcheap tags,
+  and manifest context.
+- **Richer incident bundles** (`monitor.incident` v1): `process.json`,
+  `correlations.json`, `semantic.json`, the verified raw profile bytes, plus best-effort
+  `fcheap artifact-ref` → `ArtifactRefV1` on successful stash.
+- `monitor watch --stash` groups each emitted alert into the durable issue
+  index and attaches either `fcheap://stash/<id>` or a recoverable
+  `monitor://incidents/<id>` evidence reference.
+- `monitor run` now always gives glyphrun children `MONITOR=1` and a live
+  `MONITOR_RUN_DIR`, creating and cleaning a temporary run directory when the
+  caller did not supply one.
+- Cross-repo handoff spec: `docs/contracts/monitor-incident-v1.md` for
+  Chalupa and file.cheap agents.
+
+### Changed
+
+- Per-process CPU is derived from cumulative user+system deltas over wall
+  time, detects PID reuse/counter resets, and reports first samples as
+  unavailable. One-shot process surfaces warm up for 100 ms and fall back to
+  a targeted live-PID inspection when macOS omits a process from enumeration.
+- MCP `monitor_investigate` accepts `codebase`, the complete Chalupa CI
+  correlation context, `ttl`, and `no_save`.
+- Log search is bounded (default 50, maximum 1000); the writer applies seven-day
+  time retention and a 100,000-entry FIFO cap, including cleanup of legacy
+  records. The issue store retains at most 10,000 issue groups and 100,000
+  occurrence bodies while preserving cumulative counts. Default log and issue
+  directories are private (`0700`) and stores are `0600`.
+- file.cheap integration now follows its real JSON contract, disables
+  post-save auto-compression for atomic success semantics, treats stash IDs as
+  opaque, and emits strict credential-free `ArtifactRefV1` values. The stable
+  bundle tree hash is an integrity receipt, not a deduplication promise.
+- codemap correlation distinguishes unresolved call graphs from real blast
+  radius, and vecgrep consumes its versioned JSON envelope with explicit
+  indexed/fresh readiness and surfaced warnings. Correlation work is bounded
+  by frame and time budgets.
+- Ecosystem docs: codemap/vecgrep are active investigate integrations, not
+  doctor-only probes.
+
+### Security
+
+- Incident registries validate IDs and trusted roots instead of trusting
+  persisted paths; reject symlinks, non-regular files, undeclared manifest
+  entries, oversized manifests, more than 32 files, files over 128 MiB, and
+  bundles over 256 MiB.
+- Bundle hashing uses length-framed filenames and contents, re-checks the hash
+  after fcheap returns, stages resume operations privately, and preserves
+  external source bundles. Process argv and machine-specific temporary profile
+  paths are no longer persisted.
+- Artifact-ref decoding rejects unknown/trailing fields and validates schema,
+  provider, URI/ID agreement, producer metadata, kind, and entrypoint before a
+  reference is exposed to Chalupa or another consumer.
+
+### Fixed
+
+- Failed or unavailable fcheap saves retain complete evidence in the private
+  local registry and return a resumable reference; a save that returns an
+  invalid ID or races with bundle mutation is never reported as successful.
+- Incident tree hashes no longer admit ambiguous filename/content
+  concatenations.
+- Tests that invoke installed ecosystem tools isolate their file.cheap/XDG
+  state instead of touching the operator's real vault.
+
+
 ## [1.14.0] - 2026-07-24
 
 ### Added
@@ -322,6 +416,7 @@ remaining pure CLI helpers.
 Initial release: a terminal system monitor for macOS with a Network tab,
 Settings documentation, and a GoReleaser + GitHub Actions release workflow.
 
+[1.15.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.14.0...v1.15.0
 [1.14.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.13.0...v1.14.0
 [1.13.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.12.1...v1.13.0
 [1.12.1]: https://github.com/abdul-hamid-achik/monitor/compare/v1.12.0...v1.12.1

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -105,10 +106,14 @@ func newKillCmd() *cobra.Command {
 }
 
 func newProcessCmd() *cobra.Command {
+	var codebase string
 	cmd := &cobra.Command{
 		Use:   "process <pid>",
 		Short: "Print detailed process information",
-		Args:  cobra.ExactArgs(1),
+		Long: `process shows collector metrics plus a redacted runtime binding (cwd, exe,
+runtime class, main script, codebase root, Node --inspect addr). Use this to
+confirm a Node PID can be correlated with codemap/vecgrep before investigate.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pid, err := parsePID(args[0])
 			if err != nil {
@@ -117,36 +122,82 @@ func newProcessCmd() *cobra.Command {
 			c := NewCollector(0)
 			ctx, cancel := Context()
 			defer cancel()
-			info := c.Collect(ctx) // sample once; Snapshot() is empty until Collect runs
-			for _, p := range info.Processes {
-				if p.PID == pid {
-					if JSONOutput(cmd) {
-						return WriteJSON(p)
-					}
-					fmt.Printf("PID %d  %s\n", p.PID, p.Name)
-					fmt.Printf("  CPU:    %.1f%%\n", p.CPUPercent)
-					fmt.Printf("  Memory: %s\n", collector.FormatBytes(p.Memory))
-					fmt.Printf("  Share:   %.1f%%\n", p.MemoryPercent)
-					fmt.Printf("  Threads: %d\n", p.Threads)
-					fmt.Printf("  User:    %s\n", p.User)
-					if p.Status != "" {
-						fmt.Printf("  Status:  %s\n", p.Status)
-					} else if status, ok := p.MetricStates["status"]; ok {
-						fmt.Printf("  Status:  %s (%s)\n", status.State, status.Reason)
-					}
-					fmt.Printf("  Parent:  %d\n", p.Parent)
-					if status, ok := p.MetricStates["io"]; ok && status.State != collector.MetricObserved {
-						fmt.Printf("  I/O:     %s (%s)\n", status.State, status.Reason)
-					} else {
-						fmt.Printf("  I/O:     read %s, write %s\n", collector.FormatBytes(p.IOReadBytes), collector.FormatBytes(p.IOWriteBytes))
-					}
-					fmt.Printf("  Safety:  system=%t protected=%t\n", p.IsSystem, p.IsProtected)
-					return nil
+			info, err := collectFullSnapshot(ctx, c)
+			if err != nil {
+				return err
+			}
+			var found *collector.ProcessInfo
+			for i := range info.Processes {
+				if info.Processes[i].PID == pid {
+					found = &info.Processes[i]
+					break
 				}
 			}
-			return fmt.Errorf("pid %d not found", pid)
+			if found == nil {
+				direct, directErr := c.Process(ctx, pid)
+				if directErr != nil {
+					return fmt.Errorf("pid %d not found", pid)
+				}
+				found = &direct
+			}
+			binding, bindErr := inspectProcess(ctx, pid, codebase)
+			processJSON, _ := json.Marshal(*found)
+			out := map[string]any{}
+			_ = json.Unmarshal(processJSON, &out)
+			if bindErr != nil {
+				out["binding_error"] = bindErr.Error()
+			} else {
+				out["binding"] = binding
+			}
+			if JSONOutput(cmd) {
+				return WriteJSON(out)
+			}
+			p := *found
+			fmt.Printf("PID %d  %s\n", p.PID, p.Name)
+			fmt.Printf("  CPU:    %.1f%%\n", p.CPUPercent)
+			fmt.Printf("  Memory: %s\n", collector.FormatBytes(p.Memory))
+			fmt.Printf("  Share:   %.1f%%\n", p.MemoryPercent)
+			fmt.Printf("  Threads: %d\n", p.Threads)
+			fmt.Printf("  User:    %s\n", p.User)
+			if p.Status != "" {
+				fmt.Printf("  Status:  %s\n", p.Status)
+			} else if status, ok := p.MetricStates["status"]; ok {
+				fmt.Printf("  Status:  %s (%s)\n", status.State, status.Reason)
+			}
+			fmt.Printf("  Parent:  %d\n", p.Parent)
+			if status, ok := p.MetricStates["io"]; ok && status.State != collector.MetricObserved {
+				fmt.Printf("  I/O:     %s (%s)\n", status.State, status.Reason)
+			} else {
+				fmt.Printf("  I/O:     read %s, write %s\n", collector.FormatBytes(p.IOReadBytes), collector.FormatBytes(p.IOWriteBytes))
+			}
+			fmt.Printf("  Safety:  system=%t protected=%t\n", p.IsSystem, p.IsProtected)
+			if bindErr != nil {
+				fmt.Printf("  Binding: error: %s\n", bindErr)
+				return nil
+			}
+			fmt.Printf("  Runtime: %s\n", binding.Runtime)
+			if binding.Exe != "" {
+				fmt.Printf("  Exe:     %s\n", binding.Exe)
+			}
+			if binding.Cwd != "" {
+				fmt.Printf("  Cwd:     %s\n", binding.Cwd)
+			}
+			if binding.ArgvRedacted {
+				fmt.Println("  Cmdline: [redacted; inspected in memory for runtime binding]")
+			}
+			if binding.MainScript != "" {
+				fmt.Printf("  Main:    %s\n", binding.MainScript)
+			}
+			if binding.CodebaseRoot != "" {
+				fmt.Printf("  Codebase:%s\n", binding.CodebaseRoot)
+			}
+			if binding.InspectAddr != "" {
+				fmt.Printf("  Inspect: %s\n", binding.InspectAddr)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().Bool("json", false, "emit JSON output")
+	cmd.Flags().StringVar(&codebase, "codebase", "", "override codebase root for binding")
 	return cmd
 }

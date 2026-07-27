@@ -116,7 +116,26 @@ PID it prints just that process's subtree.
 			}
 			ctx, cancel := Context()
 			defer cancel()
-			forest := buildForest(NewCollector(0).Collect(ctx).Processes, root)
+			c := NewCollector(0)
+			info, err := collectFullSnapshot(ctx, c)
+			if err != nil {
+				return err
+			}
+			if root > 0 {
+				found := false
+				for _, process := range info.Processes {
+					if process.PID == root {
+						found = true
+						break
+					}
+				}
+				if !found {
+					if direct, directErr := c.Process(ctx, root); directErr == nil {
+						info.Processes = append(info.Processes, direct)
+					}
+				}
+			}
+			forest := buildForest(info.Processes, root)
 			if root > 0 && len(forest) == 0 {
 				return fmt.Errorf("pid %d not found", root)
 			}

@@ -79,7 +79,21 @@ monitor watch --json
 ```
 
 See the [CLI Reference](/guide/cli) for snapshots, history, baselines, anomaly
-analysis, profiling, logs, and safety-checked process termination.
+analysis, profiling, logs, grouped issues, and safety-checked process
+termination.
+
+To create a local issue with diagnostic evidence, investigate a live PID and
+then inspect the grouped result:
+
+```bash
+monitor investigate 1234 --codebase "$PWD" --json
+monitor issues list --status open
+```
+
+The seven investigation steps identify the runtime, snapshot the system,
+capture a profile, correlate code with codemap and vecgrep, save evidence with
+file.cheap when available, and persist the occurrence. See
+[Local Issues](/guide/issues) for the Run/Event/Issue/Evidence model.
 
 ### 3. Start the MCP server
 
@@ -87,7 +101,7 @@ analysis, profiling, logs, and safety-checked process termination.
 monitor mcp serve
 ```
 
-The stdio server exposes four read-only tools and four mutating tools. Every
+The stdio server exposes six read-only tools and four mutating tools. Every
 mutating call requires `confirm: true`, while protected and system processes
 remain non-terminable. See [MCP Server](/guide/mcp) for client configuration and
 the full tool schemas.
@@ -115,6 +129,7 @@ temperature source.
 - [The TUI](/guide/tui) — tabs, keyboard shortcuts, and mouse navigation.
 - [CLI Reference](/guide/cli) — the full JSON command surface.
 - [MCP Server](/guide/mcp) — the agent-facing tool surface.
+- [Local Issues](/guide/issues) — recurring observations, lifecycle, and evidence.
 - [Anomaly Detection](/guide/anomaly-detection) — alert rules and thresholds.
 - [Ecosystem Integration](/guide/ecosystem) — optional local tool integrations.
 - [Process Safety](/guide/safety) — termination policy across every surface.

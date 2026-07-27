@@ -137,7 +137,26 @@ func probe(ctx context.Context, bin string) ToolStatus {
 // RunGlyphrun shells out to `glyph run <spec>`. The run directory will be
 // MONITOR_RUN_DIR for any child processes the spec spawns.
 func RunGlyphrun(ctx context.Context, spec string) ([]byte, error) {
-	return runJSON(ctx, "glyph", "run", "--format", "json", spec)
+	runDir := strings.TrimSpace(os.Getenv("MONITOR_RUN_DIR"))
+	cleanup := func() {}
+	if runDir == "" {
+		var err error
+		runDir, err = os.MkdirTemp("", "monitor-run-")
+		if err != nil {
+			return nil, fmt.Errorf("create monitor run directory: %w", err)
+		}
+		cleanup = func() { _ = os.RemoveAll(runDir) }
+	}
+	defer cleanup()
+	cmd := exec.CommandContext(ctx, "glyph", "run", "--format", "json", spec)
+	cmd.Env = append(os.Environ(), "MONITOR=1", "MONITOR_RUN_DIR="+runDir)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.Bytes(), fmt.Errorf("glyph: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
 }
 
 // TinyvaultRun wraps a command with `tvault run` so secrets land in the
@@ -166,6 +185,7 @@ type SymbolAt struct {
 	StartLine  int    `json:"start_line,omitempty"`
 	EndLine    int    `json:"end_line,omitempty"`
 	Resolution string `json:"resolution"`
+	Indexed    bool   `json:"indexed"`
 }
 
 // CodemapAvailable reports whether the codemap binary is on PATH.
@@ -197,6 +217,9 @@ type Impact struct {
 	BlastRadius   []json.RawMessage `json:"blast_radius"`
 	Tests         []json.RawMessage `json:"tests"`
 	Untested      bool              `json:"untested"`
+	CallGraph     string            `json:"call_graph"`
+	Resolution    string            `json:"resolution,omitempty"`
+	Note          string            `json:"note,omitempty"`
 }
 
 // CodemapImpactAt computes the blast radius (transitive callers) and test
@@ -218,26 +241,44 @@ func CodemapImpactAt(ctx context.Context, file string, line, depth int) (Impact,
 //
 // monitor uses fcheap as its incident-stash vault. Each alert (or manual
 // `monitor stash`) bundles the current system snapshot + relevant profile
-// into a temp dir and shells out to `fcheap save`. The tree-hash tag
-// (sha256 of the bundle's serialized contents) provides content-addressed
-// dedup: the same incident captured twice produces the same stash ID and
-// doesn't double-fill the vault, matching the codemap cache pattern.
+// into a temp dir and shells out to `fcheap save`. Monitor computes a stable
+// tree hash as an integrity/fingerprint tag; the fcheap stash ID remains the
+// provider's opaque identifier and no deduplication behavior is assumed.
 
 // StashSaveResult mirrors the JSON `fcheap save` payload.
 type StashSaveResult struct {
-	SchemaVersion string `json:"schema_version"`
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	CreatedAt     string `json:"created_at"`
-	Path          string `json:"path"`
-	SizeBytes     int64  `json:"size_bytes,omitempty"`
+	SchemaVersion string           `json:"schema_version"`
+	ID            string           `json:"id"`
+	Name          string           `json:"name"`
+	CreatedAt     string           `json:"created_at"`
+	SourcePath    string           `json:"source_path,omitempty"`
+	FileCount     int              `json:"file_count"`
+	TotalSize     int64            `json:"total_size"`
+	ContentHash   string           `json:"content_hash,omitempty"`
+	Files         []StashFileEntry `json:"files,omitempty"`
+	Status        string           `json:"status,omitempty"`
+	// Path and SizeBytes are compatibility aliases for older Monitor callers
+	// and test doubles. file.cheap's wire contract is source_path/total_size.
+	Path      string `json:"-"`
+	SizeBytes int64  `json:"-"`
+}
+
+// StashFileEntry is one file in a file.cheap manifest.
+type StashFileEntry struct {
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+	Hash string `json:"hash,omitempty"`
 }
 
 // StashSave shells out to `fcheap save <path> --json --tag ... --tool
 // monitor` and returns the parsed result. Tags encode the incident
 // fingerprint (alert rule, severity, snapshot hash) for later search.
 func StashSave(ctx context.Context, path, name string, tags []string, ttl string) (StashSaveResult, error) {
-	args := []string{"save", path, "--json", "--name", name, "--tool", "monitor"}
+	// Disable post-save auto-compression so exit status remains an atomic
+	// save signal. file.cheap can otherwise persist the stash and then exit
+	// non-zero because compression failed, causing Monitor to retain a false
+	// duplicate in its pending registry.
+	args := []string{"save", path, "--json", "--no-compress", "--name", name, "--tool", "monitor"}
 	for _, t := range tags {
 		args = append(args, "--tag", t)
 	}
@@ -248,7 +289,13 @@ func StashSave(ctx context.Context, path, name string, tags []string, ttl string
 	if err != nil {
 		return StashSaveResult{}, &Wrap{Cmd: "fcheap save", Err: err, Output: string(out)}
 	}
-	return decodeJSON[StashSaveResult](out, "fcheap save")
+	res, err := decodeJSON[StashSaveResult](out, "fcheap save")
+	if err != nil {
+		return StashSaveResult{}, err
+	}
+	res.Path = res.SourcePath
+	res.SizeBytes = res.TotalSize
+	return res, nil
 }
 
 // StashListEntry mirrors the JSON row of `fcheap list --json`.
@@ -258,7 +305,8 @@ type StashListEntry struct {
 	Tags      []string `json:"tags,omitempty"`
 	Tool      string   `json:"tool,omitempty"`
 	CreatedAt string   `json:"created_at"`
-	SizeBytes int64    `json:"size_bytes,omitempty"`
+	FileCount int      `json:"file_count"`
+	TotalSize int64    `json:"total_size"`
 }
 
 // StashList shells out to `fcheap list --json` filtered by tags.
@@ -276,14 +324,16 @@ func StashList(ctx context.Context, tags []string) ([]StashListEntry, error) {
 
 // StashInfoEntry shells out to `fcheap info <id> --json` for metadata.
 type StashInfoEntry struct {
-	ID        string           `json:"id"`
-	Name      string           `json:"name"`
-	Tags      []string         `json:"tags,omitempty"`
-	Tool      string           `json:"tool,omitempty"`
-	CreatedAt string           `json:"created_at"`
-	Path      string           `json:"path,omitempty"`
-	SizeBytes int64            `json:"size_bytes,omitempty"`
-	Manifest  []map[string]any `json:"manifest,omitempty"`
+	ID          string           `json:"id"`
+	Name        string           `json:"name"`
+	Tags        []string         `json:"tags,omitempty"`
+	Tool        string           `json:"tool,omitempty"`
+	CreatedAt   string           `json:"created_at"`
+	SourcePath  string           `json:"source_path,omitempty"`
+	FileCount   int              `json:"file_count"`
+	TotalSize   int64            `json:"total_size"`
+	ContentHash string           `json:"content_hash,omitempty"`
+	Files       []StashFileEntry `json:"files,omitempty"`
 }
 
 func StashInfo(ctx context.Context, id string) (StashInfoEntry, error) {

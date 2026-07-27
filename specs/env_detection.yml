@@ -2,15 +2,21 @@ version: 1
 name: monitor_env_detection
 
 intent: |
-  When monitor launches a child process, the child receives MONITOR=1 and
-  MONITOR_RUN_DIR set in its environment so it can detect it is being observed.
+  `monitor run` injects MONITOR=1 and a real MONITOR_RUN_DIR into the glyphrun
+  process. A fake glyph binary observes the exact child environment, so this
+  checks Monitor's launcher instead of pre-seeding the variables in the spec.
 
 target:
-  cmd: ["/bin/sh", "-lc", "if [ \"$MONITOR\" = \"1\" ] && [ -n \"$MONITOR_RUN_DIR\" ]; then echo DETECTED; else echo MISSING; fi"]
+  cmd:
+    - "/bin/sh"
+    - "-lc"
+    - |
+      d="$(mktemp -d)"
+      trap 'rm -rf "$d"' EXIT
+      printf '%s\n' '#!/bin/sh' 'if [ "$MONITOR" = "1" ] && [ -n "$MONITOR_RUN_DIR" ] && [ -d "$MONITOR_RUN_DIR" ]; then echo DETECTED; else echo MISSING; exit 9; fi' > "$d/glyph"
+      chmod +x "$d/glyph"
+      PATH="$d:$PATH" exec ./bin/monitor run specs/version.yml
   cwd: "."
-  env:
-    MONITOR: "1"
-    MONITOR_RUN_DIR: "/tmp/monitor-run-test"
 
 terminal:
   cols: 100
@@ -29,7 +35,7 @@ steps:
 
 outcomes:
   - id: env_detected
-    description: child prints DETECTED when MONITOR=1 and MONITOR_RUN_DIR are set
+    description: the child observes MONITOR=1 and a live MONITOR_RUN_DIR
     verify:
       screen:
         contains: "DETECTED"

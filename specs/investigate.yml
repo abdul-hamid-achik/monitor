@@ -3,7 +3,8 @@ name: monitor_investigate
 
 intent: |
   `monitor investigate <pid> --json` runs the diagnostic pipeline
-  (snapshot -> profile -> correlate -> stash) and returns JSON with the PID,
+  (identify -> snapshot -> profile -> correlate -> semantic -> stash -> issue)
+  and returns JSON with the PID,
   start time, an ordered list of typed per-step results ({step, status,
   limitation, recovery}), and an overall verdict of "complete" or "partial"
   (complete iff no step failed). Uses PID 1 (launchd) which is always present
@@ -13,8 +14,18 @@ intent: |
   assert a specific verdict value, only that the field is present.
 
 target:
-  cmd: ["./bin/monitor", "investigate", "1", "--json"]
+  cmd: ["./bin/monitor", "investigate", "1", "--no-save", "--json"]
   cwd: "."
+  env:
+    HOME: "/tmp/monitor-investigate-spec-home"
+    XDG_DATA_HOME: "/tmp/monitor-investigate-spec-data"
+    XDG_STATE_HOME: "/tmp/monitor-investigate-spec-state"
+    MONITOR_ISSUES_STORE: "/tmp/monitor-investigate-spec-data/issues.veclite"
+    CHALUPA_CI_ENVIRONMENT: "preview-spec"
+    CHALUPA_CI_RUN_ID: "run-spec"
+    CHALUPA_CI_STEP_ID: "test"
+    CHALUPA_CI_SUITE: "pull-request"
+    CHALUPA_CI_ATTEMPT: "2"
 
 terminal:
   cols: 120
@@ -24,6 +35,8 @@ terminal:
 preconditions:
   commands:
     - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "mkdir -p /tmp/monitor-investigate-spec-home /tmp/monitor-investigate-spec-data /tmp/monitor-investigate-spec-state"
       timeoutMs: 5000
 
 steps:
@@ -37,22 +50,22 @@ outcomes:
     description: stdout includes the investigated pid
     verify:
       command:
-        run: "./bin/monitor investigate 1 --json | grep -q '\"pid\":[[:space:]]*1'"
+        run: "MONITOR_ISSUES_STORE=/tmp/monitor-investigate-spec-data/issues.veclite XDG_STATE_HOME=/tmp/monitor-investigate-spec-state ./bin/monitor investigate 1 --no-save --json | grep -q '\"pid\":[[:space:]]*1'"
   - id: started_at_present
     description: stdout includes the started_at timestamp
     verify:
       command:
-        run: "./bin/monitor investigate 1 --json | grep -q '\"started_at\"'"
+        run: "MONITOR_ISSUES_STORE=/tmp/monitor-investigate-spec-data/issues.veclite XDG_STATE_HOME=/tmp/monitor-investigate-spec-state ./bin/monitor investigate 1 --no-save --json | grep -q '\"started_at\"'"
   - id: steps_array
     description: stdout includes a steps array naming the pipeline stages
     verify:
       command:
-        run: "./bin/monitor investigate 1 --json | grep -q '\"steps\"'"
+        run: "MONITOR_ISSUES_STORE=/tmp/monitor-investigate-spec-data/issues.veclite XDG_STATE_HOME=/tmp/monitor-investigate-spec-state ./bin/monitor investigate 1 --no-save --json | grep -q '\"steps\"'"
   - id: note_field
     description: stdout includes a note describing the pipeline stage
     verify:
       command:
-        run: "./bin/monitor investigate 1 --json | grep -q '\"note\"'"
+        run: "MONITOR_ISSUES_STORE=/tmp/monitor-investigate-spec-data/issues.veclite XDG_STATE_HOME=/tmp/monitor-investigate-spec-state ./bin/monitor investigate 1 --no-save --json | grep -q '\"note\"'"
   - id: clean_exit
     description: the binary exits cleanly
     verify:
@@ -62,9 +75,26 @@ outcomes:
     description: stdout includes the overall complete|partial verdict
     verify:
       command:
-        run: "./bin/monitor investigate 1 --json | grep -q '\"verdict\"'"
+        run: "MONITOR_ISSUES_STORE=/tmp/monitor-investigate-spec-data/issues.veclite XDG_STATE_HOME=/tmp/monitor-investigate-spec-state ./bin/monitor investigate 1 --no-save --json | grep -q '\"verdict\"'"
   - id: typed_steps
     description: steps carry per-step status objects, not bare strings
     verify:
       command:
-        run: "./bin/monitor investigate 1 --json | grep -q '\"status\"'"
+        run: "MONITOR_ISSUES_STORE=/tmp/monitor-investigate-spec-data/issues.veclite XDG_STATE_HOME=/tmp/monitor-investigate-spec-state ./bin/monitor investigate 1 --no-save --json | grep -q '\"status\"'"
+  - id: issue_step
+    description: the pipeline records a durable grouped issue occurrence
+    verify:
+      command:
+        run: "MONITOR_ISSUES_STORE=/tmp/monitor-investigate-spec-data/issues.veclite XDG_STATE_HOME=/tmp/monitor-investigate-spec-state ./bin/monitor investigate 1 --no-save --json | grep -q '\"step\":[[:space:]]*\"issue\"'"
+  - id: chalupa_ci_context
+    description: Chalupa CI identifiers are preserved on the Run/Event occurrence
+    verify:
+      command:
+        run: >-
+          d=$(mktemp -d);
+          HOME=$d/home XDG_DATA_HOME=$d/data XDG_STATE_HOME=$d/state
+          MONITOR_ISSUES_STORE=$d/issues.veclite
+          CHALUPA_CI_ENVIRONMENT=preview-spec CHALUPA_CI_RUN_ID=run-spec
+          CHALUPA_CI_STEP_ID=test CHALUPA_CI_SUITE=pull-request CHALUPA_CI_ATTEMPT=2
+          ./bin/monitor investigate 1 --no-save --json |
+          python3 -c 'import json,sys; p=json.load(sys.stdin); c=p["context"]; o=p["occurrence"]; assert c["environment"]=="preview-spec" and c["run_id"]=="run-spec" and c["step_id"]=="test" and c["suite"]=="pull-request" and c["attempt"]=="2", c; assert o["run"]["id"]=="run-spec" and isinstance(o["evidence"],list), o'

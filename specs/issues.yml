@@ -1,0 +1,54 @@
+version: 1
+name: monitor_issues
+
+intent: |
+  `monitor issues` exposes the durable local issue index without requiring an
+  external service. A fresh store lists as an empty JSON array, limits are
+  bounded, and lifecycle commands are discoverable.
+
+target:
+  cmd: ["./bin/monitor", "issues", "--help"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 40
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: lifecycle_commands
+    description: help lists issue inspection and lifecycle commands
+    verify:
+      command:
+        run: "./bin/monitor issues --help | grep -q 'resolve' && ./bin/monitor issues --help | grep -q 'ignore'"
+  - id: fresh_store_is_empty
+    description: a missing issue database is a valid empty local index
+    verify:
+      command:
+        run: "d=$(mktemp -d); HOME=$d/home XDG_DATA_HOME=$d/data XDG_STATE_HOME=$d/state MONITOR_ISSUES_STORE=$d/issues.veclite ./bin/monitor issues list --json | grep -Eq '^\\[[[:space:]]*\\]$'"
+  - id: list_is_bounded
+    description: list rejects limits above the public contract
+    verify:
+      command:
+        run: "d=$(mktemp -d); ! env HOME=$d/home XDG_DATA_HOME=$d/data XDG_STATE_HOME=$d/state MONITOR_ISSUES_STORE=$d/issues.veclite ./bin/monitor issues list --limit 201 >/dev/null 2>&1"
+  - id: missing_issue_is_structured
+    description: show on an isolated empty store returns typed JSON without a panic
+    verify:
+      command:
+        run: "d=$(mktemp -d); HOME=$d/home XDG_DATA_HOME=$d/data XDG_STATE_HOME=$d/state MONITOR_ISSUES_STORE=$d/issues.veclite ./bin/monitor issues show ISS-MISSING --json 2>/dev/null | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p[\"id\"]==\"ISS-MISSING\" and p[\"not_found\"] is True, p'"
+  - id: clean_exit
+    description: issues help exits cleanly
+    verify:
+      process:
+        exitCode: 0

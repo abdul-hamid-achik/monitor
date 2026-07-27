@@ -3,20 +3,28 @@ package cli
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/abdul-hamid-achik/monitor/internal/contextids"
 	"github.com/abdul-hamid-achik/monitor/internal/incidents"
+	"github.com/abdul-hamid-achik/monitor/internal/issues"
+	"github.com/abdul-hamid-achik/monitor/internal/procbind"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 )
 
 // restoreStubs saves the package-level stub points and returns a func that
 // restores them, so every test that swaps them can `defer restoreStubs(t)()`.
 func restoreStubs() func() {
-	origOwnership, origCapture, origIncidents, origValidate := verifyOwnership, captureProfile, incidentsCapture, validateProfile
+	origOwnership, origCapture, origIncidents, origValidate, origRecord := verifyOwnership, captureProfile, incidentsCapture, validateProfile, recordIssueOccurrence
+	recordIssueOccurrence = func(*investigateReport) (issues.Issue, issues.Occurrence, error) {
+		return issues.Issue{ID: "ISS-TEST"}, issues.Occurrence{ID: "OCC-TEST", IssueID: "ISS-TEST"}, nil
+	}
 	return func() {
 		verifyOwnership, captureProfile, incidentsCapture, validateProfile = origOwnership, origCapture, origIncidents, origValidate
+		recordIssueOccurrence = origRecord
 	}
 }
 
@@ -53,7 +61,7 @@ func TestCaptureInvestigateProfileUsesPprofWhenOwned(t *testing.T) {
 		return profiler.Profile{PID: pid, Type: profiler.ProfileHeap, Text: "heap profile: 1"}, nil
 	}
 
-	_, method, step := captureInvestigateProfile(context.Background(), 42)
+	_, method, step := captureInvestigateProfile(context.Background(), 42, nil)
 	if step.Status != stepOK {
 		t.Fatalf("step.Status = %q, want ok (limitation=%q)", step.Status, step.Limitation)
 	}
@@ -77,7 +85,7 @@ func TestCaptureInvestigateProfilePrefersSampleWhenNotOwned(t *testing.T) {
 		return profiler.Profile{PID: pid, Type: profiler.ProfileSample, Text: "Sampling process"}, nil
 	}
 
-	_, method, step := captureInvestigateProfile(context.Background(), 42)
+	_, method, step := captureInvestigateProfile(context.Background(), 42, nil)
 	if step.Status != stepOK {
 		t.Fatalf("step.Status = %q, want ok (limitation=%q)", step.Status, step.Limitation)
 	}
@@ -104,7 +112,7 @@ func TestCaptureInvestigateProfileFallsBackWhenHeapEmpty(t *testing.T) {
 		return profiler.Profile{PID: pid, Type: profiler.ProfileSample, Text: "Sampling process"}, nil
 	}
 
-	_, method, step := captureInvestigateProfile(context.Background(), 42)
+	_, method, step := captureInvestigateProfile(context.Background(), 42, nil)
 	if step.Status != stepOK {
 		t.Fatalf("step.Status = %q, want ok (limitation=%q)", step.Status, step.Limitation)
 	}
@@ -122,7 +130,7 @@ func TestCaptureInvestigateProfileBothFail(t *testing.T) {
 		return profiler.Profile{}, errors.New("boom")
 	}
 
-	_, method, step := captureInvestigateProfile(context.Background(), 42)
+	_, method, step := captureInvestigateProfile(context.Background(), 42, nil)
 	if step.Status != stepFailed {
 		t.Fatalf("step.Status = %q, want failed", step.Status)
 	}
@@ -149,7 +157,7 @@ func TestCaptureInvestigateProfileBlocksUnsupportedFallback(t *testing.T) {
 		t.Fatal("unsupported sample capture must be blocked before collection")
 		return profiler.Profile{}, nil
 	}
-	_, _, step := captureInvestigateProfile(context.Background(), 42)
+	_, _, step := captureInvestigateProfile(context.Background(), 42, nil)
 	if step.Status != stepFailed || !strings.Contains(step.Limitation, "unsupported") {
 		t.Fatalf("step = %+v, want failed unsupported limitation", step)
 	}
@@ -169,7 +177,7 @@ func TestInvestigatePipelineNeverStashesEmptyProfile(t *testing.T) {
 		return incidents.CaptureResult{StashID: "s1"}, nil
 	}
 
-	report := investigatePipeline(context.Background(), 999999, "7d", false)
+	report := investigatePipeline(context.Background(), 999999, InvestigateOptions{TTL: "7d", NoSave: false})
 
 	if gotReq.Profile.PID != 0 {
 		t.Errorf("stashed request carried a non-empty profile: %+v", gotReq.Profile)
@@ -207,7 +215,7 @@ func TestInvestigatePipelineNoSaveSkipsStash(t *testing.T) {
 		return incidents.CaptureResult{}, nil
 	}
 
-	report := investigatePipeline(context.Background(), 42, "7d", true)
+	report := investigatePipeline(context.Background(), 42, InvestigateOptions{TTL: "7d", NoSave: true})
 
 	var stashStep *investigateStep
 	for i := range report.Steps {
@@ -262,7 +270,7 @@ func TestInvestigatePipelineStashFailureRecoveryHint(t *testing.T) {
 				return tt.result, errors.New("stash failed")
 			}
 
-			report := investigatePipeline(context.Background(), 42, "7d", false)
+			report := investigatePipeline(context.Background(), 42, InvestigateOptions{TTL: "7d", NoSave: false})
 
 			var stashStep *investigateStep
 			for i := range report.Steps {
@@ -308,5 +316,57 @@ func TestInvestigateReportToMapSnakeCase(t *testing.T) {
 		if _, ok := step0[key]; !ok {
 			t.Errorf("steps[0] missing key %q: %v", key, step0)
 		}
+	}
+}
+
+func TestRecordInvestigateOccurrenceGroupsRunsAndKeepsEvidence(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	t.Setenv(issues.StorePathEnv, storePath)
+	report := investigateReport{
+		PID: 42, StartedAt: "2026-07-27T12:00:00Z", ProfileMethod: "pprof_heap",
+		Process: &procbind.Binding{Name: "api", Runtime: procbind.RuntimeGo, CodebaseRoot: "/workspace/chalupa"},
+		Context: contextids.IDs{Environment: "preview", RunID: "run-1", StepID: "test", Suite: "pr", Attempt: "1", Release: "v1"},
+		Profile: &profiler.Profile{Symbols: []profiler.Symbol{{Func: "main.serve"}, {Func: "main.serve"}}},
+		Stash:   &incidents.CaptureResult{TreeHash: strings.Repeat("a", 64), ArtifactRef: map[string]any{"uri": "fcheap://stash/stash-1"}},
+	}
+	first, occurrence, err := recordInvestigateOccurrence(&report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Project != "chalupa" || occurrence.RunID != "run-1" || len(occurrence.EvidenceRefs) != 1 || occurrence.EvidenceRefs[0] != "fcheap://stash/stash-1" {
+		t.Fatalf("first occurrence mapping = issue %+v occurrence %+v", first, occurrence)
+	}
+	if occurrence.Metadata["step_id"] != "test" || occurrence.Metadata["suite"] != "pr" || occurrence.Metadata["attempt"] != "1" {
+		t.Fatalf("Chalupa metadata missing: %v", occurrence.Metadata)
+	}
+	report.PID = 99
+	report.Context.RunID = "run-2"
+	report.Context.Release = "v2"
+	second, _, err := recordInvestigateOccurrence(&report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID || second.OccurrenceCount != 2 {
+		t.Fatalf("dynamic run data split the issue: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestInvestigateIssuePersistenceFailureMakesVerdictPartial(t *testing.T) {
+	defer restoreStubs()()
+	recordIssueOccurrence = func(*investigateReport) (issues.Issue, issues.Occurrence, error) {
+		return issues.Issue{}, issues.Occurrence{}, errors.New("permission denied")
+	}
+	verifyOwnership = func(context.Context, int32, string) (profiler.PortOwnership, string) {
+		return profiler.OwnershipOwned, ""
+	}
+	captureProfile = func(_ context.Context, pid int32, ptype profiler.ProfileType, _ string) (profiler.Profile, error) {
+		return profiler.Profile{PID: pid, Type: ptype, Text: "heap profile: 1"}, nil
+	}
+	report := investigatePipeline(context.Background(), 42, InvestigateOptions{NoSave: true, SkipSemantic: true, SkipCorrelate: true})
+	if report.Verdict != "partial" || report.IssueError != "permission denied" {
+		t.Fatalf("report = %+v", report)
+	}
+	if got := report.Steps[len(report.Steps)-1]; got.Step != "issue" || got.Status != stepFailed {
+		t.Fatalf("issue step = %+v", got)
 	}
 }

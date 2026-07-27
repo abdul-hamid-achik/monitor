@@ -56,7 +56,7 @@ keeps its default.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `update_interval` | duration (nanoseconds) | `1000000000` (1s) | How often the collector refreshes metrics. Encoded as an integer number of nanoseconds (Go `time.Duration`). Values `<= 0` are ignored and the default is kept. |
+| `update_interval` | duration (nanoseconds) | `1000000000` (1s) | How often the collector refreshes metrics. Encoded as an integer number of nanoseconds (Go `time.Duration`). Values `<= 0` are ignored; full process collection clamps positive values below 100ms to 100ms. |
 | `temperature_unit` | string | `"C"` | Temperature display unit (`C` or `F`, case-insensitive). Unknown values are ignored and the default is kept. |
 | `show_system_processes` | bool | `false` | Whether system/root-owned processes are shown in the Processes tab. |
 | `max_processes` | int | `50` | Maximum number of processes listed. Only accepted in the range `1`–`1000`; out-of-range values are ignored and the default is kept. |
@@ -110,14 +110,37 @@ useful on systems where sudo can't be obtained, with no recompile required.
 
 ## Environment variables
 
-When Monitor launches a child process or a spec, it sets two environment
-variables so the child can detect that it is being observed:
+`monitor run` sets two environment variables in the glyphrun child so the spec
+and the processes it launches can detect the observed run:
 
 | Variable | Set by | Meaning |
 |----------|--------|---------|
-| `MONITOR` | `monitor run` / `monitor watch` | Set to `1` for child processes (unless `MONITOR_RUN_DIR` is already set), mirroring glyphrun's `GLYPHRUN` pattern. |
-| `MONITOR_RUN_DIR` | the run harness | Path to the run directory for the observed process. Its presence means the process was spawned by an existing Monitor run, so `MONITOR` is not re-set. |
+| `MONITOR` | `monitor run` | Always set to `1` in the glyphrun child, mirroring glyphrun's `GLYPHRUN` pattern. |
+| `MONITOR_RUN_DIR` | `monitor run` | Reuses a non-empty inherited value; otherwise points to a temporary directory that Monitor removes after glyphrun exits. |
 | `MONITOR_LOG_STORE` | `monitor logs capture/search` | Shared override for the log database path. A command-level `--store` flag takes precedence; the default is `~/.local/share/monitor/logs.veclite`. |
+| `MONITOR_ISSUES_STORE` | issue CLI, investigate, watch, MCP | Shared override for the issue database path. `issues --store` takes precedence for CLI reads/mutations; the default follows `$XDG_DATA_HOME/monitor/issues.veclite` or `~/.local/share/monitor/issues.veclite`. |
 
-A child can check `MONITOR=1` (or the presence of `MONITOR_RUN_DIR`) to alter
-its behaviour — for example to emit extra diagnostics — while being monitored.
+A glyphrun child can check `MONITOR=1` (or the presence of `MONITOR_RUN_DIR`)
+to alter its behaviour — for example to emit extra diagnostics — while being
+monitored.
+
+### Diagnostic run context
+
+`investigate` and `watch --stash` also read optional correlation fields. An
+explicit investigate flag wins over `MONITOR_*`, which wins over Chalupa CI and
+legacy aliases.
+
+| Field | Preferred environment variables |
+|-------|---------------------------------|
+| environment | `MONITOR_ENVIRONMENT`, `CHALUPA_CI_ENVIRONMENT`, `CHALUPA_ENV`, `CHALUPA_ENVIRONMENT` |
+| deployment | `MONITOR_DEPLOYMENT_ID`, `CHALUPA_DEPLOYMENT_ID` |
+| run | `MONITOR_RUN_ID`, `CHALUPA_CI_RUN_ID`, `CHALUPA_RUN_ID`, basename of `MONITOR_RUN_DIR` |
+| step | `MONITOR_STEP_ID`, `CHALUPA_CI_STEP_ID` |
+| suite | `MONITOR_SUITE`, `CHALUPA_CI_SUITE` |
+| attempt | `MONITOR_ATTEMPT`, `CHALUPA_CI_ATTEMPT` |
+| release | `MONITOR_RELEASE`, `CHALUPA_RELEASE` |
+| service | `MONITOR_SERVICE`, `CHALUPA_SERVICE` |
+| Git SHA | `MONITOR_GIT_SHA`, `GIT_SHA`, `GITHUB_SHA` |
+
+These values belong to the local diagnostic plane and occurrence context. They
+are never added to `monitor.telemetry_window` V1.

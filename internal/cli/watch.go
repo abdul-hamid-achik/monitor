@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,7 +16,9 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/analyzer"
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/config"
+	"github.com/abdul-hamid-achik/monitor/internal/contextids"
 	"github.com/abdul-hamid-achik/monitor/internal/incidents"
+	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/notify"
 )
 
@@ -26,15 +29,18 @@ import (
 // carry an optional "diagnosis" {summary, evidence, confidence, next_actions}
 // built by the analyzer; consumers must ignore keys they don't know.
 type Event struct {
-	Type      string                   `json:"type"`
-	Timestamp time.Time                `json:"timestamp"`
-	CPU       *collector.CPUInfo       `json:"cpu,omitempty"`
-	Memory    *collector.MemoryInfo    `json:"memory,omitempty"`
-	Network   *collector.NetworkInfo   `json:"network,omitempty"`
-	Hostname  string                   `json:"hostname,omitempty"`
-	Alert     *collector.Alert         `json:"alert,omitempty"`
-	Stash     *incidents.CaptureResult `json:"stash,omitempty"`
-	StashErr  string                   `json:"stash_error,omitempty"`
+	Type       string                   `json:"type"`
+	Timestamp  time.Time                `json:"timestamp"`
+	CPU        *collector.CPUInfo       `json:"cpu,omitempty"`
+	Memory     *collector.MemoryInfo    `json:"memory,omitempty"`
+	Network    *collector.NetworkInfo   `json:"network,omitempty"`
+	Hostname   string                   `json:"hostname,omitempty"`
+	Alert      *collector.Alert         `json:"alert,omitempty"`
+	Stash      *incidents.CaptureResult `json:"stash,omitempty"`
+	StashErr   string                   `json:"stash_error,omitempty"`
+	Issue      *issues.Issue            `json:"issue,omitempty"`
+	Occurrence *issues.Occurrence       `json:"occurrence,omitempty"`
+	IssueErr   string                   `json:"issue_error,omitempty"`
 }
 
 const defaultAlertCooldown = time.Minute
@@ -186,16 +192,20 @@ func newWatchCmd() *cobra.Command {
 		Long: `Stream metrics as NDJSON to stdout.
 
 Each line is a self-describing JSON object with a "type" discriminator
-("tick", "alert", "process", "ecosystem"). Pipe into jq or any other tool:
+("tick", "alert", or "stash"). Pipe into jq or any other tool:
 
   monitor watch --json | jq -c 'select(.type=="tick")'
 
 With --stash, each emitted alert captures an incident via internal/incidents
-(fcheap stash, content-addressed). Sustained repeats are controlled by
-		--alert-cooldown.`,
+(fcheap stash with a stable integrity hash). Sustained repeats are controlled by
+--alert-cooldown. Successful and locally-retained stashes are grouped into the
+durable issue index with their run context and evidence reference.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if interval <= 0 {
 				return fmt.Errorf("--interval must be greater than zero")
+			}
+			if interval < collector.MinFullCollectionInterval {
+				return fmt.Errorf("--interval must be at least %s for full process collection", collector.MinFullCollectionInterval)
 			}
 			if alertCooldown < 0 {
 				return fmt.Errorf("--alert-cooldown must be zero or greater")
@@ -206,6 +216,20 @@ With --stash, each emitted alert captures an incident via internal/incidents
 			c := NewCollector(interval)
 			ctx, cancel := Context()
 			defer cancel()
+			var issueStore *issues.Store
+			if stash {
+				if path, err := issues.ResolvePath(""); err == nil {
+					issueStore, err = issues.OpenStore(path)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "monitor: issue store unavailable: %v\n", err)
+					}
+				} else {
+					fmt.Fprintf(os.Stderr, "monitor: issue store unavailable: %v\n", err)
+				}
+				if issueStore != nil {
+					defer issueStore.Close()
+				}
+			}
 
 			// Build the analyzer and wire the OnAlert hook.
 			engine := analyzer.NewEngine()
@@ -249,6 +273,15 @@ With --stash, each emitted alert captures an incident via internal/incidents
 						if err != nil {
 							ev2.StashErr = err.Error()
 						}
+						if issueStore != nil {
+							issue, occurrence, issueErr := recordAlertOccurrence(issueStore, ev, a, d, res)
+							if issueErr != nil {
+								ev2.IssueErr = issueErr.Error()
+							} else {
+								ev2.Issue = &issue
+								ev2.Occurrence = &occurrence
+							}
+						}
 						_ = WriteNDJSON(ev2)
 					}) {
 						fmt.Fprintln(os.Stderr, "monitor: alert delivery limit reached; dropped stash capture")
@@ -287,7 +320,10 @@ With --stash, each emitted alert captures an incident via internal/incidents
 			gate := newAlertCooldownGate(alertCooldown)
 
 			if once {
-				info := c.Collect(ctx)
+				info, err := collectFullSnapshot(ctx, c)
+				if err != nil {
+					return err
+				}
 				ev := collector.Event{
 					Timestamp: info.LastUpdate,
 					Hostname:  info.Hostname,
@@ -301,7 +337,7 @@ With --stash, each emitted alert captures an incident via internal/incidents
 				if err := emitAlerts(ev, engine.Observe(ev), gate, handlers); err != nil {
 					return err
 				}
-				err := WriteNDJSON(Event{
+				err = WriteNDJSON(Event{
 					Type:      "tick",
 					Timestamp: info.LastUpdate,
 					CPU:       &info.CPU,
@@ -338,7 +374,71 @@ With --stash, each emitted alert captures an incident via internal/incidents
 	return cmd
 }
 
+func recordAlertOccurrence(store *issues.Store, ev collector.Event, alert collector.Alert, diagnosis *incidents.Diagnosis, stash incidents.CaptureResult) (issues.Issue, issues.Occurrence, error) {
+	context := contextids.FromEnv(contextids.IDs{})
+	project := strings.TrimSpace(os.Getenv("MONITOR_PROJECT"))
+	if project == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			project = filepath.Base(cwd)
+		}
+	}
+	if project == "" {
+		project = "local"
+	}
+	service := firstNonEmpty(context.Service, alert.Process)
+	message := alert.Detail
+	title := alert.Rule
+	if diagnosis != nil && diagnosis.Summary != "" {
+		message = diagnosis.Summary
+	}
+	if title == "" {
+		title = "monitor alert"
+	}
+	evidence := []string{}
+	typedEvidence := []issues.EvidenceRef{}
+	if uri, ok := stash.ArtifactRef["uri"].(string); ok && uri != "" {
+		evidence = append(evidence, uri)
+		typedEvidence = append(typedEvidence, issues.EvidenceRef{Kind: "monitor.incident", URI: uri, TreeHash: stash.TreeHash})
+	} else if stash.StashID != "" {
+		uri := "fcheap://stash/" + stash.StashID
+		evidence = append(evidence, uri)
+		typedEvidence = append(typedEvidence, issues.EvidenceRef{Kind: "monitor.incident", URI: uri, TreeHash: stash.TreeHash})
+	} else if stash.RegistryID != "" {
+		uri := "monitor://incidents/" + stash.RegistryID
+		evidence = append(evidence, uri)
+		typedEvidence = append(typedEvidence, issues.EvidenceRef{Kind: "monitor.incident.pending", URI: uri, TreeHash: stash.TreeHash})
+	}
+	metadata := map[string]string{}
+	for key, value := range map[string]string{
+		"environment": context.Environment, "deployment_id": context.DeploymentID,
+		"step_id": context.StepID, "suite": context.Suite, "attempt": context.Attempt,
+		"git_sha": context.GitSHA, "trigger": "alert",
+	} {
+		if value != "" {
+			metadata[key] = value
+		}
+	}
+	return store.UpsertOccurrence(issues.OccurrenceInput{
+		ObservedAt: ev.Timestamp, Project: project, Service: service,
+		Kind:  "monitor.alert." + firstNonEmpty(alert.Rule, "unknown"),
+		Title: title, Message: message, Severity: alert.Severity,
+		RunID: context.RunID, Release: context.Release, PID: alert.PID,
+		TreeHash: stash.TreeHash, EvidenceRefs: evidence, Evidence: typedEvidence, Metadata: metadata,
+		Run: &issues.RunContext{
+			ID: context.RunID, Environment: context.Environment, DeploymentID: context.DeploymentID,
+			StepID: context.StepID, Suite: context.Suite, Attempt: context.Attempt,
+			Release: context.Release, GitSHA: context.GitSHA,
+		},
+	})
+}
+
 func watchLoop(ctx context.Context, c *collector.Collector, engine *analyzer.Engine, interval time.Duration, gate *alertCooldownGate, handlers []watchAlertHandler) error {
+	if interval < collector.MinFullCollectionInterval {
+		return fmt.Errorf("watch interval must be at least %s", collector.MinFullCollectionInterval)
+	}
+	// Prime cumulative process counters so the first emitted tick has a real
+	// delta instead of an unavailable first observation.
+	_ = c.Collect(ctx)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {

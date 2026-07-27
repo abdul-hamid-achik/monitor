@@ -61,23 +61,23 @@ type CompactHost struct {
 }
 
 type CompactCPU struct {
-	UsagePercent float64                       `json:"usage_percent"`
-	CoreCount    int                           `json:"core_count"`
-	ThreadCount  int                           `json:"thread_count"`
-	FrequencyMHz float64                       `json:"frequency_mhz"`
-	LoadAvg1     float64                       `json:"load_avg_1"`
-	MetricStates map[string]MetricStatus       `json:"metric_states"`
+	UsagePercent float64                 `json:"usage_percent"`
+	CoreCount    int                     `json:"core_count"`
+	ThreadCount  int                     `json:"thread_count"`
+	FrequencyMHz float64                 `json:"frequency_mhz"`
+	LoadAvg1     float64                 `json:"load_avg_1"`
+	MetricStates map[string]MetricStatus `json:"metric_states"`
 }
 
 type CompactMemory struct {
-	TotalBytes     uint64                       `json:"total_bytes"`
-	UsedBytes      uint64                       `json:"used_bytes"`
-	AvailableBytes uint64                       `json:"available_bytes"`
-	UsagePercent   float64                      `json:"usage_percent"`
-	SwapTotal      uint64                       `json:"swap_total"`
-	SwapUsed       uint64                       `json:"swap_used"`
-	Pressure       float64                      `json:"pressure"`
-	MetricStates   map[string]MetricStatus      `json:"metric_states"`
+	TotalBytes     uint64                  `json:"total_bytes"`
+	UsedBytes      uint64                  `json:"used_bytes"`
+	AvailableBytes uint64                  `json:"available_bytes"`
+	UsagePercent   float64                 `json:"usage_percent"`
+	SwapTotal      uint64                  `json:"swap_total"`
+	SwapUsed       uint64                  `json:"swap_used"`
+	Pressure       float64                 `json:"pressure"`
+	MetricStates   map[string]MetricStatus `json:"metric_states"`
 }
 
 type CompactTemperature struct {
@@ -90,15 +90,15 @@ type CompactTemperature struct {
 }
 
 type CompactNetwork struct {
-	BytesRecvPerSec uint64                       `json:"bytes_recv_per_sec"`
-	BytesSentPerSec uint64                       `json:"bytes_sent_per_sec"`
-	MetricStates    map[string]MetricStatus      `json:"metric_states"`
+	BytesRecvPerSec uint64                  `json:"bytes_recv_per_sec"`
+	BytesSentPerSec uint64                  `json:"bytes_sent_per_sec"`
+	MetricStates    map[string]MetricStatus `json:"metric_states"`
 }
 
 type CompactDiskIO struct {
-	ReadPerSec  uint64                       `json:"read_per_sec"`
-	WritePerSec uint64                       `json:"write_per_sec"`
-	MetricStates map[string]MetricStatus     `json:"metric_states"`
+	ReadPerSec   uint64                  `json:"read_per_sec"`
+	WritePerSec  uint64                  `json:"write_per_sec"`
+	MetricStates map[string]MetricStatus `json:"metric_states"`
 }
 
 type CompactFilesystem struct {
@@ -122,16 +122,16 @@ type CompactProcesses struct {
 }
 
 type CompactProcess struct {
-	PID          int32                       `json:"pid"`
-	Parent       int32                       `json:"parent,omitempty"`
-	Name         string                      `json:"name"`
-	CPUPercent   float64                     `json:"cpu_percent"`
-	MemoryBytes  uint64                      `json:"memory_bytes"`
-	Threads      int32                       `json:"threads"`
-	Status       string                      `json:"status,omitempty"`
-	IsSystem     bool                        `json:"is_system"`
-	IsProtected  bool                        `json:"is_protected"`
-	MetricStates map[string]MetricStatus      `json:"metric_states"`
+	PID          int32                   `json:"pid"`
+	Parent       int32                   `json:"parent,omitempty"`
+	Name         string                  `json:"name"`
+	CPUPercent   float64                 `json:"cpu_percent"`
+	MemoryBytes  uint64                  `json:"memory_bytes"`
+	Threads      int32                   `json:"threads"`
+	Status       string                  `json:"status,omitempty"`
+	IsSystem     bool                    `json:"is_system"`
+	IsProtected  bool                    `json:"is_protected"`
+	MetricStates map[string]MetricStatus `json:"metric_states"`
 }
 
 // BuildCompactSnapshot creates a deterministic, bounded projection without
@@ -179,7 +179,7 @@ func BuildCompactSnapshot(info SystemInfo, opts CompactOptions) CompactSnapshot 
 		Network: CompactNetwork{
 			BytesRecvPerSec: info.Network.BytesRecvPerSec,
 			BytesSentPerSec: info.Network.BytesSentPerSec,
-			MetricStates: info.Network.MetricStates,
+			MetricStates:    info.Network.MetricStates,
 		},
 		DiskIO: CompactDiskIO{
 			ReadPerSec: info.Disk.ReadPerSec, WritePerSec: info.Disk.WritePerSec,
@@ -278,7 +278,6 @@ func (p CompactProcess) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(out)
 }
-
 
 func compactLimit(value, fallback, maximum int) int {
 	if value <= 0 {

@@ -13,6 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 )
@@ -173,7 +174,7 @@ func TestRequireConfirm(t *testing.T) {
 // used (not the nil-service stub) when confirm=true.
 func TestHandleInvestigateForwardsToService(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Investigate: func(_ context.Context, pid int32) map[string]any {
+		Investigate: func(_ context.Context, pid int32, _ InvestigateOptions) map[string]any {
 			return map[string]any{"pid": pid, "wired": true}
 		},
 	})
@@ -469,7 +470,7 @@ func TestHandleProfileCaptureVerifiedArtifact(t *testing.T) {
 // for monitor_investigate.
 func TestHandleInvestigateRefusesWithoutConfirm(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Investigate: func(context.Context, int32) map[string]any {
+		Investigate: func(context.Context, int32, InvestigateOptions) map[string]any {
 			t.Fatalf("Investigate must not be called without confirm")
 			return nil
 		},
@@ -534,7 +535,7 @@ func TestHandleInvestigateReflectsVerdict(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newTestServer(t, &Service{
-				Investigate: func(context.Context, int32) map[string]any {
+				Investigate: func(context.Context, int32, InvestigateOptions) map[string]any {
 					// Return a fresh copy each call; handleInvestigate mutates the map.
 					out := map[string]any{}
 					for k, v := range tt.out {
@@ -571,7 +572,7 @@ func TestHandleInvestigateReflectsVerdict(t *testing.T) {
 func TestHandleInvestigateCustomService(t *testing.T) {
 	called := false
 	s := newTestServer(t, &Service{
-		Investigate: func(_ context.Context, pid int32) map[string]any {
+		Investigate: func(_ context.Context, pid int32, _ InvestigateOptions) map[string]any {
 			called = true
 			return map[string]any{"pid": pid, "custom": true}
 		},
@@ -940,5 +941,104 @@ func TestHandleAnalyze(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestHandleIssuesIsBoundedAndReadOnly(t *testing.T) {
+	items := make([]issues.Issue, 250)
+	for i := range items {
+		items[i] = issues.Issue{ID: fmt.Sprintf("ISS-%03d", i), Status: issues.StatusOpen}
+	}
+	var got issues.ListOptions
+	s := newTestServer(t, &Service{IssuesList: func(_ context.Context, opts issues.ListOptions) ([]issues.Issue, error) {
+		got = opts
+		return items, nil
+	}})
+	_, payload, err := s.handleIssues(context.Background(), nil, &issuesInput{
+		Statuses: []string{"OPEN"}, Project: "monitor", Service: "api", Limit: 999,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := payload.(map[string]any)
+	if len(m["issues"].([]any)) != 200 || m["total"].(float64) != 250 || !m["truncated"].(bool) {
+		t.Fatalf("bounded payload = %v", m)
+	}
+	if len(got.Statuses) != 1 || got.Statuses[0] != issues.StatusOpen || got.Project != "monitor" || got.Service != "api" {
+		t.Fatalf("filters = %+v", got)
+	}
+	if _, _, err := s.handleIssues(context.Background(), nil, &issuesInput{Statuses: []string{"bogus"}}); err != nil {
+		t.Fatalf("invalid status should be structured, got hard error: %v", err)
+	}
+}
+
+func TestHandleIssueReturnsOccurrencesAndStructuredNotFound(t *testing.T) {
+	issue := issues.Issue{ID: "ISS-1", OccurrenceCount: 3}
+	s := newTestServer(t, &Service{IssueGet: func(_ context.Context, id string, limit int) (issues.Issue, []issues.Occurrence, error) {
+		if id == "missing" {
+			return issues.Issue{}, nil, fmt.Errorf("%w: %s", issues.ErrIssueNotFound, id)
+		}
+		if limit != 20 {
+			t.Fatalf("default occurrence limit = %d, want 20", limit)
+		}
+		return issue, []issues.Occurrence{{ID: "OCC-1"}, {ID: "OCC-2"}}, nil
+	}})
+	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "ISS-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := payload.(map[string]any)
+	if len(m["occurrences"].([]any)) != 2 || !m["occurrences_truncated"].(bool) {
+		t.Fatalf("detail payload = %v", m)
+	}
+	_, payload, err = s.handleIssue(context.Background(), nil, &issueInput{ID: "missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m = payload.(map[string]any)
+	if found, _ := m["not_found"].(bool); !found {
+		t.Fatalf("not-found payload = %v", m)
+	}
+}
+
+func TestHandleIssueClampsOccurrenceLimitAndKeepsTypedEvidence(t *testing.T) {
+	var gotLimit int
+	wantRun := &issues.RunContext{ID: "run-1", Environment: "preview", StepID: "test"}
+	wantEvidence := []issues.EvidenceRef{{Kind: "monitor.incident", URI: "fcheap://stash/stash-1"}}
+	s := newTestServer(t, &Service{IssueGet: func(_ context.Context, id string, limit int) (issues.Issue, []issues.Occurrence, error) {
+		gotLimit = limit
+		return issues.Issue{ID: id, OccurrenceCount: 1}, []issues.Occurrence{{
+			ID: "OCC-1", IssueID: id, Run: wantRun, Evidence: wantEvidence,
+		}}, nil
+	}})
+	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "ISS-1", OccurrenceLimit: 999})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLimit != maxIssuesLimit {
+		t.Fatalf("service occurrence limit = %d, want %d", gotLimit, maxIssuesLimit)
+	}
+	m := payload.(map[string]any)
+	occurrences, ok := m["occurrences"].([]any)
+	if !ok || len(occurrences) != 1 {
+		t.Fatalf("occurrences = %T %v", m["occurrences"], m["occurrences"])
+	}
+	event := occurrences[0].(map[string]any)
+	run := event["run"].(map[string]any)
+	evidence := event["evidence"].([]any)
+	if run["id"] != "run-1" || len(evidence) != 1 || evidence[0].(map[string]any)["uri"] != "fcheap://stash/stash-1" {
+		t.Fatalf("typed event payload = %v", event)
+	}
+}
+
+func TestHandleIssuesNormalizesNilServices(t *testing.T) {
+	s := newTestServer(t, &Service{})
+	_, payload, err := s.handleIssues(context.Background(), nil, &issuesInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := payload.(map[string]any)
+	if _, ok := m["issues"].([]any); !ok {
+		t.Fatalf("issues must be an array: %T", m["issues"])
 	}
 }

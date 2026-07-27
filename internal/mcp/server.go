@@ -27,6 +27,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,6 +39,7 @@ import (
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
+	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 )
@@ -69,6 +71,11 @@ type Service struct {
 	// Used by monitor_analyze. Optional; if nil the tool reports unavailable.
 	Analyze func(ctx context.Context, windowSeconds int, pid int32) (AnalyzeResult, error)
 
+	// IssuesList and IssueGet expose the durable local issue index. Both are
+	// read-only and should open a fresh shared-read snapshot per call.
+	IssuesList func(ctx context.Context, opts issues.ListOptions) ([]issues.Issue, error)
+	IssueGet   func(ctx context.Context, id string, occurrenceLimit int) (issues.Issue, []issues.Occurrence, error)
+
 	// Kill terminates the given PID and returns the verified Result (outcome
 	// terminated|still_running|unknown). force=true sends SIGKILL, otherwise
 	// SIGTERM. Used by monitor_kill. Required for mutating kill tools.
@@ -81,11 +88,28 @@ type Service struct {
 	// Investigate runs the diagnostic pipeline for the given PID. Used by
 	// monitor_investigate. Optional; if nil the tool reports a stub result
 	// matching the CLI's stub output so the surface stays stable.
-	Investigate func(ctx context.Context, pid int32) map[string]any
+	// opts carry codebase binding and Chalupa correlation IDs.
+	Investigate func(ctx context.Context, pid int32, opts InvestigateOptions) map[string]any
 
 	// Record starts a vidtrace recording for the given PID. Used by
 	// monitor_record. Optional; if nil the tool reports vidtrace missing.
 	Record func(ctx context.Context, pid int32, durationSeconds int) (string, error)
+}
+
+// InvestigateOptions is the optional input for Service.Investigate beyond pid.
+type InvestigateOptions struct {
+	TTL          string
+	NoSave       bool
+	Codebase     string
+	Environment  string
+	DeploymentID string
+	RunID        string
+	StepID       string
+	Suite        string
+	Attempt      string
+	Release      string
+	Service      string
+	GitSHA       string
 }
 
 // Server wraps the MCP stdio transport.
@@ -105,7 +129,8 @@ func NewServer(svc *Service, version string) *Server {
 	opts := &mcp.ServerOptions{
 		Instructions: "monitor is an agent-harnessable local observability tool. " +
 			"Call monitor_snapshot first to orient, then drill down with monitor_processes " +
-			"or monitor_doctor. When the user reports slowness, a suspected leak, or a " +
+			"or monitor_doctor. Use monitor_issues to triage recurring local failures and " +
+			"monitor_issue to inspect occurrences and evidence. When the user reports slowness, a suspected leak, or a " +
 			"runaway process, call monitor_analyze (read-only, no confirm; it blocks for " +
 			"window_seconds while sampling). All tools return JSON. Mutating tools (monitor_kill, " +
 			"monitor_profile_capture, monitor_investigate, monitor_record) require the " +
@@ -154,6 +179,16 @@ func (s *Server) register() {
 			"retry with a larger window_seconds before concluding the system is fine.",
 	}, s.handleAnalyze)
 	mcp.AddTool(s.srv, &mcp.Tool{
+		Name: "monitor_issues",
+		Description: "List recurring local issues, newest first. Read-only; no confirm field. " +
+			"Filter by statuses (open|resolved|ignored), project, or service; limit defaults to 50 and is capped at 200.",
+	}, s.handleIssues)
+	mcp.AddTool(s.srv, &mcp.Tool{
+		Name: "monitor_issue",
+		Description: "Get one local issue and its recent occurrence/evidence history. Read-only; no confirm field. " +
+			"occurrence_limit defaults to 20 and is capped at 200.",
+	}, s.handleIssue)
+	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_kill",
 		Description: "Safely terminate a process. Requires `confirm: true` in the input. Use force=true for SIGKILL.",
 	}, s.handleKill)
@@ -162,8 +197,12 @@ func (s *Server) register() {
 		Description: "Capture a profile for a process. Requires `confirm: true`. type: heap|cpu|goroutine|sample.",
 	}, s.handleProfileCapture)
 	mcp.AddTool(s.srv, &mcp.Tool{
-		Name:        "monitor_investigate",
-		Description: "Run the diagnostic pipeline (snapshot + profile + correlate + stash) for a process. Requires `confirm: true`.",
+		Name: "monitor_investigate",
+		Description: "Run the diagnostic pipeline for a process: identify runtime/codebase " +
+			"(Node cmdline/cwd/package.json), ownership-gated profile, codemap correlate, " +
+			"vecgrep semantic hits, fcheap stash with ArtifactRefV1. Pass codebase when " +
+			"auto-detect fails. Optional environment/deployment_id/run_id/step_id/suite/attempt/release tag the " +
+			"incident for Chalupa CI. Requires `confirm: true`.",
 	}, s.handleInvestigate)
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_record",
@@ -200,6 +239,18 @@ type analyzeInput struct {
 	PID           int32 `json:"pid,omitempty"            jsonschema:"optional: focus the diagnosis on this PID only"`
 }
 
+type issuesInput struct {
+	Statuses []string `json:"statuses,omitempty" jsonschema:"optional statuses: open, resolved, ignored"`
+	Project  string   `json:"project,omitempty"  jsonschema:"case-insensitive project filter"`
+	Service  string   `json:"service,omitempty"  jsonschema:"case-insensitive service filter"`
+	Limit    int      `json:"limit,omitempty"    jsonschema:"maximum issues to return (default 50, max 200)"`
+}
+
+type issueInput struct {
+	ID              string `json:"id"                         jsonschema:"issue ID, for example ISS-..."`
+	OccurrenceLimit int    `json:"occurrence_limit,omitempty" jsonschema:"recent occurrences to return (default 20, max 200)"`
+}
+
 // processesOutput is the structured payload of monitor_processes.
 type processesOutput struct {
 	Processes []collector.ProcessInfo `json:"processes"`
@@ -232,6 +283,9 @@ const (
 	defaultAnalyzeWindowSeconds = 10
 	minAnalyzeWindowSeconds     = 4 // analyzer's diagMinSamples: fewer aligned samples -> no diagnosis
 	maxAnalyzeWindowSeconds     = 60
+	defaultIssuesLimit          = 50
+	defaultOccurrencesLimit     = 20
+	maxIssuesLimit              = 200
 )
 
 // killInput is the typed input for monitor_kill. The agent must set
@@ -251,8 +305,20 @@ type profileInput struct {
 
 // investigateInput is the typed input for monitor_investigate.
 type investigateInput struct {
-	PID     int32 `json:"pid"     jsonschema:"the PID to investigate"`
-	Confirm bool  `json:"confirm" jsonschema:"must be true; confirms intent to run the diagnostic pipeline"`
+	PID          int32  `json:"pid"                     jsonschema:"the PID to investigate"`
+	Confirm      bool   `json:"confirm"                 jsonschema:"must be true; confirms intent to run the diagnostic pipeline"`
+	Codebase     string `json:"codebase,omitempty"      jsonschema:"project root for codemap/vecgrep (auto-detected from process cwd when empty)"`
+	Environment  string `json:"environment,omitempty"   jsonschema:"correlation environment id (Chalupa env / MONITOR_ENVIRONMENT)"`
+	DeploymentID string `json:"deployment_id,omitempty" jsonschema:"correlation deployment id (CHALUPA_DEPLOYMENT_ID)"`
+	RunID        string `json:"run_id,omitempty"        jsonschema:"correlation CI/run id"`
+	StepID       string `json:"step_id,omitempty"       jsonschema:"correlation CI step id"`
+	Suite        string `json:"suite,omitempty"         jsonschema:"correlation CI suite"`
+	Attempt      string `json:"attempt,omitempty"       jsonschema:"correlation CI attempt"`
+	Release      string `json:"release,omitempty"       jsonschema:"correlation release label"`
+	Service      string `json:"service,omitempty"       jsonschema:"correlation service name"`
+	GitSHA       string `json:"git_sha,omitempty"       jsonschema:"correlation git sha"`
+	TTL          string `json:"ttl,omitempty"           jsonschema:"fcheap stash TTL (default 7d)"`
+	NoSave       bool   `json:"no_save,omitempty"      jsonschema:"skip fcheap stash; return profile inline"`
 }
 
 // recordInput is the typed input for monitor_record.
@@ -381,6 +447,72 @@ func (s *Server) handleAnalyze(ctx context.Context, _ *mcp.CallToolRequest, in *
 	return result(out)
 }
 
+func (s *Server) handleIssues(ctx context.Context, _ *mcp.CallToolRequest, in *issuesInput) (*mcp.CallToolResult, any, error) {
+	if s.svc.IssuesList == nil {
+		return result(map[string]any{"issues": []issues.Issue{}, "total": 0, "truncated": false, "error": "issue service not configured"})
+	}
+	if in == nil {
+		in = &issuesInput{}
+	}
+	statuses := make([]issues.Status, 0, len(in.Statuses))
+	for _, raw := range in.Statuses {
+		status := issues.Status(strings.ToLower(strings.TrimSpace(raw)))
+		if status != issues.StatusOpen && status != issues.StatusResolved && status != issues.StatusIgnored {
+			return result(map[string]any{"issues": []issues.Issue{}, "total": 0, "truncated": false, "error": fmt.Sprintf("invalid status %q", raw)})
+		}
+		statuses = append(statuses, status)
+	}
+	limit := in.Limit
+	if limit <= 0 {
+		limit = defaultIssuesLimit
+	}
+	if limit > maxIssuesLimit {
+		limit = maxIssuesLimit
+	}
+	items, err := s.svc.IssuesList(ctx, issues.ListOptions{Statuses: statuses, Project: in.Project, Service: in.Service})
+	if err != nil {
+		return result(map[string]any{"issues": []issues.Issue{}, "total": 0, "truncated": false, "error": err.Error()})
+	}
+	if items == nil {
+		items = []issues.Issue{}
+	}
+	total := len(items)
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return result(map[string]any{"issues": items, "total": total, "truncated": total > len(items)})
+}
+
+func (s *Server) handleIssue(ctx context.Context, _ *mcp.CallToolRequest, in *issueInput) (*mcp.CallToolResult, any, error) {
+	if in == nil || strings.TrimSpace(in.ID) == "" {
+		return result(map[string]any{"id": "", "not_found": false, "occurrences": []issues.Occurrence{}, "error": "issue id is required"})
+	}
+	if s.svc.IssueGet == nil {
+		return result(map[string]any{"id": in.ID, "not_found": false, "occurrences": []issues.Occurrence{}, "error": "issue service not configured"})
+	}
+	limit := in.OccurrenceLimit
+	if limit <= 0 {
+		limit = defaultOccurrencesLimit
+	}
+	if limit > maxIssuesLimit {
+		limit = maxIssuesLimit
+	}
+	issue, occurrences, err := s.svc.IssueGet(ctx, in.ID, limit)
+	if err != nil {
+		return result(map[string]any{
+			"id": in.ID, "not_found": errors.Is(err, issues.ErrIssueNotFound),
+			"occurrences": []issues.Occurrence{}, "error": err.Error(),
+		})
+	}
+	if occurrences == nil {
+		occurrences = []issues.Occurrence{}
+	}
+	return result(map[string]any{
+		"issue": issue, "occurrences": occurrences,
+		"occurrences_truncated": issue.OccurrenceCount > int64(len(occurrences)),
+	})
+}
+
 // requireConfirm returns an error when the agent forgot to confirm. Mirrors
 // the CLI's "refused" error so agent harnesses detect the failure mode
 // uniformly across the surface; each handler builds its own per-tool
@@ -485,7 +617,20 @@ func (s *Server) handleInvestigate(ctx context.Context, _ *mcp.CallToolRequest, 
 		return result(map[string]any{"investigated": false, "refused": true, "reason": err.Error(), "pid": in.PID})
 	}
 	if s.svc.Investigate != nil {
-		out := s.svc.Investigate(ctx, in.PID)
+		out := s.svc.Investigate(ctx, in.PID, InvestigateOptions{
+			TTL:          in.TTL,
+			NoSave:       in.NoSave,
+			Codebase:     in.Codebase,
+			Environment:  in.Environment,
+			DeploymentID: in.DeploymentID,
+			RunID:        in.RunID,
+			StepID:       in.StepID,
+			Suite:        in.Suite,
+			Attempt:      in.Attempt,
+			Release:      in.Release,
+			Service:      in.Service,
+			GitSHA:       in.GitSHA,
+		})
 		verdict, _ := out["verdict"].(string)
 		out["investigated"] = verdict == "complete"
 		if verdict == "" {
@@ -497,10 +642,13 @@ func (s *Server) handleInvestigate(ctx context.Context, _ *mcp.CallToolRequest, 
 	// Stub when no investigator is wired (tests / read-only embedders):
 	// honestly reports that nothing ran.
 	steps := []map[string]any{
+		{"step": "identify", "status": "skipped", "limitation": "no investigator configured"},
 		{"step": "snapshot", "status": "skipped", "limitation": "no investigator configured"},
 		{"step": "profile", "status": "skipped", "limitation": "no investigator configured"},
 		{"step": "correlate", "status": "skipped", "limitation": "no investigator configured"},
+		{"step": "semantic", "status": "skipped", "limitation": "no investigator configured"},
 		{"step": "stash", "status": "skipped", "limitation": "no investigator configured"},
+		{"step": "issue", "status": "skipped", "limitation": "no investigator configured"},
 	}
 	return result(map[string]any{
 		"investigated": false,

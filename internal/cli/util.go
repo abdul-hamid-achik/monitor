@@ -89,6 +89,13 @@ func NewCollector(interval time.Duration) *collector.Collector {
 	return c
 }
 
+// collectFullSnapshot takes the minimum two samples required for trustworthy
+// per-process CPU deltas. One-shot process surfaces use this instead of
+// presenting the collector's explicitly-unavailable first observation.
+func collectFullSnapshot(ctx context.Context, c *collector.Collector) (collector.SystemInfo, error) {
+	return collectSnapshot(ctx, c, collector.MinFullCollectionInterval)
+}
+
 // Context returns a context cancelled on SIGINT/SIGTERM.
 func Context() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

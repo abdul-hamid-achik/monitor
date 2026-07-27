@@ -6,7 +6,7 @@ intent: |
   workflow with explicit sample counts, health, and diagnosis arrays.
 
 target:
-  cmd: ["./bin/monitor", "analyze", "--window", "100ms", "--interval", "20ms", "--json"]
+  cmd: ["./bin/monitor", "analyze", "--window", "400ms", "--interval", "100ms", "--json"]
   cwd: "."
 
 terminal:
@@ -30,12 +30,12 @@ outcomes:
     description: JSON includes samples, healthy, and diagnoses
     verify:
       command:
-        run: "./bin/monitor analyze --window 100ms --interval 20ms --json | grep -q '\"samples\"' && ./bin/monitor analyze --window 100ms --interval 20ms --json | grep -q '\"diagnoses\"'"
+        run: "./bin/monitor analyze --window 400ms --interval 100ms --json | grep -q '\"samples\"' && ./bin/monitor analyze --window 400ms --interval 100ms --json | grep -q '\"diagnoses\"'"
   - id: diagnoses_is_array
     description: diagnoses is always a JSON array
     verify:
       command:
-        run: "./bin/monitor analyze --window 100ms --interval 20ms --json | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin)[\"diagnoses\"], list)'"
+        run: "./bin/monitor analyze --window 400ms --interval 100ms --json | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin)[\"diagnoses\"], list)'"
   - id: invalid_window_refused
     description: invalid sampling windows fail clearly
     verify:

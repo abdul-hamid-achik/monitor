@@ -657,27 +657,6 @@ func gaugeLabel(c float64) string {
 	}
 }
 
-func (m Model) renderGauge(value float64, width int) string {
-	if width < 5 {
-		width = 5
-	}
-	filled := int(value / 100 * float64(width))
-	if filled > width {
-		filled = width
-	}
-	if filled < 0 {
-		filled = 0
-	}
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#A3BE8C"))
-	if value >= 80 {
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color("#BF616A"))
-	} else if value >= 50 {
-		style = lipgloss.NewStyle().Foreground(lipgloss.Color("#EBCB8B"))
-	}
-	return fmt.Sprintf("  %s  %5.1f%%", style.Render(bar), value)
-}
-
 func (m Model) renderOverview() string {
 	return m.renderOperationalOverview()
 }

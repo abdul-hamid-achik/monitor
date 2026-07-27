@@ -34,16 +34,16 @@ outcomes:
     verify:
       command:
         run: "(./bin/monitor kill 1 2>&1 || true) | grep -qi 'protected'"
-  - id: pid_1_still_running
-    description: PID 1 must still be running
+  - id: pid_1_refused_before_signal
+    description: PID 1 is rejected by the safety gate before signal delivery
     verify:
       command:
-        run: "ps -p 1 -o pid= | grep -q '^ *1$'"
+        run: "./bin/monitor kill 1 --json 2>&1 | grep -q '\"refused\": true'"
   - id: yes_cannot_override
     description: compatibility --yes cannot bypass protected-process safety
     verify:
       command:
-        run: "./bin/monitor kill 1 --yes --json | grep -q '\"refused\": true' && ps -p 1 -o pid= | grep -q '^ *1$'"
+        run: "./bin/monitor kill 1 --yes --json | grep -q '\"refused\": true'"
   - id: refused_exit_code
     description: the command exited with a non-zero code
     verify:

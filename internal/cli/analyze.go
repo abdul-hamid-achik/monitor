@@ -74,6 +74,9 @@ func validateAnalyzeOptions(window, interval time.Duration, pid int32) error {
 	if interval <= 0 || interval > window {
 		return fmt.Errorf("--interval must be greater than zero and no longer than --window")
 	}
+	if interval < collector.MinFullCollectionInterval {
+		return fmt.Errorf("--interval must be at least %s for full process collection", collector.MinFullCollectionInterval)
+	}
 	if pid < 0 {
 		return fmt.Errorf("--pid must be zero or a positive process ID")
 	}

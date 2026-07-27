@@ -19,7 +19,7 @@ The subcommands group into four purposes:
 - **Act** — change something: [`kill`](#kill).
 - **Diagnose** — capture and analyze: [`analyze`](#analyze), [`profile`](#profile),
   [`investigate`](#investigate), [`stash`](#stash), [`incidents`](#incidents),
-  [`logs`](#logs), [`history`](#history), [`baseline`](#baseline),
+  [`issues`](#issues), [`logs`](#logs), [`history`](#history), [`baseline`](#baseline),
   [`diff`](#diff).
 - **Ecosystem & runtime** — talk to sibling tools and the running TUI:
   [`config`](#config), [`doctor`](#doctor), [`run`](#run), [`reload`](#reload),
@@ -57,15 +57,18 @@ monitor profile <monitor-pid> --type heap --pprof-addr localhost:6060 --json
 
 ### Observed-child environment
 
-When Monitor launches a child process or spec, it sets `MONITOR=1` in the
-child's environment so the child can detect that it is being observed:
+`monitor run` always sets `MONITOR=1` and `MONITOR_RUN_DIR` in the glyphrun
+child's environment so the spec and the processes it launches can detect the
+observed run:
 
 ```
 MONITOR=1
+MONITOR_RUN_DIR=/private/tmp/monitor-run-...
 ```
 
-When a richer parent (e.g. glyphrun) already exports `MONITOR_RUN_DIR`, Monitor
-leaves `MONITOR` alone, so nested invocations don't clobber the outer run.
+An inherited `MONITOR_RUN_DIR` is reused. Otherwise `monitor run` creates a
+temporary run directory and removes it after glyphrun exits. In both cases the
+glyphrun child receives `MONITOR=1` explicitly.
 
 ## Inspect
 
@@ -100,6 +103,14 @@ The compact payload starts with `schema_version: 1` and
 `filesystem_total`, `filesystem_limit`, and `filesystems_truncated` make every
 omission explicit. Empty lists serialize as `[]`, never `null`. The existing
 `--json` shape is unchanged.
+
+Per-process CPU in a warmed snapshot is an interval measurement derived from
+the delta of cumulative user+system CPU counters. `100%` means one fully used
+core, so a multithreaded process can exceed it. A first observation, reused
+PID, backwards counter, or non-positive interval is marked unavailable rather
+than presented as a trustworthy zero. `--interval 0` deliberately skips the
+second sample, so process CPU and other counter-derived rates can be
+unavailable.
 
 ```json
 {
@@ -158,6 +169,11 @@ With `--stash`, each alert captures an incident bundle in a background
 goroutine and emits a separate `stash` line reporting the outcome; the watch
 loop never blocks on fcheap I/O, and a stash failure shows up in a
 `stash_error` field rather than stalling stdout.
+
+The same `stash` event also carries a grouped `issue` and `occurrence` when the
+local issue write succeeds. `issue_error` reports that independent failure.
+Issue persistence is tied to `--stash`; plain watch streams do not write the
+issue store.
 
 `--webhook` and `--notify` are additional alert sinks — they fire alongside
 (not instead of) the NDJSON stream and `--stash`. Deliveries run asynchronously
@@ -258,6 +274,7 @@ Print detailed information for a single PID. Takes exactly one argument.
 | Flag | Default | Effect |
 |------|---------|--------|
 | `--json` | `false` | Emit JSON output. |
+| `--codebase` | auto-detect | Override the project root used for runtime binding and later codemap/vecgrep correlation. |
 
 ```bash
 monitor process 1133
@@ -267,22 +284,35 @@ monitor process 1133 --json
 ```json
 {
   "pid": 1133,
-  "name": "mediaanalysisd",
+  "name": "node",
   "cpu_percent": 150.4,
   "memory": 339427328,
-  "memory_percent": 0,
-  "threads": 24,
-  "user": "abdulachik",
+  "memory_percent": 1.98,
+  "threads": 8,
+  "user": "developer",
   "status": "S",
   "parent": 1,
-  "metric_states": {
-    "status": {"state": "observed"},
-    "io": {"state": "unsupported", "reason": "per-process I/O counters are not exposed by gopsutil on macOS"}
-  },
   "is_system": false,
-  "is_protected": false
+  "is_protected": false,
+  "metric_states": {"cpu": {"state": "observed"}},
+  "binding": {
+    "pid": 1133,
+    "name": "node",
+    "runtime": "node",
+    "main_script": "/workspace/dist/server.js",
+    "codebase_root": "/workspace",
+    "inspect_addr": "127.0.0.1:9229",
+    "argv_redacted": true
+  }
 }
 ```
+
+The original `ProcessInfo` fields remain at the top level; `binding` is added
+beside them rather than wrapping them in a nested `process` object.
+
+Monitor inspects argv in memory to infer the runtime, entrypoint, and inspector
+address. It does not serialize argv into this JSON output, issue records,
+incident bundles, or telemetry.
 
 ### `processes`
 
@@ -435,7 +465,7 @@ JSON result always includes `"diagnoses": []` rather than `null`.
 | Flag | Default | Effect |
 |------|---------|--------|
 | `--window` | `10s` | Total sampling window; greater than zero and at most 60 seconds. |
-| `-i`, `--interval` | `1s` | Delay between samples; must not exceed the window. |
+| `-i`, `--interval` | `1s` | Delay between samples; at least 100ms and no longer than the window. |
 | `--pid` | `0` | Focus on one positive PID (`0` means all current processes). |
 | `--json` | `false` | Emit `{window, interval, pid?, samples, healthy, diagnoses}`. |
 
@@ -484,22 +514,34 @@ monitor profile 1234 -t goroutine --pprof-addr localhost:7070 --json
 
 ### `investigate`
 
-Run the diagnostic pipeline for a process: snapshot -> profile -> correlate ->
-stash, bundling the result into a content-addressed fcheap stash and printing
-the stash ID so the bundle can be searched or restored later.
+Run the seven-step diagnostic pipeline for a process: identify -> snapshot ->
+profile -> correlate -> semantic -> stash -> issue. It binds the process to a
+runtime and codebase, captures the best verified profile available, adds
+bounded code context, saves an integrity-hashed incident bundle with
+file.cheap when available, and groups the occurrence into a durable local
+issue.
 
-The profile step is ownership-gated the same way `profile` is: it only trusts
-a `localhost:6060` pprof heap scrape when the LISTEN socket is proven to
-belong to the target pid, falling back to macOS `sample` otherwise. Each
-pipeline stage reports a typed result — `{step, status, limitation, recovery}`
-with `status` one of `ok`/`failed`/`skipped` — and the top-level `verdict` is
-`"complete"` only when every step succeeded, `"partial"` otherwise. An empty
-or unverified profile is never stashed.
+The profile step is ownership-gated. Node/Bun/Deno processes with an owned
+`--inspect` endpoint prefer a bounded CDP CPU profile with file/line frames.
+For Go profiles, Monitor only trusts the default pprof listener when it is
+proven to belong to the target PID; macOS `sample` is the final fallback. Each
+stage reports `{step, status, limitation, recovery}` with `status` one of
+`ok`/`failed`/`skipped`. The top-level `verdict` is `"complete"` when no step
+failed and `"partial"` otherwise. Skipped optional correlation can therefore
+remain honest without making the entire investigation fail. An empty or
+unverified profile is omitted from the bundle.
 
 | Flag | Default | Effect |
 |------|---------|--------|
 | `--ttl` | `7d` | TTL for the stash (fcheap `--ttl`). |
-| `--no-save` | `false` | Capture the bundle but skip the fcheap stash step (useful in sandboxes). |
+| `--no-save` | `false` | Skip the file.cheap stash step; the issue occurrence is still recorded. |
+| `--codebase` | auto-detect | Project root for codemap/vecgrep. |
+| `--environment` | environment | Correlation environment. |
+| `--deployment-id` | environment | Correlation deployment ID. |
+| `--run-id` | environment | Correlation run ID. |
+| `--release` | environment | Correlation release label. |
+| `--service` | process/environment | Correlation service name. |
+| `--git-sha` | environment | Correlation Git commit. |
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
@@ -512,23 +554,36 @@ monitor investigate 1234 --no-save --json   # profile in JSON, nothing stashed
   "pid": 1234,
   "started_at": "2026-06-27T00:02:38Z",
   "steps": [
+    {"step": "identify", "status": "ok"},
     {"step": "snapshot", "status": "ok"},
     {"step": "profile", "status": "ok"},
     {"step": "correlate", "status": "ok"},
-    {"step": "stash", "status": "ok"}
+    {"step": "semantic", "status": "ok"},
+    {"step": "stash", "status": "ok"},
+    {"step": "issue", "status": "ok"}
   ],
   "verdict": "complete",
-  "profile_method": "pprof_heap",
-  "stash": {"stash_id": "fcheap-abc123", "path": "/tmp/monitor-incident-..."},
+  "profile_method": "inspector_cpu",
+  "stash": {"stash_id": "abc123", "path": "fcheap://stash/abc123"},
+  "issue": {"id": "ISS-0123456789ABCDEF", "status": "open"},
+  "occurrence": {"id": "OCC-...", "evidence_refs": ["fcheap://stash/abc123"]},
   "note": "investigation pipeline complete (profile and stash verified)"
 }
 ```
 
+Codemap is best-effort: it receives `-C <codebase>` and only correlates frames
+or entrypoints with usable file/line positions. Vecgrep first reads its bounded
+JSON envelope and only trusts hits from an indexed, fresh project. Missing,
+stale, or warning-only results remain visible in the semantic step rather than
+being treated as successful evidence.
+
 ### `stash`
 
-Manually capture the current system snapshot into a content-addressed fcheap
+Manually capture the current system snapshot as an integrity-hashed file.cheap
 stash and return the stash ID. Useful for "before" states ahead of risky
-operations, or manual incident triage. The trigger tag is `manual`.
+operations, or manual incident triage. The trigger tag is `manual`. Monitor's
+tree hash verifies bundle bytes and supports correlation; it does not promise
+that repeated captures receive the same file.cheap stash ID.
 
 | Flag | Default | Effect |
 |------|---------|--------|
@@ -598,12 +653,46 @@ monitor incidents resume-stash abc123def456
 monitor incident resume-stash abc123def456 --json
 ```
 
+The registry is a recovery queue, not a permanent archive. It keeps the 20
+newest entries, uses private directories (`0700`) and files (`0600`), rejects
+symlink/non-regular bundle entries, and verifies the recorded tree hash before
+archiving or deleting local evidence. Prefer a registry ID over a raw path.
+
+### `issues`
+
+List and manage recurring observations grouped by Fingerprint V1. `issue` is
+an alias. Investigations always attempt to record an occurrence; alerts do so
+when `watch --stash` captures their evidence. The default private store is
+`~/.local/share/monitor/issues.veclite`; `issues --store <path>` overrides it.
+
+```bash
+monitor issues list --status open --project checkout --service api
+monitor issues show ISS-0123456789ABCDEF --occurrences 50 --json
+monitor issues resolve ISS-0123456789ABCDEF
+monitor issues ignore ISS-0123456789ABCDEF
+monitor issues reopen ISS-0123456789ABCDEF
+```
+
+`list` is newest-first and accepts repeatable `--status` values (`open`,
+`resolved`, `ignored`), `--project`, `--service`, and `--limit` (default 50,
+range 1–200). `show` returns the issue plus recent occurrences; its
+`--occurrences` default is 20 with the same 200 maximum. A later occurrence
+automatically reopens a resolved issue, while ignored issues keep accumulating
+occurrences until explicitly reopened. See [Local Issues](./issues) for the
+Run/Event/Issue/Evidence model and MCP tools.
+
 ### `logs`
 
 Manage captured process logs in the durable local veclite store at
 `~/.local/share/monitor/logs.veclite`. `--store` overrides the location for
 either subcommand, and `MONITOR_LOG_STORE` provides a shared environment-wide
 override (explicit flag wins).
+
+The default writer retains entries for 7 days and caps the collection at
+100,000 records, evicting the oldest records first. Searches also hide expired
+legacy entries and clamp results to 1,000. These durable retention bounds are
+separate from `logs capture --max-lines` and `--max-bytes`, which stop one
+capture session. The default parent directory is restricted to mode `0700`.
 
 #### `logs capture`
 
@@ -656,7 +745,7 @@ full structured entries (`json`/`ndjson`) or replay captured lines (`raw`).
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `--limit` | `50` | Max results. |
+| `--limit` | `50` | Max results; values above 1,000 are clamped. |
 | `--level` | none | Filter one or more levels; repeat or comma-separate. |
 | `--process` | `""` | Filter by a case-insensitive process-name substring. |
 | `--pid` | `0` | Filter by process ID. |
@@ -992,8 +1081,9 @@ Run an MCP stdio server exposing Monitor's data. The single subcommand,
 monitor mcp serve
 ```
 
-The server exposes eight tools — four read-only (`monitor_snapshot`,
-`monitor_processes`, `monitor_doctor`, `monitor_analyze`) and four mutating
+The server exposes ten tools — six read-only (`monitor_snapshot`,
+`monitor_processes`, `monitor_doctor`, `monitor_analyze`, `monitor_issues`,
+`monitor_issue`) and four mutating
 (`monitor_kill`, `monitor_profile_capture`, `monitor_investigate`,
 `monitor_record`). Every mutating tool requires `confirm: true` in its typed
 input; `monitor_analyze` is read-only and has no confirm gate. See the

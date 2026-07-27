@@ -16,6 +16,8 @@ intent: |
 target:
   cmd: ["./bin/monitor", "diff", "glyph-spec-diff", "--json"]
   cwd: "."
+  env:
+    HOME: "/tmp/monitor-diff-spec-home"
 
 terminal:
   cols: 120
@@ -26,14 +28,16 @@ preconditions:
   commands:
     - run: "test -x ./bin/monitor"
       timeoutMs: 5000
+    - run: "mkdir -p /tmp/monitor-diff-spec-home"
+      timeoutMs: 5000
     # diff needs an existing baseline to compare the live system against.
-    - run: "./bin/monitor baseline save glyph-spec-diff >/dev/null"
+    - run: "HOME=/tmp/monitor-diff-spec-home ./bin/monitor baseline save glyph-spec-diff >/dev/null"
       timeoutMs: 15000
     # Two hand-written fixture baselines with a deliberate 50-point memory
     # swing (well past the 10-point MemPoints threshold) so the verdicts
     # outcome below is deterministic instead of depending on the live
     # system happening to drift enough between two baseline captures.
-    - run: "mkdir -p \"$HOME/.local/share/monitor/baselines\" && printf '%s' '{\"name\":\"glyph-spec-diff-lo\",\"captured_at\":\"2026-01-01T00:00:00Z\",\"cpu_usage\":5,\"mem_usage\":10,\"load1\":0.1,\"processes\":{},\"listeners\":[],\"disk_used\":100000000,\"disk_total\":1000000000}' > \"$HOME/.local/share/monitor/baselines/glyph-spec-diff-lo.json\" && printf '%s' '{\"name\":\"glyph-spec-diff-hi\",\"captured_at\":\"2026-01-01T00:05:00Z\",\"cpu_usage\":5,\"mem_usage\":60,\"load1\":0.1,\"processes\":{},\"listeners\":[],\"disk_used\":100000000,\"disk_total\":1000000000}' > \"$HOME/.local/share/monitor/baselines/glyph-spec-diff-hi.json\""
+    - run: "mkdir -p /tmp/monitor-diff-spec-home/.local/share/monitor/baselines && printf '%s' '{\"name\":\"glyph-spec-diff-lo\",\"captured_at\":\"2026-01-01T00:00:00Z\",\"cpu_usage\":5,\"mem_usage\":10,\"load1\":0.1,\"processes\":{},\"listeners\":[],\"disk_used\":100000000,\"disk_total\":1000000000}' > /tmp/monitor-diff-spec-home/.local/share/monitor/baselines/glyph-spec-diff-lo.json && printf '%s' '{\"name\":\"glyph-spec-diff-hi\",\"captured_at\":\"2026-01-01T00:05:00Z\",\"cpu_usage\":5,\"mem_usage\":60,\"load1\":0.1,\"processes\":{},\"listeners\":[],\"disk_used\":100000000,\"disk_total\":1000000000}' > /tmp/monitor-diff-spec-home/.local/share/monitor/baselines/glyph-spec-diff-hi.json"
       timeoutMs: 5000
 
 steps:
@@ -47,12 +51,12 @@ outcomes:
     description: diff JSON names the baseline it compared from
     verify:
       command:
-        run: "./bin/monitor diff glyph-spec-diff --json | grep -q '\"from\"'"
+        run: "HOME=/tmp/monitor-diff-spec-home ./bin/monitor diff glyph-spec-diff --json | grep -q '\"from\"'"
   - id: diff_json_has_change_arrays
     description: diff JSON includes the process change arrays
     verify:
       command:
-        run: "./bin/monitor diff glyph-spec-diff --json | grep -qE '\"new_procs\"|\"changed_procs\"'"
+        run: "HOME=/tmp/monitor-diff-spec-home ./bin/monitor diff glyph-spec-diff --json | grep -qE '\"new_procs\"|\"changed_procs\"'"
   - id: mem_threshold_flag
     description: diff documents the --mem-threshold flag
     verify:
@@ -67,17 +71,17 @@ outcomes:
     description: a diff with a significant delta carries a Diagnosis-shaped verdicts array
     verify:
       command:
-        run: "./bin/monitor diff glyph-spec-diff-lo glyph-spec-diff-hi --json | grep -q '\"verdicts\"'"
+        run: "HOME=/tmp/monitor-diff-spec-home ./bin/monitor diff glyph-spec-diff-lo glyph-spec-diff-hi --json | grep -q '\"verdicts\"'"
   - id: cleanup_diff_verdict_fixtures
     description: remove the two crafted fixture baselines
     verify:
       command:
-        run: "./bin/monitor baseline delete glyph-spec-diff-lo; ./bin/monitor baseline delete glyph-spec-diff-hi"
+        run: "HOME=/tmp/monitor-diff-spec-home ./bin/monitor baseline delete glyph-spec-diff-lo; HOME=/tmp/monitor-diff-spec-home ./bin/monitor baseline delete glyph-spec-diff-hi"
   - id: cleanup_baseline
     description: remove the spec baseline
     verify:
       command:
-        run: "./bin/monitor baseline delete glyph-spec-diff"
+        run: "HOME=/tmp/monitor-diff-spec-home ./bin/monitor baseline delete glyph-spec-diff"
   - id: clean_exit
     description: diff exits cleanly
     verify:

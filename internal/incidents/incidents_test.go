@@ -19,14 +19,20 @@ import (
 // TestCaptureSuccessRemovesTempDir stubs the save path and asserts the result
 // is mapped and the temp bundle dir is cleaned up on success.
 func TestCaptureSuccessRemovesTempDir(t *testing.T) {
-	origHas, origSave := hasFcheap, stashSave
-	defer func() { hasFcheap, stashSave = origHas, origSave }()
+	origHas, origSave, origRef := hasFcheap, stashSave, artifactRef
+	defer func() { hasFcheap, stashSave, artifactRef = origHas, origSave, origRef }()
 
 	hasFcheap = func() bool { return true }
 	var savedDir string
 	stashSave = func(_ context.Context, dir, _ string, _ []string, _ string) (ecosystem.StashSaveResult, error) {
 		savedDir = dir
 		return ecosystem.StashSaveResult{ID: "stash-123", Path: "/vault/stash-123", SizeBytes: 4096}, nil
+	}
+	artifactRef = func(_ context.Context, id string, _ ecosystem.ArtifactRefOpts) (ecosystem.ArtifactRefV1, error) {
+		return ecosystem.ArtifactRefV1{
+			Schema: "urn:filecheap.dev:artifact-ref:v1", Version: 1, Provider: "fcheap-local", URI: "fcheap://stash/" + id,
+			ArtifactID: id, Kind: "monitor.incident",
+		}, nil
 	}
 
 	res, err := Capture(context.Background(), CaptureRequest{
@@ -36,7 +42,7 @@ func TestCaptureSuccessRemovesTempDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Capture: %v", err)
 	}
-	if res.StashID != "stash-123" || res.Path != "/vault/stash-123" || res.SizeBytes != 4096 {
+	if res.StashID != "stash-123" || res.Path != "fcheap://stash/stash-123" || res.SizeBytes != 4096 {
 		t.Errorf("result not mapped from save: %+v", res)
 	}
 	if savedDir == "" {
@@ -44,6 +50,56 @@ func TestCaptureSuccessRemovesTempDir(t *testing.T) {
 	}
 	if _, statErr := os.Stat(savedDir); !os.IsNotExist(statErr) {
 		t.Errorf("temp dir %s should be removed on success; stat err = %v", savedDir, statErr)
+	}
+}
+
+func TestWriteBundleCopiesRawProfileAndDropsArgv(t *testing.T) {
+	dir := t.TempDir()
+	rawPath := filepath.Join(t.TempDir(), "cpu.pprof")
+	raw := []byte{0x1f, 0x8b, 0x08, 0x00, 0xff}
+	if err := os.WriteFile(rawPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	req := &CaptureRequest{
+		Snapshot: collector.SystemInfo{Hostname: "host"},
+		Profile:  profiler.Profile{PID: 42, Type: profiler.ProfileCPU, Path: rawPath},
+		Process:  &ProcessBinding{PID: 42, Cmdline: []string{"server", "--token", "secret-value"}, Runtime: "go"},
+		Trigger:  "investigate",
+	}
+	if err := writeBundle(dir, req); err != nil {
+		t.Fatal(err)
+	}
+	gotRaw, err := os.ReadFile(filepath.Join(dir, "profile.data"))
+	if err != nil || !bytes.Equal(gotRaw, raw) {
+		t.Fatalf("raw profile = %x, %v; want %x", gotRaw, err, raw)
+	}
+	profileJSON, err := os.ReadFile(filepath.Join(dir, "profile.json"))
+	if err != nil || !bytes.Contains(profileJSON, []byte(`"path": "profile.data"`)) || bytes.Contains(profileJSON, []byte(rawPath)) {
+		t.Fatalf("profile metadata did not use bundle-relative path: %s (%v)", profileJSON, err)
+	}
+	processJSON, err := os.ReadFile(filepath.Join(dir, "process.json"))
+	if err != nil || bytes.Contains(processJSON, []byte("secret-value")) || bytes.Contains(processJSON, []byte(`"cmdline"`)) {
+		t.Fatalf("process evidence leaked argv: %s (%v)", processJSON, err)
+	}
+	var manifest bundleManifest
+	manifestJSON, _ := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err := json.Unmarshal(manifestJSON, &manifest); err != nil || manifest.RawProfile != "profile.data" {
+		t.Fatalf("manifest raw profile = %q, %v", manifest.RawProfile, err)
+	}
+}
+
+func TestCopyProfileArtifactRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyProfileArtifact(link, filepath.Join(dir, "copy")); err == nil {
+		t.Fatal("copyProfileArtifact accepted a symlink")
 	}
 }
 
@@ -85,8 +141,9 @@ func TestCaptureSaveFailureKeepsBundle(t *testing.T) {
 	if res.RegistryID != res.TreeHash[:12] {
 		t.Errorf("RegistryID = %q, want tree-hash prefix %q", res.RegistryID, res.TreeHash[:12])
 	}
-	if !strings.HasPrefix(res.Path, os.Getenv("XDG_STATE_HOME")) {
-		t.Errorf("Path should be under the XDG_STATE_HOME temp dir %q; got %q", os.Getenv("XDG_STATE_HOME"), res.Path)
+	wantStateRoot, _ := filepath.EvalSymlinks(os.Getenv("XDG_STATE_HOME"))
+	if !strings.HasPrefix(res.Path, wantStateRoot) {
+		t.Errorf("Path should be under the XDG_STATE_HOME temp dir %q; got %q", wantStateRoot, res.Path)
 	}
 	if _, statErr := os.Stat(filepath.Join(res.Path, "manifest.json")); statErr != nil {
 		t.Errorf("bundle should be kept on save failure: %v", statErr)
@@ -155,6 +212,60 @@ func TestComputeTreeHashDistinguishesNames(t *testing.T) {
 	hb, _, _ := computeTreeHash(b)
 	if ha == hb {
 		t.Fatalf("hashes should differ when filenames differ; both = %s", ha)
+	}
+}
+
+func TestComputeTreeHashUsesUnambiguousFraming(t *testing.T) {
+	a := t.TempDir()
+	b := t.TempDir()
+	if err := os.WriteFile(filepath.Join(a, "a"), []byte{'X', 'b', 0, 'Y'}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(b, "a"), []byte{'X'}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(b, "b"), []byte{'Y'}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ha, _, err := computeTreeHash(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hb, _, err := computeTreeHash(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ha == hb {
+		t.Fatalf("ambiguous trees produced the same hash: %s", ha)
+	}
+}
+
+func TestCaptureRetainsEvidenceOnInvalidOrMutatingSave(t *testing.T) {
+	for name, save := range map[string]func(context.Context, string, string, []string, string) (ecosystem.StashSaveResult, error){
+		"empty id": func(context.Context, string, string, []string, string) (ecosystem.StashSaveResult, error) {
+			return ecosystem.StashSaveResult{}, nil
+		},
+		"bundle changed": func(_ context.Context, dir, _ string, _ []string, _ string) (ecosystem.StashSaveResult, error) {
+			if err := os.WriteFile(filepath.Join(dir, "snapshot.json"), []byte(`{"changed":true}`), 0o600); err != nil {
+				return ecosystem.StashSaveResult{}, err
+			}
+			return ecosystem.StashSaveResult{ID: "stash-1"}, nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			origHas, origSave := hasFcheap, stashSave
+			defer func() { hasFcheap, stashSave = origHas, origSave }()
+			hasFcheap = func() bool { return true }
+			stashSave = save
+			res, err := Capture(context.Background(), CaptureRequest{Snapshot: collector.SystemInfo{Hostname: "h"}, Trigger: "manual"})
+			if err == nil || res.RegistryID == "" {
+				t.Fatalf("Capture = %+v, %v; want retained registered evidence", res, err)
+			}
+			if _, err := os.Stat(filepath.Join(res.Path, "manifest.json")); err != nil {
+				t.Fatalf("retained evidence missing: %v", err)
+			}
+		})
 	}
 }
 
@@ -304,7 +415,7 @@ func TestBuildTags(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tags := buildTags(tt.trigger, tt.alert, tt.diag, treeHash)
+			tags := buildTags(tt.trigger, tt.alert, tt.diag, treeHash, nil, nil)
 			if tt.wantCount > 0 && len(tags) != tt.wantCount {
 				t.Errorf("len(tags) = %d, want %d (%v)", len(tags), tt.wantCount, tags)
 			}
@@ -323,7 +434,7 @@ func TestBuildTags(t *testing.T) {
 		})
 	}
 	t.Run("no confidence tag when empty", func(t *testing.T) {
-		tags := buildTags("manual", AlertDetail{}, &Diagnosis{Summary: "x"}, treeHash)
+		tags := buildTags("manual", AlertDetail{}, &Diagnosis{Summary: "x"}, treeHash, nil, nil)
 		for _, tag := range tags {
 			if strings.HasPrefix(tag, "confidence:") {
 				t.Errorf("unexpected confidence tag %q when Confidence is empty", tag)
@@ -384,6 +495,7 @@ func TestSearchFiltersByMonitorIncidentTag(t *testing.T) {
 	if _, err := exec.LookPath("fcheap"); err != nil {
 		t.Skip("fcheap not on PATH; cannot probe output")
 	}
+	t.Setenv("FCHEAP_STASH_DIR", t.TempDir())
 	ctx := context.Background()
 	entries, err := Search(ctx, []string{"alert:never_matches_anything_xyz"})
 	if err != nil {
@@ -391,4 +503,46 @@ func TestSearchFiltersByMonitorIncidentTag(t *testing.T) {
 	}
 	// entries may be empty; the only invariant is "no error".
 	_ = entries
+}
+
+func TestWriteBundleIncludesProcessCorrelationsSemantic(t *testing.T) {
+	dir := t.TempDir()
+	req := CaptureRequest{
+		Snapshot: collector.SystemInfo{Hostname: "h"},
+		Trigger:  "investigate",
+		Process: &ProcessBinding{
+			PID: 7, Runtime: "node", CodebaseRoot: "/app", MainScript: "/app/index.js",
+		},
+		Correlations:  []map[string]any{{"file": "/app/index.js", "line": 1, "fqn": "main"}},
+		SemanticHits:  []map[string]any{{"file": "src/a.ts", "score": 0.9}},
+		Context:       map[string]string{"run_id": "r1", "environment": "ci"},
+		ProfileMethod: "sample",
+		ExtraTags:     []string{"run:r1"},
+	}
+	if err := writeBundle(dir, &req); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"manifest.json", "snapshot.json", "process.json", "correlations.json", "semantic.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("missing %s: %v", name, err)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m bundleManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Kind != bundleKind || m.Runtime != "node" || m.CodebaseRoot != "/app" || m.Context["run_id"] != "r1" {
+		t.Fatalf("manifest = %+v", m)
+	}
+	tags := buildTags(req.Trigger, req.Alert, nil, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd", req.ExtraTags, req.Process)
+	joined := strings.Join(tags, " ")
+	for _, want := range []string{"runtime:node", "codebase:app", "run:r1"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("tags %v missing %q", tags, want)
+		}
+	}
 }

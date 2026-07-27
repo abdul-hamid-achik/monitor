@@ -42,6 +42,11 @@ outcomes:
     verify:
       command:
         run: "./bin/monitor --help | grep -q 'kill'"
+  - id: help_lists_issues
+    description: help text mentions durable grouped issues
+    verify:
+      command:
+        run: "./bin/monitor --help | grep -q 'issues'"
   - id: clean_exit
     description: the binary exits cleanly
     verify:

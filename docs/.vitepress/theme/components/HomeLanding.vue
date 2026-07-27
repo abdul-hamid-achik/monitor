@@ -18,9 +18,9 @@ const installCommand = 'brew install --cask abdul-hamid-achik/tap/monitor'
           </div>
           <h1>See what your machine is doing, without leaving the terminal.</h1>
           <p class="hero-lede">
-            Monitor turns live system signals into a focused Studio, scriptable
-            JSON, and a safe MCP surface. One local binary for developers,
-            automation, and agents.
+            Monitor turns live system signals into grouped local issues and
+            durable evidence, with a focused Studio, scriptable JSON, and a
+            safe MCP surface for developers, automation, and agents.
           </p>
 
           <CommandCopy class="hero-command" :command="installCommand" />
@@ -72,7 +72,7 @@ const installCommand = 'brew install --cask abdul-hamid-achik/tap/monitor'
         <dd>Stable output for automation</dd>
       </div>
       <div>
-        <dt>8 MCP tools</dt>
+        <dt>10 MCP tools</dt>
         <dd>Typed inputs and safety gates</dd>
       </div>
     </dl>
@@ -134,12 +134,16 @@ const installCommand = 'brew install --cask abdul-hamid-achik/tap/monitor'
               <div class="surface-index">03 / MCP</div>
               <h3>Give agents a bounded view.</h3>
               <p>
-                Four read-only tools diagnose system state. Four mutating tools
-                require explicit confirmation and still honor protected-process
-                rules.
+                Six read-only tools diagnose system state and recurring issues.
+                Four mutating tools require explicit confirmation and still
+                honor protected-process rules.
               </p>
               <div class="tool-line">
                 <span>monitor_analyze</span>
+                <span>read-only</span>
+              </div>
+              <div class="tool-line">
+                <span>monitor_issues</span>
                 <span>read-only</span>
               </div>
               <div class="tool-line">
@@ -195,8 +199,9 @@ const installCommand = 'brew install --cask abdul-hamid-achik/tap/monitor'
             <div>
               <h3>Keep the evidence</h3>
               <p>
-                Capture logs, history, baselines, diffs, and incident bundles so
-                the diagnosis survives after the machine settles down.
+                Group recurring events into local issues and attach file.cheap
+                or locally retained evidence so the diagnosis survives after
+                the machine settles down.
               </p>
             </div>
           </article>

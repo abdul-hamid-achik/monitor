@@ -57,6 +57,14 @@ Five rules always run, and two more light up when you configure them.
 | `swap_pressure` | Swap usage at or above a fraction of swap total — real memory pressure, not just high RAM use. | `50%` of swap total |
 | `zombie_process` | The OS reports a process in zombie (`Z`) state, waiting for its parent to reap it. Unsupported status telemetry stays quiet. | status `Z` |
 
+Per-process CPU is based on two cumulative user+system CPU counter samples,
+divided by elapsed wall time. `100%` means one fully occupied core and a
+multithreaded process may exceed it. The first observation of a process has no
+delta; PID reuse, a backwards counter, or a non-positive interval is also
+reported unavailable. Those samples do not pretend to be an observed zero and
+cannot seed a misleading `cpu_spike` baseline. Full-process collection uses a
+minimum 100ms cadence.
+
 `cpu_spike`, `rss_growth`, and `zombie_process` are per-process (the alert carries the PID);
 `disk_fill` fires once per offending partition; `swap_pressure` and the
 threshold rules are system-wide.

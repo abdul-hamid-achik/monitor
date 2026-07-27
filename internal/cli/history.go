@@ -51,6 +51,9 @@ func newHistoryRecordCmd() *cobra.Command {
 		Use:   "record",
 		Short: "Sample metrics on an interval and append them to the history store (until Ctrl-C)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if interval < collector.MinFullCollectionInterval {
+				return fmt.Errorf("--interval must be at least %s for full process collection", collector.MinFullCollectionInterval)
+			}
 			path, err := resolveHistoryPath(dbPath)
 			if err != nil {
 				return err

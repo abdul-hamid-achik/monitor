@@ -19,7 +19,7 @@ flag still applies and forces the CPU-load temperature fallback.)
 
 ## Tools
 
-The server registers **8 tools**: 4 read-only and 4 mutating. Every tool
+The server registers **10 tools**: 6 read-only and 4 mutating. Every tool
 returns JSON.
 
 ### Read-only tools
@@ -30,13 +30,18 @@ returns JSON.
 | `monitor_processes` | Return the top processes. Typed input: `limit` (default 15, max 200), `sort_by` (`cpu` default or `rss`), `filter` (case-insensitive substring on the process name). Output: `{processes, total, truncated, reason}`. |
 | `monitor_doctor` | Report ecosystem tool availability (codemap, fcheap, tinyvault, glyphrun, etc.). |
 | `monitor_analyze` | Sample metrics for `window_seconds` (default 10, min 4, max 60) and return `{window_seconds, samples, diagnoses, healthy}` where `diagnoses` is `[]Diagnosis` (`summary`, `evidence`, `confidence`, `next_actions`) — always present, `[]` when nothing looks wrong (`healthy:true`). Optional `pid` focuses the diagnosis on one process and is echoed back. The tool to call when something is slow. Read-only — no confirm. |
+| `monitor_issues` | List recurring local issues newest-first. Optional `statuses` (`open`, `resolved`, `ignored`), `project`, `service`, and `limit` (default 50, max 200). Returns `{issues, total, truncated}`. |
+| `monitor_issue` | Get one issue and its recent occurrences. Requires `id`; `occurrence_limit` defaults to 20 and is capped at 200. Returns `{issue, occurrences, occurrences_truncated}` or a structured `not_found` error payload. |
 
-These take no required input (`monitor_analyze` and `monitor_processes` take
-optional fields) and never change anything on the host. The server
+All read-only tools except `monitor_issue` have no required input;
+`monitor_issue` requires `id`. Optional filters never change anything on the
+host. The server
 instructions tell the agent to call `monitor_snapshot` first to orient, then
 drill down with `monitor_processes` or `monitor_doctor`, or reach for
 `monitor_analyze` directly when the user reports slowness or a suspected
-leak.
+leak. For recurring failures, call `monitor_issues` to triage and
+`monitor_issue` to inspect Run/Event/Evidence context before capturing more
+evidence.
 
 For a small local model, prefer:
 
@@ -64,7 +69,7 @@ remains the default so existing clients are not broken.
 |------|-------------|
 | `monitor_kill` | Safely terminate a process. `force=true` sends SIGKILL instead of SIGTERM. The signal is verified, not just dispatched: the response carries `killed` (true only once the process is confirmed gone), `outcome` (`terminated`\|`still_running`\|`unknown`), `signal`, `waited_ms`, and — when the process survives — a `next_action` suggesting `force:true`. Kill never escalates to SIGKILL on its own. |
 | `monitor_profile_capture` | Capture a profile for a process. `type` is one of `heap`, `cpu`, `goroutine`, `sample` (default `heap`). Refuses to scrape `heap`/`cpu`/`goroutine` unless the pprof listener at `localhost:6060` is proven to belong to the target `pid` (use `type:sample` instead when it isn't). A successful capture must also produce a non-empty artifact — `captured:false` with `limitation` and `next_actions` otherwise; on success the response includes an `artifact` receipt (`{verified, size_bytes}`). |
-| `monitor_investigate` | Run the full diagnostic pipeline for a process: capture a snapshot, capture a profile (ownership-gated pprof heap, falling back to macOS `sample`), correlate hot frames to codemap symbols (with blast radius + test coverage), and stash the bundle with fcheap. Returns typed `steps: [{step, status, limitation, recovery}]` and an overall `verdict` (`complete`\|`partial`); `investigated` reflects `verdict=="complete"`, never a blind true. |
+| `monitor_investigate` | Run `identify` → `snapshot` → `profile` → `correlate` → `semantic` → `stash` → `issue`. It prefers an ownership-verified Node inspector CPU profile, otherwise ownership-gated pprof or macOS `sample`; enriches usable frames with codemap and a fresh vecgrep index; archives evidence with file.cheap; and records the occurrence. Returns typed `steps` and `verdict` (`complete`\|`partial`). |
 | `monitor_record` | Capture a real screen recording via the platform recorder (`screencapture` on macOS, `ffmpeg` x11grab on Linux) for `duration` seconds (default 30), returning a video path that vidtrace can analyze. The response verifies the recording file exists and is non-empty (`artifact_verified`/`artifact_bytes`), or reports `recording:false` with a `limitation` when it doesn't; a non-path `bundle_id` (e.g. an opaque vidtrace id) is `artifact_verified:false` since existence can't be checked. |
 
 Each mutating tool takes a `pid` and a required `confirm` field (see below).
@@ -129,17 +134,20 @@ the tool:
 implementations. They still degrade gracefully when the host can't satisfy the
 request, returning the same structured shape rather than failing.
 
-`monitor_investigate` runs the real pipeline: snapshot -> profile -> correlate
--> stash, with a typed receipt per step. The profile step is ownership-gated —
-it only trusts a `localhost:6060` pprof heap scrape when the LISTEN socket is
-proven to belong to the target `pid` (via `/proc`/`lsof`-backed connection
-enumeration), and falls back to macOS `sample` otherwise. Frames are
-correlated to codemap symbols (resolving each file:line to its enclosing
-function, then enriching resolved frames with blast radius and test coverage)
-best-effort — skipped when `codemap` isn't on `PATH` or the profile's frames
-carry no file:line (true of `sample` output). An empty or unverified profile
-is never stashed: `steps[].limitation`/`recovery` explain what happened, and
-the top-level `verdict` is `"complete"` only when every step succeeded.
+`monitor_investigate` runs the same seven steps as the CLI, with a typed receipt
+per step. Node/Bun/Deno processes with a detected inspector first prove that
+the port belongs to the target PID, then capture a bounded CDP CPU profile.
+Go pprof has the same ownership requirement, and macOS `sample` remains a
+fallback. Codemap receives the bound codebase through `-C`; vecgrep is trusted
+only when its bounded JSON envelope says the index exists and is fresh.
+Missing tools, stale indexes, and frames without file/line are reported as
+limitations rather than invented correlations. Empty or unverified profile
+data is never put in the evidence bundle.
+
+The `issue` step still runs when `no_save:true`; in that case it records an
+occurrence without a file.cheap evidence URI. A successful stash may include a
+validated, credential-free ArtifactRefV1, while a failed archive can produce a
+`monitor://incidents/<id>` reference to the private recovery registry.
 
 `monitor_record` invokes the platform recorder directly — `screencapture -V`
 on macOS or `ffmpeg -f x11grab` on Linux — and returns the path to the captured
@@ -182,6 +190,7 @@ build that has not been installed can use `./bin/monitor` instead.
 ## See also
 
 - [CLI Reference](/guide/cli) — the same data over `--json` commands.
+- [Local Issues](/guide/issues) — issue grouping, lifecycle, and evidence references.
 - The mutating tools mirror the CLI subcommands `kill`, `profile`,
   `investigate`, and `record`; MCP adds a required `confirm: true` gate, while
   both surfaces retain the same protected-process refusal.

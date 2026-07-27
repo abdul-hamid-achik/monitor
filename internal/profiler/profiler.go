@@ -155,6 +155,8 @@ func pprofURL(addr string, t ProfileType) string {
 // comfortably covers the bounded CPU profile (?seconds=1).
 var pprofClient = &http.Client{Timeout: 30 * time.Second}
 
+const maxRawProfileBytes int64 = 128 << 20
+
 // writeTempProfile saves raw profile bytes (a CPU protobuf) to a temp file
 // and returns its path so the profile is preserved for `go tool pprof`.
 func writeTempProfile(pid int32, body []byte) (string, error) {
@@ -244,8 +246,11 @@ func httpGet(ctx context.Context, url string) (string, error) {
 	if resp.StatusCode/100 != 2 {
 		return "", errors.Join(fmt.Errorf("status %d", resp.StatusCode), resp.Body.Close())
 	}
-	b, readErr := io.ReadAll(resp.Body)
+	b, readErr := io.ReadAll(io.LimitReader(resp.Body, maxRawProfileBytes+1))
 	closeErr := resp.Body.Close()
+	if readErr == nil && int64(len(b)) > maxRawProfileBytes {
+		readErr = fmt.Errorf("profile response exceeds %d bytes", maxRawProfileBytes)
+	}
 	return string(b), errors.Join(readErr, closeErr)
 }
 

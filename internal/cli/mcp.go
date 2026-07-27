@@ -11,6 +11,7 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/analyzer"
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
+	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
 	"github.com/abdul-hamid-achik/monitor/internal/mcp"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
@@ -41,10 +42,23 @@ func newMCPServeCmd() *cobra.Command {
 			// whole analyze window, so monitor_snapshot stalls at most one
 			// Collect (~ms), never the full window.
 			var collectMu sync.Mutex
+			warmed := false
 			collect := func(ctx context.Context) collector.SystemInfo {
 				collectMu.Lock()
 				defer collectMu.Unlock()
-				return c.Collect(ctx)
+				first := c.Collect(ctx)
+				if warmed {
+					return first
+				}
+				timer := time.NewTimer(collector.MinFullCollectionInterval)
+				defer timer.Stop()
+				select {
+				case <-ctx.Done():
+					return first
+				case <-timer.C:
+					warmed = true
+					return c.Collect(ctx)
+				}
 			}
 
 			svc := &mcp.Service{
@@ -59,6 +73,8 @@ func newMCPServeCmd() *cobra.Command {
 				Analyze: func(ctx context.Context, windowSeconds int, pid int32) (mcp.AnalyzeResult, error) {
 					return analyzeWindow(ctx, collect, time.Duration(windowSeconds)*time.Second, time.Second, pid)
 				},
+				IssuesList: listIssuesForMCP,
+				IssueGet:   getIssueForMCP,
 				// Mutating tools: thin wrappers over the CLI's existing logic.
 				Kill: kill.KillVerified,
 				Profile: func(ctx context.Context, pid int32, ptype profiler.ProfileType) (profiler.Profile, error) {
@@ -73,8 +89,21 @@ func newMCPServeCmd() *cobra.Command {
 				},
 				// Investigate runs the same real pipeline the CLI does
 				// (snapshot + profile + correlate + stash).
-				Investigate: func(ctx context.Context, pid int32) map[string]any {
-					return investigatePipeline(ctx, pid, "7d", false).toMap()
+				Investigate: func(ctx context.Context, pid int32, opts mcp.InvestigateOptions) map[string]any {
+					return investigatePipeline(ctx, pid, InvestigateOptions{
+						TTL:          firstNonEmpty(opts.TTL, "7d"),
+						NoSave:       opts.NoSave,
+						Codebase:     opts.Codebase,
+						Environment:  opts.Environment,
+						DeploymentID: opts.DeploymentID,
+						RunID:        opts.RunID,
+						StepID:       opts.StepID,
+						Suite:        opts.Suite,
+						Attempt:      opts.Attempt,
+						Release:      opts.Release,
+						Service:      opts.Service,
+						GitSHA:       opts.GitSHA,
+					}).toMap()
 				},
 				// Record captures a short screen recording via the platform
 				// recorder (screencapture / ffmpeg). Returns an error — turned
@@ -92,6 +121,45 @@ func newMCPServeCmd() *cobra.Command {
 		},
 	}
 	return cmd
+}
+
+func listIssuesForMCP(_ context.Context, opts issues.ListOptions) (items []issues.Issue, err error) {
+	path, err := issues.ResolvePath("")
+	if err != nil {
+		return nil, err
+	}
+	store, err := issues.OpenReadOnly(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := store.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
+	return store.List(opts)
+}
+
+func getIssueForMCP(_ context.Context, id string, occurrenceLimit int) (issue issues.Issue, occurrences []issues.Occurrence, err error) {
+	path, err := issues.ResolvePath("")
+	if err != nil {
+		return issue, nil, err
+	}
+	store, err := issues.OpenReadOnly(path)
+	if err != nil {
+		return issue, nil, err
+	}
+	defer func() {
+		if closeErr := store.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
+	issue, err = store.Get(id)
+	if err != nil {
+		return issue, nil, err
+	}
+	occurrences, err = store.Occurrences(id, occurrenceLimit)
+	return issue, occurrences, err
 }
 
 // analyzeWindow drives collect once per sampleInterval for the duration of

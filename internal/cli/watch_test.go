@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"os"
 	"reflect"
 	"strings"
@@ -244,5 +245,21 @@ func TestWatchRejectsNonPositiveInterval(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "--interval must be greater than zero") {
 		t.Fatalf("error = %v, want interval validation", err)
+	}
+}
+
+func TestWatchRejectsUnsafeFullCollectionInterval(t *testing.T) {
+	cmd := newWatchCmd()
+	cmd.SetArgs([]string{"--interval", "99ms", "--once"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "at least 100ms") {
+		t.Fatalf("error = %v, want full collection interval validation", err)
+	}
+}
+
+func TestWatchLoopRejectsUnsafeIntervalBeforeTicker(t *testing.T) {
+	err := watchLoop(context.Background(), nil, nil, 0, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "at least 100ms") {
+		t.Fatalf("error = %v, want validation before ticker creation", err)
 	}
 }
