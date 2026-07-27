@@ -8,6 +8,8 @@ intent: |
      analyze, issues, issue)
      AND the mutating tools (kill, profile_capture, investigate, record).
   3. The mutating tools' typed input schemas require a `confirm: true` field.
+  4. Standard MCP annotations label read-only, destructive, idempotent, and
+     closed-world behavior for client approval UX.
 
 target:
   cmd: ["sh", "-c", "{ printf '%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}'; sleep 0.3; } | ./bin/monitor mcp serve 2>&1 | head -10"]
@@ -89,3 +91,8 @@ outcomes:
     verify:
       command:
         run: "{ printf '%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}'; sleep 0.3; } | ./bin/monitor mcp serve 2>&1 | head -10 | python3 -c 'import json,sys; line=[l for l in sys.stdin if l.strip().startswith(\"{\") and \"monitor_kill\" in l][-1]; t=json.loads(line); kill=[x for x in t[\"result\"][\"tools\"] if x[\"name\"]==\"monitor_kill\"][0]; req=kill[\"inputSchema\"].get(\"required\",[]); assert \"confirm\" in req, f\"confirm not in required: {req}\"; print(\"ok\")'"
+  - id: tool_safety_annotations
+    description: tools/list labels read-only tools and the destructive kill action
+    verify:
+      command:
+        run: "{ printf '%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}'; sleep 0.3; } | ./bin/monitor mcp serve 2>&1 | head -10 | python3 -c 'import json,sys; line=[l for l in sys.stdin if l.strip().startswith(\"{\") and \"monitor_kill\" in l][-1]; tools={x[\"name\"]:x for x in json.loads(line)[\"result\"][\"tools\"]}; ro=(\"monitor_snapshot\",\"monitor_processes\",\"monitor_doctor\",\"monitor_analyze\",\"monitor_issues\",\"monitor_issue\"); assert all(tools[n][\"annotations\"].get(\"readOnlyHint\") is True and tools[n][\"annotations\"].get(\"openWorldHint\") is False for n in ro); kill=tools[\"monitor_kill\"][\"annotations\"]; assert kill.get(\"destructiveHint\") is True and kill.get(\"idempotentHint\",False) is False and kill.get(\"openWorldHint\") is False; assert all(tools[n][\"annotations\"].get(\"destructiveHint\") is False for n in (\"monitor_profile_capture\",\"monitor_investigate\",\"monitor_record\"))'"

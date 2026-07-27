@@ -151,7 +151,8 @@ func (s *Server) Run(ctx context.Context) error {
 
 func (s *Server) register() {
 	mcp.AddTool(s.srv, &mcp.Tool{
-		Name: "monitor_snapshot",
+		Name:        "monitor_snapshot",
+		Annotations: readOnlyAnnotations("System snapshot"),
 		Description: "Return the latest SystemInfo with an interpreted 'summary' string " +
 			"(memory/CPU/disk state, top consumer) and, when a threshold is near, 'next' " +
 			"suggestions. Set compact:true for a bounded, history-free, schema-versioned payload " +
@@ -160,16 +161,22 @@ func (s *Server) register() {
 			"Without compact, the lossless raw metrics follow at the top level for compatibility.",
 	}, s.handleSnapshot)
 	mcp.AddTool(s.srv, &mcp.Tool{
-		Name: "monitor_processes",
+		Name:        "monitor_processes",
+		Annotations: readOnlyAnnotations("Top processes"),
 		Description: "Return the top processes. Input: limit (default 15, max 200), " +
 			"sort_by: 'cpu' (default) or 'rss', filter: case-insensitive substring on the process name. " +
 			"Output: {processes, total, truncated, reason} — total counts matches before truncation, " +
 			"truncated says the list was cut at limit, reason is top_cpu | top_rss | filtered.",
 	}, s.handleProcesses)
-	mcp.AddTool(s.srv, &mcp.Tool{Name: "monitor_doctor", Description: "Ecosystem tool availability."},
+	mcp.AddTool(s.srv, &mcp.Tool{
+		Name:        "monitor_doctor",
+		Description: "Ecosystem tool availability.",
+		Annotations: readOnlyAnnotations("Ecosystem health"),
+	},
 		s.handleDoctor)
 	mcp.AddTool(s.srv, &mcp.Tool{
-		Name: "monitor_analyze",
+		Name:        "monitor_analyze",
+		Annotations: readOnlyAnnotations("Analyze system health"),
 		Description: "Diagnose why the system is slow or unhealthy. Call this when the user says " +
 			"\"something is slow\", the machine feels sluggish, a process seems stuck, or memory/CPU " +
 			"looks wrong. Read-only and safe: there is NO confirm field. Samples metrics once per second " +
@@ -179,25 +186,30 @@ func (s *Server) register() {
 			"retry with a larger window_seconds before concluding the system is fine.",
 	}, s.handleAnalyze)
 	mcp.AddTool(s.srv, &mcp.Tool{
-		Name: "monitor_issues",
+		Name:        "monitor_issues",
+		Annotations: readOnlyAnnotations("List local issues"),
 		Description: "List recurring local issues, newest first. Read-only; no confirm field. " +
 			"Filter by statuses (open|resolved|ignored), project, or service; limit defaults to 50 and is capped at 200.",
 	}, s.handleIssues)
 	mcp.AddTool(s.srv, &mcp.Tool{
-		Name: "monitor_issue",
+		Name:        "monitor_issue",
+		Annotations: readOnlyAnnotations("Inspect local issue"),
 		Description: "Get one local issue and its recent occurrence/evidence history. Read-only; no confirm field. " +
 			"occurrence_limit defaults to 20 and is capped at 200.",
 	}, s.handleIssue)
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_kill",
 		Description: "Safely terminate a process. Requires `confirm: true` in the input. Use force=true for SIGKILL.",
+		Annotations: mutatingAnnotations("Terminate process", true, false),
 	}, s.handleKill)
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_profile_capture",
 		Description: "Capture a profile for a process. Requires `confirm: true`. type: heap|cpu|goroutine|sample.",
+		Annotations: mutatingAnnotations("Capture process profile", false, false),
 	}, s.handleProfileCapture)
 	mcp.AddTool(s.srv, &mcp.Tool{
-		Name: "monitor_investigate",
+		Name:        "monitor_investigate",
+		Annotations: mutatingAnnotations("Investigate process", false, false),
 		Description: "Run the diagnostic pipeline for a process: identify runtime/codebase " +
 			"(Node cmdline/cwd/package.json), ownership-gated profile, codemap correlate, " +
 			"vecgrep semantic hits, fcheap stash with ArtifactRefV1. Pass codebase when " +
@@ -207,8 +219,32 @@ func (s *Server) register() {
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_record",
 		Description: "Record the screen for N seconds (default 30) via the platform recorder (screencapture/ffmpeg); the result can be analyzed with vidtrace. Requires `confirm: true`.",
+		Annotations: mutatingAnnotations("Record screen evidence", false, false),
 	}, s.handleRecord)
 }
+
+// Tool annotations let MCP clients present risk and approval affordances
+// without parsing prose. They remain hints: the typed confirm gate and the
+// handler-level safety checks are the enforcement boundary.
+func readOnlyAnnotations(title string) *mcp.ToolAnnotations {
+	return &mcp.ToolAnnotations{
+		Title:           title,
+		ReadOnlyHint:    true,
+		DestructiveHint: boolRef(false),
+		OpenWorldHint:   boolRef(false),
+	}
+}
+
+func mutatingAnnotations(title string, destructive, idempotent bool) *mcp.ToolAnnotations {
+	return &mcp.ToolAnnotations{
+		Title:           title,
+		DestructiveHint: boolRef(destructive),
+		IdempotentHint:  idempotent,
+		OpenWorldHint:   boolRef(false),
+	}
+}
+
+func boolRef(value bool) *bool { return &value }
 
 // -- Read-only input/handler types ----------------------------------------
 

@@ -91,7 +91,9 @@ Exposes 10 tools — 6 read-only (`monitor_snapshot`, `monitor_processes`,
 model contexts, call `monitor_snapshot` with `{"compact":true}`; the response
 omits histories and bounds process/filesystem lists. Every mutating tool requires
 `confirm: true` in its typed input; the handlers re-check it so hand-built
-requests still get a structured refusal rather than acting.
+requests still get a structured refusal rather than acting. Standard MCP tool
+annotations also identify read-only, destructive, idempotent, and closed-world
+behavior for compatible client approval UX.
 
 ## Installation
 

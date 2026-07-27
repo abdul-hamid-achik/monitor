@@ -22,6 +22,16 @@ flag still applies and forces the CPU-load temperature fallback.)
 The server registers **10 tools**: 6 read-only and 4 mutating. Every tool
 returns JSON.
 
+Each tool also publishes standard MCP safety annotations. Read tools advertise
+`readOnlyHint:true`; all tools advertise `openWorldHint:false` because Monitor
+only inspects the local host and its configured local integrations. The kill
+tool advertises `destructiveHint:true` and remains non-idempotent because a PID
+can be reused between calls. Profile, investigate, and record advertise
+`destructiveHint:false`: they create local evidence but do not overwrite or
+delete the target process. These annotations help compatible clients render
+approval UI, but they are hints—the typed `confirm` field and handler checks
+remain the enforcement boundary.
+
 ### Read-only tools
 
 | Tool | Description |
@@ -35,8 +45,8 @@ returns JSON.
 
 All read-only tools except `monitor_issue` have no required input;
 `monitor_issue` requires `id`. Optional filters never change anything on the
-host. The server
-instructions tell the agent to call `monitor_snapshot` first to orient, then
+host. The server instructions tell the agent to call `monitor_snapshot` first
+to orient, then
 drill down with `monitor_processes` or `monitor_doctor`, or reach for
 `monitor_analyze` directly when the user reports slowness or a suspected
 leak. For recurring failures, call `monitor_issues` to triage and
@@ -62,6 +72,27 @@ The filters are case-insensitive. Limits are clamped (`process_limit` to 25,
 `filesystem_limit` to 50), histories are omitted, and truncation/total fields
 tell the caller when to drill down with `monitor_processes`. The full response
 remains the default so existing clients are not broken.
+
+### Recommended agent workflow
+
+Use the smallest tool that answers the question, and only create evidence when
+the read-only pass justifies it:
+
+1. Call `monitor_snapshot` with `{"compact":true}` to orient.
+2. Use `monitor_processes` to find a candidate PID, or `monitor_issues` to
+   start from a recurring failure.
+3. Call `monitor_analyze` for a short read-only observation window; inspect an
+   existing group with `monitor_issue` before collecting duplicate evidence.
+4. With explicit user intent, call `monitor_investigate` with `confirm:true`.
+   Pass `codebase` when process binding cannot infer the project; pass Chalupa
+   IDs when the incident belongs to an ephemeral CI environment.
+5. Use `monitor_profile_capture`, `monitor_record`, or `monitor_kill` only when
+   the previous result recommends that narrower action.
+
+This ordering keeps model context bounded and separates observation from host
+mutation. A `partial` investigation is still useful: read its per-step
+limitations and follow the suggested recovery action instead of retrying every
+tool blindly.
 
 ### Mutating tools
 

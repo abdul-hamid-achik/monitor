@@ -6,6 +6,16 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.15.1] - 2026-07-27
+
+### Added
+
+- MCP tools now publish standard safety annotations for read-only,
+  destructive, idempotent, and closed-world behavior, with a behavioral spec
+  that verifies the advertised contract.
+- The MCP guide now includes a bounded, observation-first agent workflow from
+  compact snapshot through issue triage and confirmed investigation.
+
 ## [1.15.0] - 2026-07-27
 
 ### Added

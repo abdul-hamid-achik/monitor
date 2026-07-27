@@ -159,6 +159,91 @@ func TestNewServerReportsInjectedVersion(t *testing.T) {
 	}
 }
 
+func TestToolsAdvertiseSafetyAnnotations(t *testing.T) {
+	ctx := context.Background()
+	s := NewServer(&Service{}, "test")
+	clientTr, serverTr := mcp.NewInMemoryTransports()
+	ss, err := s.srv.Connect(ctx, serverTr, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer ss.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.0.0"}, nil)
+	cs, err := client.Connect(ctx, clientTr, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer cs.Close()
+
+	listed, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	tools := make(map[string]*mcp.Tool, len(listed.Tools))
+	for _, tool := range listed.Tools {
+		tools[tool.Name] = tool
+	}
+	readOnly := []string{
+		"monitor_snapshot", "monitor_processes", "monitor_doctor",
+		"monitor_analyze", "monitor_issues", "monitor_issue",
+	}
+	for _, name := range readOnly {
+		tool, ok := tools[name]
+		if !ok {
+			t.Errorf("%s missing from tools/list", name)
+			continue
+		}
+		annotations := tool.Annotations
+		if annotations == nil || !annotations.ReadOnlyHint {
+			t.Errorf("%s readOnlyHint = false or missing", name)
+			continue
+		}
+		if annotations.DestructiveHint == nil || *annotations.DestructiveHint {
+			t.Errorf("%s destructiveHint = %v, want false", name, annotations.DestructiveHint)
+		}
+		if annotations.OpenWorldHint == nil || *annotations.OpenWorldHint {
+			t.Errorf("%s openWorldHint = %v, want false", name, annotations.OpenWorldHint)
+		}
+	}
+
+	for _, name := range []string{"monitor_kill", "monitor_profile_capture", "monitor_investigate", "monitor_record"} {
+		tool, ok := tools[name]
+		if !ok {
+			t.Errorf("%s missing from tools/list", name)
+			continue
+		}
+		annotations := tool.Annotations
+		if annotations == nil {
+			t.Errorf("%s annotations missing", name)
+			continue
+		}
+		if annotations.ReadOnlyHint {
+			t.Errorf("%s readOnlyHint = true, want false", name)
+		}
+		if annotations.OpenWorldHint == nil || *annotations.OpenWorldHint {
+			t.Errorf("%s openWorldHint = %v, want false", name, annotations.OpenWorldHint)
+		}
+	}
+	killTool, ok := tools["monitor_kill"]
+	if !ok || killTool.Annotations == nil {
+		t.Fatal("monitor_kill annotations missing")
+	}
+	killAnnotations := killTool.Annotations
+	if killAnnotations.DestructiveHint == nil || !*killAnnotations.DestructiveHint || killAnnotations.IdempotentHint {
+		t.Errorf("monitor_kill annotations = %+v, want destructive and non-idempotent", killAnnotations)
+	}
+	for _, name := range []string{"monitor_profile_capture", "monitor_investigate", "monitor_record"} {
+		tool, ok := tools[name]
+		if !ok || tool.Annotations == nil {
+			continue // already reported above
+		}
+		annotations := tool.Annotations
+		if annotations.DestructiveHint == nil || *annotations.DestructiveHint || annotations.IdempotentHint {
+			t.Errorf("%s annotations = %+v, want additive and non-idempotent", name, annotations)
+		}
+	}
+}
+
 // TestRequireConfirm asserts the confirm gate: nil error when confirmed,
 // an error otherwise (handlers build their own refusal payload from it).
 func TestRequireConfirm(t *testing.T) {
