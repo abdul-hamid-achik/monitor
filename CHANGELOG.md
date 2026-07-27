@@ -6,6 +6,13 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The documentation site now uses a purpose-built editorial landing page,
+  local Geist variable fonts, an interactive signal-to-evidence walkthrough,
+  clearer ecosystem and MCP safety explanations, and a more polished reading
+  system across navigation, sidebars, code blocks, tables, and mobile layouts.
+
 ## [1.15.1] - 2026-07-27
 
 ### Added
@@ -426,6 +433,7 @@ remaining pure CLI helpers.
 Initial release: a terminal system monitor for macOS with a Network tab,
 Settings documentation, and a GoReleaser + GitHub Actions release workflow.
 
+[1.15.1]: https://github.com/abdul-hamid-achik/monitor/compare/v1.15.0...v1.15.1
 [1.15.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.14.0...v1.15.0
 [1.14.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.13.0...v1.14.0
 [1.13.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.12.1...v1.13.0

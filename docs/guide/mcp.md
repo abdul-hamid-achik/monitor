@@ -1,6 +1,6 @@
 # MCP Server
 
-Monitor exposes the same data it shows in the TUI to AI agents through a
+Monitor exposes its local system and issue model to AI agents through a
 [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) stdio server.
 An agent can orient itself with a system snapshot, drill into processes, check
 ecosystem health, and — with explicit confirmation — take action.
@@ -222,6 +222,7 @@ build that has not been installed can use `./bin/monitor` instead.
 
 - [CLI Reference](/guide/cli) — the same data over `--json` commands.
 - [Local Issues](/guide/issues) — issue grouping, lifecycle, and evidence references.
-- The mutating tools mirror the CLI subcommands `kill`, `profile`,
-  `investigate`, and `record`; MCP adds a required `confirm: true` gate, while
-  both surfaces retain the same protected-process refusal.
+- The mutating tools for `kill`, `profile`, and `investigate` mirror their CLI
+  counterparts. `monitor_record` is an MCP-only platform capture. Every MCP
+  mutation adds a required `confirm: true` gate, and process-targeting actions
+  retain the same protected-process refusal used by the CLI.

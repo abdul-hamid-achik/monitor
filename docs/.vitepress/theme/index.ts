@@ -1,5 +1,7 @@
 import type { Theme } from 'vitepress'
 import DefaultTheme from 'vitepress/theme'
+import '@fontsource-variable/geist'
+import '@fontsource-variable/geist-mono'
 import HomeLanding from './components/HomeLanding.vue'
 import InstallPanel from './components/InstallPanel.vue'
 import TerminalMockup from './components/TerminalMockup.vue'

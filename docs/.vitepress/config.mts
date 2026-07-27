@@ -24,6 +24,8 @@ export default defineConfig({
     ['meta', { name: 'keywords', content: 'local observability, local issue tracker, system monitor, terminal monitor, macOS monitor, Linux monitor, CLI monitor, MCP server, process monitor, anomaly detection, pprof profiler, Bubble Tea TUI, Go system monitor, agent monitoring tool' }],
     ['meta', { name: 'author', content: 'Abdul Hamid Achik' }],
     ['meta', { name: 'robots', content: 'index, follow' }],
+    ['meta', { name: 'theme-color', content: '#fbfaf8', media: '(prefers-color-scheme: light)' }],
+    ['meta', { name: 'theme-color', content: '#11161d', media: '(prefers-color-scheme: dark)' }],
 
     // Open Graph
     ['meta', { property: 'og:type', content: 'website' }],
@@ -45,6 +47,7 @@ export default defineConfig({
       name: 'Monitor',
       applicationCategory: 'DeveloperApplication',
       operatingSystem: 'macOS, Linux',
+      softwareVersion: '1.15.1',
       description: 'A terminal-based, agent-harnessable system monitor for macOS and Linux. Interactive TUI, JSON CLI, and MCP server.',
       url: 'https://monitorcli.dev',
       downloadUrl: 'https://github.com/abdul-hamid-achik/monitor/releases',
@@ -57,6 +60,7 @@ export default defineConfig({
 
   sitemap: { hostname: 'https://monitorcli.dev' },
   themeConfig: {
+    // VitePress applies `base` to theme assets automatically.
     logo: { src: '/favicon.svg', alt: '' },
     siteTitle: 'Monitor',
 
@@ -72,10 +76,14 @@ export default defineConfig({
       { text: 'Guide', link: '/guide/getting-started' },
       { text: 'Reference', link: '/reference/architecture' },
       {
-        text: 'v1.x',
+        text: 'v1.15.1',
         items: [
           {
-            text: 'Changelog',
+            text: 'Release notes',
+            link: 'https://github.com/abdul-hamid-achik/monitor/releases/tag/v1.15.1',
+          },
+          {
+            text: 'All releases',
             link: 'https://github.com/abdul-hamid-achik/monitor/releases',
           },
         ],
