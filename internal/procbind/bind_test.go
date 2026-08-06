@@ -101,3 +101,31 @@ func TestFindCodebaseRoot(t *testing.T) {
 		t.Fatalf("empty tree should yield no root; got %q %v", r, m)
 	}
 }
+
+func TestMatchesBindingDisambiguatesRuntimeRootAndEntryPoint(t *testing.T) {
+	opts := ResolveOptions{
+		Runtime:          RuntimeNode,
+		CodebaseRoot:     "/workspace/worker",
+		MainScriptSuffix: "dist/worker/src/server.js",
+	}
+	wantRoot := canonicalPath(opts.CodebaseRoot)
+	wantSuffix := filepath.Clean(opts.MainScriptSuffix)
+	app := Binding{
+		Runtime:      RuntimeNode,
+		CodebaseRoot: "/workspace/worker",
+		MainScript:   "/workspace/worker/dist/worker/src/server.js",
+	}
+	if !matchesBinding(app, opts, wantRoot, wantSuffix) {
+		t.Fatal("expected the exact worker binding to match")
+	}
+	wrapper := app
+	wrapper.MainScript = "/opt/yarn/lib/cli.js"
+	if matchesBinding(wrapper, opts, wantRoot, wantSuffix) {
+		t.Fatal("the yarn wrapper must not match the worker entrypoint")
+	}
+	otherRuntime := app
+	otherRuntime.Runtime = RuntimeBun
+	if matchesBinding(otherRuntime, opts, wantRoot, wantSuffix) {
+		t.Fatal("a different runtime must not match")
+	}
+}

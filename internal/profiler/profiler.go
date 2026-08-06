@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/abdul-hamid-achik/monitor/internal/capability"
+	"github.com/abdul-hamid-achik/monitor/internal/contextids"
 )
 
 // ProfileType is a discriminator for the kind of profile captured.
@@ -44,12 +45,15 @@ type Symbol struct {
 
 // Profile is the result of a capture.
 type Profile struct {
-	PID     int32       `json:"pid"`
-	Type    ProfileType `json:"type"`
-	Taken   time.Time   `json:"taken"`
-	Path    string      `json:"path,omitempty"`
-	Text    string      `json:"text,omitempty"`
-	Symbols []Symbol    `json:"symbols,omitempty"`
+	PID     int32          `json:"pid"`
+	Type    ProfileType    `json:"type"`
+	Method  string         `json:"method,omitempty"`
+	Taken   time.Time      `json:"taken"`
+	Path    string         `json:"path,omitempty"`
+	Text    string         `json:"text,omitempty"`
+	Symbols []Symbol       `json:"symbols,omitempty"`
+	Receipt *Receipt       `json:"receipt,omitempty"`
+	Context contextids.IDs `json:"context,omitempty"`
 }
 
 // ValidateCaptureWith checks a requested profile type against an injected
@@ -87,6 +91,7 @@ func Capture(ctx context.Context, pid int32, t ProfileType, addr string) (Profil
 	}
 	switch t {
 	case ProfileHeap, ProfileGoroutine:
+		p.Method = "pprof_" + string(t)
 		endpoint := pprofURL(addr, t)
 		text, err := httpGet(ctx, endpoint)
 		if err != nil {
@@ -96,6 +101,7 @@ func Capture(ctx context.Context, pid int32, t ProfileType, addr string) (Profil
 		p.Symbols = parsePprof(text)
 		return p, nil
 	case ProfileCPU:
+		p.Method = "pprof_cpu"
 		// The CPU endpoint returns gzipped protobuf, not text. Save it so
 		// it's never lost and is analyzable with `go tool pprof`, then
 		// best-effort symbolicate it via the go toolchain.
@@ -112,6 +118,7 @@ func Capture(ctx context.Context, pid int32, t ProfileType, addr string) (Profil
 		p.Symbols = goToolPprofTop(ctx, path)
 		return p, nil
 	case ProfileSample:
+		p.Method = "sample"
 		out, err := exec.CommandContext(ctx, "sample", fmt.Sprintf("%d", pid), "1", "-mayDie").CombinedOutput()
 		if err != nil {
 			return p, fmt.Errorf("sample: %w", err)

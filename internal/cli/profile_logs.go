@@ -15,17 +15,20 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/abdul-hamid-achik/monitor/internal/capture"
+	"github.com/abdul-hamid-achik/monitor/internal/contextids"
 	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
 	"github.com/abdul-hamid-achik/monitor/internal/incidents"
 	"github.com/abdul-hamid-achik/monitor/internal/logger"
+	"github.com/abdul-hamid-achik/monitor/internal/procbind"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 )
 
 func newProfileCmd() *cobra.Command {
-	var ptype, pprofAddr string
+	var ptype, pprofAddr, inspectAddr, output string
+	var duration time.Duration
 	cmd := &cobra.Command{
 		Use:   "profile <pid>",
-		Short: "Capture a process profile (heap, cpu, goroutine)",
+		Short: "Capture a runtime-aware process profile",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pid, err := parsePID(args[0])
@@ -35,25 +38,64 @@ func newProfileCmd() *cobra.Command {
 			ctx, cancel := Context()
 			defer cancel()
 			pt := profiler.ProfileType(ptype)
-			if err := profiler.ValidateCapture(pt); err != nil {
-				return err
+			if duration <= 0 || duration > 2*time.Minute {
+				return fmt.Errorf("--duration must be greater than zero and at most 2m")
 			}
-			if pt != profiler.ProfileSample && !cmd.Flags().Changed("pprof-addr") {
-				if own, detail := profiler.VerifyListenerOwnership(ctx, pid, pprofAddr); own != profiler.OwnershipOwned {
-					return fmt.Errorf("refusing to scrape %s for pid %d: %s (pass --pprof-addr explicitly to assert the endpoint is correct, or use -t sample)", pprofAddr, pid, detail)
+			binding, inspectErr := procbind.Inspect(ctx, pid, "")
+			jsRuntime := inspectErr == nil && (binding.Runtime == procbind.RuntimeNode ||
+				binding.Runtime == procbind.RuntimeBun || binding.Runtime == procbind.RuntimeDeno)
+			var prof profiler.Profile
+			if jsRuntime && (pt == profiler.ProfileCPU || pt == profiler.ProfileHeap) {
+				addr := inspectAddr
+				if addr == "" {
+					addr = binding.InspectAddr
+				}
+				if addr == "" {
+					return fmt.Errorf("%s process %d has no inspector address; start it with --inspect=127.0.0.1:<port> or pass --inspect-addr", binding.Runtime, pid)
+				}
+				if own, detail := profiler.VerifyInspectorOwnership(ctx, pid, addr); own != profiler.OwnershipOwned {
+					return fmt.Errorf("refusing inspector %s for pid %d: %s", addr, pid, detail)
+				}
+				var captureErr error
+				switch pt {
+				case profiler.ProfileCPU:
+					prof, captureErr = profiler.ProfileInspector(ctx, pid, addr, duration)
+				case profiler.ProfileHeap:
+					prof, captureErr = profiler.ProfileInspectorHeap(ctx, pid, addr)
+				}
+				if captureErr != nil {
+					return captureErr
+				}
+			} else {
+				if err := profiler.ValidateCapture(pt); err != nil {
+					return err
+				}
+				if pt != profiler.ProfileSample && !cmd.Flags().Changed("pprof-addr") {
+					if own, detail := profiler.VerifyListenerOwnership(ctx, pid, pprofAddr); own != profiler.OwnershipOwned {
+						return fmt.Errorf("refusing to scrape %s for pid %d: %s (pass --pprof-addr explicitly to assert the endpoint is correct, or use -t sample)", pprofAddr, pid, detail)
+					}
+				}
+				var captureErr error
+				prof, captureErr = profiler.Capture(ctx, pid, pt, pprofAddr)
+				if captureErr != nil {
+					return captureErr
 				}
 			}
-			prof, err := profiler.Capture(ctx, pid, pt, pprofAddr)
-			if err != nil {
-				return err
+			if output != "" {
+				if err := persistProfileOutput(&prof, output); err != nil {
+					return err
+				}
 			}
-			if rec := prof.VerifyArtifact(); !rec.Verified {
+			rec := prof.VerifyArtifact()
+			prof.Receipt = &rec
+			prof.Context = contextids.FromEnv(contextids.IDs{})
+			if !rec.Verified {
 				return fmt.Errorf("profile captured no usable artifact: %s", rec.Limitation)
 			}
 			if JSONOutput(cmd) {
 				return WriteJSON(prof)
 			}
-			fmt.Printf("Profile of pid %d (%s):\n", prof.PID, prof.Type)
+			fmt.Printf("Profile of pid %d (%s via %s):\n", prof.PID, prof.Type, prof.Method)
 			fmt.Printf("  Taken: %s\n", prof.Taken.Format(time.RFC3339))
 			if len(prof.Symbols) > 0 {
 				fmt.Printf("  Top symbols:\n")
@@ -69,10 +111,80 @@ func newProfileCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&ptype, "type", "t", "heap", "profile type: heap, cpu, goroutine, sample")
 	cmd.Flags().StringVar(&pprofAddr, "pprof-addr", "localhost:6060",
-		"host:port of the target's net/http/pprof server (heap/cpu/goroutine only); "+
+		"host:port of the target's net/http/pprof server (Go heap/cpu/goroutine only); "+
 			"passing this flag explicitly asserts the endpoint belongs to the target pid and skips the ownership check")
+	cmd.Flags().StringVar(&inspectAddr, "inspect-addr", "", "Node/Bun/Deno inspector host:port (defaults to the process --inspect flag)")
+	cmd.Flags().DurationVar(&duration, "duration", 5*time.Second, "CPU sampling duration (maximum 2m)")
+	cmd.Flags().StringVar(&output, "output", "", "persist the raw profile at this path (mode 0600)")
 	cmd.Flags().Bool("json", false, "emit JSON output")
 	return cmd
+}
+
+const maxPersistedProfileBytes int64 = 128 << 20
+
+func persistProfileOutput(profile *profiler.Profile, output string) error {
+	abs, err := filepath.Abs(output)
+	if err != nil {
+		return fmt.Errorf("resolve profile output: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
+		return fmt.Errorf("create profile output directory: %w", err)
+	}
+	temp, err := os.CreateTemp(filepath.Dir(abs), ".monitor-profile-*")
+	if err != nil {
+		return fmt.Errorf("create profile output: %w", err)
+	}
+	tempPath := temp.Name()
+	committed := false
+	defer func() {
+		_ = temp.Close()
+		if !committed {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if err := temp.Chmod(0o600); err != nil {
+		return fmt.Errorf("protect profile output: %w", err)
+	}
+	if profile.Path != "" {
+		source, err := os.Open(profile.Path)
+		if err != nil {
+			return fmt.Errorf("open captured profile: %w", err)
+		}
+		written, copyErr := io.Copy(temp, io.LimitReader(source, maxPersistedProfileBytes+1))
+		closeErr := source.Close()
+		if copyErr != nil {
+			return fmt.Errorf("copy captured profile: %w", copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close captured profile: %w", closeErr)
+		}
+		if written > maxPersistedProfileBytes {
+			return fmt.Errorf("captured profile exceeds %d bytes", maxPersistedProfileBytes)
+		}
+	} else {
+		if int64(len(profile.Text)) > maxPersistedProfileBytes {
+			return fmt.Errorf("captured profile exceeds %d bytes", maxPersistedProfileBytes)
+		}
+		if _, err := io.WriteString(temp, profile.Text); err != nil {
+			return fmt.Errorf("write captured profile: %w", err)
+		}
+	}
+	if err := temp.Sync(); err != nil {
+		return fmt.Errorf("sync profile output: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close profile output: %w", err)
+	}
+	if err := os.Rename(tempPath, abs); err != nil {
+		return fmt.Errorf("commit profile output: %w", err)
+	}
+	committed = true
+	if profile.Path != "" && profile.Path != abs {
+		_ = os.Remove(profile.Path)
+	}
+	profile.Path = abs
+	profile.Text = ""
+	return nil
 }
 
 func newLogsCmd() *cobra.Command {

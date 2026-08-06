@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -28,10 +30,13 @@ func ProfileInspector(ctx context.Context, pid int32, addr string, duration time
 	if addr == "" {
 		addr = DefaultInspectAddr
 	}
+	if err := ValidateInspectorAddr(addr); err != nil {
+		return Profile{PID: pid, Type: ProfileCPU, Method: "inspector_cpu", Taken: time.Now()}, err
+	}
 	if duration <= 0 {
 		duration = 5 * time.Second
 	}
-	p := Profile{PID: pid, Type: ProfileCPU, Taken: time.Now()}
+	p := Profile{PID: pid, Type: ProfileCPU, Method: "inspector_cpu", Taken: time.Now()}
 
 	wsURL, err := inspectorWebSocketURL(ctx, addr)
 	if err != nil {
@@ -114,14 +119,148 @@ func ProfileInspector(ctx context.Context, pid int32, addr string, duration time
 	}
 
 	var stopResult struct {
-		Profile cdpProfile `json:"profile"`
+		Profile json.RawMessage `json:"profile"`
 	}
 	if err := json.Unmarshal(result, &stopResult); err != nil {
 		return p, fmt.Errorf("parse CDP profile: %w", err)
 	}
-	p.Symbols = flattenCDPProfile(stopResult.Profile)
-	p.Text = string(result) // raw JSON for the bundle
+	var rawProfile cdpProfile
+	if err := json.Unmarshal(stopResult.Profile, &rawProfile); err != nil {
+		return p, fmt.Errorf("parse CDP CPU profile: %w", err)
+	}
+	p.Symbols = flattenCDPProfile(rawProfile)
+	// Persist the profile object itself (not the CDP response envelope), making
+	// --output directly consumable by Chrome DevTools and other .cpuprofile tools.
+	p.Text = string(stopResult.Profile)
 	return p, nil
+}
+
+// ProfileInspectorHeap captures a V8 heap snapshot through the Chrome
+// DevTools Protocol. Heap snapshots can be large, so chunks are streamed to a
+// private temporary file instead of being accumulated in memory. The caller
+// may move/copy Profile.Path into its own artifact directory.
+func ProfileInspectorHeap(ctx context.Context, pid int32, addr string) (profile Profile, retErr error) {
+	if addr == "" {
+		addr = DefaultInspectAddr
+	}
+	profile = Profile{PID: pid, Type: ProfileHeap, Method: "inspector_heap", Taken: time.Now()}
+	if err := ValidateInspectorAddr(addr); err != nil {
+		return profile, err
+	}
+
+	wsURL, err := inspectorWebSocketURL(ctx, addr)
+	if err != nil {
+		return profile, fmt.Errorf("inspector discovery on %s: %w", addr, err)
+	}
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		return profile, fmt.Errorf("inspector ws connect: %w", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	conn.SetReadLimit(maxRawProfileBytes + (1 << 20))
+
+	file, err := os.CreateTemp("", fmt.Sprintf("monitor-node-heap-%d-*.heapsnapshot", pid))
+	if err != nil {
+		return profile, fmt.Errorf("create heap snapshot: %w", err)
+	}
+	path := file.Name()
+	defer func() {
+		if closeErr := file.Close(); retErr == nil && closeErr != nil {
+			retErr = fmt.Errorf("close heap snapshot: %w", closeErr)
+		}
+		if retErr != nil {
+			_ = os.Remove(path)
+		}
+	}()
+	if err := file.Chmod(0o600); err != nil {
+		return profile, fmt.Errorf("protect heap snapshot: %w", err)
+	}
+
+	send := func(id int, method string, params map[string]any) error {
+		req := map[string]any{"id": id, "method": method}
+		if params != nil {
+			req["params"] = params
+		}
+		data, marshalErr := json.Marshal(req)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		return conn.Write(ctx, websocket.MessageText, data)
+	}
+	readUntilResponse := func(wantID int, collectChunks bool) error {
+		var written int64
+		for {
+			_, data, readErr := conn.Read(ctx)
+			if readErr != nil {
+				return readErr
+			}
+			var message struct {
+				ID     int    `json:"id"`
+				Method string `json:"method"`
+				Params struct {
+					Chunk string `json:"chunk"`
+				} `json:"params"`
+				Error *struct {
+					Message string `json:"message"`
+				} `json:"error,omitempty"`
+			}
+			if err := json.Unmarshal(data, &message); err != nil {
+				continue
+			}
+			if collectChunks && message.Method == "HeapProfiler.addHeapSnapshotChunk" {
+				chunk := []byte(message.Params.Chunk)
+				written += int64(len(chunk))
+				if written > maxRawProfileBytes {
+					return fmt.Errorf("heap snapshot exceeded %d bytes", maxRawProfileBytes)
+				}
+				if _, err := file.Write(chunk); err != nil {
+					return fmt.Errorf("write heap snapshot: %w", err)
+				}
+			}
+			if message.ID != wantID {
+				continue
+			}
+			if message.Error != nil {
+				return fmt.Errorf("cdp error: %s", message.Error.Message)
+			}
+			return nil
+		}
+	}
+
+	if err := send(1, "HeapProfiler.enable", nil); err != nil {
+		return profile, fmt.Errorf("heap profiler enable: %w", err)
+	}
+	if err := readUntilResponse(1, false); err != nil {
+		return profile, fmt.Errorf("heap profiler enable response: %w", err)
+	}
+	if err := send(2, "HeapProfiler.takeHeapSnapshot", map[string]any{"reportProgress": false}); err != nil {
+		return profile, fmt.Errorf("take heap snapshot: %w", err)
+	}
+	if err := readUntilResponse(2, true); err != nil {
+		return profile, fmt.Errorf("take heap snapshot response: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return profile, fmt.Errorf("sync heap snapshot: %w", err)
+	}
+	profile.Path = path
+	return profile, nil
+}
+
+// ValidateInspectorAddr refuses non-loopback CDP endpoints. Inspector access
+// is effectively remote code execution and must never leave the local host.
+func ValidateInspectorAddr(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid inspector address %q: %w", addr, err)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("refusing non-loopback inspector address %q", addr)
+	}
+	return nil
 }
 
 // inspectorWebSocketURL discovers the inspector WebSocket URL from
@@ -166,10 +305,11 @@ func inspectorWebSocketURL(ctx context.Context, addr string) (string, error) {
 
 // cdpProfile is the hierarchical CPU profile returned by Profiler.stop.
 type cdpProfile struct {
-	Nodes     []cdpNode `json:"nodes"`
-	Samples   []int64   `json:"samples"` // node IDs per sample tick
-	StartTime float64   `json:"startTime"`
-	EndTime   float64   `json:"endTime"`
+	Nodes      []cdpNode `json:"nodes"`
+	Samples    []int64   `json:"samples"` // node IDs per sample tick
+	TimeDeltas []int64   `json:"timeDeltas,omitempty"`
+	StartTime  float64   `json:"startTime"`
+	EndTime    float64   `json:"endTime"`
 }
 
 type cdpNode struct {

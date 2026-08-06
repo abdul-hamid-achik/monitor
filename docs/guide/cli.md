@@ -476,9 +476,11 @@ monitor analyze --pid 1234 --window 15s --json
 
 ### `profile`
 
-Capture a process profile. `heap`, `cpu`, and `goroutine` are scraped from the
-target's `net/http/pprof` server; `sample` uses macOS `sample`. Heap and
-goroutine profiles are symbolicated; CPU profiles are returned as raw protobuf.
+Capture a runtime-aware process profile. Node/Bun/Deno `cpu` and `heap` use
+the Chrome DevTools Protocol when the process was started with a loopback
+`--inspect` listener. CPU returns V8 file/line symbols; heap streams a bounded
+`.heapsnapshot` to disk. Go `heap`, `cpu`, and `goroutine` use
+`net/http/pprof`; `sample` uses macOS `sample`.
 
 Before scraping the default pprof address, `profile` checks that the LISTEN
 socket at `--pprof-addr` actually belongs to the target pid (via connection
@@ -493,23 +495,43 @@ refused rather than reported as a hollow success.
 |------|---------|--------|
 | `-t`, `--type` | `heap` | Profile type: `heap`, `cpu`, `goroutine`, `sample`. |
 | `--pprof-addr` | `localhost:6060` | `host:port` of the target's pprof server (heap/cpu/goroutine only). Passing this flag explicitly asserts the endpoint belongs to the target pid and skips the ownership check. |
+| `--inspect-addr` | process argv | Node/Bun/Deno inspector address. Non-loopback addresses are always refused. |
+| `--duration` | `5s` | CPU sampling duration (maximum two minutes). |
+| `--output` | unset | Persist raw evidence at the requested path with mode `0600`. |
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
-monitor profile 1234 --type heap --json
+monitor profile 1234 --type cpu --duration 10s --output run.cpuprofile --json
 monitor profile 1234 -t goroutine --pprof-addr localhost:7070 --json
 ```
 
 ```json
 {
   "pid": 1234,
-  "type": "heap",
+  "type": "cpu",
+  "method": "inspector_cpu",
   "taken": "2026-06-27T00:02:38Z",
   "symbols": [
     {"func": "main.handler", "file": "main.go", "line": 42}
   ],
-  "path": "/tmp/monitor-profile-1234-heap.pb.gz"
+  "path": "/workspace/run.cpuprofile",
+  "receipt": {"verified": true, "size_bytes": 2048},
+  "context": {"environment": "chalupa-pr-42", "run_id": "a1b2c3"}
 }
+```
+
+### `resolve`
+
+Resolve exactly one live process from stable selectors before profiling it.
+Selectors are ANDed and argv is never serialized. Zero or multiple matches
+return an error instead of guessing.
+
+```bash
+monitor resolve \
+  --runtime node \
+  --codebase-root /workspace/worker \
+  --main-script-suffix dist/server.js \
+  --json
 ```
 
 ### `investigate`

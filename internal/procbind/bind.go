@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -48,6 +49,83 @@ type Binding struct {
 	Markers []string `json:"markers,omitempty"`
 	// Limitations collects non-fatal enrichment problems (permission denied, etc.).
 	Limitations []string `json:"limitations,omitempty"`
+}
+
+// ResolveOptions identifies one process without relying on a mutable PID.
+// All supplied fields are ANDed. Resolve refuses ambiguous matches so callers
+// never profile a neighboring service by accident.
+type ResolveOptions struct {
+	Runtime          Runtime
+	CodebaseRoot     string
+	MainScriptSuffix string
+}
+
+// Resolve inspects live processes and returns the one exact match. Command
+// lines remain memory-only through Binding.Cmdline and are never included in
+// errors or JSON output.
+func Resolve(ctx context.Context, opts ResolveOptions) (Binding, error) {
+	if opts.Runtime == RuntimeUnknown && opts.CodebaseRoot == "" && opts.MainScriptSuffix == "" {
+		return Binding{}, fmt.Errorf("at least one process selector is required")
+	}
+	processes, err := process.ProcessesWithContext(ctx)
+	if err != nil {
+		return Binding{}, fmt.Errorf("list processes: %w", err)
+	}
+	wantRoot := canonicalPath(opts.CodebaseRoot)
+	wantSuffix := filepath.Clean(opts.MainScriptSuffix)
+	matches := make([]Binding, 0, 2)
+	for _, candidate := range processes {
+		binding, inspectErr := Inspect(ctx, candidate.Pid, "")
+		if inspectErr != nil {
+			continue
+		}
+		if !matchesBinding(binding, opts, wantRoot, wantSuffix) {
+			continue
+		}
+		matches = append(matches, binding)
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].PID < matches[j].PID })
+	if len(matches) == 0 {
+		return Binding{}, fmt.Errorf("no process matched runtime=%q codebase_root=%q main_script_suffix=%q", opts.Runtime, opts.CodebaseRoot, opts.MainScriptSuffix)
+	}
+	if len(matches) > 1 {
+		identities := make([]string, 0, len(matches))
+		for _, match := range matches {
+			identities = append(identities, fmt.Sprintf("pid=%d name=%q main_script=%q", match.PID, match.Name, match.MainScript))
+		}
+		return Binding{}, fmt.Errorf("process selector is ambiguous (%d matches): %s", len(matches), strings.Join(identities, "; "))
+	}
+	return matches[0], nil
+}
+
+func matchesBinding(binding Binding, opts ResolveOptions, wantRoot, wantSuffix string) bool {
+	if opts.Runtime != RuntimeUnknown && binding.Runtime != opts.Runtime {
+		return false
+	}
+	if wantRoot != "" && canonicalPath(binding.CodebaseRoot) != wantRoot {
+		return false
+	}
+	if wantSuffix != "." && wantSuffix != "" {
+		main := filepath.Clean(binding.MainScript)
+		if main == "." || (!strings.HasSuffix(main, wantSuffix) && filepath.Base(main) != wantSuffix) {
+			return false
+		}
+	}
+	return true
+}
+
+func canonicalPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = filepath.Clean(path)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(abs)
 }
 
 // Inspect reads identity fields for pid and derives runtime + codebase root.

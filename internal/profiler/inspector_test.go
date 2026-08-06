@@ -1,8 +1,16 @@
 package profiler
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
+
+	"github.com/coder/websocket"
 )
 
 func TestFlattenCDPProfile(t *testing.T) {
@@ -73,5 +81,84 @@ func TestFlattenCDPProfileStripsFileScheme(t *testing.T) {
 	syms := flattenCDPProfile(prof)
 	if len(syms) != 1 || syms[0].File != "/home/app/server.js" {
 		t.Fatalf("expected file:/// stripped; got %+v", syms)
+	}
+}
+
+func TestValidateInspectorAddrRefusesRemoteListeners(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:9229", "localhost:9231", "[::1]:9229"} {
+		if err := ValidateInspectorAddr(addr); err != nil {
+			t.Errorf("loopback %s rejected: %v", addr, err)
+		}
+	}
+	for _, addr := range []string{"0.0.0.0:9229", "10.0.0.5:9229", "example.com:9229"} {
+		if err := ValidateInspectorAddr(addr); err == nil {
+			t.Errorf("non-loopback %s was accepted", addr)
+		}
+	}
+}
+
+func TestProfileInspectorHeapStreamsSnapshotToPrivateFile(t *testing.T) {
+	var server *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/json/list", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `[{"type":"node","webSocketDebuggerUrl":"%s/ws"}]`, strings.Replace(server.URL, "http://", "ws://", 1))
+	})
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for _, id := range []int{1, 2} {
+			_, _, err := conn.Read(r.Context())
+			if err != nil {
+				t.Errorf("read command %d: %v", id, err)
+				return
+			}
+			if id == 2 {
+				for _, chunk := range []string{"{\"snapshot\":", "true}"} {
+					payload, _ := json.Marshal(map[string]any{
+						"method": "HeapProfiler.addHeapSnapshotChunk",
+						"params": map[string]string{"chunk": chunk},
+					})
+					if err := conn.Write(r.Context(), websocket.MessageText, payload); err != nil {
+						t.Errorf("write heap chunk: %v", err)
+						return
+					}
+				}
+			}
+			response, _ := json.Marshal(map[string]any{"id": id, "result": map[string]any{}})
+			if err := conn.Write(r.Context(), websocket.MessageText, response); err != nil {
+				t.Errorf("write response: %v", err)
+				return
+			}
+		}
+	})
+	server = httptest.NewServer(mux)
+	defer server.Close()
+
+	profile, err := ProfileInspectorHeap(context.Background(), 4242, strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(profile.Path)
+	if profile.Method != "inspector_heap" {
+		t.Fatalf("method = %q", profile.Method)
+	}
+	content, err := os.ReadFile(profile.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != `{"snapshot":true}` {
+		t.Fatalf("snapshot = %q", content)
+	}
+	info, err := os.Stat(profile.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("snapshot mode = %o, want 600", info.Mode().Perm())
 	}
 }

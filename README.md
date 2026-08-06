@@ -55,9 +55,10 @@ machine-readable workflows:
 ./bin/monitor analyze --window 10s --json       # bounded cross-signal diagnosis
 ./bin/monitor process 1234 --json               # detailed process info
 ./bin/monitor ps --sort memory --limit 10 --json # bounded/filterable process inventory
+./bin/monitor resolve --runtime node --codebase-root "$PWD" --main-script-suffix dist/server.js --json
 ./bin/monitor tree 1234                          # process hierarchy (parent/child)
 ./bin/monitor kill 1234                           # safety-checked (refuses protected/system PIDs)
-./bin/monitor profile 1234 --type heap --json   # heap/cpu/goroutine/sample profile
+./bin/monitor profile 1234 --type cpu --duration 10s --output run.cpuprofile --json
 ./bin/monitor logs capture -- mycommand --verbose # ingest exact argv into the durable log store
 ./bin/monitor logs search "error" --level error --since 1h --json # filtered log search
 ./bin/monitor stash --json                        # capture an incident bundle to fcheap
