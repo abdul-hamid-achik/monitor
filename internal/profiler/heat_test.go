@@ -418,6 +418,42 @@ func TestBuildHeatmapPprofHeapUsesInuseSpace(t *testing.T) {
 	}
 }
 
+// TestBuildHeatmapPprofHeapUsesAllocSpace is
+// TestBuildHeatmapPprofHeapUsesInuseSpace's mirror: HeatHeapAlloc must
+// thread through to the alloc_space column, not inuse_space — the review's
+// "alloc_space cannot be reached from --type" finding was about the CLI's
+// parseHotType never exposing this HeatOptions value at all (fixed in
+// hot.go's --type heap-alloc); this proves heat.Build's OWN plumbing for it
+// already worked.
+func TestBuildHeatmapPprofHeapUsesAllocSpace(t *testing.T) {
+	fn := &gpprof.Function{ID: 1, Name: "main.buildIndex", Filename: "main.go"}
+	loc := &gpprof.Location{ID: 1, Line: []gpprof.Line{{Function: fn, Line: 47}}}
+	prof := &gpprof.Profile{
+		SampleType: []*gpprof.ValueType{
+			{Type: "alloc_objects", Unit: "count"},
+			{Type: "alloc_space", Unit: "bytes"},
+			{Type: "inuse_objects", Unit: "count"},
+			{Type: "inuse_space", Unit: "bytes"},
+		},
+		Location: []*gpprof.Location{loc},
+		Function: []*gpprof.Function{fn},
+		Sample: []*gpprof.Sample{
+			{Value: []int64{100, 900000000, 5, 61200000}, Location: []*gpprof.Location{loc}},
+		},
+	}
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourcePprof, Pprof: prof}, HeatOptions{NoCodemap: true, NoReadCode: true, ProfileType: HeatHeapAlloc})
+	if err != nil {
+		t.Fatalf("BuildHeatmap: %v", err)
+	}
+	if hm.ProfileType != HeatHeapAlloc {
+		t.Errorf("ProfileType = %q, want heap_alloc", hm.ProfileType)
+	}
+	f := findHeatFunc(t, hm, "main.buildIndex")
+	if f.Lines[0].Self != 900000000 {
+		t.Errorf("Self = %d, want the alloc_space value (900000000), not inuse_space", f.Lines[0].Self)
+	}
+}
+
 func TestBuildHeatmapNilSourceErrors(t *testing.T) {
 	if _, err := BuildHeatmap(context.Background(), nil, HeatOptions{}); err == nil {
 		t.Fatal("expected an error for a nil source")

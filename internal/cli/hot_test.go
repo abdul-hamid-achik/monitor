@@ -400,10 +400,11 @@ func TestHotExportUnsupportedExtensionErrors(t *testing.T) {
 
 func TestParseHotType(t *testing.T) {
 	cases := map[string]profiler.HeatProfileType{
-		"":          profiler.HeatCPU,
-		"cpu":       profiler.HeatCPU,
-		"heap":      profiler.HeatHeapInuse,
-		"goroutine": profiler.HeatGoroutine,
+		"":           profiler.HeatCPU,
+		"cpu":        profiler.HeatCPU,
+		"heap":       profiler.HeatHeapInuse,
+		"heap-alloc": profiler.HeatHeapAlloc,
+		"goroutine":  profiler.HeatGoroutine,
 	}
 	for in, want := range cases {
 		got, err := parseHotType(in)

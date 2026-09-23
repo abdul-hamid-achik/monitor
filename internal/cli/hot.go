@@ -95,23 +95,32 @@ Resolving a live <pid|service> target is a later wave.`,
 	cmd.Flags().StringVar(&file, "file", "", "path to a .cpuprofile (V8/Bun) or a pprof .pb/.pb.gz")
 	cmd.Flags().StringVar(&funcName, "func", "", "show this function's CodeFrame instead of the hottest one")
 	cmd.Flags().IntVar(&top, "top", 0, fmt.Sprintf("functions to keep in the table/JSON (default %d)", profiler.DefaultTopFunctions))
-	cmd.Flags().StringVar(&ptype, "type", "cpu", "profile type: cpu, heap, goroutine (pprof sources only)")
+	cmd.Flags().StringVar(&ptype, "type", "cpu", "profile type: cpu, heap (inuse_space), heap-alloc (alloc_space), goroutine (pprof sources only)")
 	cmd.Flags().Bool("json", false, "emit the monitor.line_heatmap.v1 JSON document")
 	cmd.Flags().StringVar(&export, "export", "",
 		"also save the loaded profile (out.cpuprofile / out.pb.gz / out.pb) or the heatmap document (out.json)")
 	return cmd
 }
 
+// parseHotType maps --type to a HeatProfileType. "heap" (the common case:
+// "what's using memory right now") reaches HeatHeapInuse; "heap-alloc"
+// reaches HeatHeapAlloc ("what has ever been allocated") — heat.Build's own
+// HeatOptions.ProfileType has always supported both (see
+// heatFindValueIndex/detectPprofProfileType), but until now the CLI only
+// ever exposed the inuse column, leaving alloc_space unreachable from
+// `monitor hot --type`.
 func parseHotType(s string) (profiler.HeatProfileType, error) {
 	switch s {
 	case "", "cpu":
 		return profiler.HeatCPU, nil
 	case "heap":
 		return profiler.HeatHeapInuse, nil
+	case "heap-alloc":
+		return profiler.HeatHeapAlloc, nil
 	case "goroutine":
 		return profiler.HeatGoroutine, nil
 	default:
-		return "", fmt.Errorf("--type must be one of cpu, heap, goroutine (got %q)", s)
+		return "", fmt.Errorf("--type must be one of cpu, heap, heap-alloc, goroutine (got %q)", s)
 	}
 }
 
