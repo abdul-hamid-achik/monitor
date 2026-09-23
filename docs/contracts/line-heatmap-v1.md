@@ -47,29 +47,30 @@ an honest caveat instead of failing outright.
   "functions": [
     {
       "name": "heavyStringify",
-      "file": "internal/report/format.go",
-      "start_line": 40,
-      "end_line": 58,
+      "file": "examples/polyglot/js/workload.js",
+      "start_line": 11,
+      "end_line": 22,
       "range_source": "codemap", // "codemap" | "observed"
       "self_pct": 71.2,
       "cum_pct": 88.0,
       "lines": [
         {
-          "line": 48,
+          "line": 17, // the dogfood hot line: 99.9% of heavyStringify's own ticks land here, not on the line-11 declaration
           "self": 8120,
           "cum": 8120,
           "pct_of_function": 91.4, // this line's share of its OWN function's weight
-          "code": "  data, _ := json.Marshal(v)",
-          "mapping": "exact", // "exact" | "ambiguous" | "transpiled" | "stale" | ""
+          "code": "      s += JSON.stringify({ i, item, doubled, pad: 'x'.repeat(64) });",
+          "mapping": "exact", // "exact" | "ambiguous" | "transpiled" | "inferred" | ""
+          "stale": false, // true when the mapped file's current sha256 no longer matches what was profiled
           "issues": [
             // additive, v1.17 E3.4: errors × heat cross-reference,
             // read from the issues store, not computed here
-            { "short_id": "GRA-42", "count": 3, "status": "open" }
+            { "short_id": "A07E", "count": 3, "status": "open" }
           ]
         }
       ],
       "callees": [
-        { "func": "json.Marshal", "cum": 7600 }
+        { "func": "JSON.stringify", "cum": 7600 }
       ]
     }
   ],
@@ -89,12 +90,17 @@ an honest caveat instead of failing outright.
   weight (`self`/`cum` roll-up within that function), not the profile total —
   this is what lets `monitor hot --file v8-hot.cpuprofile` name "the hot line
   within the hot function" instead of only "the hot function".
-- **`mapping`** carries the same enum a stack frame's `Mapping` field uses
-  (see the naming ADR): `exact` (source map resolved this line precisely),
-  `ambiguous` (multiple candidate mappings), `transpiled` (mapped through a
-  build step without a source map), `stale` (the mapped file's sha256 no
-  longer matches what was profiled), or `""` when no source map applies
-  (plain Go, or a `.go` file profiled directly).
+- **`mapping`** is the *same* enum as a stack `Frame`'s `Mapping` field —
+  defined once, in the [naming ADR](./local-sentry-naming#_1-naming-map)'s
+  `Frame.Mapping` row, and reused here rather than redeclared: `exact`
+  (source map resolved this line precisely), `ambiguous` (multiple candidate
+  mappings), `transpiled` (mapped through a build step without a source
+  map), `inferred` (no source map at all; the location was guessed), or
+  `""` when no source map applies (plain Go, or a `.go` file profiled
+  directly). Staleness is a **separate** boolean, `lines[].stale`, not a
+  fifth `mapping` value: a profiled line can go stale after profiling (the
+  file changed since), which is a signal a per-crash stack `Frame` has no
+  equivalent for, so it does not belong inside the shared enum.
 - **`lines[].issues`** is additive (v1.17, E3.4) and always read from the
   issues store at render time — `heat.Build` never computes or caches issue
   membership itself, so a heatmap and the issues store never disagree about
