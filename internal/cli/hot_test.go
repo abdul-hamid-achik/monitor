@@ -30,11 +30,197 @@ func TestHotFileHumanOutputNamesHotLine(t *testing.T) {
 	if !strings.Contains(text, "> 5 |") && !strings.Contains(text, ">  5 |") {
 		t.Errorf("output missing a '>' marker on line 5:\n%s", text)
 	}
-	if !strings.Contains(text, "method: v8_position_ticks") {
-		t.Errorf("output missing method line:\n%s", text)
+	if !strings.Contains(text, "method: v8 positionTicks") {
+		t.Errorf("output missing the human method label:\n%s", text)
 	}
 	if !strings.Contains(text, "next  monitor hot --file") {
 		t.Errorf("output missing a next line:\n%s", text)
+	}
+}
+
+// TestHotFileHumanOutputShowsActiveIdleGCProgramBreakdown asserts the
+// header's active/idle clause adds up: v8-hot.cpuprofile carries real (idle)
+// and (garbage collector) pseudo-frame time (see testdata/README.md), so
+// the header must show gc explicitly, not just idle, when gc is nonzero.
+func TestHotFileHumanOutputShowsActiveIdleGCProgramBreakdown(t *testing.T) {
+	cmd := newHotCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--file", v8HotFixture})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	header := strings.SplitN(out.String(), "\n", 2)[0]
+	if !strings.Contains(header, "gc") {
+		t.Errorf("header = %q, want a gc%% clause (this fixture has real gc ticks)", header)
+	}
+}
+
+// TestHotFileDefaultTargetIgnoresTopCap is the CLI-level regression for the
+// review's finding: with --top 1 capping the visible table to one (possibly
+// cooler) function, the CodeFrame must still target the real hottest-by-self
+// function across the WHOLE profile (Heatmap.DefaultTarget), not whatever
+// survived the cap.
+func TestHotFileDefaultTargetIgnoresTopCap(t *testing.T) {
+	cmd := newHotCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--file", v8HotFixture, "--top", "1"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "heavyStringify") {
+		t.Errorf("output missing heavyStringify even though --top 1 must not change the CodeFrame target:\n%s", text)
+	}
+	if !strings.Contains(text, "> 5 |") && !strings.Contains(text, ">  5 |") {
+		t.Errorf("output missing the real hot line 5 under --top 1:\n%s", text)
+	}
+	if strings.Contains(text, "diffuse") {
+		t.Errorf("output must not warn diffuse: heavyStringify has 95.8%% self, --top 1 must not change that:\n%s", text)
+	}
+}
+
+// TestHotFileBunFixtureDefaultOutputNamesHotLineWithoutFunc is the CLI-level
+// regression for the "Bun native builtins" finding: with NO --func, the
+// default target must be heavyStringify (line 5), not a location-less
+// native builtin frame (Bun's own stringify/repeat) rendered as "line 0 of
+// an empty file".
+func TestHotFileBunFixtureDefaultOutputNamesHotLineWithoutFunc(t *testing.T) {
+	cmd := newHotCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--file", "../profiler/testdata/bun-cpu-prof.cpuprofile"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	text := out.String()
+	if strings.Contains(text, ">  0 |") || strings.Contains(text, "> 0 |") {
+		t.Errorf("output fabricated a line-0 hot line:\n%s", text)
+	}
+	if !strings.Contains(text, "> 5 |") && !strings.Contains(text, ">  5 |") {
+		t.Errorf("default output (no --func) must name line 5 of heavyStringify:\n%s", text)
+	}
+	// The native builtins' real cost (88%+ of this fixture's samples)
+	// should still surface, as heavyStringify's callees, not vanish.
+	if !strings.Contains(text, "calls->") || !strings.Contains(text, "stringify") {
+		t.Errorf("output missing the native builtins as callees:\n%s", text)
+	}
+}
+
+// TestHotFileIdleProfileSkipsCodeFrame is the CLI-level regression for the
+// AC-5 honesty finding: an idle profile must show its warning and its
+// (honest) table, but never a CodeFrame '>' marker — there is no real hot
+// line to point at.
+func TestHotFileIdleProfileSkipsCodeFrame(t *testing.T) {
+	cmd := newHotCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--file", "../profiler/testdata/idle.cpuprofile"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "mostly idle") {
+		t.Errorf("output missing the mostly-idle warning:\n%s", text)
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, ">") {
+			t.Errorf("output must not print a '>' hot-line marker for a mostly-idle profile: %q", line)
+		}
+	}
+}
+
+// TestHotUnknownFuncErrorsConsistentlyAcrossJSONAndHuman is the CLI-level
+// regression for the finding that --func nope --json exited 0 with an
+// empty functions list while human mode failed: both modes must refuse the
+// same way.
+func TestHotUnknownFuncErrorsConsistentlyAcrossJSONAndHuman(t *testing.T) {
+	human := newHotCmd()
+	human.SetOut(&bytes.Buffer{})
+	human.SetErr(&bytes.Buffer{})
+	human.SetArgs([]string{"--file", v8HotFixture, "--func", "nope"})
+	humanErr := human.Execute()
+
+	jsonCmd := newHotCmd()
+	jsonCmd.SetOut(&bytes.Buffer{})
+	jsonCmd.SetErr(&bytes.Buffer{})
+	jsonCmd.SetArgs([]string{"--file", v8HotFixture, "--func", "nope", "--json"})
+	jsonErr := jsonCmd.Execute()
+
+	if humanErr == nil || jsonErr == nil {
+		t.Fatalf("expected both modes to error for an unknown --func: human=%v json=%v", humanErr, jsonErr)
+	}
+}
+
+// TestHotUnknownFuncDoesNotWriteExport is the CLI-level regression for the
+// finding that --export wrote its file before the --func not-found check
+// ran.
+func TestHotUnknownFuncDoesNotWriteExport(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "hot.json")
+	cmd := newHotCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--file", v8HotFixture, "--func", "nope", "--export", out})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected an error for an unknown --func")
+	}
+	if _, err := os.Stat(out); err == nil {
+		t.Error("--export must not write a file when --func doesn't match any function")
+	}
+}
+
+func TestHumanMethodLabel(t *testing.T) {
+	cases := map[profiler.HeatMethod]string{
+		profiler.MethodV8PositionTicks: "v8 positionTicks",
+		profiler.MethodPprofProto:      "pprof proto (inlining-aware; no go toolchain needed)",
+	}
+	for m, want := range cases {
+		if got := humanMethodLabel(m); got != want {
+			t.Errorf("humanMethodLabel(%q) = %q, want %q", m, got, want)
+		}
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	if got := shellQuote("(anonymous)"); got != "'(anonymous)'" {
+		t.Errorf("shellQuote((anonymous)) = %q, want %q", got, "'(anonymous)'")
+	}
+	if got := shellQuote("it's"); got != `'it'\''s'` {
+		t.Errorf("shellQuote(it's) = %q, want %q", got, `'it'\''s'`)
+	}
+}
+
+func TestFormatCallees(t *testing.T) {
+	hm := &profiler.Heatmap{ActiveSamples: 200}
+	f := profiler.HeatFunction{Callees: []profiler.HeatCallee{{Func: "stringify", Cum: 100}, {Func: "repeat", Cum: 50}}}
+	got := formatCallees(hm, f)
+	want := "calls-> stringify 50.0%   repeat 25.0%"
+	if got != want {
+		t.Errorf("formatCallees = %q, want %q", got, want)
+	}
+}
+
+func TestHotActiveClauseOmittedForNonCPUProfileType(t *testing.T) {
+	hm := &profiler.Heatmap{ProfileType: profiler.HeatHeapInuse, IdleMeasured: false}
+	if got := hotActiveClause(hm); got != "" {
+		t.Errorf("hotActiveClause(heap) = %q, want empty (idle is a CPU-only concept)", got)
+	}
+}
+
+func TestHotActiveClauseSaysNotMeasuredInsteadOfFakingIdleZero(t *testing.T) {
+	hm := &profiler.Heatmap{ProfileType: profiler.HeatCPU, IdleMeasured: false, Samples: 40, ActiveSamples: 40}
+	got := hotActiveClause(hm)
+	if !strings.Contains(got, "not measured") {
+		t.Errorf("hotActiveClause(unmeasured cpu) = %q, want it to say idle was not measured, not \"idle 0%%\"", got)
+	}
+	if strings.Contains(got, "idle 0%") {
+		t.Errorf("hotActiveClause(unmeasured cpu) = %q, must never claim idle 0%% when idle wasn't measured", got)
 	}
 }
 

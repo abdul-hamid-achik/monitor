@@ -71,6 +71,13 @@ Resolving a live <pid|service> target is a later wave.`,
 			if err != nil {
 				return err
 			}
+			// Checked once, before --export or --json do anything
+			// observable: both modes must refuse a nonexistent --func the
+			// same way, and --export must never write a file for a
+			// request that's about to fail anyway.
+			if funcName != "" && !hasHeatFunction(hm, funcName) {
+				return fmt.Errorf("function %q not found in %s", funcName, file)
+			}
 
 			if export != "" {
 				if err := exportHot(src, hm, export); err != nil {
@@ -81,9 +88,6 @@ Resolving a live <pid|service> target is a later wave.`,
 
 			if JSONOutput(cmd) {
 				return WriteJSON(hm)
-			}
-			if funcName != "" && !hasHeatFunction(hm, funcName) {
-				return fmt.Errorf("function %q not found in %s", funcName, file)
 			}
 			return renderHotHuman(cmd.OutOrStdout(), file, hm, funcName)
 		},
@@ -164,20 +168,19 @@ func copyFileBytes(src, dst string) error {
 	return nil
 }
 
-// renderHotHuman prints the header line (samples/active/idle/method), the
-// TOTAL/SELF/FUNCTION/LOCATION table, the CodeFrame of the hottest (or
-// --func) function, and a "next" line — the shape
+// renderHotHuman prints the header line (samples/duration/active/idle/
+// method), the TOTAL/SELF/FUNCTION/LOCATION table, the CodeFrame of the
+// hottest (or --func) function plus its callees and limitations, and a
+// "next" line — the shape
 // ~/notes/projects/monitor/2026-09-22-local-sentry-roadmap.md's "5. Mapa de
 // calor por línea" mockup specifies, minus the pid/service-only banner line
 // (no live process in --file mode) and the CALLERS/TESTS/ISSUES columns
-// (codemap impact and the issues-store overlay are later slices, E3.4).
+// (codemap impact and the issues-store overlay are later slices, E3.4). Per
+// AC-5, a mostly-idle profile (hm.MostlyIdle) still gets its table — those
+// percentages are real — but never a CodeFrame: with the sampler mostly
+// catching (idle), no single line has earned a confident-looking marker.
 func renderHotHuman(w io.Writer, path string, hm *profiler.Heatmap, wantFunc string) error {
-	activePct := 0.0
-	if hm.Samples > 0 {
-		activePct = float64(hm.ActiveSamples) / float64(hm.Samples) * 100
-	}
-	fmt.Fprintf(w, "loaded %s · %s · %s · active %.0f%% (idle %.0f%% excluded)      method: %s\n",
-		path, hm.ProfileType, formatHeatQuantity(hm.Samples, hm.Unit), activePct, hm.IdlePct, hm.Method)
+	fmt.Fprintf(w, "%s      method: %s\n", hotHeaderLine(path, hm), humanMethodLabel(hm.Method))
 	for _, warn := range hm.Warnings {
 		fmt.Fprintf(w, "! %s\n", warn)
 	}
@@ -196,24 +199,159 @@ func renderHotHuman(w io.Writer, path string, hm *profiler.Heatmap, wantFunc str
 		return err
 	}
 
+	if hm.MostlyIdle() {
+		fmt.Fprintf(w, "(codeframe skipped: %.0f%% idle — CPU heat can't explain this target's slowness; "+
+			"see the warning above instead of a guessed hot line)\n", hm.IdlePct)
+		return nil
+	}
+
 	var target profiler.HeatFunction
-	if wantFunc != "" {
+	switch {
+	case wantFunc != "":
 		for _, f := range hm.Functions {
 			if f.Name == wantFunc {
 				target = f
 				break
 			}
 		}
-	} else {
+	case hm.DefaultTarget != nil:
+		// The real hottest-by-self function across the WHOLE profile (see
+		// Heatmap.DefaultTarget's doc), not re-derived from hm.Functions:
+		// that list may already be filtered/capped by --top, which must
+		// never silently swap in some other, cooler function's CodeFrame.
+		target = *hm.DefaultTarget
+	default:
+		// Defensive fallback only: BuildHeatmap always populates
+		// DefaultTarget whenever it produced at least one function (see
+		// addWarnings), and hm.Functions is already known non-empty here.
 		target = hottestBySelf(hm.Functions)
 	}
 
 	cf := codeFrameForFunction(hm, target)
 	fmt.Fprintln(w, cf.Render())
+	if len(target.Callees) > 0 {
+		fmt.Fprintln(w, formatCallees(hm, target))
+	}
+	for _, lim := range hm.Limitations {
+		fmt.Fprintf(w, "  %s\n", lim)
+	}
 
-	next := fmt.Sprintf("monitor hot --file %s --func %s", path, nextFuncSuggestion(hm.Functions, target.Name))
-	fmt.Fprintf(w, "next  %s · --export hot%s (Chrome DevTools / VS Code)\n", next, hotExportExt(hm.Method))
+	next := "monitor hot --file " + shellQuote(path)
+	if suggestion := nextFuncSuggestion(hm.Functions, target.Name); suggestion != "" && suggestion != target.Name {
+		next += " --func " + shellQuote(suggestion)
+	}
+	fmt.Fprintf(w, "next  %s · --export hot%s (%s)\n", next, hotExportExt(hm.Method), exportViewerHint(hm.Method))
 	return nil
+}
+
+// hotHeaderLine renders the "loaded ..." summary line's content (everything
+// before "      method: ..."): the loaded path, profile type, capture
+// duration when known, quantity, and — for a CPU profile type, where
+// "idle" is a meaningful concept — the active/idle/gc/program breakdown.
+func hotHeaderLine(path string, hm *profiler.Heatmap) string {
+	parts := []string{"loaded " + path, string(hm.ProfileType)}
+	// Only a CDP source benefits from a separate duration clause: its
+	// Samples is a sample COUNT, unrelated to wall-clock time. A pprof CPU
+	// source's own Samples/unit IS already a nanosecond (duration-shaped)
+	// quantity — formatHeatQuantity renders it as one below — so adding
+	// CaptureDurationNanos too would just print the same duration twice.
+	if hm.CaptureDurationNanos > 0 && hm.Unit != "nanoseconds" {
+		parts = append(parts, time.Duration(hm.CaptureDurationNanos).String())
+	}
+	parts = append(parts, formatHeatQuantity(hm.Samples, hm.Unit))
+	if clause := hotActiveClause(hm); clause != "" {
+		parts = append(parts, clause)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// hotActiveClause renders the "active X% (idle .../gc .../program ...
+// excluded)" clause, or "" to omit it entirely. "" for anything but a CPU
+// profile type: idle/gc/program-time accounting is a CPU-sampling concept,
+// meaningless for a heap or goroutine snapshot (ActiveSamples there always
+// equals Samples by construction, so an "active 100%" clause would say
+// nothing true or useful). For a CPU profile whose idle share genuinely
+// wasn't measured (a pprof CPU proto with no DurationNanos — see
+// Heatmap.IdleMeasured), says so explicitly rather than printing a
+// misleading "idle 0%".
+func hotActiveClause(hm *profiler.Heatmap) string {
+	if hm.ProfileType != profiler.HeatCPU {
+		return ""
+	}
+	if !hm.IdleMeasured {
+		return "active: not measured"
+	}
+	activePct := 0.0
+	if hm.Samples > 0 {
+		activePct = float64(hm.ActiveSamples) / float64(hm.Samples) * 100
+	}
+	// programPct is whatever's left of the excluded share once idle and gc
+	// are subtracted out (root/other negligible pseudo-frames), so the
+	// three numbers shown always actually add up to the excluded share —
+	// see the review evidence: a header that showed only idle silently
+	// dropped real gc/program time from the accounting.
+	programPct := (100 - activePct) - hm.IdlePct - hm.GCPct
+	if programPct < 0.05 {
+		programPct = 0 // float rounding noise, or a source with no gc/program concept (pprof): never show a fabricated negative share.
+	}
+	if hm.GCPct > 0 || programPct > 0 {
+		return fmt.Sprintf("active %.0f%% (idle %.0f%%, gc %.0f%%, program %.0f%% excluded)", activePct, hm.IdlePct, hm.GCPct, programPct)
+	}
+	return fmt.Sprintf("active %.0f%% (idle %.0f%% excluded)", activePct, hm.IdlePct)
+}
+
+// humanMethodLabel renders a HeatMethod the way a person reads it — the
+// roadmap mockup's own wording ("method: v8 positionTicks"), not the raw
+// JSON enum value ("v8_position_ticks").
+func humanMethodLabel(m profiler.HeatMethod) string {
+	switch m {
+	case profiler.MethodV8PositionTicks:
+		return "v8 positionTicks"
+	case profiler.MethodCPUProfileFile:
+		return "v8 (no positionTicks; declaration-line fallback)"
+	case profiler.MethodPprofProto:
+		return "pprof proto (inlining-aware; no go toolchain needed)"
+	default:
+		return string(m)
+	}
+}
+
+// formatCallees renders one function's Callees as the roadmap's "calls->"
+// line — each callee's Cum as a share of the WHOLE profile's active
+// samples, the same basis codeFrameForFunction's dual-column view uses —
+// so a wrapper (all its cost is in what it calls, not any line of its own)
+// still tells the reader where the time actually went instead of just
+// "(no lines to show)".
+func formatCallees(hm *profiler.Heatmap, f profiler.HeatFunction) string {
+	total := float64(hm.ActiveSamples)
+	parts := make([]string, 0, len(f.Callees))
+	for _, c := range f.Callees {
+		pct := 0.0
+		if total > 0 {
+			pct = float64(c.Cum) / total * 100
+		}
+		parts = append(parts, fmt.Sprintf("%s %.1f%%", c.Func, pct))
+	}
+	return "calls-> " + strings.Join(parts, "   ")
+}
+
+// shellQuote wraps s in single quotes, escaping any single quote it
+// contains, so a "next" line a person copy-pastes into bash or zsh never
+// breaks on a function name like "(anonymous)" (parens are shell
+// metacharacters) or a path with a space.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// exportViewerHint names the tool that opens --export's output: pprof's own
+// `go tool pprof` for a .pb.gz/.pb source, or Chrome DevTools / VS Code for
+// a V8/Bun .cpuprofile — never the same hint for both formats, which a
+// person can't actually open a pprof proto in.
+func exportViewerHint(m profiler.HeatMethod) string {
+	if m == profiler.MethodPprofProto {
+		return "go tool pprof"
+	}
+	return "Chrome DevTools / VS Code"
 }
 
 // formatHeatQuantity renders Heatmap.Samples in a unit-appropriate,
