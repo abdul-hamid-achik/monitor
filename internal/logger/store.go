@@ -44,6 +44,12 @@ type Store struct {
 	pendingWrites int
 	lastSync      time.Time
 	syncCount     int
+
+	// stopFlusher / flusherDone implement the background flusher started by
+	// OpenStoreWithRetention (see startFlusher's doc comment). Both are nil
+	// on a read-only store, which has nothing to flush.
+	stopFlusher chan struct{}
+	flusherDone chan struct{}
 }
 
 const (
@@ -171,6 +177,7 @@ func OpenStoreWithRetention(path string, retention RetentionPolicy) (*Store, err
 		_ = db.Close()
 		return nil, fmt.Errorf("apply log retention: %w", err)
 	}
+	s.startFlusher()
 	return s, nil
 }
 
@@ -198,11 +205,20 @@ func (s *Store) ensureCollection() error {
 	if s.db.HasCollection(defaultCollection) {
 		return nil
 	}
-	_, err := s.db.CreateCollection(defaultCollection, veclite.WithMemoryLimits(veclite.MemoryConfig{
-		MaxRecords:        s.retention.MaxRecords,
-		EvictionPolicy:    "fifo",
-		EvictionBatchSize: max(1, s.retention.MaxRecords/10),
-	}))
+	// Deliberately created WITHOUT veclite.WithMemoryLimits. veclite@v0.22.1's
+	// enforceMemoryLimitIfConfigured runs on every single InsertTextDocument*
+	// call for a collection created with a MemoryConfig (collection.go:172-176),
+	// which evicts min(count-MaxRecords, EvictionBatchSize) records — 1, the
+	// first time the cap is reached — via a full sorted scan of the collection
+	// EVERY insert once at capacity (cleanup.go:221-233,244-274). That pins the
+	// count at MaxRecords forever and defeats enforceRecordLimit's batching
+	// below: its 10%-overflow threshold never fires because veclite's own
+	// per-insert eviction never lets the collection grow past the cap in the
+	// first place. Letting enforceRecordLimit (Go-level state, unconditional
+	// on every Append) be the ONLY enforcement is what makes eviction actually
+	// batched, in the same session that creates the store, not only after a
+	// reopen.
+	_, err := s.db.CreateCollection(defaultCollection)
 	return err
 }
 
@@ -366,6 +382,73 @@ func (s *Store) syncLocked() error {
 	return nil
 }
 
+// startFlusher launches the background goroutine that keeps a quiet writer's
+// pending lines from sitting unflushed indefinitely.
+//
+// maybeSyncLocked's time bound (SyncInterval) is only ever CHECKED from
+// inside Append — so once a captured process stops producing lines (a burst
+// followed by silence, or the more extreme case of a process that logs 1000+
+// lines and then goes idle before being kill -9'd), nothing calls Append
+// again to notice that SyncInterval has elapsed, and the pending lines never
+// reach disk: an OpenReadOnly reader sees nothing, and a crash loses
+// everything since the last flush instead of at most SyncInterval. This
+// ticker is the writer-side counterpart that flushes on wall-clock time
+// alone, independent of whether Append is still being called.
+func (s *Store) startFlusher() {
+	// Create the channels as LOCAL variables and capture those (not the
+	// struct fields) in the goroutine's select. stopFlusherAndWait mutates
+	// s.stopFlusher/s.flusherDone under s.mu from a different goroutine; an
+	// earlier version had the select read s.stopFlusher directly on every
+	// loop iteration, which is an unsynchronized read racing that write. Once
+	// stopFlusherAndWait had set the field to nil, the NEXT time this
+	// goroutine re-entered select it could evaluate `case <-s.stopFlusher`
+	// against nil — a nil channel receive that never fires — leaving only the
+	// ticker case alive forever: the goroutine never returns, flusherDone
+	// never closes, and Close (which waits on it) hangs permanently. Fixed
+	// local captures make close(stop) always reach the exact channel this
+	// goroutine is actually blocked on, independent of anything the fields
+	// are mutated to afterward.
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	s.stopFlusher = stop
+	s.flusherDone = done
+	interval := s.retention.SyncInterval
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				s.mu.Lock()
+				if s.db != nil && s.pendingWrites > 0 {
+					_ = s.syncLocked()
+				}
+				s.mu.Unlock()
+			}
+		}
+	}()
+}
+
+// stopFlusherAndWait signals startFlusher's goroutine to stop and blocks
+// until it has. Must be called WITHOUT s.mu held (the goroutine takes s.mu
+// itself on every tick), and before Close tears down s.db.
+func (s *Store) stopFlusherAndWait() {
+	s.mu.Lock()
+	stop := s.stopFlusher
+	done := s.flusherDone
+	s.stopFlusher = nil
+	s.flusherDone = nil
+	s.mu.Unlock()
+	if stop == nil {
+		return
+	}
+	close(stop)
+	<-done
+}
+
 // Sync flushes pending writes to disk immediately, ignoring the batching
 // policy in maybeSyncLocked. Callers that need a captured line visible to a
 // concurrent OpenReadOnly reader sooner than SyncInterval — or that are about
@@ -527,8 +610,11 @@ func entryFromRecord(rec *veclite.Record) Entry {
 	return e
 }
 
-// Close releases the underlying veclite handle.
+// Close releases the underlying veclite handle. It stops the background
+// flusher (see startFlusher) first, so no tick can race Close's own final
+// db.Close.
 func (s *Store) Close() error {
+	s.stopFlusherAndWait()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db == nil {
