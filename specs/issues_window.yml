@@ -18,7 +18,7 @@ target:
     - "-lc"
     - |
       set -e
-      d="$(mktemp -d)"
+      d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
       export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state"
       export MONITOR_ISSUES_STORE="$d/issues.veclite"
       mkdir -p "$HOME"
@@ -119,6 +119,20 @@ outcomes:
           future=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
           excluded=$(./bin/monitor issues list --since "$future" --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
           included=$(./bin/monitor issues list --since 24h --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          [ "$excluded" = "0" ] && [ "$included" = "1" ]
+  - id: until_excludes_and_includes_by_window
+    description: an --until safely in the past (before the issue existed) excludes it; a recent --until includes it
+    verify:
+      command:
+        run: |
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/issues.veclite"
+          mkdir -p "$HOME"
+          ./bin/monitor investigate 1 --no-save --run-id run-a --release rel-a --json >/dev/null
+          past=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+          future=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+          excluded=$(./bin/monitor issues list --until "$past" --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          included=$(./bin/monitor issues list --until "$future" --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
           [ "$excluded" = "0" ] && [ "$included" = "1" ]
   - id: mcp_monitor_issues_maps_the_same_filters
     description: the MCP monitor_issues tool's run_id/kind filters agree with the CLI's
