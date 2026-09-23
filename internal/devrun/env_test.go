@@ -37,17 +37,28 @@ func TestResolveLaunchIDsFreshLaunchIDsAreUnique(t *testing.T) {
 	}
 }
 
-func TestResolveLaunchIDsNestedInheritsUnchanged(t *testing.T) {
+// TestResolveLaunchIDsNestedInheritsOnlyRoot matches the roadmap's own
+// worked nesting example (`monitor run -- task dev` launching `monitor run
+// --name web-api -- node ...`): ONLY MONITOR_LAUNCH_ROOT carries through
+// unchanged (for the live DedupeKey's sake); an inner --name must still
+// take effect as this launch's own Service, and its ID is freshly minted,
+// not silently replaced by the outer launch's.
+func TestResolveLaunchIDsNestedInheritsOnlyRoot(t *testing.T) {
 	environ := []string{
 		"PATH=/bin",
 		"MONITOR_LAUNCH_ID=parent-id-123",
 		"MONITOR_LAUNCH_SERVICE=parent-svc",
 		"MONITOR_LAUNCH_ROOT=/parent/repo",
 	}
-	launch := ResolveLaunchIDs(environ, "child-name-should-be-ignored", "/child/repo/should/be/ignored")
-	want := LaunchIDs{ID: "parent-id-123", Service: "parent-svc", Root: "/parent/repo"}
-	if launch != want {
-		t.Errorf("ResolveLaunchIDs (nested) = %+v, want %+v (inherited unchanged)", launch, want)
+	launch := ResolveLaunchIDs(environ, "web-api", "/child/repo/should/be/ignored")
+	if launch.Root != "/parent/repo" {
+		t.Errorf("Root = %q, want /parent/repo (inherited)", launch.Root)
+	}
+	if launch.Service != "web-api" {
+		t.Errorf("Service = %q, want web-api (an inner --name must take effect, not be replaced by the parent's)", launch.Service)
+	}
+	if launch.ID == "" || launch.ID == "parent-id-123" {
+		t.Errorf("ID = %q, want a freshly minted id, not empty or the parent's", launch.ID)
 	}
 }
 

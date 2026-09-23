@@ -42,30 +42,45 @@ type LaunchIDs struct {
 	Root    string
 }
 
-// ResolveLaunchIDs computes this launch's identity, honoring nesting
-// (docs/contracts/local-sentry-naming.md §2): when environ already carries
+// ResolveLaunchIDs computes this launch's identity, honoring nesting the
+// way the roadmap's own worked example resolves it (~/notes/projects/
+// monitor/2026-09-22-local-sentry-roadmap.md, "Conflictos resueltos":
+// "Anidamiento: `monitor run -- task dev` que lanza `monitor run --name
+// web-api -- node …`. → MONITOR_LAUNCH_ROOT se hereda, y la DedupeKey en
+// vivo es sha256(ROOT + hash del bloque)..."): when environ already carries
 // a non-empty MONITOR_LAUNCH_ROOT -- this monitor process is itself running
-// as the child of another `monitor run -- <cmd>` (e.g. `monitor run --
-// task dev`, where `task dev` itself invokes `monitor run --name web-api --
-// node ...`) -- every MONITOR_LAUNCH_* value is inherited UNCHANGED from
-// environ instead of recomputed, so a whole chain of nested launches
-// resolves to one launch identity end to end. name and root are used only
-// to seed a fresh (non-nested) launch; callers pass the already-defaulted
+// as the child of another `monitor run -- <cmd>` -- ONLY that root carries
+// through, unchanged, so the whole chain shares one identity for the live
+// DedupeKey's sake (docs/contracts/local-sentry-naming.md §5: without this,
+// parent and child would see the same underlying text and double-count the
+// occurrence). ID and Service are always computed fresh for THIS launch:
+// an inner `--name web-api` must take effect as MONITOR_LAUNCH_SERVICE
+// exactly like the roadmap's own example names it, not be silently
+// replaced by whatever the OUTER launch happened to be named -- E3.2's
+// per-service launch registry depends on that too. name and root are used
+// to seed a fresh launch's Service/Root; callers pass the already-defaulted
 // effective service name and root (see devrun.go).
+//
+// docs/contracts/local-sentry-naming.md §2 currently still describes ALL
+// THREE MONITOR_LAUNCH_* values as inherited unchanged when nested; that
+// text predates this resolution and is out of date (it is not owned by
+// this file/PR to correct).
 func ResolveLaunchIDs(environ []string, name, root string) LaunchIDs {
-	if inherited, ok := launchIDsFromEnviron(environ); ok {
-		return inherited
+	if inherited, ok := launchRootFromEnviron(environ); ok {
+		root = inherited
 	}
 	return LaunchIDs{ID: newLaunchID(), Service: strings.TrimSpace(name), Root: root}
 }
 
-func launchIDsFromEnviron(environ []string) (LaunchIDs, bool) {
+// launchRootFromEnviron reports environ's MONITOR_LAUNCH_ROOT, when
+// non-empty -- the sole nesting signal (see ResolveLaunchIDs).
+func launchRootFromEnviron(environ []string) (string, bool) {
 	vals := envMap(environ)
 	root := strings.TrimSpace(vals[EnvLaunchRoot])
 	if root == "" {
-		return LaunchIDs{}, false
+		return "", false
 	}
-	return LaunchIDs{ID: vals[EnvLaunchID], Service: vals[EnvLaunchService], Root: root}, true
+	return root, true
 }
 
 func envMap(environ []string) map[string]string {
