@@ -48,7 +48,8 @@ type Binding struct {
 	// InspectAddr is a host:port for a Node/Bun/Deno inspector when detected
 	// from argv (e.g. --inspect=9229). Empty when unknown.
 	InspectAddr string `json:"inspect_addr,omitempty"`
-	// Markers lists which root markers were found (package.json, go.mod, .git).
+	// Markers lists which root markers were found (package.json, go.mod,
+	// pyproject.toml, Cargo.toml, Gemfile, .ruby-version, or .git).
 	Markers []string `json:"markers,omitempty"`
 	// Limitations collects non-fatal enrichment problems (permission denied, etc.).
 	Limitations []string `json:"limitations,omitempty"`
@@ -200,9 +201,9 @@ func Inspect(ctx context.Context, pid int32, codebaseOverride string) (Binding, 
 }
 
 // FindCodebaseRoot walks up from start looking for package.json, go.mod,
-// pyproject.toml, Cargo.toml, or .git. Returns the first directory that
-// contains any marker (preferring the nearest), plus the markers found there.
-// If nothing is found, returns ("", nil).
+// pyproject.toml, Cargo.toml, Gemfile, .ruby-version, or .git. Returns the
+// first directory that contains any marker (preferring the nearest), plus
+// the markers found there. If nothing is found, returns ("", nil).
 func FindCodebaseRoot(start string) (string, []string) {
 	dir, err := filepath.Abs(start)
 	if err != nil {
@@ -342,7 +343,7 @@ func isNodeish(base string) bool {
 }
 
 // extractMainScript returns the first non-flag path-like argument that looks
-// like a JS/TS/Python entry for interpreter runtimes.
+// like a JS/TS/Python/Ruby entry for interpreter runtimes.
 func extractMainScript(rt Runtime, cmdline []string, cwd string) string {
 	if len(cmdline) < 2 {
 		return ""
