@@ -880,11 +880,15 @@ agent.`,
 // printAmbiguousIssueError reports every candidate a short prefix matched.
 // The caller is responsible for os.Exit(2) right after calling this
 // (mirrors internal/cli/resolve.go's printAmbiguousLeaf/os.Exit(2) split
-// for procbind.AmbiguousLeafError): keeping the exit call OUT of this
-// function is what lets a test exercise the printed output in-process,
-// without actually terminating the test binary -- see
-// TestPrintAmbiguousIssueError* in issues_test.go, and
-// specs/issues_context.yml for the real exit-2 process behavior.
+// for procbind.AmbiguousLeafError, including that split's own reasoning:
+// keeping the exit call OUT of this function is what lets
+// TestPrintAmbiguousIssueErrorHumanAndJSON exercise the printed output
+// in-process without terminating the test binary). store.ResolveID's own
+// ambiguity detection (which frame is ambiguous) is covered deterministically
+// in internal/issues/resolve_id_test.go via a crafted fingerprint collision;
+// a REAL fingerprint hash collision is not reproducible enough to script as
+// a black-box spec, so the literal process-level exit(2) path is untested
+// beyond that -- the same gap resolve.go's own ambiguous-leaf path has.
 func printAmbiguousIssueError(cmd *cobra.Command, id string, ambiguous *issues.AmbiguousIDError) {
 	if JSONOutput(cmd) {
 		_ = writeIssueJSON(cmd.OutOrStdout(), map[string]any{
