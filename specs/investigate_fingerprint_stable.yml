@@ -4,20 +4,29 @@ name: monitor_investigate_fingerprint_stable
 intent: |
   E1.6 (bug 11): recordInvestigateOccurrence must stop hashing the top-10
   sampled symbols. Five consecutive `monitor investigate <pid> --no-save`
-  runs against the SAME live process (node --jitless --inspect on a free
-  port, running examples/polyglot/js/workload.js) must group into ONE
-  issue with occurrence_count 5 -- not five separate issues, which is what
-  the old fingerprint (hashing whatever ended up in the sampled top-10,
-  which reshuffles between runs) produced. Each run's issue.symbols must
-  be exactly the single dominant in-app function (`heavyStringify`, well
-  over the 15% threshold once its several hot lines are aggregated), never
-  the old multi-symbol list.
+  runs against the SAME live process (node --jitless --inspect on a FREE
+  port -- picked at run time via a one-line `node -e` listen(0)/close(),
+  never a fixed port a concurrent spec/dev process could already hold --
+  running examples/polyglot/js/workload.js) must group into ONE issue with
+  occurrence_count 5 -- not five separate issues, which is what the old
+  fingerprint (hashing whatever ended up in the sampled top-10, which
+  reshuffles between runs) produced. Each run's issue.symbols must be
+  exactly the single dominant in-app function (`heavyStringify`, well over
+  the 15% threshold once its several hot lines are aggregated), never the
+  old multi-symbol list.
 
   --jitless (pure V8 interpretation, no JIT inlining) is deliberate here,
   matching specs/profile_node_lines.yml's own documented workaround: under
   default JIT flags, V8 sometimes inlines heavyStringify into its caller
   mid-profile, which would make the DOMINANT symbol itself unstable across
   runs for reasons that have nothing to do with this fix.
+
+  `node` is resolved to an absolute path (NODE_BIN=$(command -v node))
+  BEFORE HOME is overridden: an asdf/version-manager `node` shim looks up
+  its target version from files under the real HOME, so overriding HOME
+  first and only then calling bare `node` can leave the shim unable to
+  resolve any version at all on a machine where the repo isn't checked out
+  under the real HOME.
 
   Runs an isolated MONITOR_ISSUES_STORE (and HOME/XDG_*_HOME, scoped to a
   subshell -- exporting a fake HOME for the rest of the command breaks this
@@ -39,7 +48,7 @@ target:
     [
       "sh",
       "-c",
-      "mkdir -p /tmp/monitor-spec-investigate-fp/home /tmp/monitor-spec-investigate-fp/data /tmp/monitor-spec-investigate-fp/state; ( export HOME=/tmp/monitor-spec-investigate-fp/home XDG_DATA_HOME=/tmp/monitor-spec-investigate-fp/data XDG_STATE_HOME=/tmp/monitor-spec-investigate-fp/state MONITOR_ISSUES_STORE=/tmp/monitor-spec-investigate-fp/data/issues.veclite; node --jitless --inspect=127.0.0.1:9412 examples/polyglot/js/workload.js >/tmp/monitor-spec-investigate-fp/node.log 2>&1 & P=$!; sleep 1; i=1; while [ \"$i\" -le 5 ]; do ./bin/monitor investigate \"$P\" --no-save --json > /tmp/monitor-spec-investigate-fp/run$i.json; i=$((i + 1)); done; kill \"$P\" 2>/dev/null ); MONITOR_ISSUES_STORE=/tmp/monitor-spec-investigate-fp/data/issues.veclite ./bin/monitor issues list --json > /tmp/monitor-spec-investigate-fp/issues.json; true",
+      "mkdir -p /tmp/monitor-spec-investigate-fp/home /tmp/monitor-spec-investigate-fp/data /tmp/monitor-spec-investigate-fp/state; NODE_BIN=$(command -v node); PORT=$(\"$NODE_BIN\" -e 'const s=require(\"net\").createServer();s.listen(0,\"127.0.0.1\",()=>{console.log(s.address().port);s.close();});'); ( export HOME=/tmp/monitor-spec-investigate-fp/home XDG_DATA_HOME=/tmp/monitor-spec-investigate-fp/data XDG_STATE_HOME=/tmp/monitor-spec-investigate-fp/state MONITOR_ISSUES_STORE=/tmp/monitor-spec-investigate-fp/data/issues.veclite; \"$NODE_BIN\" --jitless --inspect=127.0.0.1:$PORT examples/polyglot/js/workload.js >/tmp/monitor-spec-investigate-fp/node.log 2>&1 & P=$!; sleep 1; i=1; while [ \"$i\" -le 5 ]; do ./bin/monitor investigate \"$P\" --no-save --json > /tmp/monitor-spec-investigate-fp/run$i.json; i=$((i + 1)); done; kill \"$P\" 2>/dev/null ); MONITOR_ISSUES_STORE=/tmp/monitor-spec-investigate-fp/data/issues.veclite ./bin/monitor issues list --json > /tmp/monitor-spec-investigate-fp/issues.json; true",
     ]
   cwd: "."
 
@@ -73,10 +82,16 @@ outcomes:
   # invariants) -- none of these re-launches node or re-runs investigate,
   # so they stay fast regardless of how many there are.
   - id: one_issue_occurrence_count_5
-    description: all 5 runs grouped into exactly one issue with occurrence_count 5
+    description: |
+      all 5 runs grouped into exactly one issue with occurrence_count 5 --
+      AND run1 actually identified the node process (Process.Runtime ==
+      "node"), so a spec broken in a way that leaves every run's
+      identify step failing (a dead pid, node never starting) can't pass
+      this outcome merely because 5 failed "manual process investigation"
+      occurrences also group into one issue with occurrence_count 5.
     verify:
       command:
-        run: "python3 -c \"import json;issues=json.load(open('/tmp/monitor-spec-investigate-fp/issues.json'));assert len(issues)==1, issues;assert issues[0]['occurrence_count']==5, issues[0]\""
+        run: "python3 -c \"import json;issues=json.load(open('/tmp/monitor-spec-investigate-fp/issues.json'));assert len(issues)==1, issues;assert issues[0]['occurrence_count']==5, issues[0];run1=json.load(open('/tmp/monitor-spec-investigate-fp/run1.json'));proc=run1.get('process') or {};assert proc.get('runtime')=='node', 'process was not identified as node: '+json.dumps(run1.get('steps'))\""
   - id: dominant_symbol_is_heavystringify_not_top10
     description: issue.symbols is the single dominant in-app function, not a hashed top-10 list
     verify:
