@@ -310,3 +310,9 @@ func TestMatchesBindingDisambiguatesRuntimeRootAndEntryPoint(t *testing.T) {
 		t.Fatal("a different runtime must not match")
 	}
 }
+
+// TestResolveDescendantOfRestrictsToPidSubtree and
+// TestResolveDescendantOfCountsAsASelector live in tree_test.go, alongside
+// the rest of E3.2's process-tree tests, not here: this file's ownership
+// for E3.2 is additions to Resolve/ResolveOptions only, not new top-level
+// tests of its own.

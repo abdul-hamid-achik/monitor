@@ -1,0 +1,74 @@
+version: 1
+name: monitor_resolve_descendant
+
+intent: |
+  `monitor resolve --descendant-of <pid>` with no other selector runs E3.2's
+  leaf resolution: it walks the given pid's descendants, skips wrapper
+  processes (a shell, a package-manager launcher, the `go` toolchain
+  fronting `go run`, ...), and returns the first process that classifies as
+  an application runtime -- so `sh -c 'node app.js'` resolves to the node
+  child, not the shell. Several distinct runtime candidates at the same
+  depth are refused as ambiguous with exit code 2, listing every candidate,
+  rather than guessing one. This is a black-box spec: each outcome starts
+  its own real `sh` process tree in the background, resolves against it,
+  and kills whatever it started.
+
+target:
+  cmd: ["./bin/monitor", "--version"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v node >/dev/null 2>&1"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: leaf_resolves_node_under_sh_wrapper
+    description: |
+      sh -c 'node examples/polyglot/js/workload.js' resolves through its sh
+      wrapper to the node leaf, with runtime node -- the exact E3.2
+      done-when scenario. The "& wait" makes sh fork a genuine child instead
+      of exec-optimizing into node with the SAME pid (verified live on this
+      project's own dev box: many sh implementations replace their own
+      process image for a single simple command with no further shell work
+      left), so this actually exercises descending past the wrapper instead
+      of trivially matching sh itself at depth 0.
+    timeoutMs: 20000
+    verify:
+      command:
+        run: "sh -c 'node examples/polyglot/js/workload.js & wait' >/dev/null 2>&1 & SHPID=$!; RC=1; OUT=''; for i in $(seq 1 50); do OUT=$(./bin/monitor resolve --descendant-of \"$SHPID\" --json 2>&1); RC=$?; [ \"$RC\" -eq 0 ] && break; sleep 0.1; done; pkill -P \"$SHPID\" 2>/dev/null || true; kill \"$SHPID\" 2>/dev/null || true; [ \"$RC\" -eq 0 ] && echo \"$OUT\" | grep -q '\"runtime\": \"node\"' && ! echo \"$OUT\" | grep -q \"\\\"pid\\\": $SHPID\\b\""
+  - id: ambiguous_leaf_exits_2_and_lists_candidates
+    description: two node children under the same sh wrapper are refused as ambiguous (exit 2) rather than guessing one
+    timeoutMs: 20000
+    verify:
+      command:
+        run: "sh -c 'node examples/polyglot/js/workload.js & node examples/polyglot/js/workload.js & wait' >/dev/null 2>&1 & SHPID=$!; RC=1; OUT=''; for i in $(seq 1 50); do OUT=$(./bin/monitor resolve --descendant-of \"$SHPID\" 2>&1); RC=$?; [ \"$RC\" -eq 2 ] && break; sleep 0.1; done; pkill -P \"$SHPID\" 2>/dev/null || true; kill \"$SHPID\" 2>/dev/null || true; [ \"$RC\" -eq 2 ] && echo \"$OUT\" | grep -qi ambiguous"
+  - id: ambiguous_combined_mode_exits_2_and_lists_candidates
+    description: |
+      the same two-node-children ambiguity, but with --descendant-of
+      COMBINED with --runtime node (not alone): this must reach the same
+      exit-2-with-candidates behavior as the leaf-alone outcome above,
+      through procbind.Resolve's DescendantOf path rather than
+      procbind.ResolveLeaf, instead of falling through to a plain exit 1.
+    timeoutMs: 20000
+    verify:
+      command:
+        run: "sh -c 'node examples/polyglot/js/workload.js & node examples/polyglot/js/workload.js & wait' >/dev/null 2>&1 & SHPID=$!; RC=1; OUT=''; for i in $(seq 1 50); do OUT=$(./bin/monitor resolve --descendant-of \"$SHPID\" --runtime node 2>&1); RC=$?; [ \"$RC\" -eq 2 ] && break; sleep 0.1; done; pkill -P \"$SHPID\" 2>/dev/null || true; kill \"$SHPID\" 2>/dev/null || true; [ \"$RC\" -eq 2 ] && echo \"$OUT\" | grep -qi ambiguous"
+  - id: clean_exit
+    description: the baseline target command exits cleanly
+    verify:
+      process:
+        exitCode: 0
