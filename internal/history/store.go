@@ -11,10 +11,13 @@
 // whole recording session, and OpenReadOnly takes a shared lock — the two are
 // mutually exclusive, so a query CANNOT open the store while a recorder is
 // actively running (it gets a lock error, surfaced with guidance). To keep the
-// on-disk snapshot current and bound crash-loss to a single tick, Append flushes
-// each batch with db.Sync() (veclite's default syncOnWrite is off). A reader
-// opened once the recorder has released the lock therefore sees every synced
-// sample, not just those from the last clean Close.
+// on-disk snapshot reasonably current without paying for a full gob-encode +
+// fsync of the whole database on every tick, Append flushes with db.Sync()
+// every syncEvery batches or syncInterval of wall-clock time, whichever comes
+// first (veclite's default syncOnWrite is off), and Close always flushes
+// whatever is still pending. A reader opened once the recorder has released
+// the lock therefore sees every sample as of the last flush, which lags the
+// most recent tick by at most syncInterval.
 package history
 
 import (
@@ -30,11 +33,46 @@ import (
 
 const collection = "metrics"
 
-// maxRecords caps the recorder's collection so a long-running `monitor history
-// record` can't grow memory/disk without bound. veclite evicts oldest-first
-// (fifo) once the cap is hit. At the default 1s interval × 8 metrics/tick that
-// is ~36 hours of history; higher intervals stretch proportionally.
-const maxRecords = 1_000_000
+// defaultMaxRecords caps the recorder's collection so a long-running `monitor
+// history record` can't grow memory/disk without bound. veclite evicts
+// oldest-first (fifo) once the cap is hit. At the default 1s interval × 8
+// metrics/tick that is ~36 hours of history; higher intervals stretch
+// proportionally.
+//
+// The cap lives on Store.maxRecords (set from this default by Open) and is
+// enforced by enforceRecordLimitLocked on every Append, independent of
+// veclite's own per-collection MemoryConfig. veclite v0.22.1 does not persist
+// a collection's MemoryConfig across a reopen (loadFromSnapshot rebuilds the
+// collection without it — a verified upstream bug), so relying solely on
+// WithMemoryLimits at creation time silently disables the cap forever the
+// first time the store is closed and reopened. Enforcing the cap ourselves,
+// unconditionally, from Go-level Store state that Open always sets, keeps
+// history bounded across the store's whole lifetime regardless of reopens.
+const defaultMaxRecords = 1_000_000
+
+// evictionBatchThreshold is how far the collection may grow past maxRecords
+// before enforceRecordLimit pays for a sorted eviction pass, expressed as a
+// fraction of maxRecords (minimum 1 record). EnforceMemoryLimit's underlying
+// eviction sorts every live record to select what to evict; running that sort
+// once per single record over the cap made every insert past the cap an
+// O(n log n) full scan. Batching lets the collection grow up to
+// maxRecords+threshold-1 before one pass evicts the whole accumulated
+// overflow back down to maxRecords, trading a small amount of extra memory
+// for far fewer sorts.
+func evictionBatchThreshold(max int) int {
+	b := max / 10
+	if b < 1 {
+		b = 1
+	}
+	return b
+}
+
+// defaultSyncEvery / defaultSyncInterval bound how many Append batches (ticks)
+// can accumulate in memory before a durable flush. See maybeSyncLocked.
+const (
+	defaultSyncEvery    = 5
+	defaultSyncInterval = 5 * time.Second
+)
 
 // DefaultPath returns the default history store path
 // (~/.local/share/monitor/history.veclite), creating the directory.
@@ -67,6 +105,21 @@ type Point struct {
 type Store struct {
 	mu sync.Mutex
 	db *veclite.DB
+
+	// maxRecords is this store's Go-level record cap (see defaultMaxRecords'
+	// doc comment for why it lives here rather than solely in veclite).
+	maxRecords int
+
+	// syncEvery / syncInterval and the counters below implement the bounded
+	// flush policy described on maybeSyncLocked. pendingWrites counts Append
+	// batches since the last Sync; syncCount is exported via SyncCount for
+	// tests and diagnostics that need to observe how often a full rewrite
+	// actually happened.
+	syncEvery     int
+	syncInterval  time.Duration
+	pendingWrites int
+	lastSync      time.Time
+	syncCount     int
 }
 
 // Open opens (and creates) a history store at path for writing.
@@ -75,7 +128,13 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db}
+	s := &Store{
+		db:           db,
+		maxRecords:   defaultMaxRecords,
+		syncEvery:    defaultSyncEvery,
+		syncInterval: defaultSyncInterval,
+		lastSync:     time.Now(),
+	}
 	if err := s.ensureCollection(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -90,7 +149,7 @@ func OpenReadOnly(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, maxRecords: defaultMaxRecords}, nil
 }
 
 func (s *Store) ensureCollection() error {
@@ -100,11 +159,13 @@ func (s *Store) ensureCollection() error {
 	if s.db.HasCollection(collection) {
 		return nil
 	}
-	// Bound the collection at creation so the recorder self-prunes oldest
-	// samples instead of growing forever. (Applies to newly-created stores;
-	// pre-existing collections keep their prior unbounded config.)
+	// WithMemoryLimits only takes effect for the lifetime of THIS collection
+	// object; it is not what keeps the cap alive across a reopen (see
+	// defaultMaxRecords' doc comment). It is still worth setting at creation
+	// so a long single session gets veclite's own free per-insert enforcement
+	// in addition to enforceRecordLimitLocked below.
 	_, err := s.db.CreateCollection(collection, veclite.WithMemoryLimits(veclite.MemoryConfig{
-		MaxRecords:     maxRecords,
+		MaxRecords:     s.maxRecords,
 		EvictionPolicy: "fifo",
 	}))
 	return err
@@ -132,23 +193,79 @@ func (s *Store) Append(samples ...Sample) error {
 			return err
 		}
 	}
-	// Flush this batch to disk so (a) a SIGKILL/crash bounds data loss to one
-	// tick rather than the whole session, and (b) a concurrent OpenReadOnly
-	// querier in another process sees freshly recorded samples. veclite's
-	// default syncOnWrite is off, so without this the on-disk file stays frozen
-	// at the last clean Close.
-	return s.db.Sync()
+	s.enforceRecordLimitLocked(c)
+	return s.maybeSyncLocked()
 }
 
-// Sync flushes pending writes to disk. No-op (returns nil) on a read-only or
-// closed store.
+// enforceRecordLimitLocked re-applies s.maxRecords unconditionally, from
+// Go-level Store state rather than veclite's per-collection MemoryConfig, so
+// the cap survives a Close+reopen (see defaultMaxRecords' doc comment). Must
+// be called with s.mu held.
+func (s *Store) enforceRecordLimitLocked(c *veclite.Collection) int {
+	count := c.Count()
+	overflow := count - s.maxRecords
+	if overflow < evictionBatchThreshold(s.maxRecords) {
+		return 0
+	}
+	return c.EnforceMemoryLimit(veclite.MemoryConfig{
+		MaxRecords:        s.maxRecords,
+		EvictionPolicy:    "fifo",
+		EvictionBatchSize: overflow,
+	})
+}
+
+// maybeSyncLocked durably flushes the store once syncEvery Append batches
+// have accumulated or syncInterval of wall-clock time has passed since the
+// last flush, whichever comes first, then resets both counters. Must be
+// called with s.mu held.
+//
+// history.Append used to call db.Sync() unconditionally on every batch, and
+// veclite's Sync re-gob-encodes and fsyncs the WHOLE database — cost that
+// grows with total record count, paid on every single tick of a long-running
+// `monitor history record` session. Bounding the flush cadence instead trades
+// a small, documented crash-loss / reader-staleness window (at most
+// syncInterval, or syncEvery ticks) for a large reduction in write
+// amplification. Close always flushes any still-pending writes.
+func (s *Store) maybeSyncLocked() error {
+	s.pendingWrites++
+	if s.pendingWrites < s.syncEvery && time.Since(s.lastSync) < s.syncInterval {
+		return nil
+	}
+	return s.syncLocked()
+}
+
+// syncLocked performs the actual flush and resets the batching counters.
+// Must be called with s.mu held.
+func (s *Store) syncLocked() error {
+	if err := s.db.Sync(); err != nil {
+		return err
+	}
+	s.pendingWrites = 0
+	s.lastSync = time.Now()
+	s.syncCount++
+	return nil
+}
+
+// Sync flushes pending writes to disk immediately, ignoring the batching
+// policy in maybeSyncLocked. No-op (returns nil) on a read-only or closed
+// store.
 func (s *Store) Sync() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db == nil {
 		return nil
 	}
-	return s.db.Sync()
+	return s.syncLocked()
+}
+
+// SyncCount returns how many times Sync has actually flushed to disk (via
+// either the batching policy or an explicit Sync call). Exposed for tests and
+// diagnostics that need to observe write amplification, not for callers that
+// need durability guarantees.
+func (s *Store) SyncCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.syncCount
 }
 
 // Query returns the samples for metric at or after `since`, oldest-first.
