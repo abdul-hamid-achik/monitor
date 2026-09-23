@@ -133,6 +133,9 @@ export default defineConfig({
           text: 'Contracts',
           items: [
             { text: 'Monitor Incident v1', link: '/contracts/monitor-incident-v1' },
+            { text: 'Local Sentry Naming (ADR)', link: '/contracts/local-sentry-naming' },
+            { text: 'Issue Context v1 (Draft)', link: '/contracts/issue-context-v1' },
+            { text: 'Line Heatmap v1 (Draft)', link: '/contracts/line-heatmap-v1' },
           ],
         },
       ],
