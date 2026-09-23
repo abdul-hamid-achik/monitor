@@ -35,7 +35,13 @@ func ResolveLatest(store *issues.Store, filter LatestFilter) (issue issues.Issue
 	}
 	resolved = ResolvedFrom{ID: "latest", Project: strings.TrimSpace(filter.Project), Service: strings.TrimSpace(filter.Service), Kind: kind}
 	items, err := store.List(issues.ListOptions{
-		Project: resolved.Project, Service: resolved.Service, Kind: kind, Limit: 1,
+		// Statuses excludes "ignored": an issue the user explicitly told
+		// monitor to stop surfacing must never win "latest" over an older
+		// but still-open (or resolved-and-possibly-recurring) one just
+		// because it happened to be touched more recently (a stray
+		// occurrence can still update LastSeen on an ignored issue).
+		Statuses: []issues.Status{issues.StatusOpen, issues.StatusResolved},
+		Project:  resolved.Project, Service: resolved.Service, Kind: kind, Limit: 1,
 	})
 	if err != nil {
 		return issues.Issue{}, resolved, false, err

@@ -119,6 +119,37 @@ func TestResolveLatestAnyKindIncludesAlerts(t *testing.T) {
 	}
 }
 
+// TestResolveLatestExcludesIgnoredIssues: an issue the user explicitly
+// ignored must never win "latest" over an older open one, even when a
+// stray occurrence bumped its LastSeen more recently.
+func TestResolveLatestExcludesIgnoredIssues(t *testing.T) {
+	storePath := newTestStore(t)
+	now := time.Now().UTC()
+	wantID := seedException(t, storePath, "polyglot", "workload", now.Add(-time.Hour))
+	ignoredID := seedException(t, storePath, "polyglot", "other", now) // more recent, but ignored below
+
+	if err := issues.WithWriter(context.Background(), storePath, issues.DefaultWriterWait, func(store *issues.Store) error {
+		_, err := store.Ignore(ignoredID)
+		return err
+	}); err != nil {
+		t.Fatalf("Ignore: %v", err)
+	}
+
+	store, err := issues.OpenReadOnly(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	issue, _, ok, err := ResolveLatest(store, LatestFilter{Project: "polyglot"})
+	if err != nil || !ok {
+		t.Fatalf("ResolveLatest: ok=%v err=%v", ok, err)
+	}
+	if issue.ID != wantID {
+		t.Fatalf("resolved issue = %s, want %s (the more recent %s is ignored and must be excluded)", issue.ID, wantID, ignoredID)
+	}
+}
+
 func TestResolveLatestNoMatchIsNotAnError(t *testing.T) {
 	storePath := newTestStore(t)
 	store, err := issues.OpenStore(storePath)

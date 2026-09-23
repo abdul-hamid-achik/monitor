@@ -68,6 +68,7 @@ func newIssuesCmd() *cobra.Command {
 		// collision row -- so it is deliberately NOT an alias here anymore.
 		Use:          "issues [flags]",
 		Short:        "List and manage durable grouped issues",
+		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 	}
 	cmd.PersistentFlags().StringVar(&storePath, "store", "", "issue store path (default: $MONITOR_ISSUES_STORE or XDG data dir)")
@@ -103,6 +104,7 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 		limit       int
 		at          string
 		root        string
+		all         bool
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -133,6 +135,21 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 			if err != nil {
 				return &issueCommandError{action: "list", err: err}
 			}
+			// Bare `monitor issues` (no --project, no --all) lists the
+			// CURRENT project only (roadmap: "issues sin argumentos lista
+			// el proyecto actual") -- without this, a store holding several
+			// projects' issues silently mixed all of them into one list
+			// regardless of which checkout the command ran from.
+			effectiveProject := strings.TrimSpace(projectFlag)
+			if effectiveProject == "" && !all {
+				// PID: 1 is a positive, non-real PID purely to steer
+				// project.Resolve's OWN "PID<=0 means a host-wide,
+				// no-process event" special case (Hints.PID's doc comment)
+				// away from returning the literal slug "host" here -- this
+				// call is about resolving the CURRENT directory's project
+				// identity, not describing a specific process.
+				effectiveProject = project.Resolve(project.Hints{UseWorkingDir: true, PID: 1}).Slug
+			}
 			// --at (E3.4/E3's "monitor issues --at <file:line>") narrows to
 			// issues whose culprit lands inside the target function/line, a
 			// query that can legitimately match an issue outside the
@@ -144,7 +161,7 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 			}
 			entries, listErr := store.List(issues.ListOptions{
 				Statuses: parsedStatuses,
-				Project:  strings.TrimSpace(projectFlag),
+				Project:  effectiveProject,
 				Service:  strings.TrimSpace(service),
 				Since:    sinceBound,
 				Until:    untilBound,
@@ -176,11 +193,12 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 			if JSONOutput(cmd) {
 				return writeIssueJSON(cmd.OutOrStdout(), entries)
 			}
-			return writeIssuesListHuman(cmd.OutOrStdout(), path, entries, projectFlag)
+			return writeIssuesListHuman(cmd.OutOrStdout(), path, entries, effectiveProject)
 		},
 	}
 	cmd.Flags().StringSliceVar(&statuses, "status", nil, "filter by status (open, resolved, ignored; repeatable)")
-	cmd.Flags().StringVar(&projectFlag, "project", "", "filter by project")
+	cmd.Flags().StringVar(&projectFlag, "project", "", "filter by project (default: the current project, unless --all)")
+	cmd.Flags().BoolVar(&all, "all", false, "list issues across every project instead of defaulting to the current one")
 	cmd.Flags().StringVar(&service, "service", "", "filter by service")
 	cmd.Flags().StringVar(&since, "since", "", "only issues active at/after this time (RFC3339 or a duration like 10m, 24h ago)")
 	cmd.Flags().StringVar(&until, "until", "", "only issues active at/before this time (RFC3339 or a duration like 10m, 24h ago)")
@@ -412,6 +430,11 @@ func writeIssuesListHuman(w io.Writer, storePath string, entries []issues.Issue,
 	}
 	now := time.Now()
 	activity := activityBucketsFor(storePath, entries, now)
+	// Widened per THIS listing when 4 hex characters collide among the rows
+	// actually being printed (see uniqueDisplayIDs) -- a 4-char short id
+	// that isn't actually unique among what's on screen would make the
+	// footer's own suggested `monitor issue <id>` immediately ambiguous.
+	displayIDs := uniqueDisplayIDs(entries)
 
 	if err := writeIssuesListHeader(w, entries, projectFilter, now); err != nil {
 		return err
@@ -428,7 +451,7 @@ func writeIssuesListHuman(w io.Writer, storePath string, entries []issues.Issue,
 		}
 		line := widgets.RenderActivityLine(activity[issue.ID])
 		if _, err := fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n",
-			strings.ToUpper(shortIssueID(issue.ID)), issue.OccurrenceCount, line,
+			strings.ToUpper(displayIDs[issue.ID]), issue.OccurrenceCount, line,
 			humanDuration(now.Sub(issue.LastSeen)), title,
 			truncateDisplay(culpritLocation(issue), maxWhereLen)); err != nil {
 			return err
@@ -437,7 +460,49 @@ func writeIssuesListHuman(w io.Writer, storePath string, entries []issues.Issue,
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	return writeIssuesListFooter(w, entries)
+	return writeIssuesListFooter(w, entries, displayIDs)
+}
+
+// uniqueDisplayIDs returns, for each of entries, the shortest ID-suffix
+// length (starting at the usual 4 hex characters -- shortIssueID) that is
+// unique among entries ITSELF, widening only the colliding groups rather
+// than every row. Collisions here are rare (a 4-hex-char short id has a
+// large space) but not impossible in a large list, and the mockup's own
+// `next monitor issue <id>` hint is worthless if that id then resolves
+// ambiguously.
+func uniqueDisplayIDs(entries []issues.Issue) map[string]string {
+	out := make(map[string]string, len(entries))
+	remaining := make([]string, 0, len(entries))
+	for _, e := range entries {
+		remaining = append(remaining, e.ID)
+	}
+	for length := 4; len(remaining) > 0 && length <= 32; length++ {
+		groups := make(map[string][]string, len(remaining))
+		for _, id := range remaining {
+			suffix := strings.TrimPrefix(id, "ISS-")
+			key := suffix
+			if len(key) > length {
+				key = key[:length]
+			}
+			groups[key] = append(groups[key], id)
+		}
+		var next []string
+		for key, ids := range groups {
+			if len(ids) == 1 {
+				out[ids[0]] = key
+				continue
+			}
+			next = append(next, ids...)
+		}
+		remaining = next
+	}
+	// Exhausted the full hex length and something STILL collides (only
+	// possible for literal duplicate IDs, which should not exist) -- fall
+	// back to the plain 4-char id rather than leaving it unset.
+	for _, id := range remaining {
+		out[id] = shortIssueID(id)
+	}
+	return out
 }
 
 // writeIssuesListHeader prints "<project> · N open · M new in the last
@@ -471,11 +536,11 @@ func writeIssuesListHeader(w io.Writer, entries []issues.Issue, projectFilter st
 
 // writeIssuesListFooter prints the mockup's "next" hint line, pointing at
 // the top (most recently active) row's short id.
-func writeIssuesListFooter(w io.Writer, entries []issues.Issue) error {
+func writeIssuesListFooter(w io.Writer, entries []issues.Issue, displayIDs map[string]string) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	id := strings.ToLower(shortIssueID(entries[0].ID))
+	id := strings.ToLower(displayIDs[entries[0].ID])
 	_, err := fmt.Fprintf(w, "next  monitor issue %s  ·  monitor issue %s --md | pbcopy  ·  monitor issues --status resolved\n", id, id)
 	return err
 }
@@ -679,6 +744,11 @@ func runIssuesAt(cmd *cobra.Command, entries []issues.Issue, at, rootFlag string
 		return &issueCommandError{action: "list --at", err: err}
 	}
 	root := resolveExplainRoot(rootFlag)
+	// Stored culprits are root-relative (stacktrace.ApplyGitRoot rewrites
+	// Filename that way at record time); an absolute --at path, or one
+	// relative to a subdirectory the command happens to run from, matches
+	// nothing until it is normalized the same way.
+	file = normalizeAtFile(file, root)
 	out := issuesAtOutput{File: file, Line: line}
 
 	if root != "" {
@@ -698,12 +768,44 @@ func runIssuesAt(cmd *cobra.Command, entries []issues.Issue, at, rootFlag string
 		}
 		matched = append(matched, issue)
 	}
+	// Payload diet (AC-6), same as the plain list path just above: a row
+	// here carries only a trimmed LatestException summary.
+	for i := range matched {
+		matched[i] = issues.SummarizeForList(matched[i])
+	}
 	out.Issues = matched
 
 	if JSONOutput(cmd) {
 		return writeIssueJSON(cmd.OutOrStdout(), out)
 	}
 	return writeIssuesAtHuman(cmd.OutOrStdout(), out)
+}
+
+// normalizeAtFile rewrites file (as typed on --at) to be relative to root,
+// the same way every stored Culprit.File already is. An absolute path is
+// made relative to root directly; a relative one is first resolved against
+// the current working directory (the same "relative to wherever you
+// happened to run the command from" a human typing --at means) and THEN
+// made relative to root. Any step that fails, or resolves outside root
+// entirely, returns file unchanged -- best-effort, never fatal: the caller
+// falls back to matching on file exactly as given.
+func normalizeAtFile(file, root string) string {
+	if root == "" {
+		return file
+	}
+	abs := file
+	if !filepath.IsAbs(abs) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return file
+		}
+		abs = filepath.Join(cwd, file)
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return file
+	}
+	return filepath.ToSlash(rel)
 }
 
 // culpritMatchesAt reports whether issue's culprit falls inside out's
@@ -734,7 +836,7 @@ func writeIssuesAtHuman(w io.Writer, out issuesAtOutput) error {
 			return err
 		}
 	default:
-		if _, err := fmt.Fprintf(w, "%s:%d · %d issue(s) at this line (codemap unavailable: exact-line match only)\n",
+		if _, err := fmt.Fprintf(w, "%s:%d · %d issue(s) at this line (no range resolved: exact-line match only)\n",
 			out.File, out.Line, len(out.Issues)); err != nil {
 			return err
 		}
@@ -792,6 +894,39 @@ func resolveExplainRoot(explicit string) string {
 // `monitor issue <id|short-prefix|latest>` (E2.5)
 // ---------------------------------------------------------------------------
 
+// deprecatedIssuesAlias lists `monitor issues`' own subcommand names: before
+// E2.5, `issue` (singular) was a plain cobra Aliases entry of `issues`
+// (plural), so `monitor issue list`/`show <id>`/`resolve <id>`/etc. all
+// worked by literally being `monitor issues <same args>`. E2.5 gave `issue`
+// its own, different meaning (the page above) and dropped that alias
+// outright, which broke every script still spelling it the old way with no
+// warning ("issue list not found" / "accepts 1 arg(s), received 2"). See
+// runDeprecatedIssueAlias.
+var deprecatedIssuesAlias = map[string]bool{
+	"list": true, "show": true, "resolve": true, "reopen": true, "ignore": true,
+}
+
+// runDeprecatedIssueAlias delegates `monitor issue <one of
+// deprecatedIssuesAlias> ...` to a freshly built `monitor issues` command
+// tree, passing every raw arg through UNCHANGED (newIssueCmd runs with
+// DisableFlagParsing so this branch is reached before anything has tried to
+// interpret them) -- reusing `issues`' own real flag parsing and RunE
+// rather than duplicating any of it, so behavior (--json, --status, --since,
+// --occurrences, whatever the target subcommand accepts) matches `monitor
+// issues <args>` exactly, not just approximately. It also means `--store`
+// works exactly like it always did on this alias, as long as it comes after
+// the subcommand name (`monitor issue list --store X`), the position every
+// pre-E2.5 example used.
+func runDeprecatedIssueAlias(cmd *cobra.Command, args []string) error {
+	fmt.Fprintf(cmd.ErrOrStderr(), "`monitor issue %s` is deprecated; use `monitor issues %s` instead.\n", args[0], args[0])
+	issuesCmd := newIssuesCmd()
+	issuesCmd.SetArgs(args)
+	issuesCmd.SetOut(cmd.OutOrStdout())
+	issuesCmd.SetErr(cmd.ErrOrStderr())
+	issuesCmd.SetContext(cmd.Context())
+	return issuesCmd.Execute()
+}
+
 func newIssueCmd() *cobra.Command {
 	var (
 		storePath, projectFlag, service, kind, root string
@@ -812,11 +947,41 @@ issue". An ambiguous prefix exits 2 and lists every match.
 
 --json emits the full monitor.issue_context.v1 contract at the
 "standard" budget. --md emits a paste-ready markdown page for an
-agent.`,
-		Args:         cobra.ExactArgs(1),
-		SilenceUsage: true,
+agent.
+
+'monitor issue list|show|resolve|reopen|ignore ...' (the pre-E2.5
+alias of 'monitor issues') keeps working during the deprecation: it
+prints a note to stderr and delegates to 'monitor issues <same
+args>'.`,
+		// DisableFlagParsing: the deprecated-alias check below has to run
+		// BEFORE anything tries to interpret args as THIS command's own
+		// flags -- `issues list`/`show`/etc. accept flags (--status,
+		// --since, --occurrences, ...) this command does not itself
+		// register, and cobra would otherwise reject the whole invocation
+		// with "unknown flag" before RunE ever ran, never reaching the
+		// delegation. The non-deprecated path below parses this command's
+		// OWN flags manually instead, once it knows it needs to.
+		DisableFlagParsing: true,
+		SilenceUsage:       true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rawID := strings.TrimSpace(args[0])
+			if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
+				return cmd.Help()
+			}
+			if len(args) > 0 && deprecatedIssuesAlias[strings.ToLower(args[0])] {
+				return runDeprecatedIssueAlias(cmd, args)
+			}
+			if err := cmd.Flags().Parse(args); err != nil {
+				return err
+			}
+			positional := cmd.Flags().Args()
+			if len(positional) == 0 {
+				return &issueCommandError{action: "issue", err: fmt.Errorf("id is required")}
+			}
+			if len(positional) > 1 {
+				return &issueCommandError{action: "issue", err: fmt.Errorf(
+					"accepts 1 arg (an id/prefix/\"latest\"), received %d -- did you mean `monitor issues %s`?", len(positional), positional[0])}
+			}
+			rawID := strings.TrimSpace(positional[0])
 			if rawID == "" {
 				return &issueCommandError{action: "issue", err: fmt.Errorf("id is required")}
 			}
@@ -1001,7 +1166,11 @@ func writeCulpritSection(w io.Writer, culprit *explain.CulpritInfo) error {
 	if culprit.Source == "message_search" {
 		suffix = fmt.Sprintf("  inferred from message · via %s · confidence %s", culprit.Via, culprit.Confidence)
 	}
-	if _, err := fmt.Fprintf(w, "CULPRIT  %s in %s()%s\n", loc, culprit.Function, suffix); err != nil {
+	fn := ""
+	if culprit.Function != "" {
+		fn = fmt.Sprintf(" in %s()", culprit.Function)
+	}
+	if _, err := fmt.Fprintf(w, "CULPRIT  %s%s%s\n", loc, fn, suffix); err != nil {
 		return err
 	}
 	if culprit.Snippet == nil {

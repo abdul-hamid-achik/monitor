@@ -92,7 +92,11 @@ func TestIssuesListFiltersLimitsAndRendersHumanOutput(t *testing.T) {
 		t.Fatalf("filtered issues = %+v, want %s", got, newest.ID)
 	}
 
-	human, err := executeIssuesCommand(t, path, "list")
+	// --all: this test's own ambient working directory (wherever `go test`
+	// happens to run from) must never affect which of these seeded issues
+	// show up -- see TestIssuesListDefaultsToCurrentProject for the
+	// dedicated coverage of the default-to-current-project behavior itself.
+	human, err := executeIssuesCommand(t, path, "list", "--all")
 	if err != nil {
 		t.Fatalf("human list: %v", err)
 	}
@@ -105,7 +109,7 @@ func TestIssuesListFiltersLimitsAndRendersHumanOutput(t *testing.T) {
 		}
 	}
 	// Bare `monitor issues` (no "list") renders identically.
-	bare, err := executeIssuesCommand(t, path)
+	bare, err := executeIssuesCommand(t, path, "--all")
 	if err != nil {
 		t.Fatalf("bare issues: %v", err)
 	}
@@ -144,7 +148,7 @@ func TestIssuesListWindowFlags(t *testing.T) {
 	}
 	closeIssueCLIStore(t, store)
 
-	output, err := executeIssuesCommand(t, path, "list", "--kind", "exception", "--json")
+	output, err := executeIssuesCommand(t, path, "list", "--all", "--kind", "exception", "--json")
 	if err != nil {
 		t.Fatalf("list --kind exception: %v", err)
 	}
@@ -156,7 +160,7 @@ func TestIssuesListWindowFlags(t *testing.T) {
 		t.Fatalf("--kind exception = %+v, want only %s", got, exIssue.ID)
 	}
 
-	output, err = executeIssuesCommand(t, path, "list", "--run-id", "run-a", "--json")
+	output, err = executeIssuesCommand(t, path, "list", "--all", "--run-id", "run-a", "--json")
 	if err != nil {
 		t.Fatalf("list --run-id: %v", err)
 	}
@@ -167,7 +171,7 @@ func TestIssuesListWindowFlags(t *testing.T) {
 		t.Fatalf("--run-id run-a = %+v, want both issues", got)
 	}
 
-	output, err = executeIssuesCommand(t, path, "list", "--release", "rel-a", "--json")
+	output, err = executeIssuesCommand(t, path, "list", "--all", "--release", "rel-a", "--json")
 	if err != nil {
 		t.Fatalf("list --release: %v", err)
 	}
@@ -178,7 +182,7 @@ func TestIssuesListWindowFlags(t *testing.T) {
 		t.Fatalf("--release rel-a = %+v, want only %s", got, exIssue.ID)
 	}
 
-	output, err = executeIssuesCommand(t, path, "list", "--since", "24h", "--json")
+	output, err = executeIssuesCommand(t, path, "list", "--all", "--since", "24h", "--json")
 	if err != nil {
 		t.Fatalf("list --since 24h: %v", err)
 	}
@@ -189,7 +193,7 @@ func TestIssuesListWindowFlags(t *testing.T) {
 		t.Fatalf("--since 24h = %+v, want both issues (seeded 1h ago)", got)
 	}
 
-	output, err = executeIssuesCommand(t, path, "list", "--since", "1m", "--json")
+	output, err = executeIssuesCommand(t, path, "list", "--all", "--since", "1m", "--json")
 	if err != nil {
 		t.Fatalf("list --since 1m: %v", err)
 	}
@@ -203,7 +207,7 @@ func TestIssuesListWindowFlags(t *testing.T) {
 	// --until N means "active at/before N ago": a bound OLDER than the
 	// issues' first_seen (1h ago) excludes them (their whole window starts
 	// after the bound); a bound more RECENT than first_seen includes them.
-	output, err = executeIssuesCommand(t, path, "list", "--until", "2h", "--json")
+	output, err = executeIssuesCommand(t, path, "list", "--all", "--until", "2h", "--json")
 	if err != nil {
 		t.Fatalf("list --until 2h: %v", err)
 	}
@@ -214,7 +218,7 @@ func TestIssuesListWindowFlags(t *testing.T) {
 		t.Fatalf("--until 2h = %+v, want none (both issues' first_seen is 1h ago, after the 2h-ago bound)", got)
 	}
 
-	output, err = executeIssuesCommand(t, path, "list", "--until", "30m", "--json")
+	output, err = executeIssuesCommand(t, path, "list", "--all", "--until", "30m", "--json")
 	if err != nil {
 		t.Fatalf("list --until 30m: %v", err)
 	}
@@ -659,7 +663,7 @@ func TestIssuesAtExactLineFallbackWhenCodemapUnavailable(t *testing.T) {
 	wantMatch := seedCLIException(t, storePath, root, "src/app.go", 4, "a", now)
 	seedCLIException(t, storePath, root, "src/app.go", 8, "b", now) // different line, must not match
 
-	out, err := executeIssuesCommand(t, storePath, "--at", "src/app.go:4", "--root", root, "--json")
+	out, err := executeIssuesCommand(t, storePath, "--at", "src/app.go:4", "--root", root, "--all", "--json")
 	if err != nil {
 		t.Fatalf("issues --at: %v\n%s", err, out)
 	}
@@ -684,21 +688,182 @@ func TestIssuesAtHumanOutputAndNoMatch(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "issues.veclite")
 	seedCLIException(t, storePath, root, "src/app.go", 1, "f", time.Now().UTC())
 
-	human, err := executeIssuesCommand(t, storePath, "--at", "src/app.go:1", "--root", root)
+	human, err := executeIssuesCommand(t, storePath, "--at", "src/app.go:1", "--root", root, "--all")
 	if err != nil {
 		t.Fatalf("issues --at (human): %v\n%s", err, human)
 	}
-	for _, want := range []string{"LINE", "ID", "codemap unavailable"} {
+	for _, want := range []string{"LINE", "ID", "no range resolved"} {
 		if !strings.Contains(human, want) {
 			t.Errorf("human --at output missing %q:\n%s", want, human)
 		}
 	}
 
-	none, err := executeIssuesCommand(t, storePath, "--at", "src/other.go:1", "--root", root)
+	none, err := executeIssuesCommand(t, storePath, "--at", "src/other.go:1", "--root", root, "--all")
 	if err != nil {
 		t.Fatalf("issues --at (no match): %v", err)
 	}
 	if strings.Contains(none, "LINE\tID") {
 		t.Errorf("expected no table for a non-matching --at target:\n%s", none)
+	}
+}
+
+// TestIssueDeprecatedSubcommandsDelegateToIssues covers `monitor issue
+// list|show|resolve|...` -- the pre-E2.5 alias of `monitor issues` -- still
+// working during the deprecation by delegating to a real `monitor issues
+// <same args>` invocation (runDeprecatedIssueAlias), instead of failing with
+// "issue list not found" or a stray-args error.
+func TestIssueDeprecatedSubcommandsDelegateToIssues(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	store := openIssueCLIStore(t, storePath)
+	issue, _, err := store.UpsertOccurrence(issues.OccurrenceInput{
+		ObservedAt: time.Now().UTC(), Project: "polyglot", Message: "boom",
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	closeIssueCLIStore(t, store)
+
+	// --store goes AFTER the deprecated subcommand name (e.g. "monitor
+	// issue list --store X"), same as every pre-E2.5 example: newIssueCmd's
+	// deprecation check only looks at the FIRST raw arg (see its own doc
+	// comment), so a global-style flag placed before the subcommand name
+	// falls through to the (non-deprecated) single-id parsing path instead.
+	run := func(args ...string) (stdout, stderr string, err error) {
+		t.Helper()
+		cmd := newIssueCmd()
+		var out, errOut bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&errOut)
+		cmd.SetArgs(append(append([]string{}, args...), "--store", storePath))
+		err = cmd.Execute()
+		return out.String(), errOut.String(), err
+	}
+
+	out, errOut, err := run("list", "--all", "--json")
+	if err != nil {
+		t.Fatalf("issue list: %v", err)
+	}
+	if !strings.Contains(out, issue.ID) {
+		t.Fatalf("issue list output = %q, want it to contain %s", out, issue.ID)
+	}
+	if !strings.Contains(errOut, "deprecated") {
+		t.Errorf("stderr = %q, want a deprecation note", errOut)
+	}
+
+	out, _, err = run("show", issue.ID, "--json")
+	if err != nil {
+		t.Fatalf("issue show: %v\n%s", err, out)
+	}
+	var detail struct {
+		Issue issues.Issue `json:"issue"`
+	}
+	if jsonErr := json.Unmarshal([]byte(out), &detail); jsonErr != nil {
+		t.Fatalf("decode: %v (%s)", jsonErr, out)
+	}
+	if detail.Issue.ID != issue.ID {
+		t.Fatalf("issue show = %+v, want %s", detail.Issue, issue.ID)
+	}
+
+	out, _, err = run("resolve", issue.ID, "--json")
+	if err != nil {
+		t.Fatalf("issue resolve: %v\n%s", err, out)
+	}
+	var mutated struct {
+		Issue issues.Issue `json:"issue"`
+	}
+	if jsonErr := json.Unmarshal([]byte(out), &mutated); jsonErr != nil {
+		t.Fatalf("decode: %v (%s)", jsonErr, out)
+	}
+	if mutated.Issue.Status != issues.StatusResolved {
+		t.Fatalf("status after issue resolve = %q, want resolved", mutated.Issue.Status)
+	}
+}
+
+// TestIssueTooManyPositionalArgsIsAFriendlyError: a NON-deprecated first
+// argument followed by extra positional args (not a typo'd `issues`
+// subcommand) still gets a clear error instead of a generic cobra one.
+func TestIssueTooManyPositionalArgsIsAFriendlyError(t *testing.T) {
+	cmd := newIssueCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetArgs([]string{"a07e", "extra"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "did you mean") {
+		t.Fatalf("err = %v, want a friendly too-many-args error", err)
+	}
+}
+
+// TestIssuesListDefaultsToCurrentProject is the dedicated coverage for
+// "monitor issues sin argumentos lista el proyecto actual": bare `monitor
+// issues` (and `issues list`, with neither --project nor --all) lists only
+// the project resolved from the current working directory; --all restores
+// the old "every project" behavior.
+func TestIssuesListDefaultsToCurrentProject(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	store := openIssueCLIStore(t, storePath)
+	now := time.Now().UTC()
+	current, _, err := store.UpsertOccurrence(issues.OccurrenceInput{
+		ObservedAt: now, Project: "acme-project", Message: "here",
+	})
+	if err != nil {
+		t.Fatalf("seed current-project issue: %v", err)
+	}
+	other, _, err := store.UpsertOccurrence(issues.OccurrenceInput{
+		ObservedAt: now.Add(time.Minute), Project: "other-project", Message: "elsewhere",
+	})
+	if err != nil {
+		t.Fatalf("seed other-project issue: %v", err)
+	}
+	closeIssueCLIStore(t, store)
+
+	// project.Resolve derives the slug from the git root's basename -- an
+	// isolated dir named exactly "acme-project" with a bare .git marker is
+	// enough (findGitRoot only stats for .git; it never needs a real repo).
+	cwd := filepath.Join(t.TempDir(), "acme-project")
+	if err := os.MkdirAll(filepath.Join(cwd, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+
+	output, err := executeIssuesCommand(t, storePath, "list", "--json")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var got []issues.Issue
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("decode: %v (%s)", err, output)
+	}
+	if len(got) != 1 || got[0].ID != current.ID {
+		t.Fatalf("default list = %+v, want only the current project's issue %s (not %s)", got, current.ID, other.ID)
+	}
+
+	all, err := executeIssuesCommand(t, storePath, "list", "--all", "--json")
+	if err != nil {
+		t.Fatalf("list --all: %v", err)
+	}
+	var gotAll []issues.Issue
+	if err := json.Unmarshal([]byte(all), &gotAll); err != nil {
+		t.Fatal(err)
+	}
+	if len(gotAll) != 2 {
+		t.Fatalf("list --all = %+v, want both issues", gotAll)
+	}
+
+	// The human header names the defaulted project (writeIssuesListHeader).
+	human, err := executeIssuesCommand(t, storePath, "list")
+	if err != nil {
+		t.Fatalf("human list: %v", err)
+	}
+	if !strings.Contains(human, "acme-project") {
+		t.Errorf("human list header = %q, want it to name the defaulted current project", human)
+	}
+
+	// Bare `monitor issues` (no "list") behaves the same way.
+	bare, err := executeIssuesCommand(t, storePath)
+	if err != nil {
+		t.Fatalf("bare issues: %v", err)
+	}
+	if bare != human {
+		t.Fatalf("bare issues output differs from issues list:\nbare:\n%s\nlist:\n%s", bare, human)
 	}
 }
