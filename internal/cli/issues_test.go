@@ -796,8 +796,13 @@ func TestIssueTooManyPositionalArgsIsAFriendlyError(t *testing.T) {
 // TestIssuesListDefaultsToCurrentProject is the dedicated coverage for
 // "monitor issues sin argumentos lista el proyecto actual": bare `monitor
 // issues` (and `issues list`, with neither --project nor --all) lists only
-// the project resolved from the current working directory; --all restores
-// the old "every project" behavior.
+// the project resolved from the current working directory in the HUMAN
+// view; --all restores the old "every project" behavior. --json is
+// deliberately UNAFFECTED by this default: it is the machine/scripting path
+// (specs, an agent's own tooling) that has always meant "every project
+// matching every other explicit filter", and silently narrowing that by
+// cwd would make an unchanged script's answer depend on which directory it
+// happened to run from.
 func TestIssuesListDefaultsToCurrentProject(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "issues.veclite")
 	store := openIssueCLIStore(t, storePath)
@@ -825,37 +830,42 @@ func TestIssuesListDefaultsToCurrentProject(t *testing.T) {
 	}
 	t.Chdir(cwd)
 
+	// --json: unaffected by cwd, still lists both projects by default.
 	output, err := executeIssuesCommand(t, storePath, "list", "--json")
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatalf("list --json: %v", err)
 	}
 	var got []issues.Issue
 	if err := json.Unmarshal([]byte(output), &got); err != nil {
 		t.Fatalf("decode: %v (%s)", err, output)
 	}
-	if len(got) != 1 || got[0].ID != current.ID {
-		t.Fatalf("default list = %+v, want only the current project's issue %s (not %s)", got, current.ID, other.ID)
+	if len(got) != 2 {
+		t.Fatalf("default --json list = %+v, want BOTH issues (unaffected by cwd)", got)
 	}
 
-	all, err := executeIssuesCommand(t, storePath, "list", "--all", "--json")
-	if err != nil {
-		t.Fatalf("list --all: %v", err)
-	}
-	var gotAll []issues.Issue
-	if err := json.Unmarshal([]byte(all), &gotAll); err != nil {
-		t.Fatal(err)
-	}
-	if len(gotAll) != 2 {
-		t.Fatalf("list --all = %+v, want both issues", gotAll)
-	}
-
-	// The human header names the defaulted project (writeIssuesListHeader).
+	// The human view (no --json) defaults to the current project.
 	human, err := executeIssuesCommand(t, storePath, "list")
 	if err != nil {
 		t.Fatalf("human list: %v", err)
 	}
+	if !strings.Contains(human, shortIssueID(current.ID)) {
+		t.Errorf("human list = %q, want it to contain the current-project issue %s", human, current.ID)
+	}
+	if strings.Contains(human, shortIssueID(other.ID)) {
+		t.Errorf("human list = %q, want it to EXCLUDE the other-project issue %s by default", human, other.ID)
+	}
+	// The human header names the defaulted project (writeIssuesListHeader).
 	if !strings.Contains(human, "acme-project") {
 		t.Errorf("human list header = %q, want it to name the defaulted current project", human)
+	}
+
+	// --all restores "every project" in the human view too.
+	humanAll, err := executeIssuesCommand(t, storePath, "list", "--all")
+	if err != nil {
+		t.Fatalf("human list --all: %v", err)
+	}
+	if !strings.Contains(humanAll, shortIssueID(current.ID)) || !strings.Contains(humanAll, shortIssueID(other.ID)) {
+		t.Fatalf("human list --all = %q, want both issues", humanAll)
 	}
 
 	// Bare `monitor issues` (no "list") behaves the same way.

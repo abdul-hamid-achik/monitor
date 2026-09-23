@@ -139,9 +139,15 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 			// CURRENT project only (roadmap: "issues sin argumentos lista
 			// el proyecto actual") -- without this, a store holding several
 			// projects' issues silently mixed all of them into one list
-			// regardless of which checkout the command ran from.
+			// regardless of which checkout the command ran from. Scoped to
+			// the HUMAN view only: --json is the machine/scripting path
+			// (specs, MCP-adjacent tooling, an agent's own `issues --json`
+			// call) that has always defaulted to "every project matching
+			// every OTHER explicit filter" -- silently narrowing THAT by
+			// cwd would break any script or spec invoking it from a fixed
+			// checkout without expecting a directory-dependent answer.
 			effectiveProject := strings.TrimSpace(projectFlag)
-			if effectiveProject == "" && !all {
+			if effectiveProject == "" && !all && !JSONOutput(cmd) {
 				// PID: 1 is a positive, non-real PID purely to steer
 				// project.Resolve's OWN "PID<=0 means a host-wide,
 				// no-process event" special case (Hints.PID's doc comment)
@@ -1050,10 +1056,13 @@ args>'.`,
 // TestPrintAmbiguousIssueErrorHumanAndJSON exercise the printed output
 // in-process without terminating the test binary). store.ResolveID's own
 // ambiguity detection (which frame is ambiguous) is covered deterministically
-// in internal/issues/resolve_id_test.go via a crafted fingerprint collision;
-// a REAL fingerprint hash collision is not reproducible enough to script as
-// a black-box spec, so the literal process-level exit(2) path is untested
-// beyond that -- the same gap resolve.go's own ambiguous-leaf path has.
+// in internal/issues/resolve_id_test.go via a crafted fingerprint collision.
+// The literal process-level exit(2) path IS also covered black-box, by
+// specs/issues_context.yml's ambiguous_short_prefix_exits_2: a 1-char
+// prefix is easy to collide deterministically without any crafted hash --
+// seed enough (>16, the hex alphabet's size) distinct message-only issues
+// and, by the pigeonhole principle, at least two of their ids are
+// guaranteed to share a first hex character.
 func printAmbiguousIssueError(cmd *cobra.Command, id string, ambiguous *issues.AmbiguousIDError) {
 	if JSONOutput(cmd) {
 		_ = writeIssueJSON(cmd.OutOrStdout(), map[string]any{
