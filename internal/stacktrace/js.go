@@ -38,6 +38,9 @@ var (
 	// The same header after a console.error prefix ("request failed:
 	// SyntaxError: ...") or a process-warning prefix ("(node:123) ...").
 	reJSHeaderPrefixed = regexp.MustCompile(`^(.*?\S)\s+(` + jsTypeExpr + `)(?: \[([\w.-]+)\])?: (.*)$`)
+	// util.inspect of an error with no stack of its own, e.g.
+	// "[AggregateError: All promises were rejected] {" (Promise.any).
+	reJSBracketHeader = regexp.MustCompile(`^\[(` + jsTypeExpr + `)(?: \[[\w.-]+\])?(?:: (.*))?\]( \{)?$`)
 	// Any "Name: msg" (Bun prints fs errors as "ENOENT: ..."; a custom
 	// class need not end in Error).
 	reJSTypeValue   = regexp.MustCompile(`^([A-Za-z_$][\w$.]*)(?: \[([\w.-]+)\])?: (.*)$`)
@@ -83,11 +86,16 @@ func jsSubOf(line string) (jsSub, bool) {
 		return jsSubBun, true
 	case reJSCLIError.MatchString(line):
 		return jsSubCLI, true
-	case reJSHeader.MatchString(line), reJSHeaderPrefixed.MatchString(line):
+	case reJSHeader.MatchString(line), reJSHeaderPrefixed.MatchString(line), reJSBracketHeader.MatchString(line):
 		return jsSubHeader, true
 	}
 	return 0, false
 }
+
+// jsMaxMessageLines bounds the tentative lines between an error line and
+// its first frame: long enough for an assertion diff or a JSON validation
+// report, and re-read as fresh input if no frame ever comes.
+const jsMaxMessageLines = 200
 
 func isJSFooter(line string) bool {
 	return reNodeFooter.MatchString(line) || reBunFooter.MatchString(line)
@@ -102,8 +110,11 @@ var jsRule = blockRule{
 	open: func(first string) grammar {
 		sub, _ := jsSubOf(first)
 		g := &jsGrammar{sub: sub, st: jsStMessage}
-		if sub == jsSubNode || sub == jsSubBun {
+		switch {
+		case sub == jsSubNode || sub == jsSubBun:
 			g.st = jsStPreamble
+		case reJSBracketHeader.MatchString(first) && strings.HasSuffix(first, " {"):
+			g.st, g.depth = jsStProps, 1
 		}
 		return g
 	},
@@ -132,6 +143,9 @@ type jsGrammar struct {
 	// unambiguous when the "Bun vX" footer closes the whole dump, so
 	// everything after the first block stays tentative until the footer.
 	inCause bool
+	// sawCaret: a Bun code frame's caret line was seen; the next line is
+	// the error line.
+	sawCaret bool
 }
 
 func (g *jsGrammar) next(line string, boundary bool) verdict {
@@ -150,21 +164,32 @@ func (g *jsGrammar) step(line string, boundary bool) verdict {
 	switch g.st {
 	case jsStPreamble:
 		if g.sub == jsSubBun {
+			// Numbered source lines, then the caret under the throw
+			// site, then the error line. Anything else -- a table
+			// row followed by text, a gutter with no caret -- is not
+			// a Bun code frame.
 			switch {
-			case reBunCodeFrame.MatchString(line), reJSCaretLine.MatchString(line):
+			case reJSCaretLine.MatchString(line):
+				g.sawCaret = true
+				return vAccept
+			case g.sawCaret && !blank:
+				g.sawCaret = false
+				g.st = jsStMessage // the error line
+				return vAccept
+			case !g.sawCaret && reBunCodeFrame.MatchString(line):
 				g.preamble++
 				if g.preamble > 16 {
 					return vReject
 				}
 				return vAccept
-			case blank:
-				return vReject
 			}
-			g.st = jsStMessage // the error line
-			return vAccept
+			return vReject
 		}
-		if reJSHeader.MatchString(line) {
+		if reJSHeader.MatchString(line) || reJSBracketHeader.MatchString(line) {
 			g.st = jsStMessage
+			if strings.HasSuffix(line, " {") {
+				g.st, g.depth = jsStProps, 1
+			}
 			return vAccept
 		}
 		g.preamble++
@@ -201,13 +226,20 @@ func (g *jsGrammar) step(line string, boundary bool) verdict {
 			return vAccept
 		case reDenoCausedBy.MatchString(line):
 			return vAccept
-		case g.sub != jsSubBun && !blank && !isIndented(line) && reJSHeader.MatchString(line):
-			return vReject // another error starts
+		case !blank && !isIndented(line) && (reJSHeader.MatchString(line) || reJSHeaderPrefixed.MatchString(line)):
+			// Another error starts ("TypeError: x", or a prefixed
+			// "request failed: TypeError: x", "(node:1) Warning: x").
+			return vReject
+		case reRubyHandledLine.MatchString(line):
+			// "ArgumentError: x" was a Ruby class/message line; its
+			// backtrace follows.
+			return vReject
 		}
-		// Message continuation, Deno/Bun source + caret lines, Bun
+		// Message continuation (a multi-line message, an assertion diff,
+		// a JSON validation report), Deno/Bun source + caret lines, Bun
 		// property lines: confirmed only by a frame or a footer.
 		g.msg++
-		if g.msg > 16 {
+		if g.msg > jsMaxMessageLines {
 			return vReject
 		}
 		return vTentative
@@ -226,6 +258,10 @@ func (g *jsGrammar) step(line string, boundary bool) verdict {
 			return vAccept
 		case blank:
 			g.st, g.blanks = jsStAfter, 1
+			return vTentative
+		case g.sub == jsSubBun && reBunCodeFrame.MatchString(line):
+			// Bun prints an AggregateError's siblings back to back.
+			g.startBunCause()
 			return vTentative
 		}
 		return vReject
@@ -247,13 +283,19 @@ func (g *jsGrammar) step(line string, boundary bool) verdict {
 			}
 			return vTentative
 		case g.sub == jsSubBun && reBunCodeFrame.MatchString(line):
-			g.inCause = true
-			g.st, g.preamble, g.msg = jsStPreamble, 1, 0
+			g.startBunCause()
 			return vTentative
 		}
 		return vReject
 	}
 	return vReject
+}
+
+// startBunCause switches to the next Bun code-frame block, which is linked
+// (and committed) only if the "Bun vX" footer of an uncaught crash follows.
+func (g *jsGrammar) startBunCause() {
+	g.inCause = true
+	g.st, g.preamble, g.msg, g.sawCaret = jsStPreamble, 1, 0, false
 }
 
 // frame records a frame line; one ending in " {" opens util.inspect's
@@ -292,6 +334,9 @@ func splitJSTypeValue(s string) (typ, val string) {
 	if m := reJSHeader.FindStringSubmatch(s); m != nil {
 		return m[1], m[3]
 	}
+	if m := reJSBracketHeader.FindStringSubmatch(s); m != nil {
+		return m[1], m[2]
+	}
 	if m := reJSTypeValue.FindStringSubmatch(s); m != nil {
 		return m[1], m[3]
 	}
@@ -325,12 +370,21 @@ func parseJS(block Block) *Exception {
 	}
 	outer := segs[0]
 
+	// "error: TypeError: x" is a printed report (deno test, a logger's
+	// "${level}: ${stack}"), not the runtime's own crash line, which is
+	// "error: Uncaught ..." for Deno and has a footer for Bun.
+	cliTyped := sub == jsSubCLI && reJSHeader.MatchString(reJSCLIError.FindStringSubmatch(lines[0])[1])
 	fatal := footer != "" || sub == jsSubNode || sub == jsSubDeno ||
-		(sub == jsSubCLI && len(outer.frames) > 0)
+		(sub == jsSubCLI && !cliTyped && len(outer.frames) > 0)
 	if len(outer.frames) == 0 {
 		switch sub {
 		case jsSubHeader:
-			return nil
+			// An error with no stack of its own is still an event when
+			// util.inspect printed it with properties
+			// ("[AggregateError: ...] {").
+			if !(reJSBracketHeader.MatchString(lines[0]) && strings.HasSuffix(lines[0], " {")) {
+				return nil
+			}
 		case jsSubCLI, jsSubBun:
 			if footer == "" {
 				return nil
@@ -403,7 +457,9 @@ func parseV8Segments(lines []string, sub jsSub) []jsSegment {
 		rest = strings.TrimPrefix(rest, "(in promise) ")
 		cur.typ, cur.val = splitJSTypeValue(rest)
 	case jsSubCLI:
-		if msg := reJSCLIError.FindStringSubmatch(lines[0])[1]; msg != "" {
+		if msg := reJSCLIError.FindStringSubmatch(lines[0])[1]; reJSHeader.MatchString(msg) {
+			cur.typ, cur.val = splitJSTypeValue(msg) // "error: TypeError: x"
+		} else if msg != "" {
 			cur.typ, cur.val = "Error", msg
 		} else {
 			// Bun's "error" + the inspected non-Error value, up to the
@@ -420,6 +476,8 @@ func parseV8Segments(lines []string, sub jsSub) []jsSegment {
 	case jsSubHeader:
 		if m := reJSHeader.FindStringSubmatch(lines[0]); m != nil {
 			cur.typ, cur.val = m[1], m[3]
+		} else if m := reJSBracketHeader.FindStringSubmatch(lines[0]); m != nil {
+			cur.typ, cur.val = m[1], m[2]
 		} else if m := reJSHeaderPrefixed.FindStringSubmatch(lines[0]); m != nil {
 			cur.typ, cur.val = m[2], m[4]
 		}
@@ -428,7 +486,7 @@ func parseV8Segments(lines []string, sub jsSub) []jsSegment {
 		// (or the printed value of a thrown non-Error).
 		h := -1
 		for i := 1; i < len(lines); i++ {
-			if reJSHeader.MatchString(lines[i]) {
+			if reJSHeader.MatchString(lines[i]) || reJSBracketHeader.MatchString(lines[i]) {
 				h = i
 				break
 			}
@@ -448,6 +506,8 @@ func parseV8Segments(lines []string, sub jsSub) []jsSegment {
 		cur.typ, cur.val = splitJSTypeValue(lines[h])
 		start = h + 1
 	}
+
+	cur.val = expandBracketValue(cur.val, lines[min(start, len(lines)):])
 
 	var segs []jsSegment
 	skipIndent := ""
@@ -487,6 +547,37 @@ func parseV8Segments(lines []string, sub jsSub) []jsSegment {
 	return segs
 }
 
+// maxExpandedValue caps a message rebuilt from several lines.
+const maxExpandedValue = 512
+
+// expandBracketValue handles a message whose first line is only an opening
+// "[" or "{" (a JSON validation report such as ZodError's): the value
+// becomes the message's lines up to the first frame, joined by spaces and
+// capped, instead of a lone bracket.
+func expandBracketValue(val string, rest []string) string {
+	if v := strings.TrimSpace(val); v != "[" && v != "{" {
+		return val
+	}
+	parts := []string{strings.TrimSpace(val)}
+	for _, l := range rest {
+		if reJSCaretLine.MatchString(l) {
+			// Deno prints the throwing source line, then the caret,
+			// after the message: the source line is not message.
+			if len(parts) > 1 {
+				parts = parts[:len(parts)-1]
+			}
+			break
+		}
+		if reJSFrameLine.MatchString(l) || reJSCause.MatchString(l) || isJSFooter(l) {
+			break
+		}
+		if t := strings.TrimSpace(l); t != "" {
+			parts = append(parts, t)
+		}
+	}
+	return truncateUTF8(strings.Join(parts, " "), maxExpandedValue)
+}
+
 // parseBunSegments reads Bun's printer: per exception (outer first, then
 // each cause), code-frame lines and a caret, the error line, optional
 // property lines, then frames.
@@ -513,6 +604,7 @@ func parseBunSegments(lines []string) []jsSegment {
 		} else {
 			seg.typ, seg.val = splitJSTypeValue(l)
 		}
+		seg.val = expandBracketValue(seg.val, lines[i:])
 		for i < len(lines) && !reBunCodeFrame.MatchString(lines[i]) && !isJSFooter(lines[i]) {
 			if f, ok := parseJSFrameLine(lines[i]); ok {
 				seg.frames = append(seg.frames, f)

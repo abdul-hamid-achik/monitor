@@ -1,0 +1,32 @@
+[0m[1m[31merror[0m: Uncaught (in promise) ZodError: [
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "undefined",
+    "path": [
+      "field0"
+    ],
+    "message": "Required"
+  },
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "undefined",
+    "path": [
+      "field1"
+    ],
+    "message": "Required"
+  },
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "undefined",
+    "path": [
+      "field2"
+    ],
+    "message": "Required"
+  }
+]
+    const e = new Error(JSON.stringify(issues, null, 2));
+[0m[31m              ^[0m
+    at [0m[2m[38;5;245mfile:///repo/app/[0m[0m[36mapp.js[0m:[0m[33m37[0m:[0m[33m15[0m
