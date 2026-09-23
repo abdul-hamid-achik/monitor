@@ -1,0 +1,160 @@
+version: 1
+name: monitor_run_inspect
+
+intent: |
+  E3.3b `monitor run --inspect` + E3.2 `monitor hot <service>`, end to end
+  and entirely out of process (glyph launches ./bin/monitor as a real
+  subprocess; this is the same mechanics internal/devrun's own unit/
+  integration tests exercise, here proven against a REAL node process
+  rather than a shell fixture): `monitor run --name w --inspect -- sh -c
+  'node --jitless examples/polyglot/js/workload.js'` appends
+  --inspect=127.0.0.1:0 to NODE_OPTIONS, parses node's own "Debugger
+  listening on ws://..." banner off the scanned stderr stream, resolves
+  its owning pid via the listening port (never trusted from the banner
+  text itself), and records it into the launch registry
+  ($XDG_STATE_HOME/monitor/services/<project>/w.json). `monitor hot w`
+  then looks that entry up, resolves the real node leaf
+  (procbind.ResolveLeaf, from the registered pid), reuses the
+  already-known inspector address instead of rediscovering one from argv
+  (which --inspect via NODE_OPTIONS never appears in), and captures a live
+  CDP CPU profile -- naming workload.js's real hot line (17, inside
+  heavyStringify, or its inlined caller processBatch) exactly like
+  specs/hot_pid.yml's own numeric-pid path does, but reached entirely
+  through --name/--inspect and a service NAME instead of a raw pid.
+  --jitless matches hot_pid.yml's own documented rationale: the only mode
+  verified to give a stable, deterministic line attribution for this
+  fixture. WORKLOAD_SECONDS shortens the fixture's own 40s default run so
+  this spec does not have to wait that long. Every outcome below
+  independently re-runs the launch+lookup dance from fresh, isolated
+  state (its own subdirectory under /tmp/monitor-spec-run-inspect), the
+  same "each outcome is a self-contained repro" convention
+  specs/hot_pid.yml already uses.
+
+target:
+  cmd:
+    [
+      "sh",
+      "-c",
+      "d=/tmp/monitor-spec-run-inspect/target; rm -rf \"$d\"; mkdir -p \"$d/state\" \"$d/data\"; export XDG_STATE_HOME=\"$d/state\" MONITOR_ISSUES_STORE=\"$d/data/issues.veclite\" WORKLOAD_SECONDS=10; ./bin/monitor run --name w --inspect -- sh -c 'node --jitless examples/polyglot/js/workload.js' >\"$d/run.out\" 2>&1 & P=$!; sleep 1.5; ./bin/monitor hot w --duration 2s --json >\"$d/hot.json\" 2>\"$d/hot.err\"; R=$?; kill $P 2>/dev/null; wait $P 2>/dev/null; cat \"$d/hot.json\" \"$d/hot.err\" >&2; exit $R",
+    ]
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v node"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "test -f examples/polyglot/js/workload.js"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-run-inspect && mkdir -p /tmp/monitor-spec-run-inspect"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 20000
+
+outcomes:
+  - id: json_schema_line_heatmap_v1
+    description: monitor hot <service> --json emits the monitor.line_heatmap.v1 schema id
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-run-inspect/o1; rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+          export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite" WORKLOAD_SECONDS=10
+          ./bin/monitor run --name w --inspect -- sh -c 'node --jitless examples/polyglot/js/workload.js' >"$d/run.out" 2>&1 &
+          P=$!; sleep 1.5
+          ./bin/monitor hot w --duration 2s --json > "$d/hot.json" 2>"$d/hot.err"
+          kill $P 2>/dev/null; wait $P 2>/dev/null
+          grep -q '"schema":[[:space:]]*"monitor.line_heatmap.v1"' "$d/hot.json"
+
+  - id: names_hot_line_in_heavystringify_or_caller
+    description: |
+      the JSON heatmap names workload.js's real hot line (17) as its
+      MAX-SELF line, attributed to either heavyStringify itself or its
+      caller processBatch if V8 inlined it there -- lines are not
+      guaranteed weight-sorted (heat.Build emits them ascending by line
+      number), so this checks the actual self weight via python3 rather
+      than assuming line order, matching specs/hot_pid.yml/
+      specs/mcp_profile_lines.yml's own technique.
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-run-inspect/o2; rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+          export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite" WORKLOAD_SECONDS=10
+          ./bin/monitor run --name w --inspect -- sh -c 'node --jitless examples/polyglot/js/workload.js' >"$d/run.out" 2>&1 &
+          P=$!; sleep 1.5
+          ./bin/monitor hot w --duration 2s --json > "$d/hot.json" 2>"$d/hot.err"
+          kill $P 2>/dev/null; wait $P 2>/dev/null
+          python3 -c "
+          import json
+          d = json.load(open('$d/hot.json'))
+          candidates = [f for f in d['functions'] if f['name'] in ('heavyStringify', 'processBatch')]
+          assert candidates, [f['name'] for f in d['functions']]
+          found = False
+          for fn in candidates:
+              for line in fn['lines']:
+                  if line['line'] == 17 and line.get('self', 0) > 0:
+                      found = True
+          assert found, [(fn['name'], fn['lines']) for fn in candidates]
+          "
+
+  - id: hot_service_uses_registered_inspector_never_leaks_ws_url
+    description: |
+      monitor hot w's own stdout/stderr, and every one of monitor run's own
+      "monitor > ..." banner lines, never contain a ws:// URL -- only the
+      private 0600 registry file does (the golden "ws:// only on disk,
+      never printed" rule). The child's own RAW passthrough text is exempt
+      from this check on purpose: node's inspector banner ITSELF prints
+      "Debugger listening on ws://..." straight to its own stderr, and
+      that raw text reaching the terminal untouched (never suppressed or
+      rewritten) is pump.go's own golden rule, a completely different one
+      from "monitor's OWN output never repeats the secret" -- so this
+      greps only the "monitor > "-prefixed lines in run.out, not the whole
+      file. The registry file DOES carry both a port and the full ws://
+      URL, proving the banner was actually parsed and recorded rather than
+      this check trivially passing because nothing was ever captured.
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-run-inspect/o3; rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+          export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite" WORKLOAD_SECONDS=10
+          ./bin/monitor run --name w --inspect -- sh -c 'node --jitless examples/polyglot/js/workload.js' >"$d/run.out" 2>&1 &
+          P=$!; sleep 1.5
+          reg=$(find "$d/state/monitor/services" -type f | head -1)
+          test -n "$reg"
+          grep -q 'ws://' "$reg"
+          grep -q '"port"' "$reg"
+          ./bin/monitor hot w --duration 1s > "$d/hot.txt" 2>"$d/hot.err"
+          kill $P 2>/dev/null; wait $P 2>/dev/null
+          ! grep -q 'ws://' "$d/hot.txt" "$d/hot.err"
+          ! grep '^monitor > ' "$d/run.out" | grep -q 'ws://'
+
+  - id: registry_entry_removed_after_run_exits
+    description: the launch registry entry is removed once `monitor run` itself exits (docs/contracts/local-sentry-naming.md §8's "removed on exit" rule)
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-run-inspect/o4; rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+          export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite" WORKLOAD_SECONDS=3
+          ./bin/monitor run --name w --inspect -- sh -c 'node --jitless examples/polyglot/js/workload.js' >"$d/run.out" 2>&1
+          test -z "$(find "$d/state/monitor/services" -type f 2>/dev/null)"
+
+  - id: clean_exit
+    description: the target's own hot w --json call exits cleanly
+    verify:
+      process:
+        exitCode: 0

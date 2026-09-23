@@ -1,0 +1,138 @@
+version: 1
+name: monitor_run_nested
+
+intent: |
+  docs/contracts/local-sentry-naming.md §2/§5's nesting rule, and its own
+  FIX (MONITOR_LAUNCH_ROOT is seeded from the launch's own ID when NOT
+  nested, never a shared directory): a NESTED `monitor run -- monitor run
+  -- <crasher>` must still fold into exactly ONE occurrence (the inner
+  launch inherits the outer's MONITOR_LAUNCH_ROOT unchanged, so both the
+  outer's own detector -- which sees the SAME raw panic text via the
+  inner monitor's own terminal passthrough -- and the inner's detector
+  compute the identical live DedupeKey and the second write dedupes),
+  while TWO INDEPENDENT, sibling (non-nested) `monitor run --` launches of
+  the exact same crasher, run one after another from the SAME shell, must
+  record TWO separate occurrences -- each mints its own fresh
+  MONITOR_LAUNCH_ID/ROOT, so their DedupeKeys never collide even though
+  they are the same binary crashing with textually identical output. This
+  is the fix's own regression test: before it, MONITOR_LAUNCH_ROOT
+  defaulted to a directory (git root/cwd) for an unnested launch, so the
+  sibling scenario below would have WRONGLY deduped down to 1 occurrence
+  too, silently undercounting two real, independent crashes.
+
+target:
+  cmd: ["./bin/monitor", "--version"]
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v go"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-run-nested && mkdir -p /tmp/monitor-spec-run-nested"
+      timeoutMs: 5000
+    - run: "(cd examples/polyglot/go-crash && go build -o /tmp/monitor-spec-run-nested/go-crash .)"
+      timeoutMs: 60000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: nested_run_records_exactly_one_occurrence
+    description: |
+      `monitor run -- monitor run -- <go-crash>` (the outer wraps the
+      inner, which wraps the actual crasher) records exactly ONE
+      occurrence of the panic, not two -- the inner launch's
+      MONITOR_LAUNCH_ROOT is inherited unchanged from the outer's, so
+      both detectors' live DedupeKeys agree and the store's dedupe lookup
+      folds the second write away.
+    timeoutMs: 20000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-run-nested/nested; rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+          export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite"
+          ./bin/monitor run -- ./bin/monitor run -- /tmp/monitor-spec-run-nested/go-crash >"$d/run.out" 2>&1
+          ./bin/monitor issues list --json > "$d/issues.json"
+          python3 -c "
+          import json
+          d = json.load(open('$d/issues.json'))
+          assert len(d) == 1, d
+          assert d[0]['occurrence_count'] == 1, d[0]
+          assert d[0]['culprit']['line'] == 11, d[0].get('culprit')
+          "
+
+  - id: two_independent_sibling_launches_record_two_occurrences
+    description: |
+      two SEPARATE, non-nested `monitor run -- <go-crash>` invocations
+      (run one after the other from the same shell, sharing no
+      MONITOR_LAUNCH_ROOT) against the SAME store record TWO occurrences
+      of the identical panic, in ONE issue (same fingerprint) -- the FIX 1
+      regression: before it, both launches' MONITOR_LAUNCH_ROOT defaulted
+      to the same directory (this repo's cwd), so their live DedupeKeys
+      collided and the second occurrence silently deduped away.
+    timeoutMs: 20000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-run-nested/siblings; rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+          export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite"
+          ./bin/monitor run -- /tmp/monitor-spec-run-nested/go-crash >"$d/run1.out" 2>&1
+          ./bin/monitor run -- /tmp/monitor-spec-run-nested/go-crash >"$d/run2.out" 2>&1
+          ./bin/monitor issues list --json > "$d/issues.json"
+          python3 -c "
+          import json
+          d = json.load(open('$d/issues.json'))
+          assert len(d) == 1, d
+          assert d[0]['occurrence_count'] == 2, d[0]
+          "
+
+  - id: nested_launch_inherits_root_child_env
+    description: |
+      the OUTER launch's own minted MONITOR_LAUNCH_ROOT (observed at the
+      outer sh, BEFORE it execs the inner `monitor run --`) is the exact
+      same value the INNER launch's own child later sees (observed at a
+      second, independent sh, AFTER the inner launch re-processed its
+      environment) -- a direct proof that inheritance actually happened
+      end to end, not merely that occurrence dedup folded two coincidentally
+      different roots together.
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-run-nested/envcheck; rm -rf "$d"; mkdir -p "$d"
+          OUT=$(./bin/monitor run -- sh -c 'echo "OUTER=$MONITOR_LAUNCH_ROOT"; exec ./bin/monitor run -- sh -c "echo INNER=\$MONITOR_LAUNCH_ROOT"')
+          outer_root=$(echo "$OUT" | grep '^OUTER=' | sed 's/^OUTER=//')
+          inner_root=$(echo "$OUT" | grep '^INNER=' | sed 's/^INNER=//')
+          test -n "$outer_root"
+          test -n "$inner_root"
+          test "$outer_root" = "$inner_root"
+
+  - id: independent_launches_mint_different_roots
+    description: two independent (non-nested) `monitor run --` invocations mint two DIFFERENT MONITOR_LAUNCH_ROOT values -- FIX 1's own direct env-level proof, complementing the occurrence-count behavioral test above
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          r1=$(./bin/monitor run -- sh -c 'echo $MONITOR_LAUNCH_ROOT')
+          r2=$(./bin/monitor run -- sh -c 'echo $MONITOR_LAUNCH_ROOT')
+          test -n "$r1"
+          test -n "$r2"
+          test "$r1" != "$r2"
+
+  - id: clean_exit
+    description: the baseline target command exits cleanly
+    verify:
+      process:
+        exitCode: 0

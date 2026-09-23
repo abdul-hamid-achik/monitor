@@ -1,0 +1,222 @@
+version: 1
+name: monitor_hot_service
+
+intent: |
+  E3.2's own two "hecho cuando" scenarios, entirely out of process against
+  real wrapped launches: `monitor hot <service>` must resolve through a
+  wrapper to the REAL runtime leaf, using the launch registry's pid as the
+  BFS root (procbind.ResolveLeaf) -- the exact thing a symbolic <service>
+  name buys over a numeric pid (which the caller would have to already
+  know, defeating the point of naming a service).
+
+  Node: `monitor run --name w --inspect -- sh -c 'node
+  examples/polyglot/js/workload.js & wait'` -- the "& wait" forces sh to
+  fork a genuine child instead of exec-optimizing into node with the SAME
+  pid (specs/resolve_descendant.yml's own documented technique for this
+  exact reason: many sh implementations replace their own process image
+  for a single simple command with no further shell work left, which
+  would trivially "resolve" without ever exercising the wrapper-skip at
+  all). `monitor hot w` must then profile the node CHILD -- reusing its
+  already-registered --inspect banner instead of rediscovering one from
+  argv, which --inspect via NODE_OPTIONS never appears in -- not the sh
+  wrapper (which has no inspector and is not even a supported leaf
+  runtime).
+
+  Go: `monitor run --name q --scan both -- go run
+  examples/polyglot/go-pprof` (zap/pkg-errors-style Go services print to
+  stdout, hence --scan both, per the naming ADR's §3) launches the `go`
+  toolchain, which execs a compiled CHILD binary under a NEW pid.
+  `monitor hot q` must resolve to the COMPILED CHILD (tree.go's
+  looksLikeGoRunBinary reclassification), not the `go` toolchain process
+  itself (which classifyRuntime would otherwise misreport as runtime go
+  too, per bind.go's own bare-"go"-name rule). No --pprof-addr is passed,
+  so the default localhost:6060 is used and finds nothing listening
+  (go-pprof's own net/http/pprof server binds 127.0.0.1:6069, not the
+  default) -- this is deliberate: it exercises E3.2's OWN documented
+  fallback for this exact shape ("monitor hot q samples the compiled
+  child, not the go tool"), the macOS `sample` path, not a live pprof
+  scrape.
+
+  A third scenario covers the "never guess" contract: an unregistered
+  service name exits 2 and lists every service actually registered (and
+  alive) for the project -- proven the same out-of-process,
+  os.Exit(2)-respecting way specs already handle exit codes throughout
+  this repo (steps/process verifiers, never asserting on it from inside a
+  Go test).
+
+target:
+  cmd: ["./bin/monitor", "--version"]
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v node"
+      timeoutMs: 5000
+    - run: "command -v go"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "test -f examples/polyglot/js/workload.js"
+      timeoutMs: 5000
+    - run: "test -f examples/polyglot/go-pprof/main.go"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-hot-service && mkdir -p /tmp/monitor-spec-hot-service"
+      timeoutMs: 5000
+    # Warm the build cache so the real `go run .` in the go outcome below
+    # starts fast (process startup only, no compile-on-first-use jitter
+    # eating into the fixed sleep window) -- matches specs/hot_go_heap.yml's
+    # own precondition for the identical reason.
+    - run: "cd examples/polyglot/go-pprof && go build -o /tmp/monitor-spec-hot-service-warm . && rm -f /tmp/monitor-spec-hot-service-warm"
+      timeoutMs: 60000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: node_service_resolves_wrapped_child_via_registered_inspector
+    description: |
+      `monitor hot w` profiles the node child under an sh wrapper, naming
+      workload.js's real hot line (17, heavyStringify or its inlined
+      caller processBatch) -- not merely "runtime node somewhere", the
+      same actual-self-weight technique specs/hot_pid.yml/
+      specs/run_inspect.yml use, applied here through the registry+wrapper
+      path instead of a raw pid.
+    timeoutMs: 20000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-hot-service/node; rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+          export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite" WORKLOAD_SECONDS=10
+          ./bin/monitor run --name w --inspect -- sh -c 'node --jitless examples/polyglot/js/workload.js & wait' >"$d/run.out" 2>&1 &
+          P=$!; sleep 2
+          ./bin/monitor hot w --duration 2s --json > "$d/hot.json" 2>"$d/hot.err"
+          kill $P 2>/dev/null; wait $P 2>/dev/null
+          python3 -c "
+          import json
+          d = json.load(open('$d/hot.json'))
+          assert d['schema'] == 'monitor.line_heatmap.v1', d.get('schema')
+          candidates = [f for f in d['functions'] if f['name'] in ('heavyStringify', 'processBatch')]
+          assert candidates, [f['name'] for f in d['functions']]
+          found = False
+          for fn in candidates:
+              for line in fn['lines']:
+                  if line['line'] == 17 and line.get('self', 0) > 0:
+                      found = True
+          assert found, [(fn['name'], fn['lines']) for fn in candidates]
+          "
+
+  - id: node_service_header_shows_wrapper_and_registered_inspector
+    description: the human header names the sh wrapper's pid in a "child of" clause and shows "monitor run --inspect", per the roadmap's own mockup shape
+    timeoutMs: 20000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-hot-service/node2; rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+          export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite" WORKLOAD_SECONDS=10
+          ./bin/monitor run --name w --inspect -- sh -c 'node --jitless examples/polyglot/js/workload.js & wait' >"$d/run.out" 2>&1 &
+          P=$!; sleep 2
+          OUT=$(./bin/monitor hot w --duration 1s)
+          kill $P 2>/dev/null; wait $P 2>/dev/null
+          echo "$OUT" | head -1 | grep -q "^monitor > w = node pid"
+          echo "$OUT" | head -1 | grep -q "child of"
+          echo "$OUT" | head -1 | grep -q "monitor run --inspect"
+          ! echo "$OUT" | grep -q "ws://"
+
+  - id: go_service_resolves_compiled_child_via_sample_fallback
+    description: |
+      `monitor hot q` (no --pprof-addr; go-pprof's server is on a
+      non-default port, deliberately unreachable at the default
+      localhost:6060) resolves through the `go run` toolchain wrapper to
+      the COMPILED CHILD and falls back to the macOS `sample` method --
+      E3.2's own documented "samples the compiled child, not the go tool"
+      scenario. This asserts on a non-empty, real function-level result
+      (never an empty/degenerate heatmap), retrying a few fresh attempts
+      when a given 1s sample window happens to land entirely between
+      go-pprof's 40ms work bursts: darwin `sample`'s coarse, OS-thread-
+      level Go-stack attribution is inherently less deterministic than a
+      real pprof/CDP capture (specs/profile_sample.yml -- the direct,
+      hardcoded-pid version of this same mechanism -- is itself skipped in
+      CI for exactly this reason; see AGENTS.md), so this does not pin an
+      exact symbol name the way specs/hot_pid.yml/specs/hot_go_heap.yml's
+      real-pprof/CDP captures do. The WRAPPER RESOLUTION itself (compiled
+      child, not the go tool) is asserted deterministically by the
+      sibling outcome below instead.
+    timeoutMs: 60000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-hot-service/go; root="$PWD"
+          ok=0
+          i=1
+          while [ "$i" -le 4 ]; do
+            rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+            export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite"
+            ( cd examples/polyglot/go-pprof && exec "$root/bin/monitor" run --name q --scan both -- go run . ) >"$d/run.out" 2>&1 &
+            P=$!; sleep 3
+            "$root/bin/monitor" hot q --json > "$d/hot.json" 2>"$d/hot.err"
+            R=$?
+            kill $P 2>/dev/null; wait $P 2>/dev/null
+            if [ "$R" -eq 0 ] && python3 -c "
+          import json, sys
+          d = json.load(open('$d/hot.json'))
+          sys.exit(0 if d.get('functions') else 1)
+          "; then
+              ok=1
+              break
+            fi
+            i=$((i + 1))
+          done
+          [ "$ok" -eq 1 ]
+
+  - id: go_service_method_is_darwin_sample_not_go_toolchain
+    description: |
+      the resolved leaf is the compiled binary, not the `go` toolchain
+      process fronting `go run .` -- checked via the human header line,
+      which must never show a bare "go pid" runtime label the way the
+      unresolved toolchain process itself would render.
+    timeoutMs: 25000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-hot-service/go2; rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+          export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite"
+          root="$PWD"
+          ( cd examples/polyglot/go-pprof && exec "$root/bin/monitor" run --name q --scan both -- go run . ) >"$d/run.out" 2>&1 &
+          P=$!; sleep 3
+          OUT=$("$root/bin/monitor" hot q)
+          kill $P 2>/dev/null; wait $P 2>/dev/null
+          echo "$OUT" | head -1 | grep -q "^monitor > q = go pid"
+          echo "$OUT" | head -1 | grep -q "macOS sample"
+
+  - id: unknown_service_exits_2_and_lists_registered
+    description: an unregistered service name exits 2 and lists every currently-registered, live service for the project
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-hot-service/unknown; rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+          export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite" WORKLOAD_SECONDS=10
+          ./bin/monitor run --name registered-one --inspect -- sh -c 'node --jitless examples/polyglot/js/workload.js' >"$d/run.out" 2>&1 &
+          P=$!; sleep 1.5
+          ./bin/monitor hot totally-bogus-service > "$d/out.txt" 2>&1
+          R=$?
+          kill $P 2>/dev/null; wait $P 2>/dev/null
+          test "$R" -eq 2
+          grep -q 'no service named "totally-bogus-service"' "$d/out.txt"
+          grep -q 'registered-one' "$d/out.txt"
+
+  - id: clean_exit
+    description: the baseline target command exits cleanly
+    verify:
+      process:
+        exitCode: 0
