@@ -209,6 +209,11 @@ func (s *Store) upsertOccurrenceLocked(input OccurrenceInput) (UpsertResult, err
 		} else if ok {
 			return UpsertResult{Issue: issue, Occurrence: deduped, Deduped: true}, nil
 		}
+		// previousLastSeen is captured BEFORE laterTime below advances
+		// issue.LastSeen, so the Culprit/LatestException guard right after
+		// it can tell whether THIS write is actually the newest one the
+		// issue has seen.
+		previousLastSeen := issue.LastSeen
 		issue.LastSeen = laterTime(issue.LastSeen, now)
 		issue.FirstSeen = earlierTime(issue.FirstSeen, now)
 		issue.OccurrenceCount += input.Count
@@ -218,17 +223,26 @@ func (s *Store) upsertOccurrenceLocked(input OccurrenceInput) (UpsertResult, err
 			issue.ResolvedAt = nil
 			issue.ReopenedCount++
 		}
-		// Culprit/LatestException track the issue's LATEST occurrence (see
-		// their doc comments), unlike Title/Message/ExceptionType/Severity
-		// which stay frozen at creation. Only overwrite when this
-		// occurrence actually carries exception detail, so a differently
-		// kinded write sharing the fingerprint space (should not normally
-		// happen, but defensively) never blanks out a real one.
-		if input.Culprit != nil {
-			issue.Culprit = input.Culprit
-		}
-		if input.Exception != nil {
-			issue.LatestException = input.Exception
+		// Culprit/LatestException track the issue's LATEST occurrence BY
+		// ObservedAt (see their doc comments), unlike Title/Message/
+		// ExceptionType/Severity which stay frozen at creation. Gate on
+		// "this write's ObservedAt is not older than every occurrence seen
+		// so far" (not merely "this write happened last"), so replaying an
+		// old log after live events already recorded something newer
+		// (`stacktrace parse --record` catching up, or two writers racing
+		// with out-of-order ObservedAt) never clobbers the newer
+		// occurrence's culprit/exception detail with stale data. Also only
+		// overwrite when this occurrence actually carries exception detail,
+		// so a differently kinded write sharing the fingerprint space
+		// (should not normally happen, but defensively) never blanks out a
+		// real one.
+		if !now.Before(previousLastSeen) {
+			if input.Culprit != nil {
+				issue.Culprit = input.Culprit
+			}
+			if input.Exception != nil {
+				issue.LatestException = input.Exception
+			}
 		}
 	}
 	applyRunReleaseAggregate(&issue, input)

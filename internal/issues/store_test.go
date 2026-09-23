@@ -901,6 +901,80 @@ func TestListWindowFilterPerformanceOver10kOccurrences(t *testing.T) {
 	}
 }
 
+// TestCulpritLatestExceptionTrackObservedAtNotWriteOrder is the fix for the
+// minor finding at store.go:227: Issue.Culprit/LatestException are
+// documented as tracking the issue's LATEST occurrence, but were overwritten
+// by whichever write arrived last regardless of that write's ObservedAt.
+// Recording a NEWER occurrence first and then replaying an OLDER one (as
+// `stacktrace parse --record` catching up on a log would) must leave the
+// newer occurrence's culprit/exception detail in place -- LastSeen already
+// gets this right; Culprit/LatestException must match it.
+func TestCulpritLatestExceptionTrackObservedAtNotWriteOrder(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "issues.veclite"))
+	newExceptionInfo := func(line int) *ExceptionInfo {
+		return &ExceptionInfo{Type: "TypeError", Value: fmt.Sprintf("boom at line %d", line)}
+	}
+	newCulprit := func(line int) *Culprit {
+		return &Culprit{Function: "handle", File: "src/app.go", Line: line, Source: "stack"}
+	}
+
+	base := time.Now().UTC().Add(-time.Hour)
+	newer := base.Add(time.Minute)
+
+	// Write the NEWER occurrence first (line 99), then the OLDER one (line
+	// 10) -- e.g. a live event recorded before an old log replay catches up.
+	seeded, _, err := store.UpsertOccurrence(OccurrenceInput{
+		ObservedAt: base, Project: "p", Message: "boom", ExceptionType: "TypeError",
+		Culprit: newCulprit(1), Exception: newExceptionInfo(1),
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	fingerprint := seeded.Fingerprint
+
+	issueAfterNewer, _, err := store.UpsertOccurrence(OccurrenceInput{
+		ObservedAt: newer, Project: "p", Message: "boom", ExceptionType: "TypeError",
+		Fingerprint: fingerprint, Culprit: newCulprit(99), Exception: newExceptionInfo(99),
+	})
+	if err != nil {
+		t.Fatalf("newer occurrence: %v", err)
+	}
+	if issueAfterNewer.Culprit == nil || issueAfterNewer.Culprit.Line != 99 {
+		t.Fatalf("Culprit after the newer write = %+v, want line 99", issueAfterNewer.Culprit)
+	}
+
+	issueAfterOlder, _, err := store.UpsertOccurrence(OccurrenceInput{
+		ObservedAt: base.Add(30 * time.Second), Project: "p", Message: "boom", ExceptionType: "TypeError",
+		Fingerprint: fingerprint, Culprit: newCulprit(10), Exception: newExceptionInfo(10),
+	})
+	if err != nil {
+		t.Fatalf("older (replayed) occurrence: %v", err)
+	}
+	if issueAfterOlder.Culprit == nil || issueAfterOlder.Culprit.Line != 99 {
+		t.Fatalf("Culprit after replaying an OLDER occurrence = %+v, want it to stay at line 99 (the newer one)", issueAfterOlder.Culprit)
+	}
+	if issueAfterOlder.LatestException == nil || issueAfterOlder.LatestException.Value != "boom at line 99" {
+		t.Fatalf("LatestException after replaying an older occurrence = %+v, want it to stay at line 99", issueAfterOlder.LatestException)
+	}
+	// LastSeen must still reflect the newest ObservedAt seen so far,
+	// matching Culprit/LatestException instead of disagreeing with them.
+	if !issueAfterOlder.LastSeen.Equal(newer) {
+		t.Fatalf("LastSeen = %v, want %v", issueAfterOlder.LastSeen, newer)
+	}
+
+	// A genuinely newer occurrence (past `newer`) must still update both.
+	issueAfterNewest, _, err := store.UpsertOccurrence(OccurrenceInput{
+		ObservedAt: newer.Add(time.Minute), Project: "p", Message: "boom", ExceptionType: "TypeError",
+		Fingerprint: fingerprint, Culprit: newCulprit(200), Exception: newExceptionInfo(200),
+	})
+	if err != nil {
+		t.Fatalf("newest occurrence: %v", err)
+	}
+	if issueAfterNewest.Culprit == nil || issueAfterNewest.Culprit.Line != 200 {
+		t.Fatalf("Culprit after a genuinely newer occurrence = %+v, want line 200", issueAfterNewest.Culprit)
+	}
+}
+
 func TestAppendBoundedUniqueDedupesAndEvictsOldest(t *testing.T) {
 	var values []string
 	for i := 0; i < maxIssueRunsReleases+5; i++ {
