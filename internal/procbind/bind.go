@@ -26,6 +26,9 @@ const (
 	RuntimeDeno    Runtime = "deno"
 	RuntimeGo      Runtime = "go"
 	RuntimePython  Runtime = "python"
+	// RuntimeRuby covers MRI only (ruby, ruby3.x). JRuby is intentionally out
+	// of scope for now.
+	RuntimeRuby Runtime = "ruby"
 )
 
 // Binding is the process→codebase attachment used by investigate and
@@ -171,7 +174,7 @@ func Inspect(ctx context.Context, pid int32, codebaseOverride string) (Binding, 
 
 	b.Runtime = classifyRuntime(b.Name, b.Exe, b.Cmdline)
 	b.MainScript = extractMainScript(b.Runtime, b.Cmdline, b.Cwd)
-	b.InspectAddr = extractInspectAddr(b.Cmdline)
+	b.InspectAddr = extractInspectAddr(b.Runtime, b.Cmdline)
 
 	if codebaseOverride != "" {
 		if abs, err := filepath.Abs(codebaseOverride); err == nil {
@@ -220,7 +223,7 @@ func FindCodebaseRoot(start string) (string, []string) {
 
 func markersAt(dir string) []string {
 	var out []string
-	for _, name := range []string{"package.json", "go.mod", "pyproject.toml", "Cargo.toml", ".git"} {
+	for _, name := range []string{"package.json", "go.mod", "pyproject.toml", "Cargo.toml", "Gemfile", ".ruby-version", ".git"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
 			out = append(out, name)
 		}
@@ -245,6 +248,10 @@ func classifyRuntime(name, exe string, cmdline []string) Runtime {
 		return RuntimeDeno
 	case base == "python" || base == "python3" || strings.HasPrefix(base, "python"):
 		return RuntimePython
+	case isRubyish(base):
+		return RuntimeRuby
+	case base == "bundle" && isBundleExecRuby(cmdline):
+		return RuntimeRuby
 	}
 	// Go binaries are often the service name, not "go". Heuristic: no
 	// interpreter in argv0 and exe looks like a compiled binary is weak;
@@ -264,11 +271,56 @@ func classifyRuntime(name, exe string, cmdline []string) Runtime {
 			return RuntimeDeno
 		case a0 == "python" || a0 == "python3" || strings.HasPrefix(a0, "python"):
 			return RuntimePython
+		case isRubyish(a0):
+			return RuntimeRuby
+		case a0 == "bundle" && isBundleExecRuby(cmdline):
+			return RuntimeRuby
 		case a0 == "go":
 			return RuntimeGo
 		}
 	}
 	return RuntimeUnknown
+}
+
+// isRubyish matches MRI interpreter basenames: "ruby", "ruby3.4", "ruby-3.1"
+// (Homebrew/Debian-style versioned binaries). JRuby is intentionally excluded.
+func isRubyish(base string) bool {
+	if base == "ruby" {
+		return true
+	}
+	if strings.HasPrefix(base, "ruby") {
+		rest := strings.TrimPrefix(base, "ruby")
+		rest = strings.TrimPrefix(rest, "-")
+		if rest != "" {
+			if _, err := strconv.Atoi(rest[:1]); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isBundleExecRuby reports whether cmdline looks like "bundle [flags] exec
+// ruby|rails|rake|puma ...". Bundler normally Kernel#execs straight into the
+// resolved interpreter (so the live process already looks like plain ruby
+// and is caught by isRubyish above); this only matters for the less common
+// case where the bundle wrapper is still the live process image.
+func isBundleExecRuby(cmdline []string) bool {
+	for i := 1; i < len(cmdline); i++ {
+		arg := cmdline[i]
+		if strings.HasPrefix(arg, "-") {
+			continue // bundler flag before "exec", e.g. --gemfile=Gemfile
+		}
+		if arg != "exec" {
+			return false
+		}
+		if i+1 >= len(cmdline) {
+			return false
+		}
+		next := strings.ToLower(filepath.Base(cmdline[i+1]))
+		return isRubyish(next) || next == "rails" || next == "rake" || next == "puma"
+	}
+	return false
 }
 
 func isNodeish(base string) bool {
@@ -296,7 +348,7 @@ func extractMainScript(rt Runtime, cmdline []string, cwd string) string {
 		return ""
 	}
 	switch rt {
-	case RuntimeNode, RuntimeBun, RuntimeDeno, RuntimePython:
+	case RuntimeNode, RuntimeBun, RuntimeDeno, RuntimePython, RuntimeRuby:
 	default:
 		return ""
 	}
@@ -308,10 +360,16 @@ func extractMainScript(rt Runtime, cmdline []string, cwd string) string {
 		// Flags and their values.
 		if strings.HasPrefix(arg, "-") {
 			// --require <mod>, -r <mod>, --import <mod>, -e code: skip value.
+			// NOTE: --inspect / --inspect-brk / --inspect-wait deliberately do
+			// NOT consume the next argv element — in Node, Deno and Bun they
+			// take no separate value (only --inspect=host:port carries one),
+			// so treating them as value-consuming here silently ate the main
+			// script argument that followed a bare --inspect.
 			switch arg {
 			case "-r", "--require", "--import", "-e", "--eval", "-p", "--print",
-				"--inspect", "--inspect-brk", "--inspect-port", "--cpu-prof-dir",
-				"--heap-prof-dir", "--diagnostic-dir", "-c", "--config":
+				"--inspect-port", "--cpu-prof-dir",
+				"--heap-prof-dir", "--diagnostic-dir", "-c", "--config",
+				"-I", "-C": // -I load path, -C chdir (Ruby)
 				i++
 			}
 			// --inspect=host:port already consumed as single token.
@@ -344,6 +402,17 @@ func looksLikeSourceFile(arg string, rt Runtime) bool {
 		return base == "server" || base == "index" || base == "main" || base == "app"
 	case RuntimePython:
 		return strings.HasSuffix(lower, ".py")
+	case RuntimeRuby:
+		if strings.HasSuffix(lower, ".rb") || strings.HasSuffix(lower, ".ru") || strings.HasSuffix(lower, ".rake") {
+			return true
+		}
+		// Bundler-installed bin scripts invoked via "bundle exec <name>"
+		// (rails/rake/puma) commonly have no extension.
+		switch filepath.Base(lower) {
+		case "rails", "rake", "puma", "rackup":
+			return true
+		}
+		return false
 	default:
 		return false
 	}
@@ -359,32 +428,38 @@ func resolvePath(arg, cwd string) string {
 	return filepath.Clean(filepath.Join(cwd, arg))
 }
 
-// extractInspectAddr parses Node/Bun-style inspect flags from argv.
+// extractInspectAddr parses Node/Deno/Bun-style inspect flags from argv.
 // Forms: --inspect, --inspect=9229, --inspect=host:port, --inspect-brk[=...],
-// --inspect-port=N.
-func extractInspectAddr(cmdline []string) string {
-	const defaultInspect = "127.0.0.1:9229"
+// --inspect-wait[=...], --inspect-port=N.
+//
+// The bare forms (--inspect, --inspect-brk, --inspect-wait) take NO separate
+// value in Node, Deno or Bun — only the "=host:port" form carries an address.
+// A following argv token (if any) is the entry script or a script argument,
+// never an implicit port, so it is deliberately never consumed here.
+func extractInspectAddr(rt Runtime, cmdline []string) string {
+	defaultInspect := "127.0.0.1:9229"
+	if rt == RuntimeBun {
+		// A bare --inspect on Bun listens on 127.0.0.1:6499 (with a random
+		// URL path Bun prints at startup); 9229 is the Node/Deno default.
+		defaultInspect = "127.0.0.1:6499"
+	}
 	for i := range cmdline {
 		arg := cmdline[i]
 		switch {
-		case arg == "--inspect" || arg == "--inspect-brk":
-			// Optional following host:port token without '='.
-			if i+1 < len(cmdline) && !strings.HasPrefix(cmdline[i+1], "-") && looksLikeHostPort(cmdline[i+1]) {
-				return normalizeHostPort(cmdline[i+1])
-			}
+		case arg == "--inspect" || arg == "--inspect-brk" || arg == "--inspect-wait":
 			return defaultInspect
-		case strings.HasPrefix(arg, "--inspect="), strings.HasPrefix(arg, "--inspect-brk="):
+		case strings.HasPrefix(arg, "--inspect="), strings.HasPrefix(arg, "--inspect-brk="), strings.HasPrefix(arg, "--inspect-wait="):
 			val := arg[strings.IndexByte(arg, '=')+1:]
 			if val == "" {
 				return defaultInspect
 			}
-			return normalizeHostPort(val)
+			return normalizeHostPort(val, defaultInspect)
 		case arg == "--inspect-port":
 			if i+1 < len(cmdline) {
-				return normalizeHostPort(cmdline[i+1])
+				return normalizeHostPort(cmdline[i+1], defaultInspect)
 			}
 		case strings.HasPrefix(arg, "--inspect-port="):
-			return normalizeHostPort(strings.TrimPrefix(arg, "--inspect-port="))
+			return normalizeHostPort(strings.TrimPrefix(arg, "--inspect-port="), defaultInspect)
 		}
 	}
 	// NODE_OPTIONS may carry inspect flags; best-effort read from environ of
@@ -393,28 +468,12 @@ func extractInspectAddr(cmdline []string) string {
 	return ""
 }
 
-func looksLikeHostPort(s string) bool {
-	if s == "" {
-		return false
-	}
-	// port only
-	if _, err := strconv.Atoi(s); err == nil {
-		return true
-	}
-	// host:port
-	if i := strings.LastIndexByte(s, ':'); i > 0 {
-		if _, err := strconv.Atoi(s[i+1:]); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
-func normalizeHostPort(s string) string {
+func normalizeHostPort(s, defaultAddr string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return "127.0.0.1:9229"
+		return defaultAddr
 	}
+	defaultPort := defaultAddr[strings.LastIndexByte(defaultAddr, ':')+1:]
 	if _, err := strconv.Atoi(s); err == nil {
 		return "127.0.0.1:" + s
 	}
@@ -423,7 +482,7 @@ func normalizeHostPort(s string) string {
 	}
 	// host without port
 	if !strings.Contains(s, ":") {
-		return s + ":9229"
+		return s + ":" + defaultPort
 	}
 	return s
 }
