@@ -294,6 +294,21 @@ type cdpFuncAccum struct {
 	calleeOrder []heatFuncKey
 }
 
+// isRuntimeInternalCDPFile reports whether file names a JS runtime's own
+// bootstrap/module-loader machinery rather than user code: Node's
+// "node:internal/..." built-in module specifiers, and the analogous
+// "ext:"/"deno:" schemes Deno's isolate uses for the same purpose. See the
+// call site in buildFromCDP for why these are excluded from Functions
+// while still counting toward Stats.ActiveSamples.
+func isRuntimeInternalCDPFile(file string) bool {
+	for _, prefix := range [...]string{"node:", "ext:", "deno:"} {
+		if strings.HasPrefix(file, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func newCDPFuncAccum() *cdpFuncAccum {
 	return &cdpFuncAccum{lineSelf: map[int]int64{}, callees: map[heatFuncKey]int64{}}
 }
@@ -363,6 +378,20 @@ func buildFromCDP(cp *cdpProfile, opts HeatOptions) (*Heatmap, error) {
 			continue
 		}
 		file := decodeCDPFileURL(n.CallFrame.URL)
+		if isRuntimeInternalCDPFile(file) {
+			// Real code, real CPU time (already counted in totalHits
+			// above), but not a "function" worth its own row: Node's CJS
+			// loader wraps every entry point in several such frames (see
+			// testdata/v8-hot.cpuprofile — module require plumbing sits
+			// directly on the path to heavyStringify), and since every
+			// sample's stack passes through them, including them would
+			// bury real user functions under a wall of zero-self
+			// "(anonymous)" bootstrap wrappers. nodeFunc simply has no
+			// entry for this node's ID; pass 3's tree walk still descends
+			// into its children unconditionally, so a real function
+			// further down the stack is unaffected.
+			continue
+		}
 		funcLine := int(n.CallFrame.LineNumber) + 1
 		k := heatFuncKey{Func: fn, File: file, FuncLine: funcLine}
 		nodeFunc[n.ID] = k
@@ -990,7 +1019,17 @@ func addWarnings(hm *Heatmap) {
 	if len(hm.Functions) == 0 {
 		return
 	}
+	// "The hottest function" here must mean the same thing `monitor hot`
+	// actually renders as its default CodeFrame target — the highest SELF
+	// share, not Functions[0] (sorted by CUM, so a near-zero-self wrapper
+	// that merely calls a genuinely hot function would otherwise trigger a
+	// false "diffuse" warning on data that isn't diffuse at all).
 	top := hm.Functions[0]
+	for _, f := range hm.Functions[1:] {
+		if f.SelfPct > top.SelfPct {
+			top = f
+		}
+	}
 	basis := top.SelfPct
 	if basis <= 0 {
 		basis = top.CumPct
