@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,38 +16,50 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/issues"
+	"github.com/abdul-hamid-achik/monitor/internal/procbind"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 	"github.com/abdul-hamid-achik/monitor/internal/widgets"
 )
 
 // newHotCmd is `monitor hot`: AC-5's "which LINE" view, built on
-// profiler.BuildHeatmap (monitor.line_heatmap.v1). E3.1 wires only the
-// --file mode (a saved .cpuprofile or pprof proto); resolving a live
-// <pid|service> is E3.2, a later wave, so a positional target argument
-// gets a clear "not yet" error instead of silently doing nothing.
+// profiler.BuildHeatmap (monitor.line_heatmap.v1). E3.1 wired --file mode (a
+// saved .cpuprofile or pprof proto); E3.2 adds a numeric <pid> target,
+// resolved to its real runtime leaf process (skipping a shell/yarn/npm/
+// `go run` wrapper) and captured live via the same runtime-aware dispatch
+// `monitor profile` uses. A symbolic <service> name needs the launch
+// registry (a later wave), so it still gets a clear "not yet" error instead
+// of silently doing nothing.
 func newHotCmd() *cobra.Command {
-	var file, funcName, ptype, export string
+	var file, funcName, ptype, export, pprofAddr string
 	var top int
+	var duration time.Duration
 	cmd := &cobra.Command{
-		Use:   "hot",
+		Use:   "hot [pid]",
 		Short: "Show the hot line inside a function (CPU, heap, or goroutine)",
 		Long: `monitor hot answers "which LINE inside this function", not just
 "which function" — combining stack samples (V8 positionTicks or a pprof
 proto) with a per-function CodeFrame.
 
-Only --file is wired yet: point it at a V8/Bun .cpuprofile or a
-github.com/google/pprof proto (.pb / .pb.gz, gzip auto-detected).
-Resolving a live <pid|service> target is a later wave.`,
+--file loads a saved V8/Bun .cpuprofile or a github.com/google/pprof proto
+(.pb / .pb.gz, gzip auto-detected). A numeric pid instead captures live,
+resolving the real runtime leaf process under it (skipping a shell/yarn/npm/
+` + "`go run`" + ` wrapper — ambiguous, exits 2 listing candidates). A symbolic
+<service> name needs the launch registry, a later wave.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
-				return fmt.Errorf(
-					"monitor hot <pid|service> is not implemented yet; pass --file <path> instead "+
-						"(a V8/Bun .cpuprofile, or a pprof .pb/.pb.gz — got positional arg %q)", args[0])
+				pid, perr := parsePID(args[0])
+				if perr != nil {
+					return fmt.Errorf(
+						"monitor hot <service> is not implemented yet (needs the launch registry); "+
+							"pass a numeric pid or --file <path> instead (got %q)", args[0])
+				}
+				return runHotPID(cmd, pid, funcName, ptype, export, pprofAddr, top, duration)
 			}
 			if strings.TrimSpace(file) == "" {
-				return fmt.Errorf("--file is required (pid/service modes are not implemented yet): " +
-					"monitor hot --file <path.cpuprofile|path.pb.gz>")
+				return fmt.Errorf("--file is required when no pid is given: " +
+					"monitor hot --file <path.cpuprofile|path.pb.gz>, or monitor hot <pid>")
 			}
 
 			heatType, err := parseHotType(ptype)
@@ -78,6 +92,9 @@ Resolving a live <pid|service> target is a later wave.`,
 			if funcName != "" && !hasHeatFunction(hm, funcName) {
 				return fmt.Errorf("function %q not found in %s", funcName, file)
 			}
+			if warn := applyIssueOverlay(hm); warn != "" {
+				hm.Warnings = append(hm.Warnings, warn)
+			}
 
 			if export != "" {
 				if err := exportHot(src, hm, export); err != nil {
@@ -99,7 +116,186 @@ Resolving a live <pid|service> target is a later wave.`,
 	cmd.Flags().Bool("json", false, "emit the monitor.line_heatmap.v1 JSON document")
 	cmd.Flags().StringVar(&export, "export", "",
 		"also save the loaded profile (out.cpuprofile / out.pb.gz / out.pb) or the heatmap document (out.json)")
+	cmd.Flags().DurationVar(&duration, "duration", 5*time.Second, "CPU sampling duration for a live <pid> capture (maximum 2m); ignored for --file and for --type heap/goroutine (instant snapshots)")
+	cmd.Flags().StringVar(&pprofAddr, "pprof-addr", "localhost:6060",
+		"host:port of the target's net/http/pprof server, for a live <pid> Go target (ignored for --file and for a Node/Bun/Deno target's own inspector); "+
+			"passing this flag explicitly asserts the endpoint belongs to the target pid and skips the ownership check")
 	return cmd
+}
+
+// runHotPID is `monitor hot <pid>` (E3.2): resolve pid's real runtime leaf
+// process, capture a profile live via the same runtime-aware dispatch
+// `monitor profile`/MCP's monitor_profile_capture use
+// (captureRuntimeAwareProfile), then hand it to the exact same
+// BuildHeatmap+render pipeline --file uses, so a live capture and a saved
+// one produce byte-for-byte the same kind of output.
+func runHotPID(cmd *cobra.Command, pid int32, funcName, ptypeFlag, export, pprofAddr string, top int, duration time.Duration) error {
+	heatType, err := parseHotType(ptypeFlag)
+	if err != nil {
+		return err
+	}
+	if duration <= 0 || duration > 2*time.Minute {
+		return fmt.Errorf("--duration must be greater than zero and at most 2m")
+	}
+
+	ctx, cancel := Context()
+	defer cancel()
+
+	binding, candidates, err := procbind.ResolveLeaf(ctx, pid, procbind.LeafOptions{})
+	if err != nil {
+		var ambiguous *procbind.AmbiguousLeafError
+		if errors.As(err, &ambiguous) {
+			printAmbiguousLeaf(cmd, pid, candidates)
+			os.Exit(2)
+			return nil
+		}
+		return fmt.Errorf("monitor hot %d: %w", pid, err)
+	}
+
+	addrExplicit := cmd.Flags().Changed("pprof-addr")
+	prof, method, step := captureRuntimeAwareProfile(ctx, binding.PID, &binding, heatTypeToProfileType(heatType), pprofAddr, "", addrExplicit, duration, true)
+	if step.Status != stepOK {
+		msg := step.Limitation
+		if step.Recovery != "" {
+			msg = fmt.Sprintf("%s (%s)", msg, step.Recovery)
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	defer discardTempProfilePath(&prof)
+
+	src, err := profilerSourceFromCapture(prof)
+	if err != nil {
+		return fmt.Errorf("monitor hot %d: %w", pid, err)
+	}
+
+	hm, err := profiler.BuildHeatmap(ctx, src, profiler.HeatOptions{
+		Func: funcName, Top: top, ProfileType: heatType, Runtime: string(binding.Runtime),
+	})
+	if err != nil {
+		return err
+	}
+	if funcName != "" && !hasHeatFunction(hm, funcName) {
+		return fmt.Errorf("function %q not found in pid %d", funcName, pid)
+	}
+	if warn := applyIssueOverlay(hm); warn != "" {
+		hm.Warnings = append(hm.Warnings, warn)
+	}
+
+	if export != "" {
+		if err := exportHot(src, hm, export); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "saved: %s\n", export)
+	}
+
+	if JSONOutput(cmd) {
+		return WriteJSON(hm)
+	}
+
+	header := hotLiveHeaderLine(ctx, pid, binding, method, pprofAddr, heatType, duration)
+	next := fmt.Sprintf("monitor hot %d", pid)
+	return renderHotLiveHuman(cmd.OutOrStdout(), header, hm, funcName, next)
+}
+
+// heatTypeToProfileType maps monitor hot's own --type (HeatProfileType,
+// which distinguishes heap_inuse from heap_alloc — two different pprof
+// sample-value COLUMNS of the very same captured proto) down to
+// captureRuntimeAwareProfile's coarser ProfileType (which only distinguishes
+// WHICH ENDPOINT/MECHANISM to scrape): a single heap capture already carries
+// every value column BuildHeatmap might later pick from, so both HeatOptions
+// heap variants capture identically.
+func heatTypeToProfileType(t profiler.HeatProfileType) profiler.ProfileType {
+	switch t {
+	case profiler.HeatHeapInuse, profiler.HeatHeapAlloc:
+		return profiler.ProfileHeap
+	case profiler.HeatGoroutine:
+		return profiler.ProfileGoroutine
+	default:
+		return profiler.ProfileCPU
+	}
+}
+
+// profilerSourceFromCapture turns a just-captured profiler.Profile into a
+// profiler.Source BuildHeatmap can consume, without adding a live-capture
+// code path to internal/profiler's own loadfile.go: a pprof capture (heap/
+// cpu/goroutine) already wrote its raw proto to Profile.Path
+// (captureProfilePprof's writeTempProfile), so that file is loaded directly;
+// a CDP CPU capture carries its raw .cpuprofile JSON in Profile.Text instead
+// (ProfileInspector never writes one to disk), so it is spooled to a private
+// temp file first, loaded, and immediately removed. A capture with neither —
+// macOS `sample` (no file:line at all), or a CDP HEAP snapshot (a completely
+// different wire shape LoadFile was never built to parse) — has no
+// line-level detail to build a heatmap from, and this returns an error
+// naming why rather than fabricating an empty heatmap.
+func profilerSourceFromCapture(prof profiler.Profile) (*profiler.Source, error) {
+	if prof.Path != "" {
+		src, err := profiler.LoadFile(prof.Path)
+		if err != nil {
+			return nil, fmt.Errorf("this %s capture (method %s) has no line-level detail to build a heatmap from: %w", prof.Type, prof.Method, err)
+		}
+		return src, nil
+	}
+	if prof.Text != "" {
+		f, err := os.CreateTemp("", "monitor-hot-live-*.cpuprofile")
+		if err != nil {
+			return nil, fmt.Errorf("stage captured profile: %w", err)
+		}
+		path := f.Name()
+		defer os.Remove(path)
+		if _, werr := f.WriteString(prof.Text); werr != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("stage captured profile: %w", werr)
+		}
+		if cerr := f.Close(); cerr != nil {
+			return nil, fmt.Errorf("stage captured profile: %w", cerr)
+		}
+		src, err := profiler.LoadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("this %s capture (method %s) has no line-level detail to build a heatmap from: %w", prof.Type, prof.Method, err)
+		}
+		return src, nil
+	}
+	return nil, fmt.Errorf("this %s capture (method %s) carries no file:line detail to build a heatmap from", prof.Type, prof.Method)
+}
+
+// hotLiveHeaderLine renders monitor hot's live-capture banner — the roadmap
+// mockup's "monitor > <name> = <runtime> pid <N> (child of <wrapper> <M>) ·
+// inspector <addr> · sampling <duration>" (section 5), minus the launch
+// registry's own --name (service mode, a later wave): the leaf's own
+// runtime+pid stands in for <name>. When the resolved leaf differs from the
+// requested pid (a wrapper was skipped), the original process is looked up
+// ONCE more (a single Inspect call, not a full process-table walk) purely
+// for its name; any failure there just omits the name rather than the whole
+// clause, since ResolveLeaf itself already proved a real wrapper was
+// skipped.
+func hotLiveHeaderLine(ctx context.Context, requestedPID int32, binding procbind.Binding, method, pprofAddr string, heatType profiler.HeatProfileType, duration time.Duration) string {
+	who := fmt.Sprintf("%s pid %d", binding.Runtime, binding.PID)
+	if requestedPID != binding.PID {
+		label := "wrapper"
+		if root, err := procbind.Inspect(ctx, requestedPID, ""); err == nil && root.Name != "" {
+			label = root.Name
+		}
+		who += fmt.Sprintf(" (child of %s %d)", label, requestedPID)
+	}
+	parts := []string{"monitor > " + who}
+	switch {
+	case strings.HasPrefix(method, "inspector"):
+		if binding.InspectAddr != "" {
+			parts = append(parts, "inspector "+binding.InspectAddr)
+		}
+	case strings.HasPrefix(method, "pprof"):
+		addr := pprofAddr
+		if addr == "" {
+			addr = profiler.DefaultPprofAddr
+		}
+		parts = append(parts, "pprof "+addr)
+	}
+	if heatType == profiler.HeatCPU {
+		parts = append(parts, "sampling "+duration.String())
+	} else {
+		parts = append(parts, "instant snapshot")
+	}
+	return strings.Join(parts, " · ")
 }
 
 // parseHotType maps --type to a HeatProfileType. "heap" (the common case:
@@ -177,21 +373,44 @@ func copyFileBytes(src, dst string) error {
 	return nil
 }
 
-// renderHotHuman prints the header line (samples/duration/active/idle/
-// method), the TOTAL/SELF/FUNCTION/LOCATION table, the CodeFrame of the
-// hottest (or --func) function plus its callees and limitations, and a
-// "next" line — the shape
-// ~/notes/projects/monitor/2026-09-22-local-sentry-roadmap.md's "5. Mapa de
-// calor por línea" mockup specifies, minus the pid/service-only banner line
-// (no live process in --file mode) and the CALLERS/TESTS/ISSUES columns
-// (codemap impact and the issues-store overlay are later slices, E3.4). Per
-// AC-5, a mostly-idle profile (hm.MostlyIdle) still gets its table — those
-// percentages are real — but never a CodeFrame: with the sampler mostly
-// catching (idle), no single line has earned a confident-looking marker.
+// renderHotHuman prints the --file header line (samples/duration/active/
+// idle/method) then delegates the rest — table, CodeFrame, callees,
+// limitations, next line — to renderHeatBody, shared with the live <pid>
+// renderer (renderHotLiveHuman) so both modes render the exact same body
+// shape.
 func renderHotHuman(w io.Writer, path string, hm *profiler.Heatmap, wantFunc string) error {
 	fmt.Fprintf(w, "%s      method: %s\n", hotHeaderLine(path, hm), humanMethodLabel(hm.Method))
+	return renderHeatBody(w, hm, wantFunc, "monitor hot --file "+shellQuote(path))
+}
+
+// renderHotLiveHuman is runHotPID's (E3.2) renderer: header already carries
+// the roadmap's "monitor > <name> = ..." live-capture banner (see
+// hotLiveHeaderLine), everything after it is the same renderHeatBody
+// --file mode uses.
+func renderHotLiveHuman(w io.Writer, header string, hm *profiler.Heatmap, wantFunc, next string) error {
+	fmt.Fprintln(w, header)
+	return renderHeatBody(w, hm, wantFunc, next)
+}
+
+// renderHeatBody prints the shared part of `monitor hot`'s human output —
+// warnings, the TOTAL/SELF/FUNCTION/LOCATION/ISSUES table (codemap's own
+// CALLERS/TESTS columns are a later slice; ISSUES is E3.4's errors × heat
+// overlay, applyIssueOverlay), the CodeFrame of the hottest (or --func)
+// function plus its callees and limitations, and a "next" line — the shape
+// ~/notes/projects/monitor/2026-09-22-local-sentry-roadmap.md's "5. Mapa de
+// calor por línea" mockup specifies. Per AC-5, a mostly-idle profile
+// (hm.MostlyIdle) still gets its table — those percentages are real — but
+// never a CodeFrame: with the sampler mostly catching (idle), no single
+// line has earned a confident-looking marker; E3.5 adds the idle case's own
+// follow-up suggestions (--type goroutine for Go, `monitor issues --since`
+// for any runtime) right after the warning that explains why.
+func renderHeatBody(w io.Writer, hm *profiler.Heatmap, wantFunc, next string) error {
 	for _, warn := range hm.Warnings {
 		fmt.Fprintf(w, "! %s\n", warn)
+		if warn == "mostly idle: slowness is off-CPU" {
+			fmt.Fprintln(w, "  this process is mostly idle, so its slowness is off-CPU (I/O, locks, awaits).")
+			fmt.Fprintln(w, "  Go: monitor hot <pid> --type goroutine   ·   any runtime: monitor issues --since 10m (timeouts?)")
+		}
 	}
 
 	if len(hm.Functions) == 0 {
@@ -200,17 +419,16 @@ func renderHotHuman(w io.Writer, path string, hm *profiler.Heatmap, wantFunc str
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "TOTAL\tSELF\tFUNCTION\tLOCATION")
+	fmt.Fprintln(tw, "TOTAL\tSELF\tFUNCTION\tLOCATION\tISSUES")
 	for _, f := range hm.Functions {
-		fmt.Fprintf(tw, "%.1f%%\t%.1f%%\t%s\t%s\n", f.CumPct, f.SelfPct, f.Name, heatLocation(f))
+		fmt.Fprintf(tw, "%.1f%%\t%.1f%%\t%s\t%s\t%s\n", f.CumPct, f.SelfPct, f.Name, heatLocation(f), issuesColumnForFunction(f))
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
 
 	if hm.MostlyIdle() {
-		fmt.Fprintf(w, "(codeframe skipped: %.0f%% idle — CPU heat can't explain this target's slowness; "+
-			"see the warning above instead of a guessed hot line)\n", hm.IdlePct)
+		fmt.Fprintf(w, "(codeframe skipped: %.0f%% idle)\n", hm.IdlePct)
 		return nil
 	}
 
@@ -245,7 +463,6 @@ func renderHotHuman(w io.Writer, path string, hm *profiler.Heatmap, wantFunc str
 		fmt.Fprintf(w, "  %s\n", lim)
 	}
 
-	next := "monitor hot --file " + shellQuote(path)
 	if suggestion := nextFuncSuggestion(hm.Functions, target.Name); suggestion != "" && suggestion != target.Name {
 		next += " --func " + shellQuote(suggestion)
 	}
@@ -463,6 +680,12 @@ func codeFrameForFunction(hm *profiler.Heatmap, f profiler.HeatFunction) widgets
 		} else {
 			cl.Percent = l.PctOfFunction
 		}
+		if len(l.Issues) > 0 {
+			cl.Issues = make([]string, 0, len(l.Issues))
+			for _, iss := range l.Issues {
+				cl.Issues = append(cl.Issues, fmt.Sprintf("%s x%d %s", iss.ShortID, iss.Count, iss.Status))
+			}
+		}
 		cf.Lines = append(cf.Lines, cl)
 	}
 	if showCum {
@@ -486,4 +709,133 @@ func wantColor(w *os.File) bool {
 		return false
 	}
 	return term.IsTerminal(w.Fd())
+}
+
+// applyIssueOverlay is E3.4 (errors × heat, the hot side): it reads the
+// local issues store read-only (issues.OpenReadOnly — never blocking, and
+// never blocked by, a writer such as `watch --stash`) and fills each
+// function's HeatLine.Issues with every exception issue whose Culprit lands
+// on that exact line, matched by file (root-relative or absolute; see
+// heatFileMatchesCulprit) and by line falling inside the function's own
+// [StartLine,EndLine] range. heat.Build itself never computes this (see
+// HeatLine.Issues' doc comment in internal/profiler/heat.go) — it lives
+// here, applied once after BuildHeatmap returns, so a heatmap and the
+// issues store never disagree about an issue's current status.
+//
+// Returns a Warnings-shaped string describing a REAL degradation (the store
+// exists but couldn't be opened/read); a store that simply doesn't exist
+// yet — the common case before any issue has ever been recorded — is not a
+// degradation and returns "".
+func applyIssueOverlay(hm *profiler.Heatmap) string {
+	if hm == nil || len(hm.Functions) == 0 {
+		return ""
+	}
+	path, err := issues.ResolvePath("")
+	if err != nil {
+		return ""
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		return "" // no store yet -- not a degradation
+	}
+	store, err := issues.OpenReadOnly(path)
+	if err != nil {
+		return fmt.Sprintf("issues overlay skipped: %s", err.Error())
+	}
+	defer func() { _ = store.Close() }()
+
+	list, err := store.List(issues.ListOptions{Kind: issues.KindException})
+	if err != nil {
+		return fmt.Sprintf("issues overlay skipped: %s", err.Error())
+	}
+
+	for i := range hm.Functions {
+		f := &hm.Functions[i]
+		if f.File == "" {
+			continue
+		}
+		for _, iss := range list {
+			if iss.Culprit == nil || iss.Culprit.Line <= 0 || iss.Culprit.File == "" {
+				continue
+			}
+			if !heatFileMatchesCulprit(f.File, iss.Culprit.File) {
+				continue
+			}
+			if f.StartLine > 0 && (iss.Culprit.Line < f.StartLine || iss.Culprit.Line > f.EndLine) {
+				continue
+			}
+			for li := range f.Lines {
+				if f.Lines[li].Line != iss.Culprit.Line {
+					continue
+				}
+				f.Lines[li].Issues = append(f.Lines[li].Issues, profiler.HeatLineIssue{
+					ShortID: issueShortID(iss.ID),
+					Count:   int(iss.OccurrenceCount),
+					Status:  string(iss.Status),
+				})
+			}
+		}
+	}
+	return ""
+}
+
+// heatFileMatchesCulprit reports whether a heatmap function's own File and
+// an issue's Culprit.File name the same source file, tolerating a
+// root-relative form on one side and an absolute one on the other (a
+// heatmap function's File can be either, depending on how it was resolved —
+// see heat.go's range-resolution comments — while stacktrace.Frame.Filename
+// is always git-root-relative). Exact match first; otherwise one is
+// accepted as a path SUFFIX of the other, split only on "/" boundaries
+// (never a bare substring match, which could otherwise conflate
+// "workload.js" with "other_workload.js").
+func heatFileMatchesCulprit(heatFile, culpritFile string) bool {
+	a := filepath.ToSlash(strings.TrimSpace(heatFile))
+	b := filepath.ToSlash(strings.TrimSpace(culpritFile))
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	return strings.HasSuffix(a, "/"+b) || strings.HasSuffix(b, "/"+a)
+}
+
+// issueShortID derives an issue's display short_id from its full store ID —
+// docs/contracts/issue-context-v1.md's "uppercase first 4 hex chars of the
+// id's hex portion" (store.go builds ID as "ISS-" + strings.ToUpper(
+// fingerprint[:16]), so the hex portion is already uppercase and stripping
+// the prefix is all that's needed).
+func issueShortID(id string) string {
+	id = strings.TrimPrefix(id, "ISS-")
+	if len(id) > 4 {
+		return id[:4]
+	}
+	return id
+}
+
+// issuesColumnForFunction renders the TOTAL/SELF/FUNCTION/LOCATION/ISSUES
+// table's ISSUES cell for one function: "-" when no line in the function
+// carries an overlay, else every distinct short_id across its lines
+// (deduplicated, first-seen order), comma-joined and capped at 2 with a
+// "+N more" tail so one function with many issues can't blow out the
+// table's column alignment.
+func issuesColumnForFunction(f profiler.HeatFunction) string {
+	var ids []string
+	seen := map[string]bool{}
+	for _, l := range f.Lines {
+		for _, iss := range l.Issues {
+			if seen[iss.ShortID] {
+				continue
+			}
+			seen[iss.ShortID] = true
+			ids = append(ids, iss.ShortID)
+		}
+	}
+	if len(ids) == 0 {
+		return "-"
+	}
+	const maxShown = 2
+	if len(ids) <= maxShown {
+		return strings.Join(ids, ",")
+	}
+	return fmt.Sprintf("%s,+%d more", strings.Join(ids[:maxShown], ","), len(ids)-maxShown)
 }
