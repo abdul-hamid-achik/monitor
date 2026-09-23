@@ -62,24 +62,47 @@ type ResolveOptions struct {
 	Runtime          Runtime
 	CodebaseRoot     string
 	MainScriptSuffix string
+	// DescendantOf, when non-zero, restricts candidate processes to
+	// descendants of this pid (never the pid itself) instead of scanning
+	// every live process on the host. This both bounds the (relatively
+	// expensive, per-candidate) Inspect cost to one process subtree and
+	// makes a selector safe against matching a same-named process outside
+	// that subtree. See tree.go's Tree.Descendants for how the subtree is
+	// computed (one process-table enumeration, not gopsutil's O(n^2)
+	// Children()).
+	DescendantOf int32
 }
 
 // Resolve inspects live processes and returns the one exact match. Command
 // lines remain memory-only through Binding.Cmdline and are never included in
 // errors or JSON output.
 func Resolve(ctx context.Context, opts ResolveOptions) (Binding, error) {
-	if opts.Runtime == RuntimeUnknown && opts.CodebaseRoot == "" && opts.MainScriptSuffix == "" {
+	if opts.Runtime == RuntimeUnknown && opts.CodebaseRoot == "" && opts.MainScriptSuffix == "" && opts.DescendantOf == 0 {
 		return Binding{}, fmt.Errorf("at least one process selector is required")
 	}
-	processes, err := process.ProcessesWithContext(ctx)
-	if err != nil {
-		return Binding{}, fmt.Errorf("list processes: %w", err)
+	var candidatePIDs []int32
+	if opts.DescendantOf != 0 {
+		tree, err := BuildTree(ctx, nil)
+		if err != nil {
+			return Binding{}, err
+		}
+		for _, info := range tree.Descendants(opts.DescendantOf) {
+			candidatePIDs = append(candidatePIDs, info.PID)
+		}
+	} else {
+		processes, err := process.ProcessesWithContext(ctx)
+		if err != nil {
+			return Binding{}, fmt.Errorf("list processes: %w", err)
+		}
+		for _, p := range processes {
+			candidatePIDs = append(candidatePIDs, p.Pid)
+		}
 	}
 	wantRoot := canonicalPath(opts.CodebaseRoot)
 	wantSuffix := filepath.Clean(opts.MainScriptSuffix)
 	matches := make([]Binding, 0, 2)
-	for _, candidate := range processes {
-		binding, inspectErr := Inspect(ctx, candidate.Pid, "")
+	for _, pid := range candidatePIDs {
+		binding, inspectErr := Inspect(ctx, pid, "")
 		if inspectErr != nil {
 			continue
 		}
@@ -90,7 +113,7 @@ func Resolve(ctx context.Context, opts ResolveOptions) (Binding, error) {
 	}
 	sort.Slice(matches, func(i, j int) bool { return matches[i].PID < matches[j].PID })
 	if len(matches) == 0 {
-		return Binding{}, fmt.Errorf("no process matched runtime=%q codebase_root=%q main_script_suffix=%q", opts.Runtime, opts.CodebaseRoot, opts.MainScriptSuffix)
+		return Binding{}, fmt.Errorf("no process matched runtime=%q codebase_root=%q main_script_suffix=%q descendant_of=%d", opts.Runtime, opts.CodebaseRoot, opts.MainScriptSuffix, opts.DescendantOf)
 	}
 	if len(matches) > 1 {
 		identities := make([]string, 0, len(matches))
