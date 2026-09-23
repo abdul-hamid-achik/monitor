@@ -1,0 +1,5 @@
+#<Thread:0x0000000120924200 scenarios.rb:51 run> terminated with exception (report_on_exception is true):
+scenarios.rb:14:in 'Hash#fetch': key not found: :a (KeyError)
+	from scenarios.rb:14:in 'Object#root'
+	from scenarios.rb:51:in 'block in <main>'
+joined

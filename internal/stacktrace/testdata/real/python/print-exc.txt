@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/repo/app/scenarios.py", line 79, in handled
+    parse("x3")
+    ~~~~~^^^^^^
+  File "/repo/app/scenarios.py", line 8, in parse
+    return int(raw)
+ValueError: invalid literal for int() with base 10: 'x3'
+still running

@@ -1,0 +1,6 @@
+error: Uncaught (in promise) Error: upstream request failed
+    const err = new Error('upstream request failed', { cause: inner });
+                ^
+    at file:///repo/app/src/scenarios.mjs:88:17
+Caused by: Error: socket hang up
+    at file:///repo/app/src/scenarios.mjs:87:33

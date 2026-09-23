@@ -1,0 +1,12 @@
+file:///repo/app/src/scenarios.mjs:95
+    throw new Error('first line of message\nsecond line of message');
+          ^
+
+Error: first line of message
+second line of message
+    at file:///repo/app/src/scenarios.mjs:95:11
+    at ModuleJob.run (node:internal/modules/esm/module_job:569:25)
+    at async node:internal/modules/esm/loader:650:26
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5)
+
+Node.js v26.7.0

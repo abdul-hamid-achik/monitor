@@ -1,0 +1,9 @@
+
+  VITE v5.4.0  ready in 312 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: use --host to expose
+  ➜  press h + enter to show help
+
+[vite] connected.
+[vite] hmr update /src/App.vue

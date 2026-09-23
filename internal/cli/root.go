@@ -63,6 +63,7 @@ child can detect it is being observed.`,
 		newDiffCmd(),
 		newTreeCmd(),
 		newConfigCmd(),
+		newStacktraceCmd(),
 	)
 
 	return root

@@ -1,0 +1,7 @@
+E, [2026-09-22T22:35:40.285091 #48617] ERROR -- : undefined method 'baz' for nil (NoMethodError)
+scenarios.rb:5:in 'Foo#bar'
+scenarios.rb:10:in 'Object#run_nomethod'
+scenarios.rb:43:in '<main>'
+E, [2026-09-22T22:35:40.285344 #48617] ERROR -- : plain error without backtrace
+W, [2026-09-22T22:35:40.285354 #48617]  WARN -- : disk almost full
+I, [2026-09-22T22:35:40.285360 #48617]  INFO -- : still running

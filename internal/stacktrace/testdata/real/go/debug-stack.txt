@@ -1,0 +1,7 @@
+goroutine 1 [running]:
+runtime/debug.Stack()
+	/usr/local/go/src/runtime/debug/stack.go:26 +0x64
+runtime/debug.PrintStack()
+	/usr/local/go/src/runtime/debug/stack.go:18 +0x1c
+main.main()
+	/repo/app/main.go:119 +0x578

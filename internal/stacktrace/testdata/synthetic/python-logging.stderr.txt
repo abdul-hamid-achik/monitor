@@ -1,0 +1,9 @@
+ERROR:root:flaky_parse failed
+Traceback (most recent call last):
+  File "/repo/internal/stacktrace/testdata/synthetic/python-logging.py", line 15, in tick_errors
+    flaky_parse(p)
+    ~~~~~~~~~~~^^^
+  File "/repo/internal/stacktrace/testdata/synthetic/python-logging.py", line 9, in flaky_parse
+    raise ValueError(f"flaky_parse: malformed payload near token {raw[:8]!r}")
+ValueError: flaky_parse: malformed payload near token 'bad-payl'
+ERROR:root:connection pool exhausted: 0 of 10 connections available

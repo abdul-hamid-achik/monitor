@@ -1,0 +1,28 @@
+2026-09-22T22:30:26.319-0600	ERROR	app/main.go:82	load: db timeout
+example.com/app/internal/svc.fetch
+	/repo/app/internal/svc/svc.go:24
+example.com/app/internal/svc.(*Store).Load
+	/repo/app/internal/svc/svc.go:20
+main.zapErr
+	/repo/app/main.go:57
+main.main
+	/repo/app/main.go:82
+runtime.main
+	/usr/local/go/src/runtime/proc.go:290
+runtime.goexit
+	/usr/local/go/src/runtime/asm_arm64.s:1447
+load failed
+example.com/app/internal/svc.(*Store).Load
+	/repo/app/internal/svc/svc.go:20
+main.zapErr
+	/repo/app/main.go:57
+main.main
+	/repo/app/main.go:82
+runtime.main
+	/usr/local/go/src/runtime/proc.go:290
+runtime.goexit
+	/usr/local/go/src/runtime/asm_arm64.s:1447
+main.main
+	/repo/app/main.go:82
+runtime.main
+	/usr/local/go/src/runtime/proc.go:290

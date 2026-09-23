@@ -1,0 +1,11 @@
+panic: assignment to entry in nil map
+
+goroutine 1 [running]:
+main.main.generic.func1(...)
+	/repo/app/main.go:35
+example.com/app/internal/svc.Map[...](...)
+	/repo/app/internal/svc/svc.go:30
+main.generic(...)
+	/repo/app/main.go:33
+main.main()
+	/repo/app/main.go:69 +0x11c8

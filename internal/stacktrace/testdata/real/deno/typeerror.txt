@@ -1,0 +1,5 @@
+error: Uncaught (in promise) TypeError: Cannot read properties of undefined (reading 'length')
+    return req.body.length;
+                    ^
+    at Server.handle (file:///repo/app/src/scenarios.mjs:34:21)
+    at file:///repo/app/src/scenarios.mjs:84:18

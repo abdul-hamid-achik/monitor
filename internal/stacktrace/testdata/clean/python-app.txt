@@ -1,0 +1,6 @@
+2026-09-22 10:00:00,001 INFO app: starting nlp service
+2026-09-22 10:00:00,015 INFO app: error handling module loaded
+2026-09-22 10:00:01,204 INFO app: request /predict completed in 42ms
+2026-09-22 10:00:02,981 INFO app: request /predict completed in 38ms
+2026-09-22 10:00:03,120 INFO app: no errors in the last 100 requests
+2026-09-22 10:00:04,442 INFO app: request /predict completed in 40ms

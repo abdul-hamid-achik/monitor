@@ -1,0 +1,10 @@
+Error: ENOENT: no such file or directory, open 'does-not-exist.json'
+    at Object.readFileSync (ext:deno_node/fs.ts:423:15)
+    at readConfig (file:///repo/app/src/scenarios.mjs:24:13)
+    at file:///repo/app/src/scenarios.mjs:68:7 {
+  errno: -2,
+  syscall: "open",
+  code: "ENOENT",
+  path: "does-not-exist.json"
+}
+still running

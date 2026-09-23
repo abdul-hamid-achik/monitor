@@ -1,0 +1,11 @@
+=== RUN   TestParse
+    parse_test.go:12: expected error: boom, got <nil>
+--- FAIL: TestParse (0.00s)
+=== RUN   TestServe
+--- PASS: TestServe (0.01s)
+FAIL
+FAIL	example.com/app/internal/svc	0.214s
+2026/09/22 10:00:00 server: error reading request: EOF
+2026/09/22 10:00:01 http: panic serving 127.0.0.1:52100: recovered and logged
+level=error msg="request failed" err="context deadline exceeded" path=/v1/items
+exit status 1

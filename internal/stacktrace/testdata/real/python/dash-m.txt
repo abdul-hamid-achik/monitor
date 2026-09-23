@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/repo/app/pkg/__main__.py", line 3, in <module>
+    run()
+    ~~~^^
+  File "/repo/app/pkg/worker.py", line 6, in run
+    load("settings.toml")
+    ~~~~^^^^^^^^^^^^^^^^^
+  File "/repo/app/pkg/worker.py", line 2, in load
+    raise RuntimeError(f"cannot load {path}")
+RuntimeError: cannot load settings.toml

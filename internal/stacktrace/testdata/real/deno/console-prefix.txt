@@ -1,0 +1,4 @@
+request failed: SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (<anonymous>)
+    at file:///repo/app/src/scenarios.mjs:60:12
+still running

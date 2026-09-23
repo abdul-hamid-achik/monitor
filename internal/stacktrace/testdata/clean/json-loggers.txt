@@ -1,0 +1,7 @@
+{"level":"error","message":"payment declined","service":"billing","timestamp":"2026-09-22T10:00:00.000Z"}
+{"level":"warn","message":"retrying upstream","attempt":2,"timestamp":"2026-09-22T10:00:01.000Z"}
+{"level":50,"time":1790137826333,"pid":4821,"hostname":"dev","msg":"payment declined","err":{"type":"Error","message":"card expired"}}
+{"name":"api","hostname":"dev","pid":4821,"level":50,"msg":"request failed","time":"2026-09-22T10:00:02.000Z","v":0}
+{"event": "payment declined", "level": "error", "logger": "billing", "timestamp": "2026-09-22T10:00:03Z"}
+{"@timestamp":"2026-09-22T10:00:04.000Z","log.level":"error","message":"Error: upstream timeout","ecs.version":"1.6.0"}
+{"severity":"ERROR","textPayload":"TypeError: handler failed","time":"2026-09-22T10:00:05Z"}

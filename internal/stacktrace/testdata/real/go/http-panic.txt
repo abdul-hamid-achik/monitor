@@ -1,0 +1,19 @@
+2026/09/22 23:16:04 http: panic serving 127.0.0.1:58299: runtime error: invalid memory address or nil pointer dereference
+goroutine 17 [running]:
+net/http.(*conn).serve.func1()
+	/usr/local/go/src/net/http/server.go:1897 +0xac
+panic({0x1029fdf40?, 0x102abb5b0?})
+	/usr/local/go/src/runtime/panic.go:860 +0x12c
+example.com/app/internal/svc.(*Server).Handle(...)
+	/repo/app/internal/svc/svc.go:13
+main.main.func1({0x5dd0700bfb38?, 0x10268cb0c?}, 0x5dd070002010?)
+	/repo/app/main.go:113 +0x24
+net/http.HandlerFunc.ServeHTTP(0x0?, {0x102a6ef08?, 0x5dd07003e000?}, 0x5dd0700bfb20?)
+	/usr/local/go/src/net/http/server.go:2284 +0x38
+net/http.serverHandler.ServeHTTP({0x5dd070016040?}, {0x102a6ef08?, 0x5dd07003e000?}, 0x1?)
+	/usr/local/go/src/net/http/server.go:3309 +0xb0
+net/http.(*conn).serve(0x5dd07001c090, {0x102a6f650, 0x5dd070012120})
+	/usr/local/go/src/net/http/server.go:2067 +0x55c
+created by net/http.(*Server).Serve in goroutine 8
+	/usr/local/go/src/net/http/server.go:3462 +0x37c
+server still running

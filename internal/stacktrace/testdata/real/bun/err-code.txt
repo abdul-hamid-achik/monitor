@@ -1,0 +1,13 @@
+37 | 
+38 | const name = process.argv[2] ?? (typeof Deno !== 'undefined' ? Deno.args[0] : undefined);
+39 | 
+40 | switch (name) {
+41 |   case 'err-code':
+42 |     fs.readFileSync(undefined);
+            ^
+TypeError: path must be a string or a file descriptor
+ code: "ERR_INVALID_ARG_TYPE"
+
+      at /repo/app/src/scenarios.mjs:42:8
+
+Bun v1.4.2 (macOS arm64)

@@ -1,0 +1,11 @@
+2026-09-22T10:00:00.000-0600	INFO	app/main.go:77	server started	{"port": 8080}
+2026-09-22T10:00:00.100-0600	DEBUG	app/main.go:80	cache warm	{"keys": 128, "errors": 0}
+1.790137826326457e+09	info	app/main.go:90	request handled	{"path": "/v1/items", "status": 200}
+{"level":"info","ts":1790137826.333802,"caller":"app/main.go:97","msg":"server started","port":8080}
+{"level":"debug","ts":"2026-09-22T10:00:01.000-0600","caller":"app/main.go:98","msg":"error budget ok"}
+2026-09-22T10:00:02.000Z INFO [workflow] worker started
+2026-09-22T10:00:02.500Z DEBUG [workflow] Error handling configured
+I, [2026-09-22T10:00:03.000000 #501]  INFO -- : Started GET "/errors" for 127.0.0.1
+D, [2026-09-22T10:00:03.100000 #501] DEBUG -- : RuntimeError handler installed
+INFO:root:worker started
+INFO:app.errors:error reporter ready

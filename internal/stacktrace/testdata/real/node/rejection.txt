@@ -1,0 +1,8 @@
+file:///repo/app/src/scenarios.mjs:29
+  throw new TypeError('user payload is not an object');
+        ^
+
+TypeError: user payload is not an object
+    at fetchUser (file:///repo/app/src/scenarios.mjs:29:9)
+
+Node.js v26.7.0

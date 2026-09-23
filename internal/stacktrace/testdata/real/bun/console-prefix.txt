@@ -1,0 +1,11 @@
+request failed: 55 |     }
+56 |     console.error('still running');
+57 |     break;
+58 |   case 'console-prefix':
+59 |     try {
+60 |       JSON.parse('{bad');
+                ^
+SyntaxError: JSON Parse error: Expected '}'
+      at /repo/app/src/scenarios.mjs:60:12
+
+still running

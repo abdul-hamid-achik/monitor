@@ -1,0 +1,4 @@
+  File "/repo/app/syntax_bad.py", line 1
+    def broken(:
+               ^
+SyntaxError: invalid syntax

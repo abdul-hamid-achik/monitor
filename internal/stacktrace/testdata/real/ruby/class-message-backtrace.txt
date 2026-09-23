@@ -1,0 +1,3 @@
+ArgumentError: bad config
+/repo/app/app.rb:9:in 'Object#load_cfg'
+/repo/app/app.rb:43:in '<main>'

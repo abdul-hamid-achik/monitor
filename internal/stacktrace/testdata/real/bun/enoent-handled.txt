@@ -1,0 +1,16 @@
+63 |     }
+64 |     console.error('still running');
+65 |     break;
+66 |   case 'enoent-handled':
+67 |     try {
+68 |       readConfig();
+           ^
+ENOENT: no such file or directory, open 'does-not-exist.json'
+    path: "does-not-exist.json",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+      at /repo/app/src/scenarios.mjs:68:7
+
+still running

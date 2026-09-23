@@ -1,0 +1,6 @@
+2026-09-22T10:04:00.000Z INFO [workflow] worker started
+2026-09-22T10:05:00.000Z ERROR [workflow] ApplicationFailure: activity task failed
+    at runActivity() @ /repo/examples/polyglot/js/workload.js:80:3
+    at Timeout._onTimeout() @ /repo/examples/polyglot/js/workload.js:64:3
+Caused by: ApplicationFailure: root cause: boom
+    at doWork() @ /repo/examples/polyglot/js/workload.js:90:5

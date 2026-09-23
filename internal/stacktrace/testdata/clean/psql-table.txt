@@ -1,0 +1,14 @@
+app=# select id, name, role from users order by id;
+ id | name  | role
+----+-------+-------
+  1 | alice | admin
+  2 | bob   | user
+  3 | carol | user
+(3 rows)
+
+| step | status | error |
+|------|--------|-------|
+| 1 | ok | none |
+| 2 | ok | none |
+12 | build | passed
+13 | test  | passed
