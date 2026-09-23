@@ -99,10 +99,12 @@ func TestExtractMainScriptRuby(t *testing.T) {
 		t.Fatalf("ruby script main = %q", got)
 	}
 	// Ruby flags that take a separate value: -r (require), -I (load path),
-	// -e (eval, skipped along with its code argument), -C (chdir).
-	got = extractMainScript(RuntimeRuby, []string{"ruby", "-r", "bundler/setup", "-I", "lib", "app.rb"}, cwd)
+	// -e (eval, skipped along with its code argument), -C (chdir). All four
+	// are asserted together so this comment cannot drift from what the test
+	// actually exercises again.
+	got = extractMainScript(RuntimeRuby, []string{"ruby", "-r", "bundler/setup", "-I", "lib", "-e", "puts 1", "-C", "/tmp", "app.rb"}, cwd)
 	if got != "/app/app.rb" {
-		t.Fatalf("ruby with -r/-I = %q", got)
+		t.Fatalf("ruby with -r/-I/-e/-C = %q", got)
 	}
 	// Regression: Ruby's "-p" (autoprint) and "-c" (syntax check only) take
 	// NO separate value, unlike Node's "-p/--print" and Python's "-c"
@@ -179,7 +181,11 @@ func TestExtractInspectAddr(t *testing.T) {
 		{RuntimeNode, []string{"node", "--inspect-wait=9260", "a.js"}, "127.0.0.1:9260"},
 		// Bare --inspect takes no separate value: a following numeric-looking
 		// token is the script (or a script argument), never an implicit port.
-		{RuntimeNode, []string{"node", "--inspect", "9229", "a.js"}, "127.0.0.1:9229"},
+		// The argv port (9230) deliberately differs from the default 9229:
+		// the old lookahead treated "9230" as the port and returned
+		// 127.0.0.1:9230, so this case fails against the pre-fix behavior
+		// instead of passing either way.
+		{RuntimeNode, []string{"node", "--inspect", "9230", "a.js"}, "127.0.0.1:9229"},
 		// Bun's bare --inspect defaults to 6499, not the Node/Deno 9229, and
 		// the hostname is "localhost" (matching Bun's own banner; on macOS
 		// it in fact binds only the IPv6 loopback [::1]:6499, not
