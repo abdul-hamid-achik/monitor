@@ -87,16 +87,18 @@ is meant to feed.`,
 			j := stacktrace.NewJoiner()
 			scanner := bufio.NewScanner(r)
 			scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-			emit := func(b stacktrace.Block) error {
-				if len(b.Lines) == 0 {
-					return nil
+			emit := func(bs []stacktrace.Block) error {
+				for _, b := range bs {
+					ex := stacktrace.Parse(b)
+					if ex == nil {
+						continue
+					}
+					applyInApp(ex, gitRoot)
+					if err := enc.Encode(parsedEvent{Project: project, Service: service, Exception: ex}); err != nil {
+						return err
+					}
 				}
-				ex := stacktrace.Parse(b)
-				if ex == nil {
-					return nil
-				}
-				applyInApp(ex, gitRoot)
-				return enc.Encode(parsedEvent{Project: project, Service: service, Exception: ex})
+				return nil
 			}
 			for scanner.Scan() {
 				line := stacktrace.StripANSI(scanner.Text())

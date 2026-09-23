@@ -1,107 +1,173 @@
 package stacktrace
 
 import (
-	"path/filepath"
+	"path"
+	"regexp"
 	"strings"
 )
 
-// pathSegmentExclusions lists path components that mark a frame as vendor,
-// stdlib, or runtime-internal code rather than application code, tested as
-// whole "/"-separated path segments (so a project directory that merely
-// contains the substring, e.g. "internal_tools", is not excluded).
-var pathSegmentExclusions = []string{
-	"node_modules",
-	"site-packages",
-	"dist-packages",
-	"vendor",
-	".bundle",
-	"gems",
-	"internal", // legacy pre-"node:" Node internals; Deno's ext:deno_node/internal/*
+// dependencySegments are path components that mark vendored or installed
+// third-party code even inside the git root. They are matched against the
+// path RELATIVE to the root (never against the root's own ancestors, so a
+// checkout under ~/vendor/app is still in-app).
+var dependencySegments = map[string]bool{
+	"node_modules":     true,
+	"bower_components": true,
+	"jspm_packages":    true,
+	"site-packages":    true,
+	"dist-packages":    true,
+	"__pypackages__":   true,
+	"vendor":           true, // Go modules vendor/, Ruby vendor/bundle
+	".bundle":          true,
+	"gems":             true,
 }
 
-// pathSubstringExclusions lists pseudo-scheme prefixes and markers that
-// never denote a real path under the git root, so a plain substring test is
-// enough (they can't collide with a legitimate project path segment).
-var pathSubstringExclusions = []string{
-	"node:internal",
-	"bun:",
-	"deno:",
-	"ext:",
-	"<anonymous>",
+// reURLScheme matches a pseudo-path scheme such as "node:", "bun:", "ext:",
+// "deno:", "https:" or "webpack:" (two or more letters, so a Windows drive
+// letter "C:" is not a scheme).
+var reURLScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]+:`)
+
+// isPseudoPath reports runtime-internal locations that are never files in
+// the repository: node:fs, bun:main, ext:core/..., deno:..., https://...
+// (remote Deno modules), <anonymous>, <frozen runpy>, <internal:kernel>,
+// <string>, [eval], [eval]-wrapper, native, "index 0" (Promise.all).
+func isPseudoPath(p string) bool {
+	switch {
+	case p == "", p == "native":
+		return true
+	case strings.HasPrefix(p, "<"), strings.HasPrefix(p, "["):
+		return true
+	case !isWindowsAbs(p) && reURLScheme.MatchString(p):
+		return true
+	case !isAbsPath(p) && strings.Contains(p, " "):
+		// "index 0" and similar labels. Absolute paths may contain
+		// spaces ("/home/me/My Projects/app"); relative source paths
+		// in stack traces practically never do.
+		return true
+	}
+	return false
 }
 
-// InApp reports whether frame f is application code: a real file under
-// gitRoot that isn't vendored, a stdlib/runtime-internal path, or a
-// pseudo-path the runtime prints for internal/synthetic frames.
-//
-// It never touches the filesystem; gitRoot is a plain string prefix/root
-// used for the relative-path test, not a live repository handle.
-func InApp(f Frame, gitRoot string) bool {
-	path := f.AbsPath
-	if path == "" {
-		path = f.Filename
+// normPath turns p into a cleaned, slash-separated path for prefix tests;
+// Windows paths are lower-cased (their filesystems are case-insensitive).
+func normPath(p string) string {
+	win := isWindowsAbs(p)
+	p = strings.ReplaceAll(p, `\`, "/")
+	p = path.Clean(p)
+	if win {
+		p = strings.ToLower(p)
 	}
-	if path == "" {
-		return false
-	}
-	for _, marker := range pathSubstringExclusions {
-		if strings.Contains(path, marker) {
-			return false
-		}
-	}
-	if hasGOROOTSrc(path) {
-		return false
-	}
-	if strings.Contains(path, "/usr/lib/ruby") {
-		return false
-	}
-	if hasExcludedSegment(path) {
-		return false
-	}
-	if gitRoot == "" {
-		return false
-	}
-	return underRoot(path, gitRoot)
+	return p
 }
 
-// hasExcludedSegment reports whether any "/"-delimited segment of path
-// exactly matches one of pathSegmentExclusions.
-func hasExcludedSegment(path string) bool {
-	clean := strings.ReplaceAll(path, "\\", "/")
-	for _, seg := range strings.Split(clean, "/") {
-		for _, excl := range pathSegmentExclusions {
-			if seg == excl {
-				return true
-			}
+// relToRoot returns abs relative to root (slash-separated) when abs is
+// inside root.
+func relToRoot(abs, root string) (string, bool) {
+	if root == "" || !isAbsPath(abs) || isWindowsAbs(abs) != isWindowsAbs(root) {
+		return "", false
+	}
+	a, r := normPath(abs), normPath(root)
+	if a == r {
+		return "", false
+	}
+	prefix := r
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	if !strings.HasPrefix(a, prefix) {
+		return "", false
+	}
+	// Keep the original spelling of the relative part when case folding
+	// did not change byte lengths (always, for ASCII paths).
+	orig := path.Clean(strings.ReplaceAll(abs, `\`, "/"))
+	if len(orig) == len(a) {
+		return orig[len(prefix):], true
+	}
+	return a[len(prefix):], true
+}
+
+func hasDependencySegment(rel string) bool {
+	for _, seg := range strings.Split(rel, "/") {
+		if dependencySegments[seg] || strings.Contains(seg, "@v") {
+			return true
 		}
 	}
 	return false
 }
 
-// hasGOROOTSrc reports whether path looks like it lives under a Go
-// toolchain's GOROOT/src (e.g. ".../go/src/runtime/panic.go" or the
-// "runtime/", "internal/" packages the standard library itself uses). Since
-// this package never shells out to `go env GOROOT`, it recognizes the
-// canonical "/src/" layout Go toolchains use instead of comparing against
-// an actual GOROOT value.
-func hasGOROOTSrc(path string) bool {
-	clean := strings.ReplaceAll(path, "\\", "/")
-	return strings.Contains(clean, "/go/src/") || strings.HasPrefix(clean, "src/")
-}
-
-// underRoot reports whether path is a real filesystem path located inside
-// gitRoot. A relative path is treated as already-relative-to-root (the
-// common case for Ruby's bare "workload.rb"-style filenames), so it is
-// in_app by default unless it was already excluded above.
-func underRoot(path, gitRoot string) bool {
-	if !filepath.IsAbs(path) {
-		return true
-	}
-	root := filepath.Clean(gitRoot)
-	abs := filepath.Clean(path)
-	rel, err := filepath.Rel(root, abs)
-	if err != nil {
+// relativeInApp decides a relative path (Ruby's "workload.rb", a Python
+// "src/app.py", Go -trimpath output): it is taken as relative to the root,
+// except for Node's legacy "internal/*.js" core modules and Go's trimmed
+// standard library ("runtime/proc.go": a first element without a dot, which
+// Go reserves for the standard library).
+func relativeInApp(rel string) bool {
+	rel = strings.TrimPrefix(strings.ReplaceAll(rel, `\`, "/"), "./")
+	if strings.HasPrefix(rel, "../") || path.Ext(rel) == "" {
 		return false
 	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	if strings.HasPrefix(rel, "internal/") && strings.HasSuffix(rel, ".js") {
+		return false
+	}
+	if strings.HasSuffix(rel, ".go") {
+		first, _, _ := strings.Cut(rel, "/")
+		if strings.Contains(rel, "/") && !strings.Contains(first, ".") {
+			return false
+		}
+	}
+	return !hasDependencySegment(rel)
+}
+
+// InApp reports whether frame f is application code: a real file under
+// gitRoot that is not vendored or installed third-party code, and not a
+// runtime pseudo-path. Frames outside the root (GOROOT, $GOPATH/pkg/mod, the
+// Python/Ruby/Node installation, global gems) are never in-app, and neither
+// is anything when gitRoot is unknown ("").
+//
+// It never touches the filesystem; gitRoot is compared as a path string.
+func InApp(f Frame, gitRoot string) bool {
+	if gitRoot == "" {
+		return false
+	}
+	p := f.AbsPath
+	if p == "" {
+		p = f.Filename
+	}
+	p = strings.TrimPrefix(p, "file://")
+	if isPseudoPath(p) {
+		return false
+	}
+	if !isAbsPath(p) {
+		return relativeInApp(p)
+	}
+	rel, ok := relToRoot(p, gitRoot)
+	if !ok {
+		return false
+	}
+	return !hasDependencySegment(rel)
+}
+
+// ApplyGitRoot finishes an Exception once the caller knows the git root:
+// every frame (outer and chained) gets InApp, and a frame whose absolute
+// path lies under gitRoot gets Filename rewritten to the root-relative,
+// slash-separated form with the absolute path kept in AbsPath. With an empty
+// gitRoot it only resets InApp to false.
+func ApplyGitRoot(ex *Exception, gitRoot string) {
+	if ex == nil {
+		return
+	}
+	for i := range ex.Frames {
+		f := &ex.Frames[i]
+		f.InApp = InApp(*f, gitRoot)
+		abs := f.AbsPath
+		if abs == "" && isAbsPath(f.Filename) {
+			abs = f.Filename
+		}
+		if rel, ok := relToRoot(abs, gitRoot); ok {
+			f.AbsPath = abs
+			f.Filename = rel
+		}
+	}
+	for i := range ex.Chained {
+		ApplyGitRoot(&ex.Chained[i], gitRoot)
+	}
 }

@@ -1,18 +1,22 @@
-// ruby.go parses two shapes of Ruby 3.4 stderr output:
+// ruby.go parses three shapes of Ruby (3.4, and the older backtick-quoted
+// 3.3-) output:
 //
-//   - A printed backtrace from a rescue clause (commonly `warn
-//     e.backtrace.join("\n")` or `STDERR.puts e.backtrace`): a run of bare
-//     "file:line:in 'method'" lines with no exception class or message at
-//     all -- Ruby doesn't attach one unless the app chooses to print it, so
-//     this shape is marked Handled (it was rescued) but its Type/Value stay
-//     empty.
-//   - Ruby's own uncaught-exception dump at process exit: a single
+//   - Ruby's own uncaught-exception dump at process exit: a
 //     "file:line:in 'method': message (Type)" header line -- which doubles
-//     as the crash frame -- followed by "\tfrom file:line:in 'method'"
-//     lines for each caller.
+//     as the crash frame -- optionally followed by Ruby 3.4's error_highlight
+//     snippet (a blank line, the code line, a caret line), then
+//     "\tfrom file:line:in 'method'" lines for each caller. Each cause is
+//     printed right after as another header with its own from-lines, outer
+//     to inner, and becomes a Chained entry.
+//   - A printed backtrace from a rescue clause (`warn e.backtrace`): a run
+//     of bare "file:line:in 'method'" lines with no class or message --
+//     Handled, with empty Type/Value.
+//   - The stdlib Logger: "E, [2026-09-22T10:04:37.123456 #123] ERROR -- :
+//     message (Type)" followed by the backtrace logger.error(exception)
+//     prints (handled, with Type/Value), or a message-only record.
 //
-// Both print the crash (innermost) frame first, so both are reversed to
-// this package's oldest-first, crash-last convention.
+// All three print the crash (innermost) frame first and are reversed to this
+// package's oldest-first, crash-last convention.
 package stacktrace
 
 import (
@@ -22,87 +26,184 @@ import (
 )
 
 var (
-	reRubyHandledLine = regexp.MustCompile(`^(\S+):(\d+):in '([^']*)'$`)
-	reRubyFatalHeader = regexp.MustCompile(`^(\S+):(\d+):in '([^']*)': (.+) \((\S+)\)$`)
-	reRubyFatalFrame  = regexp.MustCompile(`^\tfrom (\S+):(\d+):in '([^']*)'$`)
+	reRubyHandledLine  = regexp.MustCompile("^(\\S+):(\\d+):in [`']([^']*)'$")
+	reRubyFatalHeader  = regexp.MustCompile("^(\\S+):(\\d+):in [`']([^']*)': (.*) \\(([A-Z][\\w:]*)\\)$")
+	reRubyFatalFrame   = regexp.MustCompile("^\\tfrom (\\S+):(\\d+):in [`']([^']*)'$")
+	reRubyLevelsElided = regexp.MustCompile(`^\t? *\.\.\. \d+ levels\.\.\.$`)
+	reRubyCaret        = regexp.MustCompile(`^\s*\^+\s*$`)
+	reRubyLogger       = regexp.MustCompile(`^([DIWEFA]), \[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?) #\d+\]\s+(DEBUG|INFO|WARN|ERROR|FATAL|ANY|UNKNOWN) -- ([^:]*): (.*)$`)
+	reRubyMsgClass     = regexp.MustCompile(`^(.*) \(([A-Z][\w:]*)\)$`)
 )
 
-func rubyHandledStart(line string) bool { return reRubyHandledLine.MatchString(line) }
-func rubyHandledContinues(_ []string, line string) bool {
-	return reRubyHandledLine.MatchString(line)
-}
-
-var rubyHandledRule = blockRule{kind: "ruby-handled", start: rubyHandledStart, cont: rubyHandledContinues}
-
-func rubyFatalStart(line string) bool { return reRubyFatalHeader.MatchString(line) }
-func rubyFatalContinues(_ []string, line string) bool {
-	return reRubyFatalFrame.MatchString(line)
-}
-
-var rubyFatalRule = blockRule{kind: "ruby-fatal", start: rubyFatalStart, cont: rubyFatalContinues}
-
-func rubyFrame(file string, line int, method string) Frame {
-	f := Frame{Filename: file, Lineno: line, Function: method}
-	if strings.HasPrefix(file, "/") {
+func rubyFrame(file string, line string, method string) Frame {
+	ln, _ := strconv.Atoi(line)
+	f := Frame{Filename: file, Lineno: ln, Function: method}
+	if isAbsPath(file) {
 		f.AbsPath = file
 	}
 	return f
 }
 
-func parseRubyHandled(block Block) *Exception {
+// --- rescue-printed backtraces ---
+
+var rubyHandledRule = blockRule{
+	kind:  "ruby-handled",
+	start: reRubyHandledLine.MatchString,
+	open:  func(string) grammar { return rubyBacktraceGrammar{} },
+}
+
+type rubyBacktraceGrammar struct{}
+
+func (rubyBacktraceGrammar) next(line string, boundary bool) verdict {
+	if !boundary && (reRubyHandledLine.MatchString(line) || reRubyLevelsElided.MatchString(line)) {
+		return vAccept
+	}
+	return vReject
+}
+
+func rubyBacktraceFrames(lines []string) []Frame {
 	var frames []Frame
-	for _, l := range block.Lines {
-		m := reRubyHandledLine.FindStringSubmatch(l)
-		if m == nil {
-			continue
+	for _, l := range lines {
+		if m := reRubyHandledLine.FindStringSubmatch(l); m != nil {
+			frames = append(frames, rubyFrame(m[1], m[2], m[3]))
 		}
-		ln, _ := strconv.Atoi(m[2])
-		frames = append(frames, rubyFrame(m[1], ln, m[3]))
 	}
 	reverseFrames(frames)
+	return frames
+}
+
+func parseRubyHandled(block Block) *Exception {
+	frames := rubyBacktraceFrames(block.Lines)
+	if len(frames) == 0 {
+		return nil
+	}
 	return &Exception{
-		Runtime:   "ruby",
-		Parser:    "ruby",
-		Handled:   boolPtr(true),
-		Level:     LevelError,
-		Frames:    frames,
-		LineStart: block.LineStart,
-		LineEnd:   block.LineEnd,
+		Runtime:    "ruby",
+		Parser:     "ruby",
+		Handled:    boolPtr(true),
+		Level:      LevelError,
+		Frames:     frames,
+		LineStart:  block.LineStart,
+		LineEnd:    block.LineEnd,
+		ObservedAt: blockTimestamp(block),
 	}
 }
 
+// --- uncaught dump ---
+
+var rubyFatalRule = blockRule{
+	kind:  "ruby-fatal",
+	start: reRubyFatalHeader.MatchString,
+	open:  func(string) grammar { return &rubyFatalGrammar{} },
+}
+
+// rubyFatalGrammar tracks whether the current header has any from-lines
+// yet: error_highlight's snippet (blank, code, caret) may only sit between a
+// header and its first from-line, and is tentative until that from-line
+// confirms it.
+type rubyFatalGrammar struct {
+	sawFrom bool
+	snippet int
+}
+
+func (g *rubyFatalGrammar) next(line string, boundary bool) verdict {
+	switch {
+	case reRubyFatalHeader.MatchString(line):
+		// The next cause, printed right after the previous exception.
+		g.sawFrom, g.snippet = false, 0
+		return vAccept
+	case reRubyFatalFrame.MatchString(line), reRubyLevelsElided.MatchString(line):
+		g.sawFrom, g.snippet = true, 0
+		return vAccept
+	case boundary || g.sawFrom:
+		return vReject
+	}
+	// error_highlight snippet before the first from-line.
+	blank := strings.TrimSpace(line) == ""
+	if g.snippet < 4 && (blank || isIndented(line) || reRubyCaret.MatchString(line)) {
+		g.snippet++
+		return vTentative
+	}
+	return vReject
+}
+
 func parseRubyFatal(block Block) *Exception {
-	if len(block.Lines) == 0 {
-		return nil
-	}
-	header := reRubyFatalHeader.FindStringSubmatch(block.Lines[0])
-	if header == nil {
-		return nil
-	}
-	ln, _ := strconv.Atoi(header[2])
-	frames := []Frame{rubyFrame(header[1], ln, header[3])}
-	for _, l := range block.Lines[1:] {
-		m := reRubyFatalFrame.FindStringSubmatch(l)
-		if m == nil {
+	var chain []Exception
+	for _, l := range block.Lines {
+		if h := reRubyFatalHeader.FindStringSubmatch(l); h != nil {
+			chain = append(chain, Exception{
+				Type:   h[5],
+				Value:  h[4],
+				Frames: []Frame{rubyFrame(h[1], h[2], h[3])},
+			})
 			continue
 		}
-		fln, _ := strconv.Atoi(m[2])
-		frames = append(frames, rubyFrame(m[1], fln, m[3]))
+		if m := reRubyFatalFrame.FindStringSubmatch(l); m != nil && len(chain) > 0 {
+			cur := &chain[len(chain)-1]
+			cur.Frames = append(cur.Frames, rubyFrame(m[1], m[2], m[3]))
+		}
 	}
-	reverseFrames(frames)
+	if len(chain) == 0 {
+		return nil
+	}
+	for i := range chain {
+		reverseFrames(chain[i].Frames)
+	}
+	ex := &chain[0]
+	ex.Runtime = "ruby"
+	ex.Parser = "ruby"
+	ex.Handled = boolPtr(false)
+	ex.Level = LevelFatal
+	ex.LineStart, ex.LineEnd = block.LineStart, block.LineEnd
+	ex.ObservedAt = blockTimestamp(block)
+	ex.Chained = chain[1:]
+	if len(ex.Chained) == 0 {
+		ex.Chained = nil
+	}
+	inheritChain(ex)
+	return ex
+}
+
+// --- stdlib Logger ---
+
+var rubyLoggerRule = blockRule{
+	kind: "ruby-logger",
+	start: func(line string) bool {
+		m := reRubyLogger.FindStringSubmatch(line)
+		if m == nil {
+			return false
+		}
+		_, ok := levelFromLogPrefix(m[3])
+		return ok
+	},
+	open: func(string) grammar { return rubyBacktraceGrammar{} },
+}
+
+func parseRubyLogger(block Block) *Exception {
+	m := reRubyLogger.FindStringSubmatch(block.Lines[0])
+	if m == nil {
+		return nil
+	}
+	level, ok := levelFromLogPrefix(m[3])
+	if !ok {
+		return nil
+	}
 	ex := &Exception{
-		Runtime:   "ruby",
-		Type:      header[5],
-		Value:     header[4],
-		Parser:    "ruby",
-		Handled:   boolPtr(false),
-		Level:     LevelFatal,
-		Frames:    frames,
-		LineStart: block.LineStart,
-		LineEnd:   block.LineEnd,
+		Runtime:    "ruby",
+		Value:      m[5],
+		Parser:     "message",
+		Handled:    boolPtr(true),
+		Level:      level,
+		LineStart:  block.LineStart,
+		LineEnd:    block.LineEnd,
+		ObservedAt: blockTimestamp(block),
 	}
-	if ts, ok := parseTimestamp(block.Lines[0]); ok {
-		ex.ObservedAt = ts
+	if frames := rubyBacktraceFrames(block.Lines[1:]); len(frames) > 0 {
+		ex.Parser = "ruby"
+		ex.Frames = frames
+		if mc := reRubyMsgClass.FindStringSubmatch(m[5]); mc != nil {
+			ex.Value, ex.Type = mc[1], mc[2]
+		}
 	}
 	return ex
 }
