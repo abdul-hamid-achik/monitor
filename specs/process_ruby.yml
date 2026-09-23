@@ -18,6 +18,12 @@ intent: |
   for command ruby"; run `asdf shell ruby 3.4.8` (or otherwise put a real
   ruby on PATH) before running this spec locally.
 
+  The resolve_runtime_ruby_gemfile_marker outcome additionally exercises
+  `monitor resolve --runtime ruby` end to end (previously only checked by
+  hand): it starts a disposable ruby process rooted at a fresh temp dir that
+  carries a Gemfile marker, resolves it back to that exact pid, and checks
+  that `monitor process --json` lists "Gemfile" among the binding's markers.
+
 target:
   cmd: ["./bin/monitor", "--version"]
   cwd: "."
@@ -56,6 +62,12 @@ outcomes:
     verify:
       command:
         run: "P=$(sh -c 'nohup ruby examples/polyglot/ruby/workload.rb >/dev/null 2>&1 & echo $!'); sleep 1; OUT=$(./bin/monitor process \"$P\" --json 2>&1); kill \"$P\" 2>/dev/null || true; echo \"$OUT\" | grep -q '\"codebase_root\"'"
+  - id: resolve_runtime_ruby_gemfile_marker
+    description: resolve --runtime ruby --codebase-root <dir> finds a live ruby process rooted at a Gemfile-marked dir, and process --json lists Gemfile among its markers
+    verify:
+      command:
+        run: "D=$(mktemp -d); touch \"$D/Gemfile\"; printf 'sleep 30\\n' > \"$D/svc.rb\"; (cd \"$D\" && exec ruby svc.rb >/dev/null 2>&1) & P=$!; sleep 1; OUT=$(./bin/monitor resolve --runtime ruby --codebase-root \"$D\" --json 2>&1); PROC=$(./bin/monitor process \"$P\" --json 2>&1); kill \"$P\" 2>/dev/null || true; rm -rf \"$D\"; echo \"$OUT\" | grep -q \"\\\"pid\\\": $P\\b\" && echo \"$PROC\" | grep -q '\"Gemfile\"'"
+        timeoutMs: 15000
   - id: clean_exit
     description: --version still exits cleanly (baseline sanity check for the target command)
     verify:
