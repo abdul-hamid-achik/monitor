@@ -43,7 +43,8 @@ type Hints struct {
 	// CHALUPA_SERVICE, or an explicit override). Highest service precedence.
 	ExplicitService string
 	// Dir seeds the git-root/marker walk: a process's cwd (preferred) or
-	// its already-resolved codebase root. Empty defaults to os.Getwd().
+	// its already-resolved codebase root. Empty performs no git/marker walk
+	// at all unless UseWorkingDir is set (see below).
 	Dir string
 	// ProcessName is the leaf process's name, the last-resort fallback for
 	// both project and service.
@@ -52,6 +53,18 @@ type Hints struct {
 	// process attached (e.g. a disk/swap system alert), which resolves
 	// straight to project "host" instead of walking Dir.
 	PID int32
+	// UseWorkingDir opts in to falling back to monitor's own os.Getwd()
+	// when Dir is empty. Leave this false (the default) for any caller
+	// describing ANOTHER process -- watch --stash and investigate both
+	// describe an alerted or investigated process, never monitor itself.
+	// An exited PID, a process whose cwd could not be read, or a
+	// system-wide alert with no process attached must never be attributed
+	// to whatever directory monitor happens to be running from (verified
+	// misattribution: investigating a PID with no readable cwd recorded
+	// project = monitor's own repo checkout). Only a caller that is
+	// genuinely describing monitor's own working directory as the subject
+	// should set this.
+	UseWorkingDir bool
 }
 
 // Identity is the single resolved project/service identity every occurrence
@@ -93,13 +106,13 @@ type Identity struct {
 // whenever a process name is known.
 func Resolve(h Hints) Identity {
 	dir := strings.TrimSpace(h.Dir)
-	if dir == "" {
+	if dir == "" && h.UseWorkingDir {
 		if cwd, err := os.Getwd(); err == nil {
 			dir = cwd
 		}
 	}
 	gitRoot := findGitRoot(dir)
-	markerRoot := findMarkerRoot(dir)
+	markerRoot := findMarkerRoot(dir, gitRoot)
 
 	service := resolveService(h, gitRoot, markerRoot)
 	slug, source := resolveProject(h, gitRoot, markerRoot)
@@ -174,13 +187,27 @@ func findGitRoot(start string) string {
 // nearest manifest commonly sits well below the git root, and the two roots
 // deliberately serve different purposes (project identity vs. service
 // identity; see the package doc).
-func findMarkerRoot(start string) string {
+//
+// stopAt bounds the walk to the repository: once dir reaches stopAt (the
+// already-resolved git root) without finding a marker, the walk stops
+// instead of continuing above it. Without this bound, a stray manifest
+// above the repository -- a common ~/package.json, say -- would "differ
+// from the git root" and become the service name for every process in
+// every repo nested underneath it (verified: <tmp>/package.json plus
+// <tmp>/projects/foo/.git with Dir=foo resolved Service to the outer
+// directory's name instead of falling through to the process name).
+// stopAt == "" (no git root was found) leaves the walk unbounded, as
+// before: there is no repository to bound it to.
+func findMarkerRoot(start, stopAt string) string {
 	dir := absDir(start)
 	for dir != "" {
 		for _, name := range markerFiles {
 			if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
 				return dir
 			}
+		}
+		if stopAt != "" && dir == stopAt {
+			return ""
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {

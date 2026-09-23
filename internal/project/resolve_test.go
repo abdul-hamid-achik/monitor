@@ -192,8 +192,56 @@ func TestResolveDefaultsDirToWorkingDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := Resolve(Hints{PID: 1})
+	// UseWorkingDir opts a SELF-describing caller (monitor describing its
+	// own working directory as the subject) into the os.Getwd() fallback.
+	got := Resolve(Hints{PID: 1, UseWorkingDir: true})
 	if got.GitRoot != wantRoot {
 		t.Fatalf("GitRoot = %q, want cwd-derived %q", got.GitRoot, wantRoot)
+	}
+}
+
+// TestResolveNeverDefaultsToWorkingDirectoryUnlessOptedIn is the fix for the
+// misattribution bug: a caller describing ANOTHER process -- the default,
+// UseWorkingDir unset -- must never fall back to monitor's own os.Getwd(),
+// even when that cwd happens to sit inside a git repo. `watch --stash` and
+// investigate both describe another process and must never set
+// UseWorkingDir; an exited PID or an unreadable process cwd must resolve to
+// "local", not to whichever repo monitor happens to be running from.
+func TestResolveNeverDefaultsToWorkingDirectoryUnlessOptedIn(t *testing.T) {
+	dir := t.TempDir()
+	mkGitRoot(t, dir)
+	origCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origCwd) })
+
+	got := Resolve(Hints{PID: 999999})
+	if got.Slug != "local" || got.GitRoot != "" || got.Source != "local" {
+		t.Fatalf("got = %+v, want Slug=local GitRoot=\"\" Source=local (must not default to monitor's own cwd)", got)
+	}
+}
+
+// TestResolveMarkerAboveGitRootIsIgnored is the fix for a stray manifest
+// above the repository (e.g. a common ~/package.json) leaking into every
+// nested repo's service name. findMarkerRoot must stop at the already
+// resolved git root instead of continuing to walk above it.
+func TestResolveMarkerAboveGitRootIsIgnored(t *testing.T) {
+	root := t.TempDir()
+	mkMarker(t, root, "package.json")
+	repoRoot := filepath.Join(root, "projects", "foo")
+	mkGitRoot(t, repoRoot)
+
+	got := Resolve(Hints{Dir: repoRoot, ProcessName: "foo-bin", PID: 7})
+	if got.Slug != "foo" || got.Source != "git_root" {
+		t.Fatalf("got = %+v, want Slug=foo Source=git_root", got)
+	}
+	// The marker above the git root must be ignored; service falls through
+	// to the process name instead of picking up the outer directory's name.
+	if got.Service != "foo-bin" {
+		t.Fatalf("Service = %q, want foo-bin (marker above the git root must be ignored)", got.Service)
 	}
 }
