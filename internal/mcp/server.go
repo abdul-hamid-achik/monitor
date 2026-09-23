@@ -121,8 +121,8 @@ type Service struct {
 	// functions and a few lines each so the response stays small regardless
 	// of how large the underlying profile is. A capture whose method
 	// carries no per-line detail at all (macOS `sample`, a CDP HEAP
-	// snapshot) degrades honestly to ProfileCaptureResult.HeatmapSkip
-	// instead of an empty or fabricated heatmap.
+	// snapshot) degrades honestly to a {"status":"skipped",...}
+	// LineHeatmapPayload instead of an empty or fabricated heatmap.
 	//
 	// An error satisfying errors.As(err, *UnavailableError) marks a capture
 	// that will never succeed for a known reason (Bun's JSC inspector, not
@@ -769,16 +769,20 @@ type HeatmapSkip struct {
 }
 
 // ProfileCaptureResult is what a Service.Profile call returns: the captured
-// profile and its verified artifact receipt, plus — only when the caller
-// asked for lines:true — either a bounded line_heatmap (Heatmap) or an
-// honest explanation of why one couldn't be built (HeatmapSkip). Exactly
-// one of Heatmap/HeatmapSkip is set when lines was requested and Receipt is
-// Verified; both are nil when lines was false.
+// profile (already shaped for the wire — its own Symbols cleared when
+// LineHeatmapPayload holds a real heatmap, since that replaces rather than
+// supplements the raw per-function list) and its verified artifact receipt,
+// plus — only when the caller asked for lines:true and Receipt is Verified —
+// LineHeatmapPayload, the ready-to-marshal "line_heatmap" response value:
+// either a *profiler.Heatmap or a {"status":"skipped","detail":...,
+// "recovery":...} map, already decided by the Service (internal/cli/mcp.go's
+// buildProfileService), never by handleProfileCapture — see the roadmap's
+// "no business logic in [MCP] handlers" rule. nil when lines was false or
+// the capture wasn't verified.
 type ProfileCaptureResult struct {
-	Profile     profiler.Profile
-	Receipt     profiler.Receipt
-	Heatmap     *profiler.Heatmap
-	HeatmapSkip *HeatmapSkip
+	Profile            profiler.Profile
+	Receipt            profiler.Receipt
+	LineHeatmapPayload any
 }
 
 // handleProfileCapture implements monitor_profile_capture. Defaults to
@@ -807,8 +811,10 @@ func (s *Server) handleProfileCapture(ctx context.Context, _ *mcp.CallToolReques
 	// this handler stays free of capture-specific business logic, matching
 	// how monitor_investigate's include_raw redaction also lives in the
 	// Service rather than being reimplemented per handler. lines:true's
-	// bounded line_heatmap is built the same way, inside the Service,
-	// BEFORE that discard step (see Service.Profile's doc comment).
+	// bounded line_heatmap — Symbols cleared, skip shaped to its wire map —
+	// is built and shaped the same way, inside the Service, BEFORE that
+	// discard step (see Service.Profile's doc comment and
+	// ProfileCaptureResult.LineHeatmapPayload's).
 	res, err := s.svc.Profile(ctx, in.PID, profiler.ProfileType(in.Type), in.PprofAddr, in.Keep, in.Lines)
 	if err != nil {
 		var unavail *UnavailableError
@@ -836,35 +842,14 @@ func (s *Server) handleProfileCapture(ctx context.Context, _ *mcp.CallToolReques
 			},
 		})
 	}
-	prof := res.Profile
 	payload := map[string]any{
 		"captured": true,
 		"pid":      in.PID,
-		"profile":  prof,
+		"profile":  res.Profile, // already Symbols-cleared by the Service when LineHeatmapPayload holds a real heatmap
 		"artifact": res.Receipt, // {"verified":true,"size_bytes":N}
 	}
-	if in.Lines {
-		switch {
-		case res.Heatmap != nil:
-			// "a bounded line_heatmap ... instead of raw symbols": the
-			// per-function Symbols list is redundant with (and coarser
-			// than) the line-level heatmap this call already carries, and
-			// dropping it here — a MAP COPY, never mutating res.Profile
-			// itself, so a caller re-checking the Service's own return
-			// value never sees this redaction — keeps the response inside
-			// E3.6's payload budget regardless of how many symbols the
-			// underlying capture found.
-			profWithoutSymbols := prof
-			profWithoutSymbols.Symbols = nil
-			payload["profile"] = profWithoutSymbols
-			payload["line_heatmap"] = res.Heatmap
-		case res.HeatmapSkip != nil:
-			payload["line_heatmap"] = map[string]any{
-				"status":   "skipped",
-				"detail":   res.HeatmapSkip.Detail,
-				"recovery": res.HeatmapSkip.Recovery,
-			}
-		}
+	if in.Lines && res.LineHeatmapPayload != nil {
+		payload["line_heatmap"] = res.LineHeatmapPayload
 	}
 	return result(payload)
 }

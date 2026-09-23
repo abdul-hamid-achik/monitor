@@ -577,7 +577,13 @@ func TestHandleProfileCaptureLinesTrueEmbedsHeatmapAndDropsSymbols(t *testing.T)
 	s := newTestServer(t, &Service{
 		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
 			prof := profiler.Profile{PID: 7, Type: "cpu", Method: "inspector_cpu", Symbols: []profiler.Symbol{{Func: "heavyStringify", File: "js/workload.js", Line: 17}}}
-			return ProfileCaptureResult{Profile: prof, Receipt: prof.VerifyArtifact(), Heatmap: hm}, nil
+			receipt := prof.VerifyArtifact()
+			// A real Service (internal/cli/mcp.go's buildProfileService)
+			// clears Symbols itself, AFTER computing the receipt, since
+			// LineHeatmapPayload (hm below) replaces rather than
+			// supplements it; this stub mirrors that by hand.
+			prof.Symbols = nil
+			return ProfileCaptureResult{Profile: prof, Receipt: receipt, LineHeatmapPayload: hm}, nil
 		},
 	})
 	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Type: "cpu", Lines: true, Confirm: true})
@@ -619,7 +625,11 @@ func TestHandleProfileCaptureLinesTrueSkipsHonestly(t *testing.T) {
 			prof := profiler.Profile{PID: 7, Type: "sample", Method: "sample", Text: "sample dump"}
 			return ProfileCaptureResult{
 				Profile: prof, Receipt: prof.VerifyArtifact(),
-				HeatmapSkip: &HeatmapSkip{Detail: "sample carries no file:line detail", Recovery: "use type:cpu or type:heap instead"},
+				LineHeatmapPayload: map[string]any{
+					"status":   "skipped",
+					"detail":   "sample carries no file:line detail",
+					"recovery": "use type:cpu or type:heap instead",
+				},
 			}, nil
 		},
 	})

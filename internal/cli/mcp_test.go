@@ -17,6 +17,7 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	monitormcp "github.com/abdul-hamid-achik/monitor/internal/mcp"
+	"github.com/abdul-hamid-achik/monitor/internal/procbind"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 )
 
@@ -508,6 +509,9 @@ func TestProfileServiceLiveNodeInspectorLinesTrueNamesHotLine(t *testing.T) {
 		t.Fatalf("line_heatmap.functions = %v, want at least one function", lh["functions"])
 	}
 	var sawLine17 bool
+	var hottestFunc string
+	var hottestLine float64
+	var hottestSelf float64 = -1
 	for _, fv := range functions {
 		f, ok := fv.(map[string]any)
 		if !ok {
@@ -522,10 +526,23 @@ func TestProfileServiceLiveNodeInspectorLinesTrueNamesHotLine(t *testing.T) {
 			if line, ok := l["line"].(float64); ok && int(line) == 17 {
 				sawLine17 = true
 			}
+			self, _ := l["self"].(float64)
+			if self > hottestSelf {
+				hottestSelf = self
+				hottestFunc, _ = f["name"].(string)
+				hottestLine, _ = l["line"].(float64)
+			}
 		}
 	}
 	if !sawLine17 {
 		t.Errorf("line_heatmap never names the planted hot line 17: %+v", lh)
+	}
+	// Not just "17 appears somewhere" -- it must be the actual HOTTEST
+	// line by self weight, in the function workload.js's own hot loop
+	// lives in (heavyStringify), matching mcp_profile_lines.yml's own
+	// stronger assertion.
+	if hottestFunc != "heavyStringify" || int(hottestLine) != 17 {
+		t.Errorf("hottest line by self = %s:%v, want heavyStringify:17: %+v", hottestFunc, hottestLine, lh)
 	}
 
 	raw, err := json.Marshal(m)
@@ -534,6 +551,13 @@ func TestProfileServiceLiveNodeInspectorLinesTrueNamesHotLine(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "ws://") {
 		t.Errorf("payload must never carry a ws:// inspector URL: %s", raw)
+	}
+	lhRaw, err := json.Marshal(lh)
+	if err != nil {
+		t.Fatalf("marshal line_heatmap for size check: %v", err)
+	}
+	if len(lhRaw) > 6144 {
+		t.Errorf("line_heatmap is %d bytes, want <= 6144 (E3.6's payload budget)", len(lhRaw))
 	}
 }
 
@@ -610,16 +634,14 @@ func TestBuildProfileServiceLinesTrueBoundsHeatmap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lines:true: %v", err)
 	}
-	if res.HeatmapSkip != nil {
-		t.Fatalf("expected a heatmap, got a skip: %+v", res.HeatmapSkip)
+	hm, ok := res.LineHeatmapPayload.(*profiler.Heatmap)
+	if !ok || hm == nil {
+		t.Fatalf("expected LineHeatmapPayload to hold a *profiler.Heatmap, got %#v", res.LineHeatmapPayload)
 	}
-	if res.Heatmap == nil {
-		t.Fatal("expected a non-nil Heatmap")
-	}
-	if got := len(res.Heatmap.Functions); got > mcpHeatmapMaxFunctions {
+	if got := len(hm.Functions); got > mcpHeatmapMaxFunctions {
 		t.Errorf("len(Functions) = %d, want <= %d", got, mcpHeatmapMaxFunctions)
 	}
-	for _, f := range res.Heatmap.Functions {
+	for _, f := range hm.Functions {
 		if got := len(f.Lines); got > mcpHeatmapMaxLines {
 			t.Errorf("function %s: len(Lines) = %d, want <= %d", f.Name, got, mcpHeatmapMaxLines)
 		}
@@ -635,7 +657,7 @@ func TestBuildProfileServiceLinesTrueBoundsHeatmap(t *testing.T) {
 	// the last weight in the heavyStringify series above) must have
 	// survived the top-8 trim, not an arbitrary line-number-ordered prefix.
 	var sawHotLine bool
-	for _, f := range res.Heatmap.Functions {
+	for _, f := range hm.Functions {
 		if f.Name != "main.heavyStringify" {
 			continue
 		}
@@ -646,22 +668,177 @@ func TestBuildProfileServiceLinesTrueBoundsHeatmap(t *testing.T) {
 		}
 	}
 	if !sawHotLine {
-		t.Errorf("expected the hottest line (19) to survive the top-%d-by-weight trim: %+v", mcpHeatmapMaxLines, res.Heatmap.Functions)
+		t.Errorf("expected the hottest line (19) to survive the top-%d-by-weight trim: %+v", mcpHeatmapMaxLines, hm.Functions)
 	}
 }
 
+// TestBuildProfileServiceLinesTrueKeepsDefaultTargetBeyondTopN is the E3.6
+// review regression: a 4-deep call stack (ancestor -> ancestor -> ancestor
+// -> the real hot leaf) must still surface the leaf's own line in
+// LineHeatmapPayload — mcpSelectFunctions must not let a plain top-3-by-cum
+// cap drop the one function that actually burns CPU just because three
+// near-zero-self wrapper ancestors outrank it by cumulative weight.
+func TestBuildProfileServiceLinesTrueKeepsDefaultTargetBeyondTopN(t *testing.T) {
+	defer restoreStubs()()
+	verifyOwnership = func(context.Context, int32, string) (profiler.PortOwnership, string) {
+		return profiler.OwnershipOwned, ""
+	}
+	path := writeFakeDeepPprofCPU(t)
+	captureProfile = func(_ context.Context, pid int32, ptype profiler.ProfileType, _ string) (profiler.Profile, error) {
+		return profiler.Profile{PID: pid, Type: ptype, Method: "pprof_cpu", Path: path}, nil
+	}
+
+	svc := buildProfileService()
+	res, err := svc(context.Background(), 1, profiler.ProfileCPU, "", false, true)
+	if err != nil {
+		t.Fatalf("lines:true: %v", err)
+	}
+	hm, ok := res.LineHeatmapPayload.(*profiler.Heatmap)
+	if !ok || hm == nil {
+		t.Fatalf("expected LineHeatmapPayload to hold a *profiler.Heatmap, got %#v", res.LineHeatmapPayload)
+	}
+	if got := len(hm.Functions); got > mcpHeatmapMaxFunctions {
+		t.Errorf("len(Functions) = %d, want <= %d", got, mcpHeatmapMaxFunctions)
+	}
+	var sawHotFunc bool
+	for _, f := range hm.Functions {
+		if f.Name != "main.hot" {
+			continue
+		}
+		sawHotFunc = true
+		for _, l := range f.Lines {
+			if l.Line == 3 {
+				return
+			}
+		}
+	}
+	if !sawHotFunc {
+		t.Fatalf("expected main.hot (the real leaf, highest self) to survive the top-%d cap: %+v", mcpHeatmapMaxFunctions, hm.Functions)
+	}
+	t.Fatalf("main.hot survived the cap but its hot line (3) did not: %+v", hm.Functions)
+}
+
+// writeFakeDeepPprofCPU builds a synthetic 4-deep pprof CPU proto
+// (handler -> service -> repo -> hot, mirroring the E3.6 review's own
+// "deep.js" reproduction): every ancestor frame is a near-zero-self wrapper
+// with a HIGHER cumulative weight than the real leaf (hot), which is where
+// all the actual CPU time (and its line-level detail) lives.
+func writeFakeDeepPprofCPU(t *testing.T) string {
+	t.Helper()
+	fn := func(id uint64, name, file string) *gpprof.Function {
+		return &gpprof.Function{ID: id, Name: name, Filename: file}
+	}
+	loc := func(id uint64, f *gpprof.Function, line int64) *gpprof.Location {
+		return &gpprof.Location{ID: id, Line: []gpprof.Line{{Function: f, Line: line}}}
+	}
+
+	prof := &gpprof.Profile{
+		SampleType:    []*gpprof.ValueType{{Type: "cpu", Unit: "nanoseconds"}},
+		PeriodType:    &gpprof.ValueType{Type: "cpu", Unit: "nanoseconds"},
+		Period:        1000000,
+		DurationNanos: 5 * int64(time.Second),
+	}
+
+	addFunc := func(id uint64, name string) *gpprof.Function {
+		f := fn(id, name, "deep.go")
+		prof.Function = append(prof.Function, f)
+		return f
+	}
+	addLoc := func(id uint64, f *gpprof.Function, line int64) *gpprof.Location {
+		l := loc(id, f, line)
+		prof.Location = append(prof.Location, l)
+		return l
+	}
+
+	handlerFn := addFunc(1, "main.handler")
+	serviceFn := addFunc(2, "main.service")
+	repoFn := addFunc(3, "main.repo")
+	hotFn := addFunc(4, "main.hot")
+	handlerLoc := addLoc(1, handlerFn, 2)
+	serviceLoc := addLoc(2, serviceFn, 3)
+	repoLoc := addLoc(3, repoFn, 4)
+	hotLoc := addLoc(4, hotFn, 3)
+
+	addSample := func(stack []*gpprof.Location, weight int64) {
+		prof.Sample = append(prof.Sample, &gpprof.Sample{Location: stack, Value: []int64{weight}})
+	}
+	// main.hot itself: the real leaf, one big self-time weight, so it's
+	// unambiguously DefaultTarget (highest SELF of anything in this proto).
+	addSample([]*gpprof.Location{hotLoc, repoLoc, serviceLoc, handlerLoc}, 1000)
+	// Three OTHER same-ancestor leaves (siblings main.hot's own stack never
+	// shares) that between them push handler/service/repo's own CUMULATIVE
+	// total well past main.hot's — the exact shape ("handler -> service ->
+	// repo -> hot" plus other work under the same three wrappers) that
+	// makes a plain top-3-by-CUM cap drop main.hot even though it is, by
+	// far, the hottest thing by SELF.
+	for i, name := range []string{"main.other1", "main.other2", "main.other3"} {
+		otherFn := addFunc(uint64(5+i), name)
+		otherLoc := addLoc(uint64(5+i), otherFn, int64(10+i))
+		addSample([]*gpprof.Location{otherLoc, repoLoc, serviceLoc, handlerLoc}, 400)
+	}
+
+	path := filepath.Join(t.TempDir(), "fake-deep-cpu.pb.gz")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := prof.Write(f); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // TestBuildMCPLineHeatmapSkipsForSampleCapture is lines:true's honest
-// degradation regression: a macOS `sample` capture (no Path, no Text — see
-// profilerSourceFromCapture) has no file:line detail to build a heatmap
-// from at all, and must degrade to a HeatmapSkip rather than an empty or
-// fabricated one.
+// degradation regression: a macOS `sample` capture has no file:line detail
+// to build a heatmap from at all, and must degrade to a HeatmapSkip rather
+// than an empty or fabricated one. prof.Text is set here — a REAL `sample`
+// capture always carries its raw call-graph dump there (see
+// internal/profiler/sample_darwin.go's captureSample, `p.Text =
+// string(out)`), a shape the OLD code path used to mis-stage as a
+// .cpuprofile and fail with a confusing "neither a V8/Bun .cpuprofile nor a
+// pprof profile" parse error that leaked an internal temp path. The fix
+// (buildMCPLineHeatmap checking prof.Method BEFORE ever staging anything)
+// is what this test guards: a clean, method-aware skip, never that leak.
 func TestBuildMCPLineHeatmapSkipsForSampleCapture(t *testing.T) {
-	prof := profiler.Profile{PID: 1, Type: profiler.ProfileSample, Method: "sample"}
+	prof := profiler.Profile{PID: 1, Type: profiler.ProfileSample, Method: "sample", Text: "Call graph:\n    100 Thread_1\n"}
 	hm, skip := buildMCPLineHeatmap(context.Background(), prof, nil)
 	if hm != nil {
 		t.Errorf("expected a nil Heatmap for a sample capture, got %+v", hm)
 	}
 	if skip == nil || skip.Detail == "" {
 		t.Fatalf("expected a non-empty HeatmapSkip, got %+v", skip)
+	}
+	if strings.Contains(skip.Detail, "/tmp") || strings.Contains(skip.Detail, "TestBuild") {
+		t.Errorf("skip.Detail must never leak an internal temp path, got %q", skip.Detail)
+	}
+	if strings.Contains(skip.Detail, "neither a V8/Bun") {
+		t.Errorf("skip.Detail must not misdescribe a sample dump as a malformed .cpuprofile, got %q", skip.Detail)
+	}
+	if skip.Recovery == "" {
+		t.Errorf("expected a non-empty Recovery hint, got %+v", skip)
+	}
+}
+
+// TestBuildMCPLineHeatmapSkipRecoveryNeverSuggestsTheTypeThatJustFailed
+// covers the JS-runtime skip's own recovery text: type:heap against a
+// Node/Deno target has no line-level detail (see internal/cli/hot.go's own
+// JS-runtime heap/goroutine guard), and telling the caller to "retry with
+// type:heap" — the exact request that just failed — would be dishonest.
+func TestBuildMCPLineHeatmapSkipRecoveryNeverSuggestsTheTypeThatJustFailed(t *testing.T) {
+	prof := profiler.Profile{PID: 1, Type: profiler.ProfileHeap, Method: "inspector_heap"}
+	binding := procbind.Binding{Runtime: procbind.RuntimeNode}
+	hm, skip := buildMCPLineHeatmap(context.Background(), prof, &binding)
+	if hm != nil {
+		t.Errorf("expected a nil Heatmap for an inspector_heap capture, got %+v", hm)
+	}
+	if skip == nil {
+		t.Fatal("expected a non-nil HeatmapSkip")
+	}
+	if strings.Contains(skip.Recovery, "type:heap") {
+		t.Errorf("Recovery must not suggest retrying type:heap, the type that just failed: %q", skip.Recovery)
+	}
+	if !strings.Contains(skip.Recovery, "type:cpu") {
+		t.Errorf("Recovery should point at type:cpu (the one that can actually work for Node/Deno): %q", skip.Recovery)
 	}
 }
