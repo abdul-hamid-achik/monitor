@@ -10,16 +10,36 @@ intent: |
   against a synthetic fixture in inspector_test.go — this spec exercises the
   same code path against a REAL, live V8 CPU profile end to end).
 
+  This is the INTERPRETER-MODE (--jitless) check, not a default-Node check.
   examples/polyglot/js/workload.js plants a hot statement at line 17
   (`s += JSON.stringify(...)` inside heavyStringify, called every 40ms from
-  a setInterval). Node is launched with --jitless: with any JIT tier enabled
-  (Sparkplug/Maglev/TurboFan), V8 attributes this workload's samples to the
-  *for loop's own line* (16) instead of the statement actually doing the
-  work (verified empirically against this exact fixture across --no-opt,
-  --no-turbo-inlining and --no-maglev-inlining — all still misattribute to
-  line 16); pure Ignition interpretation (--jitless) is the only mode that
-  reliably attributes samples to line 17, matching what the interpreter is
-  actually spending time on rather than a JIT tier's loop-level bookkeeping.
+  a setInterval). Pure Ignition interpretation (--jitless) reliably
+  attributes samples to line 17, matching what the interpreter is actually
+  spending time on. --jitless is used deliberately here (not --no-opt or
+  similar) because it is the only mode verified to give a stable,
+  deterministic attribution across runs for this fixture.
+
+  LIMITATION (verified live, monitor profile against real captures, Node
+  v26.7): with default flags — how `monitor run --inspect`/most users'
+  processes actually run — V8's tiered JIT (Sparkplug/Maglev/TurboFan)
+  inlines heavyStringify into its caller, processBatch, at some point
+  during the profiling window. Once inlined, positionTicks are correctly
+  self-time by construction, but they land on processBatch's own lines
+  (its for-loop body and the `return heavyStringify(items)` call site,
+  observed ~97-99% of active weight at line 26), not on any heavyStringify
+  line; heavyStringify itself then shows up only as scattered near-zero-
+  weight noise (observed as low as 0%, sometimes a fraction of a percent)
+  rather than the real hot statement. --no-opt alone does attribute
+  cleanly, but to line 16 (the for-loop header) rather than line 17 (the
+  statement doing the actual work) — still not the AC-1 bar. So this exact
+  claim — "the top-weighted symbol names the planted line under default
+  Node flags" — is NOT demonstrated by any spec today, in CI or otherwise;
+  flattenCDPProfile is reporting exactly what V8 emits, honestly. Default-
+  flag line accuracy is future work: attach the profiler from process
+  launch (`monitor run --inspect`/`--profile`, E3.3b) before the JIT has a
+  chance to inline the hot path away, rather than attaching to an
+  already-warm process the way this spec (and a real `monitor profile
+  <pid>` invocation against a long-running service) does.
 
 target:
   cmd:
@@ -73,13 +93,16 @@ outcomes:
           grep -q '"method":[[:space:]]*"inspector_cpu"' /tmp/monitor-spec-node-lines-profile.json
   - id: heavy_stringify_top_line_17
     description: |
-      the top-weighted heavyStringify symbol is line 17 (the planted hot
-      statement), not line 11/16 (its declaration or the enclosing for-loop
-      header) — the AC-1 regression this whole slice exists for. Symbols are
-      already weight-sorted descending (flattenCDPProfile), and Symbol's
-      JSON field order is func,file,line — so the first "line" following the
-      first "heavyStringify" match is the highest-weighted one; no JSON
-      parser needed.
+      under --jitless (pure interpreter, no JIT inlining to obscure the
+      attribution), the top-weighted heavyStringify symbol is line 17 (the
+      planted hot statement), not line 11/16 (its declaration or the
+      enclosing for-loop header) — the AC-1 regression this whole slice
+      exists for. See the spec's intent for the documented default-JIT
+      limitation this outcome does NOT cover. Symbols are already
+      weight-sorted descending (flattenCDPProfile), and Symbol's JSON field
+      order is func,file,line — so the first "line" following the first
+      "heavyStringify" match is the highest-weighted one; no JSON parser
+      needed.
     verify:
       command:
         run: >-

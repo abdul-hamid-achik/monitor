@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"time"
@@ -108,14 +109,32 @@ func ValidateCapture(t ProfileType) error {
 	return ValidateCaptureWith(capability.Current(), t)
 }
 
-// Capture takes a profile snapshot for the given pid. For the pprof types
-// (heap/cpu/goroutine) it scrapes the net/http/pprof server at addr (default
-// "localhost:6060" when addr is ""); the caller is responsible for pointing
-// addr at the target pid's own pprof server — callers that need proof the
-// endpoint belongs to pid should call VerifyListenerOwnership first (the
-// investigate pipeline and the MCP profile tool do). For the macOS sample
-// type it runs `sample <pid>` and addr is ignored.
+// defaultCPUDuration is the CPU sampling window used by Capture, which
+// predates a per-call duration knob: every caller that hasn't adopted
+// CaptureWithDuration (MCP's monitor_profile_capture doesn't expose a
+// --duration equivalent yet — that's E1.7) keeps this exact 1s window.
+const defaultCPUDuration = 1 * time.Second
+
+// Capture takes a profile snapshot for the given pid, using a 1s CPU
+// sampling window (see defaultCPUDuration). It is CaptureWithDuration with
+// that default; callers that need to honor a caller-supplied duration (the
+// `profile` CLI command's --duration flag) should call CaptureWithDuration
+// directly instead.
 func Capture(ctx context.Context, pid int32, t ProfileType, addr string) (Profile, error) {
+	return CaptureWithDuration(ctx, pid, t, addr, defaultCPUDuration)
+}
+
+// CaptureWithDuration takes a profile snapshot for the given pid. For the
+// pprof types (heap/cpu/goroutine) it scrapes the net/http/pprof server at
+// addr (default "localhost:6060" when addr is ""); the caller is
+// responsible for pointing addr at the target pid's own pprof server —
+// callers that need proof the endpoint belongs to pid should call
+// VerifyListenerOwnership first (the investigate pipeline and the MCP
+// profile tool do). cpuDuration sizes the CPU sampling window
+// (?seconds=N); it is ignored for heap/goroutine (instant snapshots) and
+// sample (its own fixed-duration `sample <pid> 1` invocation). For the
+// macOS sample type it runs `sample <pid>` and addr is ignored.
+func CaptureWithDuration(ctx context.Context, pid int32, t ProfileType, addr string, cpuDuration time.Duration) (Profile, error) {
 	p := Profile{PID: pid, Type: t, Taken: time.Now()}
 	if err := ValidateCapture(t); err != nil {
 		return p, err
@@ -123,9 +142,12 @@ func Capture(ctx context.Context, pid int32, t ProfileType, addr string) (Profil
 	if pid <= 0 {
 		return p, fmt.Errorf("invalid pid %d", pid)
 	}
+	if cpuDuration <= 0 {
+		cpuDuration = defaultCPUDuration
+	}
 	switch t {
 	case ProfileHeap, ProfileGoroutine, ProfileCPU:
-		return captureProfilePprof(ctx, p, addr, t)
+		return captureProfilePprof(ctx, p, addr, t, cpuDuration)
 	case ProfileSample:
 		return captureSample(ctx, pid)
 	default:
@@ -162,11 +184,21 @@ func pprofPreferredValue(t ProfileType) []string {
 // host with no go toolchain installed. The proto is always saved to Path so
 // the raw evidence survives even when in-process symbolication finds
 // nothing (a profile with zero samples of the selected type isn't an
-// error).
-func captureProfilePprof(ctx context.Context, p Profile, addr string, t ProfileType) (Profile, error) {
+// error). cpuDuration sizes the CPU sampling window (ignored for
+// heap/goroutine, which are instant snapshots either way).
+func captureProfilePprof(ctx context.Context, p Profile, addr string, t ProfileType, cpuDuration time.Duration) (Profile, error) {
 	p.Method = "pprof_" + string(t)
-	endpoint := pprofURL(addr, t)
-	body, err := httpGet(ctx, endpoint)
+	endpoint := pprofURL(addr, t, cpuDuration)
+	client := pprofClient
+	if t == ProfileCPU {
+		// The server blocks for ~cpuDuration seconds serving this one
+		// request (?seconds=N); the shared client's fixed 30s bound would
+		// kill any request close to or past that, so CPU gets its own
+		// client sized to the requested window plus network/scheduling
+		// slack instead.
+		client = cpuHTTPClient(cpuDuration)
+	}
+	body, err := httpGet(ctx, client, endpoint)
 	if err != nil {
 		return p, fmt.Errorf("scrape %s: %w", endpoint, err)
 	}
@@ -202,27 +234,57 @@ const DefaultPprofAddr = "localhost:6060"
 // pprofURL maps a ProfileType to its net/http/pprof endpoint at addr
 // (host:port, defaulting to localhost:6060 when empty). Every type is
 // fetched as the raw protobuf now (never ?debug=1 text): CPU always was
-// (there is no /cpu handler; /profile bounded with ?seconds=1 so the scrape
+// (there is no /cpu handler; /profile bounded with ?seconds=N so the scrape
 // can't block indefinitely), and heap/goroutine moved off ?debug=1 so
 // symbolsFromPprof can compute real flat/cum per line with inlining instead
-// of text-scraping a human-oriented dump.
-func pprofURL(addr string, t ProfileType) string {
+// of text-scraping a human-oriented dump. cpuDuration sets N, rounded up to
+// the next whole second (net/http/pprof's `seconds` query param is an
+// integer) and floored at 1 so a caller-supplied sub-second duration still
+// samples for at least one second rather than requesting `seconds=0`
+// (net/http/pprof treats that as "use its own 30s default", silently
+// ignoring the caller's intent). Ignored for heap/goroutine.
+func pprofURL(addr string, t ProfileType, cpuDuration time.Duration) string {
 	if addr == "" {
 		addr = DefaultPprofAddr
 	}
 	base := "http://" + addr + "/debug/pprof/"
 	switch t {
 	case ProfileCPU:
-		return base + "profile?seconds=1"
+		secs := int(math.Ceil(cpuDuration.Seconds()))
+		if secs < 1 {
+			secs = 1
+		}
+		return fmt.Sprintf("%sprofile?seconds=%d", base, secs)
 	default:
 		return base + string(t)
 	}
 }
 
 // pprofClient bounds a scrape so a hung/slow pprof endpoint can't stall
-// forever when the caller passes a context without a deadline. The timeout
-// comfortably covers the bounded CPU profile (?seconds=1).
+// forever when the caller passes a context without a deadline. Used for
+// heap/goroutine (always-instant snapshots regardless of caller intent) and
+// as Capture's implicit 1s-CPU-window callers' bound; see cpuHTTPClient for
+// CPU requests that ask for a longer window.
 var pprofClient = &http.Client{Timeout: 30 * time.Second}
+
+// cpuHTTPClientSlack is added on top of the requested CPU sampling window
+// to give the server's own timer, network transit, and scheduling jitter
+// room, so a --duration close to pprofClient's fixed 30s bound doesn't get
+// killed mid-scrape.
+const cpuHTTPClientSlack = 30 * time.Second
+
+// cpuHTTPClient returns an HTTP client whose timeout comfortably covers a
+// CPU profile scrape of the given duration. Built fresh per call (CPU
+// profiles are rare, latency-insensitive requests, so losing connection
+// reuse is not a real cost) rather than mutating the shared pprofClient,
+// which heap/goroutine captures keep using with their fixed, always-modest
+// bound.
+func cpuHTTPClient(cpuDuration time.Duration) *http.Client {
+	if cpuDuration <= 0 {
+		cpuDuration = defaultCPUDuration
+	}
+	return &http.Client{Timeout: cpuDuration + cpuHTTPClientSlack}
+}
 
 const maxRawProfileBytes int64 = 128 << 20
 
@@ -247,12 +309,12 @@ func writeTempProfile(pid int32, t ProfileType, body []byte) (string, error) {
 	return path, nil
 }
 
-func httpGet(ctx context.Context, url string) ([]byte, error) {
+func httpGet(ctx context.Context, client *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := pprofClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

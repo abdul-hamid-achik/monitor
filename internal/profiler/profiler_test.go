@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/abdul-hamid-achik/monitor/internal/capability"
 )
@@ -51,6 +52,9 @@ func TestCaptureHeapOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Capture(heap): %v", err)
 	}
+	if p.Path != "" {
+		defer os.Remove(p.Path)
+	}
 	if len(p.Symbols) == 0 {
 		t.Fatal("expected non-empty symbols from a real heap profile")
 	}
@@ -58,9 +62,40 @@ func TestCaptureHeapOverHTTP(t *testing.T) {
 		t.Error("expected Profile.Text to hold a readable top-N summary now that heap has no ?debug=1 text dump")
 	}
 	for _, s := range p.Symbols {
-		if s.Func == "unknown" {
-			t.Errorf("real heap profile produced an unknown symbol: %+v", s)
+		if s.Func == "unknown" || s.Func == "(unknown)" {
+			t.Errorf("real heap profile produced an %s symbol: %+v", s.Func, s)
 		}
+	}
+}
+
+// TestCaptureWithDurationSendsRequestedSeconds is the end-to-end regression
+// for the major finding that `monitor profile --duration X` silently
+// ignored X on the pprof path (pprofURL hardcoded ?seconds=1, and Capture
+// had no duration parameter at all). This drives the real HTTP path — not
+// just pprofURL in isolation — asserting the server actually received the
+// caller's requested window, and that Capture itself (no explicit
+// duration) keeps requesting the historical default of 1.
+func TestCaptureWithDurationSendsRequestedSeconds(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	if _, err := CaptureWithDuration(context.Background(), 1, ProfileCPU, addr, 7*time.Second); err != nil {
+		t.Fatalf("CaptureWithDuration: %v", err)
+	}
+	if gotQuery != "seconds=7" {
+		t.Errorf("server received query %q, want seconds=7", gotQuery)
+	}
+
+	if _, err := Capture(context.Background(), 1, ProfileCPU, addr); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	if gotQuery != "seconds=1" {
+		t.Errorf("Capture (no explicit duration) sent %q, want seconds=1 (its historical default)", gotQuery)
 	}
 }
 
@@ -124,20 +159,53 @@ func TestValidateCaptureWithInjectedCapabilities(t *testing.T) {
 // the plain proto endpoint (no ?debug=1): the old text dump can't carry
 // per-line flat/cum with inlining, only the wire proto can.
 func TestPprofURLMapsCPUToProfile(t *testing.T) {
-	// "" defaults to localhost:6060.
+	// "" defaults to localhost:6060. A duration of 1s (Capture's implicit
+	// default) matches the historical hardcoded ?seconds=1.
 	cases := map[ProfileType]string{
-		ProfileCPU:       "http://localhost:6060/debug/pprof/profile?seconds=1",
 		ProfileHeap:      "http://localhost:6060/debug/pprof/heap",
 		ProfileGoroutine: "http://localhost:6060/debug/pprof/goroutine",
 	}
 	for pt, want := range cases {
-		if got := pprofURL("", pt); got != want {
+		if got := pprofURL("", pt, time.Second); got != want {
 			t.Errorf("pprofURL(%q, %s) = %q, want %q", "", pt, got, want)
 		}
 	}
+	if got := pprofURL("", ProfileCPU, time.Second); got != "http://localhost:6060/debug/pprof/profile?seconds=1" {
+		t.Errorf("pprofURL(cpu, 1s) = %q, want ?seconds=1", got)
+	}
 	// A custom address is honored.
-	if got := pprofURL("10.0.0.5:7070", ProfileHeap); got != "http://10.0.0.5:7070/debug/pprof/heap" {
+	if got := pprofURL("10.0.0.5:7070", ProfileHeap, time.Second); got != "http://10.0.0.5:7070/debug/pprof/heap" {
 		t.Errorf("custom addr pprofURL = %q", got)
+	}
+}
+
+// TestPprofURLHonorsCPUDuration is the major-finding regression: a
+// --duration passed through to the pprof CPU path (the profile command's
+// only path capable of a multi-second capture) must actually change the
+// requested ?seconds=N, not silently stay pinned at the old hardcoded 1.
+func TestPprofURLHonorsCPUDuration(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{5 * time.Second, "http://localhost:6060/debug/pprof/profile?seconds=5"},
+		// Sub-second durations still round UP to a whole second (the
+		// query param is an integer) rather than truncating to 0/1.
+		{1500 * time.Millisecond, "http://localhost:6060/debug/pprof/profile?seconds=2"},
+		// A non-positive duration is not a valid sampling window; floor at
+		// 1s rather than emitting ?seconds=0 (net/http/pprof would then
+		// fall back to its OWN 30s default, silently ignoring the caller).
+		{0, "http://localhost:6060/debug/pprof/profile?seconds=1"},
+	}
+	for _, tc := range cases {
+		if got := pprofURL("", ProfileCPU, tc.d); got != tc.want {
+			t.Errorf("pprofURL(cpu, %v) = %q, want %q", tc.d, got, tc.want)
+		}
+	}
+	// heap/goroutine ignore the duration entirely — they're instant
+	// snapshots, not a bounded sampling window.
+	if got := pprofURL("", ProfileHeap, 90*time.Second); got != "http://localhost:6060/debug/pprof/heap" {
+		t.Errorf("pprofURL(heap, 90s) = %q, want duration ignored", got)
 	}
 }
 

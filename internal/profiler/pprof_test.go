@@ -135,9 +135,45 @@ func TestSymbolsFromPprofNeverMislabelsFunctionsEndingInS(t *testing.T) {
 		t.Fatalf("syms = %+v, want exactly main.processRequests", syms)
 	}
 	for _, s := range syms {
-		if s.Func == "unknown" {
-			t.Errorf("function ending in 's' was mislabeled unknown: %+v", syms)
+		if s.Func == "unknown" || s.Func == "(unknown)" {
+			t.Errorf("function ending in 's' was mislabeled %s: %+v", s.Func, syms)
 		}
+	}
+}
+
+// TestSymbolsFromPprofRecursionGuardCountsOnceePerSample: a recursive
+// function that appears more than once in a single sample's stack must have
+// its cum credited exactly once for that sample, not once per occurrence —
+// otherwise a function recursing N deep would inflate its own cum by a
+// factor of N instead of reporting "this sample's stack passed through me",
+// the actual definition of cum. The pprof.go doc comment describes this
+// guard (seenInSample); this exercises it directly with a 4-deep stack
+// (leaf, 3x recursive) whose sole sample has value 100.
+func TestSymbolsFromPprofRecursionGuardCountsOncePerSample(t *testing.T) {
+	rec := &gpprof.Function{ID: 1, Name: "main.recurse", Filename: "main.go"}
+	locLeaf := &gpprof.Location{ID: 1, Line: []gpprof.Line{{Function: rec, Line: 10}}}
+	locRecA := &gpprof.Location{ID: 2, Line: []gpprof.Line{{Function: rec, Line: 10}}}
+	locRecB := &gpprof.Location{ID: 3, Line: []gpprof.Line{{Function: rec, Line: 10}}}
+	locRecC := &gpprof.Location{ID: 4, Line: []gpprof.Line{{Function: rec, Line: 10}}}
+	prof := &gpprof.Profile{
+		SampleType: []*gpprof.ValueType{{Type: "samples", Unit: "count"}},
+		Sample: []*gpprof.Sample{
+			// Leaf-first (index 0 is what was executing): the same
+			// (func,file,line) appears at all 4 stack depths.
+			{Value: []int64{100}, Location: []*gpprof.Location{locLeaf, locRecA, locRecB, locRecC}},
+		},
+	}
+
+	syms := symbolsFromPprof(prof, 0)
+	if len(syms) != 1 {
+		t.Fatalf("got %d symbols, want 1 (every location resolves to the same func/file/line): %+v", len(syms), syms)
+	}
+	rs := syms[0]
+	if rs.Weight != 100 {
+		t.Errorf("main.recurse flat = %v, want 100 (it IS the leaf)", rs.Weight)
+	}
+	if rs.Cum != 100 {
+		t.Errorf("main.recurse cum = %v, want 100 (recursion guard: counted once per sample, not once per stack depth — a naive sum would give 400)", rs.Cum)
 	}
 }
 
@@ -239,8 +275,8 @@ func TestCaptureCPUParsesRealPprofProtoWithoutGoToolchain(t *testing.T) {
 		if strings.Contains(s.Func, "busyWorkForCPUProfile") {
 			found = true
 		}
-		if s.Func == "unknown" {
-			t.Errorf("real profile produced an unknown symbol: %+v", s)
+		if s.Func == "unknown" || s.Func == "(unknown)" {
+			t.Errorf("real profile produced an %s symbol: %+v", s.Func, s)
 		}
 	}
 	if !found {

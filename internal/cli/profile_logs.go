@@ -76,7 +76,11 @@ func newProfileCmd() *cobra.Command {
 					}
 				}
 				var captureErr error
-				prof, captureErr = profiler.Capture(ctx, pid, pt, pprofAddr)
+				// CaptureWithDuration, not Capture: --duration must reach the
+				// pprof CPU path's ?seconds=N (Capture's own duration is a
+				// fixed 1s, kept only for callers that haven't adopted a
+				// duration knob yet, e.g. MCP's monitor_profile_capture).
+				prof, captureErr = profiler.CaptureWithDuration(ctx, pid, pt, pprofAddr, duration)
 				if captureErr != nil {
 					return captureErr
 				}
