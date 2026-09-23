@@ -12,11 +12,16 @@ intent: |
   as a detached process, inspects it, and kills it — it never waits for the
   workload's own 40s sleep or its intentional crash.
 
-  Runtime note: this spec invokes the bare "ruby" from PATH, which the CI
-  infra group provisions. On a local machine where asdf/rbenv shims have no
-  default global version set, "ruby" alone may fail with "No version is set
-  for command ruby"; run `asdf shell ruby 3.4.8` (or otherwise put a real
-  ruby on PATH) before running this spec locally.
+  Runtime note: this spec invokes the bare "ruby" from PATH. glyph's outcome
+  verify-command PATH is its own construction, not the invoking shell's: it
+  puts /usr/bin ahead of ~/.asdf/shims (confirmed by printing $PATH from
+  inside an outcome's verify.command), so on a plain macOS install "ruby"
+  resolves to the system /usr/bin/ruby (2.6.x) rather than an asdf-managed
+  version, even when the invoking shell's own PATH has asdf shims first. CI
+  (or any runner image without a system ruby) relies on the infra group
+  provisioning a real "ruby" on PATH instead. The `ruby -v` precondition
+  below is non-fatal and exists only so the resolved interpreter is visible
+  in the run's artifacts.
 
   The resolve_runtime_ruby_gemfile_marker outcome additionally exercises
   `monitor resolve --runtime ruby` end to end (previously only checked by
@@ -39,6 +44,8 @@ preconditions:
       timeoutMs: 5000
     - run: "command -v ruby >/dev/null 2>&1"
       timeoutMs: 5000
+    - run: "ruby -v >&2 || true"
+      timeoutMs: 5000
 
 steps:
   - wait:
@@ -57,8 +64,8 @@ outcomes:
     verify:
       command:
         run: "P=$(sh -c 'nohup ruby examples/polyglot/ruby/workload.rb >/dev/null 2>&1 & echo $!'); sleep 1; OUT=$(./bin/monitor process \"$P\" --json 2>&1); kill \"$P\" 2>/dev/null || true; echo \"$OUT\" | grep -q '\"main_script\":.*workload.rb\"'"
-  - id: codebase_root_from_gemfile_or_git
-    description: process --json resolves a non-empty codebase_root by walking up from cwd
+  - id: codebase_root_resolves_from_cwd
+    description: process --json resolves a non-empty codebase_root by walking up from cwd (this spec's cwd is the repo root, so the marker found here is go.mod/.git, not Gemfile; resolve_runtime_ruby_gemfile_marker below exercises the Gemfile marker specifically)
     verify:
       command:
         run: "P=$(sh -c 'nohup ruby examples/polyglot/ruby/workload.rb >/dev/null 2>&1 & echo $!'); sleep 1; OUT=$(./bin/monitor process \"$P\" --json 2>&1); kill \"$P\" 2>/dev/null || true; echo \"$OUT\" | grep -q '\"codebase_root\"'"
