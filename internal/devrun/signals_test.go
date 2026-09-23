@@ -3,10 +3,12 @@
 package devrun
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -194,6 +196,75 @@ func TestForwardSignalsSkipsSigintWhenTTYShared(t *testing.T) {
 	if got := exitCodeFor(cmd.ProcessState); got != 7 {
 		t.Errorf("exit code = %d, want 7 (TERM trap, proving INT was never delivered)", got)
 	}
+}
+
+// TestForwardSignalsReachesWholeProcessGroupWhenNotTTYShared is the
+// process-group signal-forwarding fix: when Setpgid is on (stdin is not a
+// TTY), a signal forwarded to the child must reach the WHOLE new process
+// group, not just cmd.Process's own pid -- a wrapper child (`go run .`,
+// `sh -c '...'`) commonly forks or execs a real leaf process that inherits
+// that same group, and `kill -TERM <monitor-pid>` can never target a
+// separate group on its own. This proves it against a real grandchild
+// (`sleep`, backgrounded by a shell with no signal trap of its own): with
+// only the direct child (the shell) signaled, the grandchild would survive
+// for its full 100s sleep.
+func TestForwardSignalsReachesWholeProcessGroupWhenNotTTYShared(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	cmd := exec.CommandContext(context.Background(), "sh", "-c",
+		"sleep 100 & echo $! > "+pidFile+"; wait")
+	configureProcessGroup(cmd, false) // Setpgid: the shell AND its background sleep share a NEW group.
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	done := make(chan struct{})
+	go forwardSignals(cmd, false, done)
+
+	var grandchildPID int
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(pidFile); err == nil {
+			if s := strings.TrimSpace(string(bytes.TrimSpace(data))); s != "" {
+				if pid, perr := strconv.Atoi(s); perr == nil && pid > 0 {
+					grandchildPID = pid
+					break
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if grandchildPID == 0 {
+		close(done)
+		t.Fatal("grandchild pid was never written to the pidfile")
+	}
+
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatalf("Kill(self, SIGTERM): %v", err)
+	}
+
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+	select {
+	case <-waitDone:
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		close(done)
+		t.Fatal("the direct child did not exit within 5s of the forwarded SIGTERM")
+	}
+	close(done)
+
+	// The grandchild shares the new process group; only a group-wide kill
+	// (not a direct-pid signal to the shell) reaches it. Poll briefly for
+	// the kernel to finish reaping it.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(grandchildPID, 0); err != nil {
+			return // ESRCH: gone. Success.
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = syscall.Kill(grandchildPID, syscall.SIGKILL) // don't leak a sleep(100) past this test
+	t.Errorf("grandchild pid %d is still alive 2s after the forwarded SIGTERM -- it must reach the whole process group, not just the direct child", grandchildPID)
 }
 
 func boolLabel(name string, v bool) string {

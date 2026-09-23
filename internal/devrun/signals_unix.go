@@ -66,11 +66,38 @@ func forwardSignals(cmd *exec.Cmd, ttyShared bool, done <-chan struct{}) {
 			if sig == syscall.SIGINT && ttyShared {
 				continue
 			}
-			if cmd.Process != nil {
-				_ = cmd.Process.Signal(sig)
-			}
+			deliverSignal(cmd, ttyShared, sig)
 		}
 	}
+}
+
+// deliverSignal relays sig to cmd's child. When the child has its own
+// process group (configureProcessGroup's Setpgid case, i.e. ttyShared is
+// false), the signal is sent to the WHOLE group -- syscall.Kill(-pid,
+// sig) -- not just cmd.Process's own pid: a wrapper child (`go run .`,
+// `yarn start`, `sh -c '...'`) commonly execs or forks a real leaf process
+// that inherits that same new group, and `kill -TERM <monitor-pid>` (which
+// can only ever target monitor's own pid, never a separate group it does
+// not belong to) or a piped Ctrl-C (a non-TTY stdin, so --scan turned it
+// into an ordinary SIGINT delivered only to monitor) must still reach that
+// leaf, or it is silently orphaned while monitor waits on it (see
+// devrun.go's WaitDelay-bounded reap for the rest of that fix -- this half
+// is what makes the signal arrive at all instead of merely bounding the
+// hang if it doesn't). In the ttyShared case the child stays in monitor's
+// OWN process group (configureProcessGroup leaves SysProcAttr nil), so a
+// group kill here would also hit monitor itself; that case keeps signaling
+// only cmd.Process directly, unchanged.
+func deliverSignal(cmd *exec.Cmd, ttyShared bool, sig os.Signal) {
+	if cmd.Process == nil {
+		return
+	}
+	if !ttyShared {
+		if sysSig, ok := sig.(syscall.Signal); ok {
+			_ = syscall.Kill(-cmd.Process.Pid, sysSig)
+			return
+		}
+	}
+	_ = cmd.Process.Signal(sig)
 }
 
 // exitCodeFor derives the process exit code from state, matching a shell's
