@@ -98,6 +98,70 @@ func TestUpsertGroupsOccurrencesAndPersists(t *testing.T) {
 	}
 }
 
+// TestUpsertOccurrenceCountCoalescesBursts is the E1.2 done-when for
+// OccurrenceInput.Count: a coalesced burst writes ONE occurrence row whose
+// Count subsumes every raw event, the issue's cumulative OccurrenceCount
+// reflects the sum of Counts across every occurrence (not the number of
+// UpsertOccurrence calls), and Count<=0 (unset, or an accidental negative)
+// defaults to 1 rather than leaving the cumulative count unchanged.
+func TestUpsertOccurrenceCountCoalescesBursts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.veclite")
+	store := openTestStore(t, path)
+
+	issue, occurrence, err := store.UpsertOccurrence(OccurrenceInput{
+		Project: "p", Message: "burst", Count: 5,
+	})
+	if err != nil {
+		t.Fatalf("UpsertOccurrence: %v", err)
+	}
+	if occurrence.Count != 5 {
+		t.Fatalf("occurrence.Count = %d, want 5", occurrence.Count)
+	}
+	if issue.OccurrenceCount != 5 {
+		t.Fatalf("issue.OccurrenceCount = %d, want 5", issue.OccurrenceCount)
+	}
+
+	issue, occurrence, err = store.UpsertOccurrence(OccurrenceInput{
+		Project: "p", Message: "burst", Count: -3,
+	})
+	if err != nil {
+		t.Fatalf("second UpsertOccurrence: %v", err)
+	}
+	if occurrence.Count != 1 {
+		t.Fatalf("occurrence.Count = %d, want 1 (Count<=0 defaults to 1)", occurrence.Count)
+	}
+	if issue.OccurrenceCount != 6 {
+		t.Fatalf("issue.OccurrenceCount = %d, want 6 (5 + 1)", issue.OccurrenceCount)
+	}
+
+	stored, err := store.Occurrences(issue.ID, 10)
+	if err != nil {
+		t.Fatalf("Occurrences: %v", err)
+	}
+	if len(stored) != 2 {
+		t.Fatalf("stored occurrences = %d, want 2", len(stored))
+	}
+	var total int64
+	for _, occ := range stored {
+		total += occ.Count
+	}
+	if total != issue.OccurrenceCount {
+		t.Fatalf("sum of retained occurrence Counts = %d, want issue.OccurrenceCount %d", total, issue.OccurrenceCount)
+	}
+}
+
+// TestNormalizeOccurrenceSlicesDefaultsLegacyCountToOne verifies a record
+// persisted before Count existed (JSON zero value on decode) normalizes to
+// Count=1, not 0: every occurrence represents at least one raw event, and a
+// caller dividing or comparing by Count must never see zero.
+func TestNormalizeOccurrenceSlicesDefaultsLegacyCountToOne(t *testing.T) {
+	occurrence := Occurrence{ID: "OCC-LEGACY"}
+	normalizeOccurrenceSlices(&occurrence)
+	if occurrence.Count != 1 {
+		t.Fatalf("Count = %d, want 1 for a legacy record with no Count field", occurrence.Count)
+	}
+}
+
 func TestRunEventIssueEvidenceRoundTripAndDoNotAffectGrouping(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "issues.veclite")
 	store := openTestStore(t, path)
