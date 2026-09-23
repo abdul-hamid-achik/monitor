@@ -137,7 +137,7 @@ func TestHelperLogsCaptureUntilSignal(t *testing.T) {
 		return
 	}
 	cmd := newLogsCaptureCmd()
-	cmd.SetArgs([]string{"--store", path, "--", "sh", "-c", "echo INFO: sigterm_needle; sleep 30"})
+	cmd.SetArgs([]string{"--store", path, "--", "sh", "-c", `echo INFO: sigterm_needle; touch "$MONITOR_LOGS_SIGTEST_READY"; sleep 30`})
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "helper execute:", err)
 		os.Exit(1)
@@ -156,14 +156,27 @@ func TestLogsCaptureSyncsStoreOnSIGTERM(t *testing.T) {
 	}
 	path := filepath.Join(t.TempDir(), "logs.veclite")
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperLogsCaptureUntilSignal$", "-test.v")
-	cmd.Env = append(os.Environ(), "MONITOR_LOGS_SIGTEST_PATH="+path)
+	ready := filepath.Join(t.TempDir(), "ready")
+	cmd.Env = append(os.Environ(), "MONITOR_LOGS_SIGTEST_PATH="+path, "MONITOR_LOGS_SIGTEST_READY="+ready)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start helper subprocess: %v", err)
 	}
-	// Give the helper (and the `sh -c` grandchild it captures) time to print
-	// its line and reach the sleep before signaling.
-	time.Sleep(500 * time.Millisecond)
+	// Wait until the captured `sh -c` grandchild has printed its line (it
+	// touches the ready file right after), instead of a fixed sleep that a
+	// slow CI runner can outlast; then give capture a moment to ingest it.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			t.Fatal("captured child never became ready")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond)
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatalf("SIGTERM helper subprocess: %v", err)
 	}
