@@ -162,6 +162,41 @@ func TestIssuesShowJSONBoundsOccurrences(t *testing.T) {
 	}
 }
 
+// TestIssuesShowTruncationAccountsForCoalescedCount verifies that a
+// coalesced occurrence (issues.OccurrenceInput.Count > 1) is not reported
+// as truncated just because one retained row stands for several raw
+// events: OccurrencesTruncated must compare issue.OccurrenceCount against
+// the SUM of the retained rows' Count, not len(occurrences).
+func TestIssuesShowTruncationAccountsForCoalescedCount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.veclite")
+	store := openIssueCLIStore(t, path)
+	issue, _, err := store.UpsertOccurrence(issues.OccurrenceInput{
+		Project: "monitor", Service: "cli", Message: "burst", Count: 5,
+	})
+	if err != nil {
+		t.Fatalf("seed coalesced occurrence: %v", err)
+	}
+	closeIssueCLIStore(t, store)
+
+	output, err := executeIssuesCommand(t, path, "show", issue.ID, "--occurrences", "1", "--json")
+	if err != nil {
+		t.Fatalf("issues show: %v", err)
+	}
+	var got issueDetailOutput
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("decode show: %v (%s)", err, output)
+	}
+	if len(got.Occurrences) != 1 || got.Occurrences[0].Count != 5 {
+		t.Fatalf("occurrences = %+v, want one row with Count 5", got.Occurrences)
+	}
+	if got.Issue.OccurrenceCount != 5 {
+		t.Fatalf("issue.OccurrenceCount = %d, want 5", got.Issue.OccurrenceCount)
+	}
+	if got.OccurrencesTruncated {
+		t.Fatal("a single coalesced row (Count=5) covering the issue's whole occurrence_count must not be reported as truncated")
+	}
+}
+
 func TestIssueLifecycleCommandsAreIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "issues.veclite")
 	store := openIssueCLIStore(t, path)

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -322,9 +323,17 @@ func TestInvestigateReportToMapSnakeCase(t *testing.T) {
 func TestRecordInvestigateOccurrenceGroupsRunsAndKeepsEvidence(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "issues.veclite")
 	t.Setenv(issues.StorePathEnv, storePath)
+	// A real directory with a .git marker: project.Resolve walks the
+	// filesystem (unlike the old ad hoc filepath.Base(CodebaseRoot)), so
+	// CodebaseRoot must actually exist and look like a repo root for the
+	// project derivation to still land on "chalupa".
+	codebaseRoot := filepath.Join(t.TempDir(), "chalupa")
+	if err := os.MkdirAll(filepath.Join(codebaseRoot, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	report := investigateReport{
 		PID: 42, StartedAt: "2026-07-27T12:00:00Z", ProfileMethod: "pprof_heap",
-		Process: &procbind.Binding{Name: "api", Runtime: procbind.RuntimeGo, CodebaseRoot: "/workspace/chalupa"},
+		Process: &procbind.Binding{Name: "api", Runtime: procbind.RuntimeGo, CodebaseRoot: codebaseRoot},
 		Context: contextids.IDs{Environment: "preview", RunID: "run-1", StepID: "test", Suite: "pr", Attempt: "1", Release: "v1"},
 		Profile: &profiler.Profile{Symbols: []profiler.Symbol{{Func: "main.serve"}, {Func: "main.serve"}}},
 		Stash:   &incidents.CaptureResult{TreeHash: strings.Repeat("a", 64), ArtifactRef: map[string]any{"uri": "fcheap://stash/stash-1"}},

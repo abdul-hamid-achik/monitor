@@ -92,6 +92,10 @@ type Occurrence struct {
 	Metadata      map[string]string `json:"metadata,omitempty"`
 	Run           *RunContext       `json:"run,omitempty"`
 	Evidence      []EvidenceRef     `json:"evidence"`
+	// Count is how many raw events this occurrence subsumes. A coalesced
+	// burst (e.g. the same stack trace repeated within a short window)
+	// writes one Occurrence with Count > 1 instead of one row per event.
+	Count int64 `json:"count,omitempty"`
 }
 
 // Event is the local-Sentry event model. Each persisted event is an
@@ -117,6 +121,11 @@ type OccurrenceInput struct {
 	Metadata      map[string]string
 	Run           *RunContext
 	Evidence      []EvidenceRef
+	// Count is how many raw events this single occurrence write represents.
+	// Zero or negative defaults to 1 (normalizeOccurrenceInput). A coalesced
+	// burst passes the real count so the issue's cumulative
+	// OccurrenceCount reflects every raw event, not just every write.
+	Count int64
 }
 
 // ListOptions filters issues. Empty fields match all issues.

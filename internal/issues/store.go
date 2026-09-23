@@ -26,6 +26,13 @@ const (
 	// DefaultMaxOccurrences bounds retained occurrence detail globally. Issue
 	// counters remain cumulative when older occurrence bodies are evicted.
 	DefaultMaxOccurrences = 100_000
+	// DefaultWriterWait is how long OpenStoreWait / WithWriter retry a
+	// concurrent writer's exclusive lock (e.g. a live `watch --stash`)
+	// before giving up. Every short-lived writer (investigate, issues
+	// resolve/reopen/ignore, the MCP investigate path, and watch --stash's
+	// per-delivery write) uses this so none of them fail with
+	// veclite.ErrFileLocked just because another one is mid-write.
+	DefaultWriterWait = 5 * time.Second
 )
 
 // Store is a durable veclite-backed issue store.
@@ -175,7 +182,7 @@ func (s *Store) UpsertOccurrence(input OccurrenceInput) (Issue, Occurrence, erro
 		normalizeIssueSlices(&issue)
 		issue.LastSeen = laterTime(issue.LastSeen, now)
 		issue.FirstSeen = earlierTime(issue.FirstSeen, now)
-		issue.OccurrenceCount++
+		issue.OccurrenceCount += input.Count
 		if issue.Status == StatusResolved &&
 			(issue.ResolvedAt == nil || !now.Before(*issue.ResolvedAt)) {
 			issue.Status = StatusOpen
@@ -271,7 +278,7 @@ func newIssue(input OccurrenceInput, fingerprint string) Issue {
 		Status:             StatusOpen,
 		FirstSeen:          input.ObservedAt,
 		LastSeen:           input.ObservedAt,
-		OccurrenceCount:    1,
+		OccurrenceCount:    input.Count,
 	}
 }
 
@@ -283,7 +290,7 @@ func occurrenceFromInput(input OccurrenceInput, issueID string) Occurrence {
 		Symbols: cloneStrings(input.Symbols), Severity: input.Severity,
 		RunID: input.RunID, Release: input.Release, PID: input.PID, TreeHash: input.TreeHash,
 		EvidenceRefs: cloneStrings(input.EvidenceRefs), Metadata: cloneMap(input.Metadata),
-		Run: cloneRun(input.Run), Evidence: cloneEvidence(input.Evidence),
+		Run: cloneRun(input.Run), Evidence: cloneEvidence(input.Evidence), Count: input.Count,
 	}
 }
 
@@ -556,6 +563,9 @@ func normalizeOccurrenceInput(input OccurrenceInput) OccurrenceInput {
 	input.Symbols = cleanStrings(input.Symbols)
 	input.EvidenceRefs = cleanStrings(input.EvidenceRefs)
 	input.Evidence = cleanEvidence(input.Evidence)
+	if input.Count <= 0 {
+		input.Count = 1
+	}
 	return input
 }
 
@@ -659,6 +669,11 @@ func normalizeOccurrenceSlices(occurrence *Occurrence) {
 	}
 	if occurrence.Metadata == nil {
 		occurrence.Metadata = map[string]string{}
+	}
+	if occurrence.Count <= 0 {
+		// Records written before Count existed decode with the zero value;
+		// every occurrence represents at least one raw event.
+		occurrence.Count = 1
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/procbind"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
+	"github.com/abdul-hamid-achik/monitor/internal/project"
 )
 
 // Step status values for investigateStep.Status.
@@ -72,6 +73,13 @@ type investigateReport struct {
 	Occurrence    *issues.Occurrence       `json:"occurrence,omitempty"`
 	IssueError    string                   `json:"issue_error,omitempty"`
 	Note          string                   `json:"note,omitempty"`
+	// CodebaseOverride is opts.Codebase verbatim, kept alongside the
+	// resolved Process.CodebaseRoot so recordInvestigateOccurrence can tell
+	// an explicit `--codebase` override apart from an auto-detected root:
+	// an override must win over the process's own cwd for project identity
+	// even when that cwd is readable (e.g. a daemon with cwd "/"). Not
+	// serialized: Process.CodebaseRoot already carries the resolved value.
+	CodebaseOverride string `json:"-"`
 }
 
 // toMap JSON-round-trips the report so the MCP surface gets snake_case keys.
@@ -217,8 +225,9 @@ func investigatePipeline(ctx context.Context, pid int32, opts InvestigateOptions
 		opts.TTL = "7d"
 	}
 	report := investigateReport{
-		PID:       pid,
-		StartedAt: time.Now().Format(time.RFC3339),
+		PID:              pid,
+		StartedAt:        time.Now().Format(time.RFC3339),
+		CodebaseOverride: opts.Codebase,
 		Context: contextids.FromEnv(contextids.IDs{
 			Environment:  opts.Environment,
 			DeploymentID: opts.DeploymentID,
@@ -441,38 +450,49 @@ func investigatePipeline(ctx context.Context, pid int32, opts InvestigateOptions
 	return report
 }
 
+// recordInvestigateOccurrence persists one investigate run as an occurrence,
+// opening the issue store fresh for this single write via issues.WithWriter
+// (bug 12: investigate must not fail with ErrFileLocked just because
+// `watch --stash` is running). project.Resolve replaces the ad hoc
+// CodebaseRoot-basename derivation this used to do inline, so investigate
+// agrees with watch on the same project/service identity for the same
+// process (bug 15): a process's cwd is preferred over its already-resolved
+// CodebaseRoot as the git-root/marker walk's starting point, since in a
+// monorepo the codebase root is often the nearest manifest, not the git
+// root, and Resolve needs to tell those two apart itself.
+//
+// An explicit `investigate --codebase <root>` (report.CodebaseOverride)
+// wins over the process's own cwd: without this, a daemon with cwd "/" (or
+// any cwd outside the intended root) silently ignored the override for
+// project identity, even though it was honored for codemap/vecgrep
+// correlation. report.CodebaseOverride is checked before Process at all,
+// so it applies even when identify failed to bind a process (report.Process
+// == nil). Neither this override nor Process.Cwd ever falls back to
+// monitor's own os.Getwd() (project.Resolve's Hints.UseWorkingDir is
+// intentionally left unset): investigate describes the target process, not
+// the monitor invocation itself.
 func recordInvestigateOccurrence(report *investigateReport) (issues.Issue, issues.Occurrence, error) {
 	path, err := issues.ResolvePath("")
 	if err != nil {
 		return issues.Issue{}, issues.Occurrence{}, err
 	}
-	store, err := issues.OpenStore(path)
-	if err != nil {
-		return issues.Issue{}, issues.Occurrence{}, err
-	}
-	defer store.Close()
 
-	project := ""
-	service := strings.TrimSpace(report.Context.Service)
 	processName := ""
 	if report.Process != nil {
 		processName = strings.TrimSpace(report.Process.Name)
-		if report.Process.CodebaseRoot != "" {
-			project = filepath.Base(filepath.Clean(report.Process.CodebaseRoot))
-		}
 	}
-	if project == "" {
-		project = service
+	dir := strings.TrimSpace(report.CodebaseOverride)
+	if dir == "" && report.Process != nil {
+		dir = firstNonEmpty(report.Process.Cwd, report.Process.CodebaseRoot)
 	}
-	if project == "" {
-		project = processName
-	}
-	if project == "" {
-		project = "local"
-	}
-	if service == "" {
-		service = processName
-	}
+	identity := project.Resolve(project.Hints{
+		ExplicitService: strings.TrimSpace(report.Context.Service),
+		Dir:             dir,
+		ProcessName:     processName,
+		PID:             report.PID,
+	})
+	projectSlug := identity.Slug
+	service := identity.Service
 
 	symbols := make([]string, 0, 10)
 	seenSymbols := map[string]struct{}{}
@@ -521,9 +541,9 @@ func recordInvestigateOccurrence(report *investigateReport) (issues.Issue, issue
 		}
 	}
 	observedAt, _ := time.Parse(time.RFC3339, report.StartedAt)
-	titleSubject := firstNonEmpty(service, project)
-	return store.UpsertOccurrence(issues.OccurrenceInput{
-		ObservedAt: observedAt, Project: project, Service: service, Kind: "investigation",
+	titleSubject := firstNonEmpty(service, projectSlug)
+	input := issues.OccurrenceInput{
+		ObservedAt: observedAt, Project: projectSlug, Service: service, Kind: "investigation",
 		Title: "Investigation: " + titleSubject, Message: "manual process investigation",
 		Symbols: symbols, Severity: "warning", RunID: report.Context.RunID,
 		Release: report.Context.Release, PID: report.PID, TreeHash: treeHash,
@@ -534,7 +554,15 @@ func recordInvestigateOccurrence(report *investigateReport) (issues.Issue, issue
 			Suite: report.Context.Suite, Attempt: report.Context.Attempt,
 			Release: report.Context.Release, GitSHA: report.Context.GitSHA,
 		},
+	}
+	var issue issues.Issue
+	var occurrence issues.Occurrence
+	err = issues.WithWriter(context.Background(), path, issues.DefaultWriterWait, func(store *issues.Store) error {
+		var writeErr error
+		issue, occurrence, writeErr = store.UpsertOccurrence(input)
+		return writeErr
 	})
+	return issue, occurrence, err
 }
 
 func contextMap(id contextids.IDs) map[string]string {
