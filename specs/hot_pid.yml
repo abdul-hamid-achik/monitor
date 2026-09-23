@@ -1,0 +1,133 @@
+version: 1
+name: monitor_hot_pid
+
+intent: |
+  E3.2: `monitor hot <pid>` — the live-process half of AC-5's "which LINE",
+  built on E3.1's --file mode (specs/hot_file.yml) but capturing directly
+  from a running process instead of a saved .cpuprofile. Against a real,
+  live `node --inspect` process running examples/polyglot/js/workload.js,
+  `monitor hot <pid>` must:
+
+  - resolve the target's runtime leaf (here, the node process itself — the
+    fast path in procbind.ResolveLeaf, since nothing wraps it; leaf
+    resolution through a shell/yarn/npm/`go run` wrapper is covered at the
+    Go level by internal/cli/resolve_test.go and internal/cli/hot_test.go's
+    own live regressions, not re-proven here);
+  - capture a real CDP CPU profile via the same runtime-aware dispatch
+    `monitor profile`/MCP's monitor_profile_capture use
+    (captureRuntimeAwareProfile);
+  - name workload.js's planted hot line (17: `s += JSON.stringify(...)`
+    inside heavyStringify) in both --json (monitor.line_heatmap.v1) and the
+    human CodeFrame;
+  - print the roadmap's live-capture banner ("monitor > <runtime> pid <N>
+    ... inspector <addr> ...", section 5's mockup), never a ws:// URL.
+
+  --jitless matches specs/profile_node_lines.yml's own documented rationale:
+  it is the only mode verified to give a stable, deterministic line
+  attribution for this fixture across runs (V8's tiered JIT otherwise
+  inlines heavyStringify into its caller during the profiling window).
+
+  The inspector port is allocated dynamically (asking Node itself for a
+  free one) rather than hardcoded, so this spec can never collide with
+  another spec's own fixed port (profile_node_lines.yml uses 9344) if a
+  future CI run ever executes specs concurrently.
+
+target:
+  cmd:
+    [
+      "sh",
+      "-c",
+      "PORT=$(node -e 'const s=require(\"net\").createServer();s.listen(0,\"127.0.0.1\",()=>{console.log(s.address().port);s.close();});'); node --jitless --inspect=127.0.0.1:$PORT examples/polyglot/js/workload.js >/tmp/monitor-spec-hot-pid-stderr.log 2>&1 & P=$!; sleep 1; ./bin/monitor hot \"$P\" --duration 2s --json; R=$?; kill \"$P\" 2>/dev/null; exit $R",
+    ]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v node"
+      timeoutMs: 5000
+    - run: "test -f examples/polyglot/js/workload.js"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 15000
+
+outcomes:
+  - id: json_schema_line_heatmap_v1
+    description: --json emits the monitor.line_heatmap.v1 schema id
+    verify:
+      command:
+        run: >-
+          PORT=$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();});');
+          node --jitless --inspect=127.0.0.1:$PORT examples/polyglot/js/workload.js >/tmp/monitor-spec-hot-pid-stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor hot "$P" --duration 2s --json > /tmp/monitor-spec-hot-pid.json 2>&1;
+          kill "$P" 2>/dev/null;
+          grep -q '"schema":[[:space:]]*"monitor.line_heatmap.v1"' /tmp/monitor-spec-hot-pid.json
+
+  - id: names_hot_line_17_json
+    description: |
+      the JSON heatmap names heavyStringify's real hot line (17), not its
+      declaration line. Symbols/lines are already weight-sorted within a
+      function (heat.Build), and the schema's field order is
+      line,self,cum,pct_of_function — so the first "line" following the
+      first "heavyStringify" match is the highest-weighted one; no JSON
+      parser needed (same technique specs/profile_node_lines.yml uses).
+    verify:
+      command:
+        run: >-
+          PORT=$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();});');
+          node --jitless --inspect=127.0.0.1:$PORT examples/polyglot/js/workload.js >/tmp/monitor-spec-hot-pid-stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor hot "$P" --duration 2s --json > /tmp/monitor-spec-hot-pid.json 2>&1;
+          kill "$P" 2>/dev/null;
+          awk '/"name":[[:space:]]*"heavyStringify"/{f=1} f && /"line":/{print; exit}' /tmp/monitor-spec-hot-pid.json | grep -q '"line":[[:space:]]*17'
+
+  - id: names_hot_line_17_human
+    description: the human CodeFrame marks line 17 with the '>' hot-line marker
+    verify:
+      command:
+        run: >-
+          PORT=$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();});');
+          node --jitless --inspect=127.0.0.1:$PORT examples/polyglot/js/workload.js >/tmp/monitor-spec-hot-pid-stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor hot "$P" --duration 2s --func heavyStringify > /tmp/monitor-spec-hot-pid.txt 2>&1;
+          kill "$P" 2>/dev/null;
+          grep -qE '^>[[:space:]]+17[[:space:]]*\|' /tmp/monitor-spec-hot-pid.txt
+
+  - id: live_header_names_runtime_and_inspector
+    description: |
+      the human output opens with the roadmap's live-capture banner
+      ("monitor > node pid N ... inspector <addr> ..."), and never leaks a
+      ws:// URL (only the port, per the golden rule).
+    verify:
+      command:
+        run: >-
+          PORT=$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();});');
+          node --jitless --inspect=127.0.0.1:$PORT examples/polyglot/js/workload.js >/tmp/monitor-spec-hot-pid-stderr.log 2>&1 &
+          P=$!; sleep 1;
+          OUT=$(./bin/monitor hot "$P" --duration 2s);
+          kill "$P" 2>/dev/null;
+          echo "$OUT" | head -1 | grep -q "^monitor > node pid" &&
+          echo "$OUT" | head -1 | grep -q "inspector 127.0.0.1:$PORT" &&
+          ! echo "$OUT" | grep -q "ws://"
+
+  - id: clean_exit
+    description: the binary exits cleanly
+    verify:
+      command:
+        run: >-
+          PORT=$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();});');
+          node --jitless --inspect=127.0.0.1:$PORT examples/polyglot/js/workload.js >/tmp/monitor-spec-hot-pid-stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor hot "$P" --duration 2s --json >/dev/null 2>&1;
+          R=$?; kill "$P" 2>/dev/null; [ $R -eq 0 ]

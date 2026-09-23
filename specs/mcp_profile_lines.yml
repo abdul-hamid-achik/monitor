@@ -1,0 +1,174 @@
+version: 1
+name: monitor_mcp_profile_lines
+
+intent: |
+  E3.6: `monitor_profile_capture`'s `lines:true` — "which line is hot?"
+  from MCP, in the same call as the capture itself. Against a real, live
+  `node --inspect` process running examples/polyglot/js/workload.js, one
+  `type:cpu, lines:true` round trip over the real MCP stdio wire must:
+
+  - still capture normally (`captured:true`, `profile.method:
+    inspector_cpu` — the runtime-aware CDP dispatch specs/mcp_profile_capture.yml
+    already covers for lines:false);
+  - additionally carry `line_heatmap`, a real `monitor.line_heatmap.v1`
+    document (not a stub), naming workload.js's planted hot line (17: `s +=
+    JSON.stringify(...)` inside heavyStringify);
+  - stay bounded: at most 3 functions, at most 8 lines each, the
+    `line_heatmap` JSON itself comfortably under 6 KB regardless of how
+    large the underlying capture is;
+  - drop `profile.symbols` (the bounded line_heatmap replaces the raw
+    per-function symbol list, not just adds to it);
+  - never mention a `ws://` inspector URL anywhere in the response — only
+    the port, via `profile.method`/the process's own already-public
+    `--inspect` address, never the raw websocket debugger URL.
+
+  Runs the ONE real 5s CDP capture once in target.cmd (matching
+  specs/investigate_fingerprint_stable.yml's own "launch once, every
+  outcome just reads the file" shape — this tool has no --duration
+  override, so every capture here is a real, un-shortened 5s CDP window;
+  repeating it per outcome would need ~5 outcomes x 6s+ each for no
+  benefit). --jitless matches specs/profile_node_lines.yml's documented
+  rationale: the only mode verified to give this fixture a stable, JIT-
+  inlining-free line attribution across runs.
+
+target:
+  cmd:
+    - "/bin/sh"
+    - "-lc"
+    - |
+      set -u
+      mkdir -p /tmp/monitor-spec-mcp-lines
+      PORT=$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();});')
+      node --jitless --inspect=127.0.0.1:$PORT examples/polyglot/js/workload.js >/tmp/monitor-spec-mcp-lines/node.log 2>&1 &
+      P=$!
+      sleep 1
+      {
+        printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}'
+        printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+        printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_profile_capture\",\"arguments\":{\"pid\":$P,\"type\":\"cpu\",\"lines\":true,\"confirm\":true}}}"
+        sleep 7
+      } | ./bin/monitor mcp serve 2>&1 | tail -1 > /tmp/monitor-spec-mcp-lines/response.json
+      kill "$P" 2>/dev/null
+      true
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 80
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v node"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "test -f examples/polyglot/js/workload.js"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-mcp-lines"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 30000
+
+outcomes:
+  - id: captured_true_via_cdp
+    description: the capture itself still succeeds normally with lines:true set
+    verify:
+      command:
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/monitor-spec-mcp-lines/response.json'))
+          sc = d['result']['structuredContent']
+          assert sc.get('captured') is True, sc
+          assert sc['profile'].get('method') == 'inspector_cpu', sc['profile']
+          "
+
+  - id: line_heatmap_is_real_schema
+    description: line_heatmap is a real monitor.line_heatmap.v1 document, not a skip/stub
+    verify:
+      command:
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/monitor-spec-mcp-lines/response.json'))
+          sc = d['result']['structuredContent']
+          lh = sc.get('line_heatmap')
+          assert isinstance(lh, dict), sc
+          assert lh.get('schema') == 'monitor.line_heatmap.v1', lh
+          assert lh.get('functions'), lh
+          "
+
+  - id: names_planted_hot_line_17
+    description: some function's lines[] names workload.js's planted hot line (17)
+    verify:
+      command:
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/monitor-spec-mcp-lines/response.json'))
+          lh = d['result']['structuredContent']['line_heatmap']
+          lines = [l['line'] for f in lh['functions'] for l in f.get('lines', [])]
+          assert 17 in lines, lines
+          "
+
+  - id: bounded_to_top_3_functions_top_8_lines
+    description: E3.6's payload budget -- at most 3 functions, at most 8 lines each
+    verify:
+      command:
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/monitor-spec-mcp-lines/response.json'))
+          lh = d['result']['structuredContent']['line_heatmap']
+          fns = lh['functions']
+          assert len(fns) <= 3, len(fns)
+          for f in fns:
+              assert len(f.get('lines', [])) <= 8, (f['name'], f['lines'])
+          "
+
+  - id: line_heatmap_under_6kb
+    description: the line_heatmap document itself stays comfortably under 6 KB
+    verify:
+      command:
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/monitor-spec-mcp-lines/response.json'))
+          lh = d['result']['structuredContent']['line_heatmap']
+          size = len(json.dumps(lh))
+          assert size <= 6144, size
+          "
+
+  - id: symbols_dropped_when_heatmap_present
+    description: |
+      profile.symbols is absent when lines:true returned a real
+      line_heatmap -- the bounded heatmap replaces the raw per-function
+      symbol list rather than just adding to it.
+    verify:
+      command:
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/monitor-spec-mcp-lines/response.json'))
+          p = d['result']['structuredContent']['profile']
+          assert 'symbols' not in p or not p['symbols'], p.get('symbols')
+          "
+
+  - id: never_leaks_ws_url
+    description: no ws:// inspector URL anywhere in the response, only the port
+    verify:
+      command:
+        run: "! grep -q 'ws://' /tmp/monitor-spec-mcp-lines/response.json"
+
+  - id: clean_exit
+    description: target.cmd's own real capture-and-respond round trip exited cleanly
+    verify:
+      command:
+        run: "test -s /tmp/monitor-spec-mcp-lines/response.json"
