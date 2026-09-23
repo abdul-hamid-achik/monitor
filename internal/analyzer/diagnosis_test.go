@@ -231,11 +231,13 @@ func TestDiagnosePatterns(t *testing.T) {
 }
 
 // TestMemoryLeakNextActionsIncludeLineLevelHeapHints is the E3.5 regression:
-// a memory_leak diagnosis must point at BOTH the line-level heap view
-// (`monitor hot <pid> --type heap`, honest only for a Go target — see
-// buildMemoryLeak's doc comment) and the generic function-level fallback
-// (`monitor profile <pid> -t heap`), in addition to the pre-existing MCP
-// actions, since signalState carries no runtime signal to pick just one.
+// a memory_leak diagnosis must point at the line-level heap view
+// (`monitor hot <pid> --type heap`) for a process whose name gives no
+// reason to think it's NOT Go, since that command only ever names a real
+// line for a Go target — the generic function-level fallback (`monitor
+// profile <pid> -t heap`) is a worse recommendation there, not a
+// complementary one (see the E3.5 review: unconditionally offering both
+// points a Node target at a command that pauses its isolate for nothing).
 func TestMemoryLeakNextActionsIncludeLineLevelHeapHints(t *testing.T) {
 	e := NewEngine()
 	pushSeries(e, 42, "proc", rampU(100*mb, 1*mb, 20), flatF(10, 20))
@@ -245,21 +247,53 @@ func TestMemoryLeakNextActionsIncludeLineLevelHeapHints(t *testing.T) {
 	}
 	actions := diags[0].NextActions
 	wantHot := "monitor hot 42 --type heap"
-	wantProfile := "monitor profile 42 -t heap"
+	notWantProfile := "monitor profile 42 -t heap"
 	var haveHot, haveProfile bool
 	for _, a := range actions {
 		if a == wantHot {
 			haveHot = true
 		}
-		if a == wantProfile {
+		if a == notWantProfile {
 			haveProfile = true
 		}
 	}
 	if !haveHot {
 		t.Errorf("NextActions = %v, want %q", actions, wantHot)
 	}
+	if haveProfile {
+		t.Errorf("NextActions = %v, must NOT include %q for a non-Go-looking process name", actions, notWantProfile)
+	}
+}
+
+// TestMemoryLeakNextActionsOmitHotHintForKnownNonGoProcess is
+// TestMemoryLeakNextActionsIncludeLineLevelHeapHints' mirror: a process
+// plainly named after a non-Go runtime (e.g. "node") gets the generic
+// `monitor profile <pid> -t heap` hint instead, never the Go-only `monitor
+// hot --type heap` one.
+func TestMemoryLeakNextActionsOmitHotHintForKnownNonGoProcess(t *testing.T) {
+	e := NewEngine()
+	pushSeries(e, 42, "node", rampU(100*mb, 1*mb, 20), flatF(10, 20))
+	diags := e.Diagnose()
+	if len(diags) != 1 {
+		t.Fatalf("expected 1 diagnosis, got %d: %+v", len(diags), diags)
+	}
+	actions := diags[0].NextActions
+	wantProfile := "monitor profile 42 -t heap"
+	notWantHot := "monitor hot 42 --type heap"
+	var haveProfile, haveHot bool
+	for _, a := range actions {
+		if a == wantProfile {
+			haveProfile = true
+		}
+		if a == notWantHot {
+			haveHot = true
+		}
+	}
 	if !haveProfile {
 		t.Errorf("NextActions = %v, want %q", actions, wantProfile)
+	}
+	if haveHot {
+		t.Errorf("NextActions = %v, must NOT include %q for a known non-Go process name", actions, notWantHot)
 	}
 }
 
