@@ -335,9 +335,10 @@ func httpGet(ctx context.Context, client *http.Client, url string) ([]byte, erro
 // ToJSON is a convenience for CLI --json output.
 func (p Profile) ToJSON() ([]byte, error) { return json.MarshalIndent(p, "", "  ") }
 
-// DiscardRawArtifact removes the profile's on-disk temp file, if any (only
-// a pprof capture — heap/cpu/goroutine, via writeTempProfile — ever sets
-// Path; CDP and macOS `sample` captures never write one), and clears both
+// DiscardRawArtifact removes the profile's on-disk temp file, if any — a
+// pprof capture (heap/cpu/goroutine, via writeTempProfile) or a CDP heap
+// snapshot (ProfileInspectorHeap's own .heapsnapshot file) can set Path; a
+// CDP CPU profile and macOS `sample` never write one — and clears both
 // Path and Text so neither the file nor its bytes linger in a caller's
 // response.
 //
