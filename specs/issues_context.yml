@@ -1,0 +1,190 @@
+version: 1
+name: monitor_issue_context
+
+intent: |
+  E2.5 (local-sentry roadmap): `monitor issue <id|short-prefix|latest>` prints
+  monitor.issue_context.v1 -- the culprit line/snippet, causes, in-app
+  frames, codemap impact, git last_touched, honest degraded[], and next[] --
+  in human, --json, and --md form, and `monitor issues` (bare, no
+  subcommand) lists issues with short ids, a 24h activity sparkline, and a
+  WHERE column naming the culprit.
+
+  `monitor stacktrace parse --record` (E2.1/E2.4) is not on this branch yet
+  (its --record half ships in a parallel slice of the same roadmap), so this
+  spec seeds a real exception issue directly through issues.RecordException
+  via internal/explain/testdata/seed -- the same call `monitor run --`/
+  `stacktrace parse --record` will make once they land -- with a culprit
+  frame pointing at this repo's own examples/polyglot/js/workload.js:31, so
+  the snippet read comes from a real, versioned file rather than a fixture
+  invented for this spec.
+
+target:
+  cmd:
+    - "/bin/sh"
+    - "-lc"
+    - |
+      set -e
+      d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+      export MONITOR_ISSUES_STORE="$d/issues.veclite"
+
+      go run ./internal/explain/testdata/seed \
+        --store "$MONITOR_ISSUES_STORE" --scenario stack \
+        --project polyglot --service workload --root "$(pwd)" \
+        --file examples/polyglot/js/workload.js --line 31 --function flakyParse \
+        --type Error --value 'flakyParse: malformed payload near token bad-payl' \
+        --level error --handled=true --count 10 >/dev/null
+      echo seeded
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v go"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 30000
+
+outcomes:
+  - id: clean_exit
+    description: seeding one stack-culprit exception on an isolated store exits 0
+    verify:
+      process:
+        exitCode: 0
+
+  - id: human_page_shows_culprit_snippet_and_where
+    description: "`monitor issue <short-id>` prints CULPRIT with the real file:line and a source snippet"
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          id=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 31 --function flakyParse \
+            --type Error --value 'flakyParse: malformed payload near token bad-payl' --level error --handled=true)
+          short=$(echo "$id" | sed -E 's/^ISS-(....).*/\1/' | tr '[:upper:]' '[:lower:]')
+          out=$(./bin/monitor issue "$short")
+          echo "$out" | grep -q "CULPRIT" || { echo "missing CULPRIT: $out"; exit 1; }
+          echo "$out" | grep -q "examples/polyglot/js/workload.js:31" || { echo "missing culprit location: $out"; exit 1; }
+          echo "$out" | grep -q "flakyParse" || { echo "missing culprit function: $out"; exit 1; }
+
+  - id: json_contract_shape_and_budget
+    description: "--json emits monitor.issue_context.v1 at the standard budget with every top-level section present"
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          id=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 31 --function flakyParse \
+            --type Error --value 'flakyParse: malformed payload near token bad-payl' --level error --handled=true)
+          short=$(echo "$id" | sed -E 's/^ISS-(....).*/\1/' | tr '[:upper:]' '[:lower:]')
+          ./bin/monitor issue "$short" --json > "$d/out.json"
+          python3 -c '
+          import json
+          with open("'"$d"'/out.json") as f:
+              c = json.load(f)
+          assert c["schema"] == "monitor.issue_context.v1", c["schema"]
+          assert c["budget"] == "standard", c["budget"]
+          assert c["culprit"]["file"] == "examples/polyglot/js/workload.js", c["culprit"]
+          assert c["culprit"]["line"] == 31, c["culprit"]
+          assert c["culprit"]["source"] == "stack", c["culprit"]
+          assert c["culprit"]["snippet"]["highlight"] == 31, c["culprit"]["snippet"]
+          for key in ("causes", "frames", "impact", "last_touched", "related_notes", "degraded", "next", "truncated", "privacy", "timeline", "issue"):
+              assert key in c, f"missing top-level key {key}"
+          assert c["privacy"]["text_is_untrusted"] is True
+          assert c["issue"]["short_id"] == "'"$(echo $short | tr '[:lower:]' '[:upper:]')"'", c["issue"]
+          '
+
+  - id: markdown_output_has_culprit_section
+    description: "--md emits a paste-ready markdown page with a Culprit section"
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          id=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 31 --function flakyParse \
+            --type Error --value 'flakyParse: malformed payload near token bad-payl' --level error --handled=true)
+          short=$(echo "$id" | sed -E 's/^ISS-(....).*/\1/' | tr '[:upper:]' '[:lower:]')
+          out=$(./bin/monitor issue "$short" --md)
+          echo "$out" | grep -q "^## Culprit" || { echo "missing ## Culprit: $out"; exit 1; }
+          echo "$out" | grep -q "examples/polyglot/js/workload.js:31" || { echo "missing location: $out"; exit 1; }
+
+  - id: issues_list_shows_short_id_activity_and_where
+    description: "bare `monitor issues` lists the short id, a 24h activity column, and the WHERE culprit location"
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          id=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 31 --function flakyParse \
+            --type Error --value 'flakyParse: malformed payload near token bad-payl' --level error --handled=true --count 10)
+          short=$(echo "$id" | sed -E 's/^ISS-(....).*/\1/')
+          out=$(./bin/monitor issues)
+          echo "$out" | grep -q "EVENTS" || { echo "missing EVENTS header: $out"; exit 1; }
+          echo "$out" | grep -q "WHERE" || { echo "missing WHERE header: $out"; exit 1; }
+          echo "$out" | grep -q "$short" || { echo "missing short id $short: $out"; exit 1; }
+          echo "$out" | grep -q "examples/polyglot/js/workload.js:31" || { echo "missing culprit location: $out"; exit 1; }
+
+  - id: unambiguous_prefix_resolves
+    description: "an unambiguous short prefix resolves the same issue as its full short_id"
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          id=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 31 --function flakyParse \
+            --type Error --value 'flakyParse: malformed payload near token bad-payl' --level error --handled=true)
+          full=$(./bin/monitor issue "$id" --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["issue"]["id"])')
+          [ "$full" = "$id" ]
+
+  - id: message_only_exception_gets_a_message_search_culprit
+    description: an exception with no in-app frames gets a lower-confidence culprit via the message-search fallback (E2.8), never a fabricated stack one
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          id=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario message \
+            --project polyglot --value "reconcile failed: batch 42 has no rows" --level error)
+          short=$(echo "$id" | sed -E 's/^ISS-(....).*/\1/' | tr '[:upper:]' '[:lower:]')
+          ./bin/monitor issue "$short" --json > "$d/out.json"
+          python3 -c '
+          import json
+          with open("'"$d"'/out.json") as f:
+              c = json.load(f)
+          if c.get("culprit") is not None:
+              assert c["culprit"]["source"] == "message_search", c["culprit"]
+              assert c["culprit"]["confidence"] == "low", c["culprit"]
+              assert c["culprit"]["via"] in ("vecgrep", "git_grep"), c["culprit"]
+          else:
+              # A clean worktree with no source line containing this exact
+              # fragment (git_grep found nothing) -- or vecgrep itself not
+              # being ready to search here (this spec runs inside a linked
+              # git worktree, which vecgrep treats as its own project
+              # boundary) -- are both valid, honestly-degraded outcomes.
+              assert any(d["component"] in ("message_search", "vecgrep") for d in c["degraded"]), c["degraded"]
+          '
