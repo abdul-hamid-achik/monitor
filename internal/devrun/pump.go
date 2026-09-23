@@ -18,6 +18,32 @@ const linesChanCap = 1024
 // it.
 const pumpReadBufSize = 32 * 1024
 
+// streamKind identifies which of the child's scanned streams a streamLine
+// came from. `--scan both` runs one copy goroutine per stream, each with
+// its own streamKind, so the detector can keep one stacktrace.Joiner PER
+// STREAM (docs/contracts/local-sentry-naming.md's "Joiner por stream"
+// rule): a heartbeat line interleaved on stdout must never be able to split
+// a traceback being accumulated on stderr, or vice versa.
+type streamKind uint8
+
+const (
+	streamStderr streamKind = iota
+	streamStdout
+)
+
+// streamLine is one line the copy goroutine hands to the detector.
+type streamLine struct {
+	stream streamKind
+	line   string
+	// gap is true on the first line delivered for THIS stream after one or
+	// more earlier lines from the same stream were dropped by a full
+	// channel (see sendLine): the detector's Joiner for this stream may
+	// have an open block that is now missing lines, and must discard it
+	// rather than parse the truncated fragment as if it were complete --
+	// a drop must lose an event, never fabricate a wrong one.
+	gap bool
+}
+
 // copyStream is the "golden rule" goroutine (docs/contracts/
 // local-sentry-naming.md §3, "No dejar que la copia de stderr/stdout espere
 // al detector"): it copies raw bytes from in to out AS SOON AS THEY ARRIVE,
@@ -30,9 +56,10 @@ const pumpReadBufSize = 32 * 1024
 // child sees.
 //
 // It returns once in reaches EOF (nil) or a read/write error.
-func copyStream(out io.Writer, in io.Reader, lines chan<- string, dropped *int64) error {
+func copyStream(out io.Writer, in io.Reader, stream streamKind, lines chan<- streamLine, dropped *int64) error {
 	buf := make([]byte, pumpReadBufSize)
 	var partial []byte
+	var pendingGap bool
 	for {
 		n, rerr := in.Read(buf)
 		if n > 0 {
@@ -40,11 +67,11 @@ func copyStream(out io.Writer, in io.Reader, lines chan<- string, dropped *int64
 			if _, werr := out.Write(chunk); werr != nil {
 				return werr
 			}
-			partial = extractLines(append(partial, chunk...), lines, dropped)
+			partial, pendingGap = extractLines(append(partial, chunk...), stream, lines, dropped, pendingGap)
 		}
 		if rerr != nil {
 			if len(partial) > 0 {
-				sendLine(lines, string(partial), dropped)
+				sendLine(lines, stream, string(partial), &pendingGap, dropped)
 			}
 			if rerr == io.EOF {
 				return nil
@@ -56,27 +83,32 @@ func copyStream(out io.Writer, in io.Reader, lines chan<- string, dropped *int64
 
 // extractLines splits every complete line ("...\n") off the front of buf,
 // sending each (CR-trimmed) to lines via sendLine, and returns whatever
-// incomplete tail remains for the next read to extend.
-func extractLines(buf []byte, lines chan<- string, dropped *int64) []byte {
+// incomplete tail remains for the next read to extend, plus the updated
+// pendingGap flag.
+func extractLines(buf []byte, stream streamKind, lines chan<- streamLine, dropped *int64, pendingGap bool) ([]byte, bool) {
 	for {
 		idx := bytes.IndexByte(buf, '\n')
 		if idx < 0 {
-			return buf
+			return buf, pendingGap
 		}
 		line := bytes.TrimSuffix(buf[:idx], []byte("\r"))
-		sendLine(lines, string(line), dropped)
+		sendLine(lines, stream, string(line), &pendingGap, dropped)
 		buf = buf[idx+1:]
 	}
 }
 
 // sendLine makes exactly one non-blocking attempt to deliver line to lines.
-// A full channel increments dropped instead of waiting -- the copy
-// goroutine's write to the terminal must never be slowed down by the
-// detector falling behind.
-func sendLine(lines chan<- string, line string, dropped *int64) {
+// A full channel increments dropped and sets *pendingGap instead of
+// waiting -- the copy goroutine's write to the terminal must never be
+// slowed down by the detector falling behind. The NEXT line that does get
+// delivered for this stream carries gap:true (and clears *pendingGap), so
+// the detector can tell a clean stream from one with a hole in it.
+func sendLine(lines chan<- streamLine, stream streamKind, line string, pendingGap *bool, dropped *int64) {
 	select {
-	case lines <- line:
+	case lines <- streamLine{stream: stream, line: line, gap: *pendingGap}:
+		*pendingGap = false
 	default:
 		atomic.AddInt64(dropped, 1)
+		*pendingGap = true
 	}
 }

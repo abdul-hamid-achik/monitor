@@ -28,6 +28,7 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/contextids"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/project"
+	"github.com/abdul-hamid-achik/monitor/internal/scrub"
 )
 
 // Scan stream selectors for Options.Scan (docs/contracts/
@@ -98,9 +99,32 @@ type Result struct {
 	ExitCode    int
 	Dropped     int64
 	NewIssueIDs []string
-	Occurrences int64
-	Pid         int
+	// FirstNewIssueFullID is the first NEW issue's full "ISS-..." id
+	// recorded this run (empty when NewIssueIDs is empty) -- see
+	// detector.firstNewIssueFullID's doc comment for why the exit
+	// summary's "next:" hint needs this instead of NewIssueIDs[0].
+	FirstNewIssueFullID string
+	Occurrences         int64
+	Pid                 int
+	// FailedWrites is how many detected exceptions could not be recorded
+	// into the issues store (almost always a contended writer lock at
+	// shutdown -- see detector.flushAllPending's bounded budget): counted,
+	// never silently lost, and surfaced in the exit summary.
+	FailedWrites int64
 }
+
+// childIOGrace bounds how long Run waits, once the child process ITSELF has
+// exited, for its stdout/stderr pipes to also close before forcing them
+// shut (exec.Cmd.WaitDelay). Without this, a grandchild that inherited a
+// scanned pipe's write end and outlives the direct child -- `sh -c 'sleep 6
+// & echo done'`, or the compiled binary `go run .` leaves running after `go
+// run` itself exits -- pins Run (and therefore the whole monitor process)
+// behind that orphan indefinitely, even though the process the user asked
+// to run is long gone. Bounding it here means cmd.Wait() below can be
+// called CONCURRENTLY with the pump goroutines still draining those pipes,
+// instead of this package's previous order (wait for pipe EOF, THEN reap
+// the child), which was itself the direct cause of that hang.
+const childIOGrace = 2 * time.Second
 
 // Run launches Options.Argv, wires the copy/detect pipeline per Options.Scan,
 // waits for it to exit, and returns its outcome. The returned error is only
@@ -186,6 +210,10 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	cmd := exec.CommandContext(ctx, opts.Argv[0], opts.Argv[1:]...)
 	cmd.Env = env
 	cmd.Stdin = stdin
+	// See childIOGrace's doc comment: bounds the pipe-drain wait inside
+	// cmd.Wait() once the child itself has exited, instead of blocking on
+	// EOF forever behind an orphaned grandchild.
+	cmd.WaitDelay = childIOGrace
 
 	ttyShared := StdinIsTTY()
 	if opts.ttyOverride != nil {
@@ -217,24 +245,32 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	start := time.Now()
 
 	if !opts.Quiet {
-		fmt.Fprintln(banner, StartBanner(opts.Argv, cmd.Process.Pid, id.Slug, effectiveService, scan))
+		// The start banner's rendered command text goes through the same
+		// secret-shaped-value scrubbing as detected exception text (see
+		// newDetector): an argument on the command line (a bearer token
+		// passed via --header, say) must not land in terminal scrollback
+		// or a cairntrace pane capture unredacted just because it happened
+		// to be part of argv rather than the child's own output.
+		bannerScrubber := scrub.New(scrub.WithValues(scrub.SecretEnvValues(environ, opts.RedactEnvNames)))
+		cmdText := bannerScrubber.String(renderCommandText(opts.Argv))
+		fmt.Fprintln(banner, StartBanner(cmdText, cmd.Process.Pid, id.Slug, effectiveService, scan))
 	}
 
 	var dropped int64
-	lines := make(chan string, linesChanCap)
+	lines := make(chan streamLine, linesChanCap)
 	var pumpWG sync.WaitGroup
 	if scanStderr {
 		pumpWG.Add(1)
 		go func() {
 			defer pumpWG.Done()
-			_ = copyStream(stderr, stderrPipe, lines, &dropped)
+			_ = copyStream(stderr, stderrPipe, streamStderr, lines, &dropped)
 		}()
 	}
 	if scanStdout {
 		pumpWG.Add(1)
 		go func() {
 			defer pumpWG.Done()
-			_ = copyStream(stdout, stdoutPipe, lines, &dropped)
+			_ = copyStream(stdout, stdoutPipe, streamStdout, lines, &dropped)
 		}()
 	}
 
@@ -273,22 +309,31 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		}()
 	}
 
-	// os/exec requires every read from a StdoutPipe/StderrPipe to finish
-	// before Wait is called; pumpWG.Wait() below is exactly that. Only
-	// after the pipes are fully drained do we close `lines`, so the
-	// detector (or the plain drain loop above) sees a clean EOF and can
-	// run its own final flush before detDone closes.
+	// Reap the child BEFORE waiting on the pipes to drain, not after: with
+	// cmd.WaitDelay set above, cmd.Wait() itself waits for the process to
+	// exit and THEN bounds how long it waits for the StdoutPipe/StderrPipe
+	// read ends to close, forcing them shut once childIOGrace elapses if a
+	// surviving grandchild is still holding them open. Calling it here
+	// (concurrently with the pump goroutines still parked in Read(), not
+	// strictly after pumpWG.Wait() the way this package used to) is what
+	// makes that bound effective: waiting for pipe EOF first -- this
+	// package's previous order -- could never observe an orphan at all,
+	// since EOF specifically requires every holder of the write end to
+	// close it. A plain (non-orphaned) child's pipes are already closed by
+	// the time cmd.Wait() returns anyway (the kernel releases a process's
+	// file descriptors as part of exiting, before/alongside the parent's
+	// wait4 returning), so pumpWG.Wait() right below finishes essentially
+	// immediately in the common case.
+	waitErr := cmd.Wait()
+	close(sigDone)
 	pumpWG.Wait()
 	close(lines)
 	<-detDone
 
-	waitErr := cmd.Wait()
-	close(sigDone)
-
 	exitCode := exitCodeFor(cmd.ProcessState)
 	if exitCode < 0 && waitErr != nil {
 		var exitErr *exec.ExitError
-		if !errors.As(waitErr, &exitErr) {
+		if !errors.As(waitErr, &exitErr) && !errors.Is(waitErr, exec.ErrWaitDelay) {
 			return Result{}, fmt.Errorf("devrun: wait for %s: %w", opts.Argv[0], waitErr)
 		}
 	}
@@ -296,16 +341,20 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	result := Result{ExitCode: exitCode, Dropped: dropped, Pid: cmd.Process.Pid}
 	if det != nil {
 		result.NewIssueIDs = det.newIssueIDs
+		result.FirstNewIssueFullID = det.firstNewIssueFullID
 		result.Occurrences = det.occurrences
+		result.FailedWrites = det.failedWrites
 	}
 
-	if !opts.Quiet || dropped > 0 {
+	if !opts.Quiet || dropped > 0 || result.FailedWrites > 0 {
 		fmt.Fprintln(banner, ExitSummary(ExitSummaryInfo{
-			CmdName:     argv0Base,
-			ExitCode:    exitCode,
-			Duration:    time.Since(start),
-			NewIssueIDs: result.NewIssueIDs,
-			Dropped:     dropped,
+			CmdName:             argv0Base,
+			ExitCode:            exitCode,
+			Duration:            time.Since(start),
+			NewIssueIDs:         result.NewIssueIDs,
+			FirstNewIssueFullID: result.FirstNewIssueFullID,
+			Dropped:             dropped,
+			FailedWrites:        result.FailedWrites,
 		}))
 	}
 

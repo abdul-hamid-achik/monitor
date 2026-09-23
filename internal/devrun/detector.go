@@ -28,6 +28,33 @@ const coalesceWindow = 2 * time.Second
 // line stream, matching `stacktrace parse`'s own live tick interval.
 const detectorTick = 100 * time.Millisecond
 
+// dedupeBucketSeconds is the live DedupeKey's time-bucket width (see
+// liveDedupeKey). It MUST be strictly smaller than coalesceWindow: a
+// detector can only ever open a SECOND coalescing window for the same
+// fingerprint after the first one's timer has fired (coalesceWindow later,
+// at minimum -- time.AfterFunc never fires early), so as long as
+// dedupeBucketSeconds < coalesceWindow, two sequential windows from the
+// SAME detector are providably bucketed apart and can never collide with
+// each other. That was the bug a flat 3s bucket had (wider than the 2s
+// coalesce window itself): two back-to-back windows of the same handled
+// error could land in the same bucket and the second's whole Count was
+// silently folded away as a dedupe. See
+// TestLiveDedupeKeyNeverFoldsSequentialWindowsFromTheSameDetector. A nested
+// `monitor run --` reading the same underlying text observes it within
+// milliseconds of the outer launch in practice, well inside a 1s bucket, so
+// the roadmap's stated "±3s window" is a ceiling this stays well under, not
+// a target to hit exactly.
+const dedupeBucketSeconds = 1
+
+// flushShutdownBudget bounds the TOTAL wall time flushAllPending may spend
+// racing the issues store's writer lock at shutdown. Every window still
+// pending when the stream ends is flushed CONCURRENTLY, all racing this ONE
+// shared deadline via a derived context -- never sequentially, each eating
+// its own issues.DefaultWriterWait (5s), which could otherwise pin devrun's
+// exit (and the already-reaped child) behind N*5s when the store is
+// contended.
+const flushShutdownBudget = 2 * time.Second
+
 // newIssueEvent is what the detector reports to Options' banner callback
 // the first time a fingerprint is recorded during this run.
 type newIssueEvent struct {
@@ -50,12 +77,15 @@ type detectorOptions struct {
 }
 
 // detector runs the Joiner -> Parse -> scrub -> coalesce -> RecordException
-// pipeline over one merged stream of lines from the scanned stream(s). It
-// never writes to logs.veclite, and every store write goes through
-// issues.WithWriter's own bounded wait (issues.DefaultWriterWait) -- which
-// runs on a goroutine independent of the line-consuming loop below (see
-// observe/flush), so a slow or contended store write never delays reading
-// the next line off the channel, let alone the copy goroutines feeding it.
+// pipeline over the scanned stream(s), one stacktrace.Joiner per stream
+// (docs/contracts/local-sentry-naming.md's "Joiner por stream" rule -- see
+// streamLine.stream) so a line interleaved from one stream can never split
+// a block being accumulated on another. It never writes to logs.veclite,
+// and every store write goes through issues.WithWriter's own bounded wait
+// (issues.DefaultWriterWait) -- which runs on a goroutine independent of
+// the line-consuming loop below (see observe/flush), so a slow or
+// contended store write never delays reading the next line off the
+// channel, let alone the copy goroutines feeding it.
 type detector struct {
 	opts     detectorOptions
 	scrubber *scrub.Scrubber
@@ -69,13 +99,36 @@ type detector struct {
 	seen map[string]string
 
 	newIssueIDs []string
-	occurrences int64
+	// firstNewIssueFullID is the first NEW issue's full "ISS-..." id
+	// recorded this run, set once (see record). The short id in
+	// newIssueIDs is display-only and cannot be resolved by any command
+	// yet (E2.5's prefix resolution has not landed -- see shortIssueID's
+	// doc comment), so the exit summary's "next:" hint (banner.go) needs
+	// the full id to point at a command that actually works today:
+	// `monitor issue show ISS-...`, not `monitor issue <shortid>`.
+	firstNewIssueFullID string
+	occurrences         int64
+	// failedWrites counts every issues.RecordException call that returned
+	// an error (a contended or unreachable store, most commonly at
+	// shutdown once flushAllPending's budget is exhausted): the crash text
+	// itself is never fabricated or retried past that point, but it must
+	// never be silently swallowed either -- see ExitSummaryInfo.FailedWrites.
+	failedWrites int64
 
 	// flushWG tracks every coalesceWindow timer's flush goroutine
 	// (started in observe) so run's final flushAllPending can wait out one
 	// that is already executing concurrently with shutdown -- see
 	// flushAllPending's doc comment for the exact race this closes.
 	flushWG sync.WaitGroup
+
+	// bannerMu serializes onNewIssue/onRepeat callback invocations.
+	// Independent fingerprints' coalesceWindow timers (and, since
+	// flushAllPending, the shutdown flush of every still-pending
+	// fingerprint) can fire concurrently; Options.Banner is typically
+	// os.Stderr or, in tests, a plain *bytes.Buffer -- neither promises
+	// concurrent-write safety, so every banner-producing callback goes
+	// through this mutex rather than racing directly on the writer.
+	bannerMu sync.Mutex
 }
 
 // coalesceEntry is one fingerprint's open coalescing window: the FIRST raw
@@ -100,25 +153,43 @@ func newDetector(opts detectorOptions) *detector {
 }
 
 // run consumes lines until the channel is closed (the copy goroutine(s)
-// have finished draining the child's pipe(s)), then closes out whatever the
-// Joiner still has open and flushes every still-pending coalescing window
-// before returning, so a crash right at the end of a run is never silently
-// dropped by an un-flushed window.
-func (d *detector) run(ctx context.Context, lines <-chan string) {
-	j := stacktrace.NewJoiner()
+// have finished draining the child's pipe(s)), then closes out whatever
+// each stream's Joiner still has open and flushes every still-pending
+// coalescing window before returning, so a crash right at the end of a run
+// is never silently dropped by an un-flushed window.
+func (d *detector) run(ctx context.Context, lines <-chan streamLine) {
+	joiners := map[streamKind]*stacktrace.Joiner{
+		streamStderr: stacktrace.NewJoiner(),
+		streamStdout: stacktrace.NewJoiner(),
+	}
 	ticker := time.NewTicker(detectorTick)
 	defer ticker.Stop()
 	for {
 		select {
-		case line, ok := <-lines:
+		case sl, ok := <-lines:
 			if !ok {
-				d.process(ctx, j.Flush())
+				for _, j := range joiners {
+					d.process(ctx, j.Flush())
+				}
 				d.flushAllPending(ctx)
 				return
 			}
-			d.process(ctx, j.Feed(line, time.Now()))
+			j := joiners[sl.stream]
+			if sl.gap {
+				// One or more lines were dropped for this stream just
+				// before this one: whatever block this stream's Joiner
+				// had open is now missing lines. Flush it and discard the
+				// result (never process/record it) instead of letting the
+				// next Feed silently complete a truncated fragment as a
+				// wrongly-typed, wrong-culprit "exception" -- a drop must
+				// lose an event, never fabricate one.
+				j.Flush()
+			}
+			d.process(ctx, j.Feed(sl.line, time.Now()))
 		case now := <-ticker.C:
-			d.process(ctx, j.Tick(now))
+			for _, j := range joiners {
+				d.process(ctx, j.Tick(now))
+			}
 		}
 	}
 }
@@ -179,7 +250,14 @@ func (d *detector) flush(ctx context.Context, fingerprint string) {
 }
 
 // flushAllPending is run's shutdown path: every window still open when the
-// stream ended is recorded immediately instead of waiting out its timer.
+// stream ended is recorded immediately instead of waiting out its timer --
+// all of them CONCURRENTLY, racing one shared flushShutdownBudget deadline
+// (via a context derived from ctx) rather than sequentially each eating its
+// own issues.DefaultWriterWait. A store write that does not finish before
+// the deadline fails with a context error, same as any other write failure
+// (see record): it is counted in failedWrites and reported in the exit
+// summary rather than silently pinning devrun's shutdown behind a store a
+// concurrent writer is holding open.
 //
 // Race with an in-flight timer callback: entry.timer.Stop() only prevents a
 // timer that has not fired YET; one that already fired and is between
@@ -197,29 +275,49 @@ func (d *detector) flushAllPending(ctx context.Context) {
 	pending := d.pending
 	d.pending = make(map[string]*coalesceEntry)
 	d.mu.Unlock()
-	for fp, entry := range pending {
-		if entry.timer.Stop() {
-			// Stop returned true: we successfully cancelled the timer
-			// before its callback ran, so the deferred flushWG.Done()
-			// inside that callback (see observe) will never execute.
-			// Balance this entry's earlier flushWG.Add(1) ourselves --
-			// otherwise Wait() below hangs forever on every ordinary
-			// (non-racing) shutdown, not just the rare race it exists
-			// for. Stop returning false means the callback already
-			// started (or this timer already fired/was already stopped);
-			// in that case IT owns the Done() call, and calling Done()
-			// here too would double-decrement the WaitGroup.
-			d.flushWG.Done()
+
+	if len(pending) > 0 {
+		shutdownCtx, cancel := context.WithTimeout(ctx, flushShutdownBudget)
+		var wg sync.WaitGroup
+		for fp, entry := range pending {
+			if entry.timer.Stop() {
+				// Stop returned true: we successfully cancelled the timer
+				// before its callback ran, so the deferred flushWG.Done()
+				// inside that callback (see observe) will never execute.
+				// Balance this entry's earlier flushWG.Add(1) ourselves --
+				// otherwise Wait() below hangs forever on every ordinary
+				// (non-racing) shutdown, not just the rare race it exists
+				// for. Stop returning false means the callback already
+				// started (or this timer already fired/was already
+				// stopped); in that case IT owns the Done() call, and
+				// calling Done() here too would double-decrement the
+				// WaitGroup.
+				d.flushWG.Done()
+			}
+			wg.Add(1)
+			go func(fp string, entry *coalesceEntry) {
+				defer wg.Done()
+				d.record(shutdownCtx, fp, entry)
+			}(fp, entry)
 		}
-		d.record(ctx, fp, entry)
+		wg.Wait()
+		cancel()
 	}
 	d.flushWG.Wait()
 }
 
 // record performs the actual issues.RecordException write for one
 // coalesced window and, unless the write deduped against an existing
-// occurrence, reports it to the banner callbacks (NEW the first time this
-// session sees fingerprint, "again (xN)" every time after).
+// occurrence, reports it to the banner callbacks. NEW is derived from the
+// store's own answer, not merely "this session has not seen the
+// fingerprint before": result.Issue.OccurrenceCount equals entry.count
+// (this write's own count) only when this write created the issue's VERY
+// FIRST occurrence ever (upsertOccurrenceLocked seeds a fresh issue's
+// OccurrenceCount from input.Count; every later write only ADDS to a
+// strictly larger running total) -- so a pre-existing issue from an
+// earlier `monitor run --` invocation against the same store is correctly
+// announced as a repeat, never as NEW, even though this session is seeing
+// its fingerprint for the first time.
 func (d *detector) record(ctx context.Context, fingerprint string, entry *coalesceEntry) {
 	result, err := issues.RecordException(ctx, d.opts.storePath, issues.DefaultWriterWait, entry.ex, d.opts.id, d.opts.run, issues.RecordExceptionOptions{
 		ObservedAt: entry.observedAt,
@@ -228,28 +326,40 @@ func (d *detector) record(ctx context.Context, fingerprint string, entry *coales
 	})
 	if err != nil {
 		// A store write failure must never bring down the detector, let
-		// alone the monitored child (there is nowhere else to report it --
-		// the detector never writes to logs.veclite by design); it is
-		// simply absent from this run's banners/summary.
+		// alone the monitored child (there is nowhere else to report it
+		// synchronously -- the detector never writes to logs.veclite by
+		// design); it is counted here so the exit summary can say so
+		// honestly instead of silently losing the crash.
+		d.mu.Lock()
+		d.failedWrites++
+		d.mu.Unlock()
 		return
 	}
 	if result.Deduped {
 		return
 	}
 
+	isNewIssue := result.Issue.OccurrenceCount == entry.count
+
 	d.mu.Lock()
 	shortID, seenBefore := d.seen[fingerprint]
 	if !seenBefore {
 		shortID = shortIssueID(result.Issue.ID)
 		d.seen[fingerprint] = shortID
+	}
+	if isNewIssue {
 		d.newIssueIDs = append(d.newIssueIDs, shortID)
+		if d.firstNewIssueFullID == "" {
+			d.firstNewIssueFullID = result.Issue.ID
+		}
 	}
 	d.occurrences += entry.count
 	d.mu.Unlock()
 
 	switch {
-	case !seenBefore && d.opts.onNewIssue != nil:
+	case isNewIssue && d.opts.onNewIssue != nil:
 		culprit := result.Issue.Culprit
+		d.bannerMu.Lock()
 		d.opts.onNewIssue(newIssueEvent{
 			ShortID: shortID,
 			Level:   result.Occurrence.Severity,
@@ -258,23 +368,26 @@ func (d *detector) record(ctx context.Context, fingerprint string, entry *coales
 			Line:    culpritLine(culprit),
 			Func:    culpritFunc(culprit),
 		})
-	case seenBefore && d.opts.onRepeat != nil:
+		d.bannerMu.Unlock()
+	case !isNewIssue && d.opts.onRepeat != nil:
+		d.bannerMu.Lock()
 		d.opts.onRepeat(shortID, entry.count)
+		d.bannerMu.Unlock()
 	}
 }
 
 // liveDedupeKey implements the live DedupeKey rule (docs/contracts/
 // local-sentry-naming.md §5): sha256(MONITOR_LAUNCH_ROOT + hash(exception
-// block)), matched within "a ±3s window" -- approximated here by rounding
-// observedAt down to a 3-second bucket, so two detectors independently
+// block)), bucketed by dedupeBucketSeconds so two detectors independently
 // parsing the identical raw text at nearly the same wall-clock instant (a
 // `monitor run --` nested inside another one) land on the same key and the
 // store's dedupe lookup (an exact string match against the issue's
 // retained occurrences) folds the second write into the first's Deduped
-// case instead of double-counting.
+// case instead of double-counting -- while two SEQUENTIAL windows from the
+// SAME detector (see dedupeBucketSeconds' doc comment for the proof) never
+// collide with each other.
 func liveDedupeKey(launchRoot string, block stacktrace.Block, observedAt time.Time) string {
-	const bucketSeconds = 3
-	bucket := observedAt.Unix() / bucketSeconds
+	bucket := observedAt.Unix() / dedupeBucketSeconds
 	seed := strings.Join([]string{
 		launchRoot,
 		stacktrace.HashBlock(block.Text()),
@@ -285,18 +398,21 @@ func liveDedupeKey(launchRoot string, block stacktrace.Block, observedAt time.Ti
 }
 
 // shortIssueID derives a display-only short id from an Issue.ID
-// ("ISS-<16 hex chars>", per internal/issues' newIssue): its last 4 hex
-// characters, matching the roadmap's UX mockups ("5C1D", "A07E", "7B21").
-// This is a devrun-local, cosmetic derivation -- internal/issues has no
-// ShortID/ResolveID concept of its own yet (that lands with the issue-list
-// CLI/MCP work) -- so it must never be persisted or treated as a stable
+// ("ISS-<16 hex chars>", per internal/issues' newIssue): the uppercase
+// FIRST 4 hex characters after "ISS-", matching docs/contracts/
+// issue-context-v1.md's short_id field ("uppercase first 4 hex chars of the
+// id's hex portion") -- which is also what E2.5's prefix resolution
+// (`monitor issue <short_id>`) will accept, so a banner printed today
+// already resolves once that lands. This is a devrun-local, cosmetic
+// derivation -- internal/issues has no ShortID/ResolveID concept of its
+// own yet -- so it must never be persisted or treated as a stable
 // identifier beyond this run's own banners.
 func shortIssueID(id string) string {
 	id = strings.TrimPrefix(id, "ISS-")
 	if len(id) <= 4 {
 		return id
 	}
-	return id[len(id)-4:]
+	return id[:4]
 }
 
 func culpritFile(c *issues.Culprit) string {

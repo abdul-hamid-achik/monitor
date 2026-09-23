@@ -90,6 +90,21 @@ func TestRunPropagatesChildExitCodeAndRecordsIssue(t *testing.T) {
 	if list[0].ExceptionType != "panic" {
 		t.Errorf("exception_type = %q, want panic", list[0].ExceptionType)
 	}
+
+	// R-major-next-hint: Result plumbs the stored issue's own FULL id
+	// through (not just its display-only short id), so the exit summary's
+	// "next:" hint (opts.Quiet suppresses it above, see baseOptions; the
+	// rendering itself is covered directly by
+	// TestExitSummaryWithNewIssuesSuggestsNext) is a command that
+	// resolves TODAY: `monitor issue show <full id>` -- see
+	// FirstNewIssueFullID's doc comment.
+	if result.FirstNewIssueFullID != list[0].ID {
+		t.Errorf("FirstNewIssueFullID = %q, want the stored issue's own id %q", result.FirstNewIssueFullID, list[0].ID)
+	}
+	wantHint := "next: monitor issue show " + list[0].ID
+	if got := ExitSummary(ExitSummaryInfo{NewIssueIDs: result.NewIssueIDs, FirstNewIssueFullID: result.FirstNewIssueFullID}); !strings.Contains(got, wantHint) {
+		t.Errorf("ExitSummary(result's own fields) = %q, want it to contain %q", got, wantHint)
+	}
 }
 
 // TestRunInheritsStdinForInteractiveRead is the roadmap's explicit
@@ -197,11 +212,14 @@ func TestRunInvalidScanIsRejected(t *testing.T) {
 	}
 }
 
-func TestRunNestedLaunchInheritsLaunchRoot(t *testing.T) {
-	// Simulate `monitor run -- task dev` where `task dev` itself invokes
-	// `monitor run --name inner -- <cmd>`: the CHILD process (env |
-	// grep) should see the SAME MONITOR_LAUNCH_ROOT this process was
-	// launched with, not a freshly computed one.
+// TestRunNestedLaunchInheritsOnlyRootAndHonorsAnInnerName is the roadmap's
+// own worked nesting example (`monitor run -- task dev` launching `monitor
+// run --name web-api -- node ...`): the CHILD process sees the SAME
+// MONITOR_LAUNCH_ROOT this process was launched with (so the live DedupeKey
+// still folds a nested pair together), but an inner --name still becomes
+// its OWN MONITOR_LAUNCH_SERVICE rather than being silently replaced by the
+// outer launch's, and it gets its own fresh MONITOR_LAUNCH_ID.
+func TestRunNestedLaunchInheritsOnlyRootAndHonorsAnInnerName(t *testing.T) {
 	opts := baseOptions(t, []string{"sh", "-c", "env | grep ^MONITOR_LAUNCH_ | sort"})
 	opts.environOverride = []string{
 		"PATH=/usr/bin:/bin",
@@ -209,7 +227,7 @@ func TestRunNestedLaunchInheritsLaunchRoot(t *testing.T) {
 		"MONITOR_LAUNCH_SERVICE=outer-svc",
 		"MONITOR_LAUNCH_ROOT=/outer/repo",
 	}
-	opts.Name = "inner-should-be-ignored"
+	opts.Name = "web-api"
 	var stdout, stderr, banner bytes.Buffer
 	opts.Stdout, opts.Stderr, opts.Banner = &stdout, &stderr, &banner
 
@@ -217,14 +235,14 @@ func TestRunNestedLaunchInheritsLaunchRoot(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	got := stdout.String()
-	for _, want := range []string{
-		"MONITOR_LAUNCH_ID=outer-id",
-		"MONITOR_LAUNCH_SERVICE=outer-svc",
-		"MONITOR_LAUNCH_ROOT=/outer/repo",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("child env = %q, missing %q (nested launch must inherit unchanged)", got, want)
-		}
+	if !strings.Contains(got, "MONITOR_LAUNCH_ROOT=/outer/repo") {
+		t.Errorf("child env = %q, missing the inherited MONITOR_LAUNCH_ROOT", got)
+	}
+	if !strings.Contains(got, "MONITOR_LAUNCH_SERVICE=web-api") {
+		t.Errorf("child env = %q, want MONITOR_LAUNCH_SERVICE=web-api (the inner --name), not the outer launch's", got)
+	}
+	if strings.Contains(got, "MONITOR_LAUNCH_ID=outer-id") {
+		t.Errorf("child env = %q, want a fresh MONITOR_LAUNCH_ID, not the outer launch's", got)
 	}
 }
 
@@ -259,6 +277,24 @@ func TestRunChildEnvironmentOnlyExportsLaunchVars(t *testing.T) {
 	}
 }
 
+// TestRunStartBannerScrubsSecretShapedArgv is the argv-in-the-banner fix: a
+// secret-shaped value passed as a command-line argument (not just one
+// detected in the child's own output) must not land in the start banner
+// unredacted.
+func TestRunStartBannerScrubsSecretShapedArgv(t *testing.T) {
+	opts := baseOptions(t, []string{"true", "--token=sekrit-value-1234"})
+	opts.environOverride = []string{"PATH=/usr/bin:/bin", "FAKE_API_TOKEN=sekrit-value-1234"}
+	var stdout, stderr, banner bytes.Buffer
+	opts.Stdout, opts.Stderr, opts.Banner = &stdout, &stderr, &banner
+
+	if _, err := Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(banner.String(), "sekrit-value-1234") {
+		t.Errorf("banner = %q, must not contain the unredacted argv value", banner.String())
+	}
+}
+
 func TestRunQuietSuppressesBannersButNotExitSummaryDrops(t *testing.T) {
 	opts := baseOptions(t, []string{"true"})
 	opts.Quiet = true
@@ -270,6 +306,82 @@ func TestRunQuietSuppressesBannersButNotExitSummaryDrops(t *testing.T) {
 	}
 	if banner.Len() != 0 {
 		t.Errorf("banner output = %q, want nothing printed for a clean quiet run", banner.String())
+	}
+}
+
+// TestRunDoesNotHangBehindAnOrphanedGrandchildHoldingThePipeOpen is the
+// process-reap-ordering fix: a grandchild that inherits the scanned pipe's
+// write end and outlives the direct child (a background job the shell
+// leaves running, or `go run .`'s compiled binary staying alive after `go
+// run` itself exits) must not pin Run() waiting for that pipe to EOF --
+// which requires EVERY holder of the write end to close it -- once the
+// direct child is already gone. Bounded by childIOGrace instead.
+func TestRunDoesNotHangBehindAnOrphanedGrandchildHoldingThePipeOpen(t *testing.T) {
+	opts := baseOptions(t, []string{"sh", "-c", "sleep 6 & echo started; exit 3"})
+	var stdout, stderr, banner bytes.Buffer
+	opts.Stdout, opts.Stderr, opts.Banner = &stdout, &stderr, &banner
+
+	start := time.Now()
+	result, err := Run(context.Background(), opts)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.ExitCode != 3 {
+		t.Errorf("ExitCode = %d, want 3 (the direct child's own exit code)", result.ExitCode)
+	}
+	// childIOGrace (2s) plus generous scheduling slack -- nowhere near the
+	// orphan's full 6s sleep, which is what this package used to wait out.
+	if elapsed > 4*time.Second {
+		t.Errorf("Run took %v, want well under the orphan's 6s sleep (bounded by childIOGrace)", elapsed)
+	}
+	if !strings.Contains(stdout.String(), "started") {
+		t.Errorf("stdout = %q, want the child's own output before it exited", stdout.String())
+	}
+}
+
+// TestRunFlushesFailedWritesQuicklyWhenStoreIsLocked is the other half of
+// the roadmap's "burst while the store is locked" done-when: the OTHER
+// burst test below uses pure filler text, so the detector never actually
+// attempts a store write and the held lock is never contended. This one
+// carries a real crash, so flushAllPending's bounded, concurrent shutdown
+// flush (not issues.DefaultWriterWait synchronously per pending
+// fingerprint) is what is actually being measured.
+func TestRunFlushesFailedWritesQuicklyWhenStoreIsLocked(t *testing.T) {
+	storePath := isolatedStore(t)
+	lockHolder, err := issues.OpenStore(storePath)
+	if err != nil {
+		t.Fatalf("open store to hold the writer lock: %v", err)
+	}
+	t.Cleanup(func() { _ = lockHolder.Close() })
+
+	opts := baseOptions(t, []string{"sh", "-c", "printf %s '" + goCrashPanicText + "' >&2; exit 2"})
+	opts.StorePath = storePath
+	var stdout, stderr, banner bytes.Buffer
+	opts.Stdout, opts.Stderr, opts.Banner = &stdout, &stderr, &banner
+
+	start := time.Now()
+	result, err := Run(context.Background(), opts)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.ExitCode != 2 {
+		t.Errorf("ExitCode = %d, want 2 (the child's own exit code, unaffected by the store being locked)", result.ExitCode)
+	}
+	// Well under issues.DefaultWriterWait (5s): bounded by
+	// detector.flushShutdownBudget instead.
+	if elapsed > 4*time.Second {
+		t.Errorf("Run took %v with the store locked, want well under issues.DefaultWriterWait (5s)", elapsed)
+	}
+	if result.FailedWrites != 1 {
+		t.Errorf("FailedWrites = %d, want 1 (the crash could not be recorded: the store lock was held the whole run)", result.FailedWrites)
+	}
+	if len(result.NewIssueIDs) != 0 {
+		t.Errorf("NewIssueIDs = %v, want none: the write never succeeded", result.NewIssueIDs)
+	}
+	if !strings.Contains(stderr.String(), "panic: go-crash workload") {
+		t.Error("stderr passthrough is missing the crash text -- it must still reach the terminal even when the store write fails")
 	}
 }
 
