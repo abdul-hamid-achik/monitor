@@ -85,25 +85,10 @@ func newMCPServeCmd() *cobra.Command {
 				// probe against its JSC inspector would produce, and
 				// everything else falls through to the same ownership-gated
 				// pprof/sample path monitor_profile_capture always used.
-				// pprofAddr, when the agent set it, both targets the scrape
-				// and asserts ownership on the agent's behalf (mirrors the
-				// CLI's --pprof-addr).
-				Profile: func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string) (profiler.Profile, error) {
-					binding, inspectErr := procbind.Inspect(ctx, pid, "")
-					var bindingPtr *procbind.Binding
-					if inspectErr == nil {
-						bindingPtr = &binding
-					}
-					prof, _, step := captureRuntimeAwareProfile(ctx, pid, bindingPtr, ptype, pprofAddr, "", pprofAddr != "", 0)
-					if step.Status != stepOK {
-						msg := step.Limitation
-						if step.Recovery != "" {
-							msg = fmt.Sprintf("%s (%s)", msg, step.Recovery)
-						}
-						return profiler.Profile{}, fmt.Errorf("%s", msg)
-					}
-					return prof, nil
-				},
+				// Built by buildProfileService so tests can exercise the
+				// EXACT same production dispatch over an in-memory MCP
+				// transport instead of a hand-rolled stub (see mcp_test.go).
+				Profile: buildProfileService(),
 				// Investigate runs the same real pipeline the CLI does
 				// (snapshot + profile + correlate + stash).
 				Investigate: func(ctx context.Context, pid int32, opts mcp.InvestigateOptions) map[string]any {
@@ -120,6 +105,7 @@ func newMCPServeCmd() *cobra.Command {
 						Release:      opts.Release,
 						Service:      opts.Service,
 						GitSHA:       opts.GitSHA,
+						IncludeRaw:   opts.IncludeRaw,
 					}).redactRaw(opts.IncludeRaw).toMap()
 				},
 				// Record captures a short screen recording via the platform
@@ -138,6 +124,48 @@ func newMCPServeCmd() *cobra.Command {
 		},
 	}
 	return cmd
+}
+
+// buildProfileService returns the mcp.Service.Profile implementation wired
+// into `monitor mcp serve` (newMCPServeCmd, above). Pulled out into its own
+// function — rather than an inline closure — so a test can build and call
+// the EXACT same production runtime-aware dispatch (procbind.Inspect +
+// captureRuntimeAwareProfile with allowInspectorHeap:true, since an
+// explicit type:heap request is exactly the caller-asked-for-it case that
+// flag exists for) over a real in-memory MCP transport, instead of
+// re-implementing a parallel stub that could silently drift from what
+// production actually calls (see mcp_test.go's
+// TestProfileServiceLiveNodeInspectorViaRealDispatch).
+//
+// keep/discard and the receipt live here, not in server.go's
+// handleProfileCapture: the same principle that keeps monitor_investigate's
+// include_raw redaction in the Service instead of the handler.
+func buildProfileService() func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep bool) (profiler.Profile, profiler.Receipt, error) {
+	return func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep bool) (profiler.Profile, profiler.Receipt, error) {
+		binding, inspectErr := procbind.Inspect(ctx, pid, "")
+		var bindingPtr *procbind.Binding
+		if inspectErr == nil {
+			bindingPtr = &binding
+		}
+		prof, _, step := captureRuntimeAwareProfile(ctx, pid, bindingPtr, ptype, pprofAddr, "", pprofAddr != "", 0, true)
+		if step.Status == stepUnavailable {
+			return profiler.Profile{}, profiler.Receipt{}, &mcp.UnavailableError{Limitation: step.Limitation, Recovery: step.Recovery}
+		}
+		if step.Status != stepOK {
+			msg := step.Limitation
+			if step.Recovery != "" {
+				msg = fmt.Sprintf("%s (%s)", msg, step.Recovery)
+			}
+			return profiler.Profile{}, profiler.Receipt{}, fmt.Errorf("%s", msg)
+		}
+		receipt := prof.VerifyArtifact()
+		if receipt.Verified && !keep {
+			if err := prof.DiscardRawArtifact(); err != nil {
+				receipt.Limitation = joinLimitation(receipt.Limitation, "cleanup: "+err.Error())
+			}
+		}
+		return prof, receipt, nil
+	}
 }
 
 func listIssuesForMCP(_ context.Context, opts issues.ListOptions) (items []issues.Issue, err error) {

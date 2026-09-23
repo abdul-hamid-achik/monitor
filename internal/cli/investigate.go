@@ -25,6 +25,13 @@ const (
 	stepOK      = "ok"
 	stepFailed  = "failed"
 	stepSkipped = "skipped"
+	// stepUnavailable marks a capture that will never succeed for a known,
+	// non-retryable reason (Bun speaking the WebKit/JSC inspector protocol
+	// instead of V8 CDP is the only producer today) rather than an
+	// unexpected failure. It intentionally does NOT flip computeVerdict to
+	// "partial" by itself (only stepFailed does): a Bun profile request is
+	// an honest, expected limitation, not a broken pipeline.
+	stepUnavailable = "unavailable"
 )
 
 // investigateStep is one typed pipeline step result. Limitation is honest
@@ -54,6 +61,16 @@ type InvestigateOptions struct {
 	GitSHA        string
 	SkipSemantic  bool // tests / offline
 	SkipCorrelate bool
+	// IncludeRaw mirrors the caller's --include-raw / include_raw:true and
+	// is consulted ONLY to decide whether the pipeline's own on-disk
+	// profile temp file (report.Profile.Path) survives past the stash step
+	// when NoSave is also set — see investigatePipeline's keepRawPath. The
+	// separate redactRaw(includeRaw) step (applied by the CLI/MCP callers
+	// to the returned report, not here) is what actually keeps
+	// profile.text in the JSON; this field exists only so the two don't
+	// disagree with each other for a pprof CPU capture, whose Text is
+	// always empty and whose Path is the ONLY raw evidence.
+	IncludeRaw bool
 }
 
 // investigateReport is the pipeline result shared verbatim by the CLI
@@ -147,6 +164,14 @@ const (
 	bunInspectorRecovery   = "run the app with `bun --cpu-prof` (or `monitor run --profile` when available) and inspect the .cpuprofile"
 )
 
+// defaultInspectorHeapTimeout bounds a CDP heap snapshot (Profiler
+// takeHeapSnapshot pauses the target isolate) so a caller whose own context
+// carries no deadline — the stdio MCP server's ctx, notably — can never
+// block on it indefinitely. Chosen generously above the CPU path's 5s
+// default: a heap snapshot of a large heap genuinely takes longer than a
+// CPU sample window, but it must still end.
+const defaultInspectorHeapTimeout = 20 * time.Second
+
 // captureRuntimeAwareProfile captures exactly one profile of type ptype for
 // pid via the runtime-appropriate mechanism, shared by `monitor profile`
 // (newProfileCmd), MCP's monitor_profile_capture, and (as one candidate in
@@ -172,7 +197,20 @@ const (
 // pprof via the captureProfile stub — keeping captureInvestigateProfile's
 // existing tests stub-testable — and a fixed 5s for CDP, matching the
 // pre-E1.7 captureInspectorProfile helper this replaces).
-func captureRuntimeAwareProfile(ctx context.Context, pid int32, binding *procbind.Binding, ptype profiler.ProfileType, pprofAddr, inspectAddr string, addrExplicit bool, cpuDuration time.Duration) (profiler.Profile, string, investigateStep) {
+//
+// allowInspectorHeap gates ONLY the ptype==ProfileHeap case for a JS
+// runtime: true (the CLI's `monitor profile -t heap` and MCP's
+// monitor_profile_capture type:heap — an explicit, caller-requested heap
+// capture) lets it take a real CDP heap snapshot for Node/Deno, exactly
+// like CPU always does. false (investigate's own automatic fallback
+// ladder — captureInvestigateProfile's step 2) skips the whole
+// jsRuntime-heap branch, including its Bun check, and falls straight
+// through to the generic pprof/sample switch below, so investigate never
+// blocks on an isolate-pausing heap snapshot nobody asked for and never
+// repeats the Bun limitation a step 1 CPU attempt already recorded. It has
+// no effect on ptype==ProfileCPU, which always prefers CDP for a JS
+// runtime regardless of caller.
+func captureRuntimeAwareProfile(ctx context.Context, pid int32, binding *procbind.Binding, ptype profiler.ProfileType, pprofAddr, inspectAddr string, addrExplicit bool, cpuDuration time.Duration, allowInspectorHeap bool) (profiler.Profile, string, investigateStep) {
 	step := investigateStep{Step: "profile"}
 	jsRuntime := binding != nil && (binding.Runtime == procbind.RuntimeNode ||
 		binding.Runtime == procbind.RuntimeBun ||
@@ -183,23 +221,30 @@ func captureRuntimeAwareProfile(ctx context.Context, pid int32, binding *procbin
 		addr = binding.InspectAddr
 	}
 
-	if jsRuntime && (ptype == profiler.ProfileCPU || ptype == profiler.ProfileHeap) {
+	if jsRuntime && (ptype == profiler.ProfileCPU || (ptype == profiler.ProfileHeap && allowInspectorHeap)) {
+		// Bun is checked BEFORE the missing-address case: a Bun process
+		// will never speak V8 CDP regardless of whether --inspect was
+		// passed, so telling a Bun user with no --inspect to "start it
+		// with --inspect" (the addr=="" message below) only leads them to
+		// the same JSC dead end. status is "unavailable", not "failed" —
+		// this will never succeed by retrying, unlike a transient failure.
+		if binding.Runtime == procbind.RuntimeBun {
+			step.Status = stepUnavailable
+			step.Limitation = bunInspectorLimitation
+			step.Recovery = bunInspectorRecovery
+			return profiler.Profile{}, "", step
+		}
 		if addr == "" {
 			step.Status = stepFailed
 			step.Limitation = fmt.Sprintf("%s process %d has no inspector address", binding.Runtime, pid)
-			step.Recovery = "start it with --inspect=127.0.0.1:<port>, or pass --inspect-addr"
-			return profiler.Profile{}, "", step
-		}
-		if binding.Runtime == procbind.RuntimeBun {
-			step.Status = stepFailed
-			step.Limitation = bunInspectorLimitation
-			step.Recovery = bunInspectorRecovery
+			step.Recovery = "start it with --inspect=127.0.0.1:<port> (the CLI also accepts --inspect-addr to override auto-detection)"
 			return profiler.Profile{}, "", step
 		}
 		own, detail := profiler.VerifyInspectorOwnership(ctx, pid, addr)
 		if own != profiler.OwnershipOwned {
 			step.Status = stepFailed
 			step.Limitation = fmt.Sprintf("inspector %s not proven to belong to pid %d (%s: %s)", addr, pid, own, detail)
+			step.Recovery = "pass --inspect-addr (CLI) once you've confirmed the real port, or use type:sample / -t sample instead"
 			return profiler.Profile{}, "", step
 		}
 		var prof profiler.Profile
@@ -207,7 +252,9 @@ func captureRuntimeAwareProfile(ctx context.Context, pid int32, binding *procbin
 		method := "inspector_cpu"
 		if ptype == profiler.ProfileHeap {
 			method = "inspector_heap"
-			prof, err = profiler.ProfileInspectorHeap(ctx, pid, addr)
+			heapCtx, cancel := context.WithTimeout(ctx, defaultInspectorHeapTimeout)
+			prof, err = profiler.ProfileInspectorHeap(heapCtx, pid, addr)
+			cancel()
 		} else {
 			dur := cpuDuration
 			if dur <= 0 {
@@ -244,7 +291,24 @@ func captureRuntimeAwareProfile(ctx context.Context, pid int32, binding *procbin
 			step.Limitation = err.Error()
 			return profiler.Profile{}, "", step
 		}
-		if !addrExplicit {
+		if addrExplicit {
+			// An explicit pprof_addr/--pprof-addr both targets the scrape
+			// AND skips the ownership proof on the caller's behalf; it
+			// must still be refused when it points off-host. An agent
+			// (possibly prompt-injected) could otherwise make monitor GET
+			// an arbitrary host's /debug/pprof/* — the same risk
+			// ValidateInspectorAddr already guards the CDP path against.
+			display := pprofAddr
+			if display == "" {
+				display = profiler.DefaultPprofAddr
+			}
+			if verr := profiler.ValidateInspectorAddr(display); verr != nil {
+				step.Status = stepFailed
+				step.Limitation = fmt.Sprintf("pprof endpoint %s: %s", display, verr.Error())
+				step.Recovery = "pass a loopback host:port (localhost or 127.0.0.1) for pprof_addr / --pprof-addr"
+				return profiler.Profile{}, "", step
+			}
+		} else {
 			own, detail := verifyOwnership(ctx, pid, pprofAddr)
 			if own != profiler.OwnershipOwned {
 				display := pprofAddr
@@ -253,6 +317,7 @@ func captureRuntimeAwareProfile(ctx context.Context, pid int32, binding *procbin
 				}
 				step.Status = stepFailed
 				step.Limitation = fmt.Sprintf("pprof endpoint %s not proven to belong to pid %d (%s: %s)", display, pid, own, detail)
+				step.Recovery = "pass --pprof-addr (CLI) / pprof_addr (MCP) explicitly to assert the endpoint is correct, or use -t sample / type:sample instead"
 				return profiler.Profile{}, "", step
 			}
 		}
@@ -317,9 +382,11 @@ func captureInvestigateProfile(ctx context.Context, pid int32, binding *procbind
 		binding.Runtime == procbind.RuntimeBun ||
 		binding.Runtime == procbind.RuntimeDeno)
 
+	isBun := binding != nil && binding.Runtime == procbind.RuntimeBun
+
 	// 1) Node/Bun/Deno with --inspect: CDP CPU profile (file:line frames).
 	if jsRuntime && binding.InspectAddr != "" {
-		if prof, method, step := captureRuntimeAwareProfile(ctx, pid, binding, profiler.ProfileCPU, "", "", false, 0); step.Status == stepOK {
+		if prof, method, step := captureRuntimeAwareProfile(ctx, pid, binding, profiler.ProfileCPU, "", "", false, 0, true); step.Status == stepOK {
 			return prof, method, step
 		} else {
 			reasons = append(reasons, step.Limitation)
@@ -331,18 +398,28 @@ func captureInvestigateProfile(ctx context.Context, pid int32, binding *procbind
 	// a JS runtime that (as almost all do) exposes no net/http/pprof
 	// server fails this exactly the same way a non-JS one with nothing
 	// listening does — no separate "is this runtime applicable" guard
-	// needed before trying.
-	if prof, method, step := captureRuntimeAwareProfile(ctx, pid, binding, profiler.ProfileHeap, "", "", false, 0); step.Status == stepOK {
+	// needed before trying. allowInspectorHeap is false here: this
+	// automatic fallback step must stay Go-pprof-only — routing a JS
+	// runtime through a CDP heap SNAPSHOT here would pause its isolate for
+	// up to defaultInspectorHeapTimeout on every investigate run nobody
+	// explicitly asked for a heap capture from, and (for Bun) would repeat
+	// step 1's own bunInspectorLimitation a second time. A caller that
+	// wants a JS heap snapshot asks for it explicitly via `monitor profile
+	// -t heap` / MCP type:heap, which pass allowInspectorHeap=true.
+	if prof, method, step := captureRuntimeAwareProfile(ctx, pid, binding, profiler.ProfileHeap, "", "", false, 0, false); step.Status == stepOK {
 		return prof, method, step
 	} else {
 		reasons = append(reasons, step.Limitation)
 	}
 
 	// 3) macOS sample fallback.
-	prof, method, step := captureRuntimeAwareProfile(ctx, pid, binding, profiler.ProfileSample, "", "", false, 0)
+	prof, method, step := captureRuntimeAwareProfile(ctx, pid, binding, profiler.ProfileSample, "", "", false, 0, false)
 	if step.Status == stepOK {
 		extra := "used macOS sample: frames carry no file:line, so codemap correlation needs codebase+entry or vecgrep semantic fallback"
-		if jsRuntime {
+		switch {
+		case isBun:
+			extra = "used macOS sample (Bun speaks JSC, not CDP): frames carry no file:line; " + bunInspectorRecovery
+		case jsRuntime:
 			extra = "used macOS sample (no --inspect or inspector unreachable): frames carry no file:line; start node with --inspect for CDP CPU profiles"
 		}
 		step.Limitation = strings.Join(append(reasons, extra), "; ")
@@ -352,9 +429,12 @@ func captureInvestigateProfile(ctx context.Context, pid int32, binding *procbind
 
 	step.Status = stepFailed
 	step.Limitation = strings.Join(reasons, "; ")
-	if jsRuntime {
+	switch {
+	case isBun:
+		step.Recovery = bunInspectorRecovery
+	case jsRuntime:
 		step.Recovery = "start node with --inspect (or --inspect=9230) and ensure codemap/vecgrep index the project; on macOS 'sample' is a weaker fallback"
-	} else {
+	default:
 		step.Recovery = "start the target with net/http/pprof and re-run (or pass --pprof-addr to 'monitor profile'); on macOS ensure 'sample' can attach (same user or root) and the pid is alive"
 	}
 	return profiler.Profile{}, "", step
@@ -455,6 +535,16 @@ func investigatePipeline(ctx context.Context, pid int32, opts InvestigateOptions
 	} else if profStep.Status != stepOK && (report.Process == nil || report.Process.MainScript == "") {
 		corrStep.Status = stepSkipped
 		corrStep.Limitation = "no verified profile or main script to correlate"
+	} else if codebase == "" {
+		// Without a known codebase root, ecosystem.ProbeCodemap(ctx, "")
+		// would run `codemap status` with no -C, against monitor's OWN
+		// working directory rather than the profiled process's — reporting
+		// an unrelated project's health (ok, schema_skew, ...) and
+		// potentially letting correlateProfile resolve frames against the
+		// wrong index. Skip honestly instead of probing/correlating blind.
+		corrStep.Status = stepSkipped
+		corrStep.Limitation = "no codebase root for codemap"
+		corrStep.Recovery = "pass --codebase <project root indexed by codemap>"
 	} else if codemapHealth := ecosystem.ProbeCodemap(ctx, codebase); codemapHealth.State != ecosystem.HealthOK {
 		// One probe, one skipped step — not up to 12 codemap subprocess
 		// calls (correlateProfile's own per-frame budget) that would all
@@ -523,8 +613,11 @@ func investigatePipeline(ctx context.Context, pid int32, opts InvestigateOptions
 	stashStep := investigateStep{Step: "stash"}
 	if opts.NoSave {
 		stashStep.Status = stepSkipped
-		stashStep.Limitation = "--no-save: bundle not stashed; profile included in JSON"
-		report.Note = "--no-save: bundle not stashed; profile included in JSON"
+		// "profile symbols" not "profile" (bare): E1.7's payload diet drops
+		// profile.text by default (both --include-raw and the on-disk Path
+		// below restore the actual raw evidence; symbols/stats always stay).
+		stashStep.Limitation = "--no-save: bundle not stashed; profile symbols included in JSON (pass --include-raw for the raw capture)"
+		report.Note = stashStep.Limitation
 	} else {
 		req := incidents.CaptureRequest{
 			Snapshot: snapshot,
@@ -575,16 +668,28 @@ func investigatePipeline(ctx context.Context, pid int32, opts InvestigateOptions
 	}
 	report.Steps = append(report.Steps, stashStep)
 
-	// Whether or not the bundle was stashed, the transient on-disk profile
-	// copy (only pprof heap ever sets Path — CDP and macOS sample capture
-	// straight to Text) is no longer needed by the time we reach here: a
-	// successful stash already copied it into fcheap/the resumable local
-	// bundle above, and either way Text (or the stash itself) already
-	// carries what a reader of this report needs. Removing it here, not
-	// just on the stash-succeeded path, keeps investigate from leaving a
-	// /tmp/monitor-heap-<pid>-*.pb.gz behind on every run regardless of
-	// --no-save (E1.7: 10 captures leave no temp files).
-	if report.Profile != nil && report.Profile.Path != "" {
+	// The transient on-disk profile copy — a pprof capture's .pb.gz
+	// (heap/cpu/goroutine) or a CDP heap snapshot's .heapsnapshot
+	// (profiler.ProfileInspectorHeap also sets Path; only a CDP CPU
+	// profile and macOS `sample` capture straight to Text/Symbols with no
+	// temp file at all) — is removed once it is no longer the only copy of
+	// the raw evidence, so investigate doesn't leave a
+	// /tmp/monitor-<type>-<pid>-* file behind on every run (E1.7: 10
+	// captures leave no temp files). It is KEPT — not removed — in the two
+	// cases where deleting it would silently drop the only raw copy the
+	// caller has any way to get back:
+	//
+	//   - the stash failed AND wrote no local bundle (report.Stash == nil):
+	//     nothing durable holds a copy, so the on-disk Path is temporarily
+	//     the only surviving artifact until the caller retries;
+	//   - --no-save was combined with --include-raw/include_raw: the
+	//     caller explicitly asked to keep the raw capture, and for a pprof
+	//     CPU profile specifically Text is always empty (captureProfilePprof
+	//     never sets it for ProfileCPU), so Path is the ONLY place the raw
+	//     capture exists at all — redactRaw keeping profile.text is not
+	//     enough on its own for that type.
+	keepRawPath := (stashStep.Status == stepFailed && report.Stash == nil) || (opts.NoSave && opts.IncludeRaw)
+	if !keepRawPath && report.Profile != nil && report.Profile.Path != "" {
 		_ = os.Remove(report.Profile.Path)
 		report.Profile.Path = ""
 	}
@@ -660,12 +765,22 @@ func symbolWeight(sym profiler.Symbol) float64 {
 // capture method (or a hand-built profiler.Profile in a test) can't
 // silently make a pseudo frame "the dominant function" just because it
 // slipped past its own producer's filtering.
+//
+// This is an explicit allowlist of the runtime's own pseudo-frame names
+// (the roadmap's "(idle)/(program)/(GC)" plus pprof's "(unknown)" degraded
+// label and a defensive "native"/"" catch), NOT "anything wrapped in
+// parens": V8 labels a genuine, real anonymous closure "(anonymous)"
+// (inspector.go sets Func = "(anonymous)" for exactly this), so treating
+// every parenthesized name as pseudo used to make a profile whose hot path
+// runs through one anonymous arrow/closure — extremely common in real JS —
+// report "diffuse cpu profile" even when that one function was 99% of
+// active samples.
 func isPseudoSymbolName(name string) bool {
 	switch name {
-	case "", "(idle)", "(program)", "(garbage collector)", "(root)", "(anonymous)", "(unknown)", "native":
+	case "", "(idle)", "(program)", "(garbage collector)", "(root)", "(unknown)", "native":
 		return true
 	default:
-		return strings.HasPrefix(name, "(") && strings.HasSuffix(name, ")")
+		return false
 	}
 }
 
@@ -708,11 +823,64 @@ func dominantInAppSymbol(symbols []profiler.Symbol, gitRoot string) (dominantSym
 	sort.SliceStable(all, func(i, j int) bool { return all[i].Weight > all[j].Weight })
 
 	for _, d := range all {
-		if stacktrace.InApp(stacktrace.Frame{Filename: d.File, AbsPath: d.File}, gitRoot) {
+		if looksLikeSourceFile(d.File) && stacktrace.InApp(stacktrace.Frame{Filename: d.File, AbsPath: d.File}, gitRoot) {
 			return d, all
 		}
 	}
 	return dominantSymbol{}, all
+}
+
+// binaryImageExt lists shared-library/executable-image extensions that a
+// Symbol.File can carry when it names the containing IMAGE a symbol was
+// found in rather than a source file — as macOS `sample` does: its Image
+// field (sample_parse.go) becomes File here, and for a hot line inside the
+// runtime's own interpreter that is a name like "libsystem_pthread.dylib"
+// or "libpython3.14.dylib", never a path monitor could show a snippet of.
+// stacktrace.relativeInApp accepts any relative name with SOME extension as
+// a possible source file (it has no source-extension allowlist — by design,
+// so it doesn't need updating for every language's file extensions), which
+// means a `sample` capture's runtime-internal image can slip past
+// stacktrace.InApp as "in-app" purely because ".dylib"/".so"/".dll" happen
+// to look like "a file with an extension" to that check. Filtered out here,
+// before InApp ever sees the name, so a Bun/Python/Ruby process profiled
+// via `sample` never fingerprints on its OWN interpreter's shared library.
+var binaryImageExt = map[string]bool{
+	".dylib": true,
+	".so":    true,
+	".dll":   true,
+}
+
+// looksLikeSourceFile reports whether file could plausibly be a source file
+// monitor might show a snippet of — i.e. it is NOT a shared-library/
+// executable image name (see binaryImageExt). It does not check the file
+// exists or use any language-specific allowlist; it only rules out the
+// specific binary-image extensions macOS `sample` is known to produce.
+func looksLikeSourceFile(file string) bool {
+	if file == "" {
+		return false
+	}
+	return !binaryImageExt[strings.ToLower(filepath.Ext(file))]
+}
+
+// diffuseProfileTypeLabel turns a captureRuntimeAwareProfile method
+// ("inspector_cpu", "inspector_heap", "pprof_cpu", "pprof_heap",
+// "pprof_goroutine", "sample") into the word recordInvestigateOccurrence's
+// "diffuse <word> profile" message uses, so a heap or goroutine capture
+// with no dominant symbol is never mislabeled "diffuse cpu profile".
+// Defaults to "cpu" only when method is empty/unrecognized (should not
+// happen: this is only reached when report.Profile has symbols, which
+// requires a successful, methodful capture).
+func diffuseProfileTypeLabel(method string) string {
+	switch {
+	case strings.HasPrefix(method, "inspector_"):
+		return strings.TrimPrefix(method, "inspector_")
+	case strings.HasPrefix(method, "pprof_"):
+		return strings.TrimPrefix(method, "pprof_")
+	case method == "sample":
+		return "sample"
+	default:
+		return "cpu"
+	}
 }
 
 // formatTopSymbols renders up to n dominantSymbol groups (already
@@ -791,7 +959,14 @@ func recordInvestigateOccurrence(report *investigateReport) (issues.Issue, issue
 		if dominant.Weight >= dominantInAppSymbolThreshold {
 			symbols = []string{dominant.Func}
 		} else {
-			message = "diffuse cpu profile"
+			// "diffuse <type> profile", not always "diffuse cpu profile":
+			// report.ProfileMethod also covers heap/goroutine pprof
+			// captures and macOS `sample` (any profile type, not just
+			// CPU), and a heap/goroutine snapshot with no single dominant
+			// allocator/blocker is exactly as diffuse a signal as a CPU
+			// profile with no single hot function — but calling it a "cpu
+			// profile" when it wasn't one is simply false.
+			message = "diffuse " + diffuseProfileTypeLabel(report.ProfileMethod) + " profile"
 		}
 		profileSymbolsMetadata = formatTopSymbols(all, 10)
 	}

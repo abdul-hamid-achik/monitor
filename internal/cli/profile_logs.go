@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 func newProfileCmd() *cobra.Command {
 	var ptype, pprofAddr, inspectAddr, output string
 	var duration time.Duration
+	var keep bool
 	cmd := &cobra.Command{
 		Use:   "profile <pid>",
 		Short: "Capture a runtime-aware process profile",
@@ -51,7 +54,12 @@ func newProfileCmd() *cobra.Command {
 			// ownership proof, same as before this shared with `monitor
 			// investigate` and MCP's monitor_profile_capture.
 			addrExplicit := cmd.Flags().Changed("pprof-addr")
-			prof, _, step := captureRuntimeAwareProfile(ctx, pid, bindingPtr, pt, pprofAddr, inspectAddr, addrExplicit, duration)
+			// allowInspectorHeap:true — this is an explicit, caller-asked
+			// `monitor profile -t heap` request, exactly the case that flag
+			// exists to allow a real CDP heap snapshot for (as opposed to
+			// investigate's own automatic fallback ladder, which passes
+			// false so it never blocks on one nobody asked for).
+			prof, _, step := captureRuntimeAwareProfile(ctx, pid, bindingPtr, pt, pprofAddr, inspectAddr, addrExplicit, duration, true)
 			if step.Status != stepOK {
 				msg := step.Limitation
 				if step.Recovery != "" {
@@ -69,6 +77,17 @@ func newProfileCmd() *cobra.Command {
 			prof.Context = contextids.FromEnv(contextids.IDs{})
 			if !rec.Verified {
 				return fmt.Errorf("profile captured no usable artifact: %s", rec.Limitation)
+			}
+			// E1.7 temp-file cleanup: unless the caller persisted the
+			// artifact elsewhere (--output, handled above) or explicitly
+			// asked to --keep it, delete the on-disk temp file a
+			// pprof/CDP-heap capture left in $TMPDIR now that VerifyArtifact
+			// has already confirmed it was real. --json's `text` and
+			// `symbols` fields are UNCHANGED by this (glyphrun procmon
+			// depends on them): discardTempProfilePath only clears Path,
+			// never Text/Symbols, unlike profiler.Profile.DiscardRawArtifact.
+			if output == "" && !keep {
+				discardTempProfilePath(&prof)
 			}
 			if JSONOutput(cmd) {
 				return WriteJSON(prof)
@@ -94,8 +113,27 @@ func newProfileCmd() *cobra.Command {
 	cmd.Flags().StringVar(&inspectAddr, "inspect-addr", "", "Node/Bun/Deno inspector host:port (defaults to the process --inspect flag)")
 	cmd.Flags().DurationVar(&duration, "duration", 5*time.Second, "CPU sampling duration (maximum 2m)")
 	cmd.Flags().StringVar(&output, "output", "", "persist the raw profile at this path (mode 0600)")
+	cmd.Flags().BoolVar(&keep, "keep", false, "keep the on-disk temp file a pprof/CDP-heap capture writes to $TMPDIR (default: delete it once --json/text output is verified); ignored with --output, which already persists it elsewhere")
 	cmd.Flags().Bool("json", false, "emit JSON output")
 	return cmd
+}
+
+// discardTempProfilePath removes the on-disk temp file (a pprof capture's
+// .pb.gz, or a CDP heap snapshot's .heapsnapshot — CDP CPU and macOS
+// `sample` never write one) that captureRuntimeAwareProfile leaves in
+// $TMPDIR, when the caller neither persisted it via --output nor asked to
+// --keep it (E1.7: repeated captures must not accumulate temp files).
+// Unlike profiler.Profile.DiscardRawArtifact, this clears ONLY Path:
+// prof.Text and prof.Symbols — what `monitor profile --json` promises
+// glyphrun procmon (AGENTS.md) — are left untouched. The payload-diet
+// `text` omission MCP/investigate apply is a separate, unaffected contract;
+// `monitor profile --json` keeps text exactly as before this change.
+func discardTempProfilePath(prof *profiler.Profile) {
+	if prof.Path == "" {
+		return
+	}
+	_ = os.Remove(prof.Path)
+	prof.Path = ""
 }
 
 const maxPersistedProfileBytes int64 = 128 << 20
@@ -538,6 +576,7 @@ attached as fcheap tags + manifest context — never mixed into telemetry.`,
 				Release:      release,
 				Service:      service,
 				GitSHA:       gitSHA,
+				IncludeRaw:   includeRaw,
 			})
 			// E1.7 payload diet: profile.text (a CDP CPU profile's full
 			// JSON, or a pprof capture's text dump — tens of KB for a
@@ -571,6 +610,119 @@ attached as fcheap tags + manifest context — never mixed into telemetry.`,
 	cmd.Flags().StringVar(&service, "service", "", "correlation service name")
 	cmd.Flags().StringVar(&gitSHA, "git-sha", "", "correlation git sha")
 	return cmd
+}
+
+// codemapBatchImpactItem mirrors the fields correlateProfile needs from one
+// element of `codemap impact --batch --json`'s envelope
+// (ImpactBatchReport.Results[i] / ImpactReport, defined in codemap's own
+// internal/app/service_impact.go and service_impact_batch.go) — only the
+// counts and enums correlateProfile already reads off ecosystem.Impact
+// per-frame, so a codemap upgrade adding fields here needs no change here.
+// Position echoes the requested file:line back so a result can be matched
+// to the frame that asked for it; Error is set for an item-level miss (a
+// source position codemap couldn't resolve), which is NOT a whole-command
+// failure the way a malformed request or a project/storage error is.
+type codemapBatchImpactItem struct {
+	Position *struct {
+		File string `json:"file"`
+		Line int    `json:"line"`
+	} `json:"position"`
+	Error *struct {
+		Code string `json:"code"`
+	} `json:"error"`
+	Found         bool              `json:"found"`
+	DirectCallers []json.RawMessage `json:"direct_callers"`
+	BlastRadius   []json.RawMessage `json:"blast_radius"`
+	Tests         []json.RawMessage `json:"tests"`
+	Untested      bool              `json:"untested"`
+	CallGraph     string            `json:"call_graph"`
+	Resolution    string            `json:"resolution,omitempty"`
+	Note          string            `json:"note,omitempty"`
+}
+
+// toImpact adapts one batch result into ecosystem.Impact, the shape
+// correlateProfile's per-frame CodemapImpactAtPath already returns, so the
+// batch and per-frame paths feed the exact same downstream code.
+func (it codemapBatchImpactItem) toImpact() ecosystem.Impact {
+	return ecosystem.Impact{
+		Found: it.Found, DirectCallers: it.DirectCallers, BlastRadius: it.BlastRadius,
+		Tests: it.Tests, Untested: it.Untested, CallGraph: it.CallGraph,
+		Resolution: it.Resolution, Note: it.Note,
+	}
+}
+
+// candidateCorrelationFrames returns up to capN frames from syms, deduped by
+// (file, line) in visiting order — the same shape correlateProfile's own
+// per-frame loop dedupes by (file, func, funcLine) before spending its
+// codemap call budget. This is only a HINT for how many --at positions
+// codemapImpactBatch asks for in one subprocess call: a mismatch with the
+// main loop's own dedup degrades to a few extra per-frame fallback calls
+// for the frames the batch didn't happen to cover, never a correctness bug.
+func candidateCorrelationFrames(syms []profiler.Symbol, capN int) []profiler.Symbol {
+	seen := map[string]bool{}
+	var out []profiler.Symbol
+	for _, s := range syms {
+		if s.File == "" || s.Line <= 0 {
+			continue
+		}
+		key := fmt.Sprintf("%s:%d", s.File, s.Line)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, s)
+		if len(out) >= capN {
+			break
+		}
+	}
+	return out
+}
+
+// codemapImpactBatch runs ONE `codemap impact --batch --at f:l --at f:l ...
+// --json` subprocess for every frame in frames, instead of
+// correlateProfile's per-frame budget of up to 12 separate `codemap impact`
+// calls (review finding: the installed codemap already supports --batch —
+// `codemap impact --help` lists it). ok is false on ANY failure —an older
+// codemap without --batch, a timeout, malformed JSON — so the caller falls
+// back to its existing per-frame ecosystem.CodemapImpactAtPath path
+// unchanged; this is a pure subprocess-count optimization, never a new
+// behavior requirement, and callers must treat a missing map entry (not
+// just ok==false) as "fall back for this one frame" too, since --batch's
+// own partial-success envelope can miss individual positions.
+func codemapImpactBatch(ctx context.Context, opts ecosystem.CodemapOpts, frames []profiler.Symbol, depth int) (map[string]codemapBatchImpactItem, bool) {
+	if len(frames) == 0 || !ecosystem.CodemapAvailable() {
+		return nil, false
+	}
+	args := []string{"impact", "--batch", "--json"}
+	if opts.Path != "" {
+		args = append(args, "-C", opts.Path)
+	}
+	if depth > 0 {
+		args = append(args, "--depth", strconv.Itoa(depth))
+	}
+	for _, f := range frames {
+		args = append(args, "--at", fmt.Sprintf("%s:%d", f.File, f.Line))
+	}
+	batchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(batchCtx, "codemap", args...).Output()
+	if err != nil {
+		return nil, false
+	}
+	var report struct {
+		Results []codemapBatchImpactItem `json:"results"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		return nil, false
+	}
+	byKey := make(map[string]codemapBatchImpactItem, len(report.Results))
+	for _, item := range report.Results {
+		if item.Position == nil {
+			continue
+		}
+		byKey[fmt.Sprintf("%s:%d", item.Position.File, item.Position.Line)] = item
+	}
+	return byKey, true
 }
 
 // correlatedSymbol caches one codemap symbol-at + impact lookup so repeat
@@ -613,6 +765,14 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase stri
 	defer cancel()
 	resolvedFrames := 0
 	cache := make(map[string]*correlatedSymbol)
+	// One `codemap impact --batch` subprocess up front for (up to 12,
+	// deduped-by-file:line) candidate frames, instead of the per-frame loop
+	// below spending up to 12 SEPARATE `codemap impact` subprocesses. ok is
+	// false on any failure (older codemap without --batch, timeout,
+	// malformed output) or when there is simply nothing to ask about, and
+	// the loop below transparently falls back to the per-frame path for any
+	// frame the batch doesn't have an entry for.
+	batchImpact, batchOK := codemapImpactBatch(correlateCtx, opts, candidateCorrelationFrames(syms, 12), 0)
 	for _, s := range syms {
 		if s.File == "" || s.Line <= 0 {
 			continue
@@ -635,8 +795,17 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase stri
 			if cs.symErr == nil && cs.sym.FQN != "" {
 				// Enrich resolved frames with blast radius + test coverage,
 				// turning the frame list into a "fix this first" ranking.
-				// One call per (file,func), not per line.
-				cs.imp, cs.impErr = ecosystem.CodemapImpactAtPath(correlateCtx, s.File, s.Line, 0, opts)
+				// One call per (file,func), not per line — or, when the
+				// upfront batch covered this exact file:line, zero calls.
+				if batchOK {
+					if item, found := batchImpact[fmt.Sprintf("%s:%d", s.File, s.Line)]; found && item.Error == nil {
+						cs.imp, cs.impErr = item.toImpact(), nil
+					} else {
+						cs.imp, cs.impErr = ecosystem.CodemapImpactAtPath(correlateCtx, s.File, s.Line, 0, opts)
+					}
+				} else {
+					cs.imp, cs.impErr = ecosystem.CodemapImpactAtPath(correlateCtx, s.File, s.Line, 0, opts)
+				}
 				cs.impDone = true
 			}
 			cache[key] = cs
