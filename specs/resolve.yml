@@ -33,22 +33,22 @@ steps:
 outcomes:
   - id: exact_match
     description: a single process rooted at the given codebase-root resolves by pid
+    timeoutMs: 15000
     verify:
       command:
         run: "D=$(mktemp -d); touch \"$D/go.mod\"; (cd \"$D\" && exec sleep 30) & P=$!; sleep 0.3; OUT=$(./bin/monitor resolve --codebase-root \"$D\" --json 2>&1); kill \"$P\" 2>/dev/null || true; rm -rf \"$D\"; echo \"$OUT\" | grep -q \"\\\"pid\\\": $P\\b\""
-        timeoutMs: 15000
   - id: no_match_errors
     description: a codebase-root with no live process errors instead of guessing
+    timeoutMs: 15000
     verify:
       command:
         run: "D=$(mktemp -d); touch \"$D/go.mod\"; OUT=$(./bin/monitor resolve --codebase-root \"$D\" 2>&1); RC=$?; rm -rf \"$D\"; [ \"$RC\" -ne 0 ] && echo \"$OUT\" | grep -qi 'no process matched'"
-        timeoutMs: 15000
   - id: ambiguous_match_refused
     description: two processes sharing a codebase-root are refused as ambiguous rather than picking one
+    timeoutMs: 15000
     verify:
       command:
         run: "D=$(mktemp -d); touch \"$D/go.mod\"; (cd \"$D\" && exec sleep 30) & P1=$!; (cd \"$D\" && exec sleep 30) & P2=$!; sleep 0.3; OUT=$(./bin/monitor resolve --codebase-root \"$D\" 2>&1); RC=$?; kill \"$P1\" \"$P2\" 2>/dev/null || true; rm -rf \"$D\"; [ \"$RC\" -ne 0 ] && echo \"$OUT\" | grep -qi 'ambiguous' && echo \"$OUT\" | grep -q \"$P1\" && echo \"$OUT\" | grep -q \"$P2\""
-        timeoutMs: 15000
   - id: no_selector_refused
     description: calling resolve with zero selectors is refused up front (never scans blindly)
     verify:
