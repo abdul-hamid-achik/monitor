@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -128,7 +129,11 @@ func ProfileInspector(ctx context.Context, pid int32, addr string, duration time
 	if err := json.Unmarshal(stopResult.Profile, &rawProfile); err != nil {
 		return p, fmt.Errorf("parse CDP CPU profile: %w", err)
 	}
-	p.Symbols = flattenCDPProfile(rawProfile)
+	syms, stats := flattenCDPProfile(rawProfile)
+	p.Symbols = syms
+	if stats.Samples > 0 {
+		p.Stats = &stats
+	}
 	// Persist the profile object itself (not the CDP response envelope), making
 	// --output directly consumable by Chrome DevTools and other .cpuprofile tools.
 	p.Text = string(stopResult.Profile)
@@ -313,10 +318,11 @@ type cdpProfile struct {
 }
 
 type cdpNode struct {
-	ID        int64    `json:"id"`
-	CallFrame cdpFrame `json:"callFrame"`
-	HitCount  int64    `json:"hitCount"`
-	Children  []int64  `json:"children"`
+	ID            int64             `json:"id"`
+	CallFrame     cdpFrame          `json:"callFrame"`
+	HitCount      int64             `json:"hitCount"`
+	Children      []int64           `json:"children"`
+	PositionTicks []cdpPositionTick `json:"positionTicks,omitempty"`
 }
 
 type cdpFrame struct {
@@ -327,39 +333,139 @@ type cdpFrame struct {
 	ColumnNumber int64  `json:"columnNumber"`
 }
 
+// cdpPositionTick is one per-line sample count within a node's own function.
+// V8 reports Line already 1-based (unlike callFrame.lineNumber, which is
+// 0-based), so it needs no +1 adjustment.
+type cdpPositionTick struct {
+	Line  int   `json:"line"`
+	Ticks int64 `json:"ticks"`
+}
+
+// isPseudoCDPFrame reports whether fn is one of V8's synthetic call-tree
+// roots. These never correspond to a source line and must never dilute the
+// weight denominator (a diffuse profile shouldn't hide the real hot line
+// behind 50%+ "(idle)").
+func isPseudoCDPFrame(fn string) bool {
+	switch fn {
+	case "(idle)", "(program)", "(garbage collector)", "(root)":
+		return true
+	default:
+		return false
+	}
+}
+
+// decodeCDPFileURL turns a CDP callFrame.url into a local path for codemap
+// correlation. file:// URLs are percent-decoded via url.Parse (so a path
+// with spaces or other escaped bytes resolves to the real filesystem path);
+// anything else (node:internal/..., webpack://, or empty) passes through
+// unchanged, matching the CDP convention that a non-file URL is already a
+// human-readable module specifier, not a URL-escaped path.
+func decodeCDPFileURL(raw string) string {
+	if raw == "" || !strings.HasPrefix(raw, "file://") {
+		return raw
+	}
+	if u, err := url.Parse(raw); err == nil && u.Path != "" {
+		return u.Path
+	}
+	return strings.TrimPrefix(raw, "file://")
+}
+
+// flatKey identifies one aggregated (function, file, line) bucket. Two CDP
+// nodes with the same key — because the function was sampled via two
+// different call paths (e.g. recursion, or two call sites) — merge into one
+// entry instead of appearing as separate, individually-diluted rows.
+type flatKey struct {
+	Func string
+	File string
+	Line int
+}
+
 // flattenCDPProfile converts the hierarchical CDP profile into a flat
-// []Symbol sorted by weight (hitCount as % of total hits). Only nodes
-// with hitCount > 0 are kept; internal V8 frames (no url) are included
-// but flagged with an empty File so callers can skip them.
-func flattenCDPProfile(prof cdpProfile) []Symbol {
-	totalHits := int64(0)
-	for _, n := range prof.Nodes {
-		totalHits += n.HitCount
+// []Symbol carrying genuine statement-level attribution, plus the pseudo-
+// frame breakdown as Stats.
+//
+// V8's per-node hitCount attributes time to the function's declaration line
+// only; the real hot line lives in the node's positionTicks (already
+// 1-based). This aggregates every node's positionTicks by (func, file, line)
+// — merging call-path duplicates — and falls back to
+// (lineNumber+1, hitCount) only for nodes that carry no positionTicks at
+// all (e.g. Bun's native builtins, which have no url/positionTicks but do
+// have a hitCount). (idle)/(program)/(garbage collector)/(root) are excluded
+// from both the output and the weight denominator; their share is reported
+// in Stats instead of being silently folded into "real" code.
+func flattenCDPProfile(prof cdpProfile) ([]Symbol, Stats) {
+	var totalHits, idleHits, gcHits, excludedHits int64
+	totals := make(map[flatKey]int64)
+	declLines := make(map[flatKey]int)
+	var order []flatKey
+
+	add := func(fn, file string, line int, ticks int64, funcLine int) {
+		if ticks <= 0 {
+			return
+		}
+		k := flatKey{Func: fn, File: file, Line: line}
+		if _, ok := totals[k]; !ok {
+			order = append(order, k)
+			// First occurrence wins: every node that contributes to this
+			// key is a sample of the exact same statement, so any of them
+			// carries the same enclosing function's declaration line.
+			declLines[k] = funcLine
+		}
+		totals[k] += ticks
 	}
-	if totalHits <= 0 {
-		return nil
-	}
-	out := make([]Symbol, 0, len(prof.Nodes))
+
 	for _, n := range prof.Nodes {
 		if n.HitCount <= 0 {
 			continue
 		}
+		totalHits += n.HitCount
 		f := n.CallFrame
-		funcName := f.FunctionName
-		if funcName == "" {
-			funcName = "(anonymous)"
+		fn := f.FunctionName
+		if fn == "" {
+			fn = "(anonymous)"
 		}
-		file := f.URL
-		// file:// URLs → local paths for codemap correlation.
-		file = strings.TrimPrefix(file, "file://")
-		line := int(f.LineNumber + 1) // CDP is 0-indexed; our Symbol is 1-indexed
-		sym := Symbol{
-			Func:   funcName,
-			File:   file,
-			Line:   line,
-			Weight: float64(n.HitCount) / float64(totalHits) * 100,
+		if isPseudoCDPFrame(fn) {
+			excludedHits += n.HitCount
+			switch fn {
+			case "(idle)":
+				idleHits += n.HitCount
+			case "(garbage collector)":
+				gcHits += n.HitCount
+			}
+			continue
 		}
-		out = append(out, sym)
+		file := decodeCDPFileURL(f.URL)
+		funcLine := int(f.LineNumber) + 1
+		if len(n.PositionTicks) > 0 {
+			for _, pt := range n.PositionTicks {
+				add(fn, file, pt.Line, pt.Ticks, funcLine)
+			}
+			continue
+		}
+		// No positionTicks (older V8, or a native frame with no source
+		// lines): fall back to the node's own declaration line.
+		add(fn, file, funcLine, n.HitCount, funcLine)
+	}
+
+	if totalHits <= 0 {
+		return nil, Stats{}
+	}
+
+	active := totalHits - excludedHits
+	stats := Stats{
+		Samples:       int(totalHits),
+		ActiveSamples: int(active),
+		IdlePct:       float64(idleHits) / float64(totalHits) * 100,
+		GCPct:         float64(gcHits) / float64(totalHits) * 100,
+	}
+
+	out := make([]Symbol, 0, len(order))
+	for _, k := range order {
+		var weight float64
+		if active > 0 {
+			weight = float64(totals[k]) / float64(active) * 100
+		}
+		out = append(out, Symbol{Func: k.Func, File: k.File, Line: k.Line, Weight: weight, FuncLine: declLines[k]})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Weight != out[j].Weight {
@@ -370,12 +476,12 @@ func flattenCDPProfile(prof cdpProfile) []Symbol {
 		}
 		return out[i].Line < out[j].Line
 	})
-	// Cap to ~25 frames (same as pprof parser) so codemap correlation
-	// stays bounded.
-	if len(out) > 25 {
-		out = out[:25]
+	// Cap AFTER aggregation (top 50) so merging call paths/lines can't be
+	// starved by a cap applied before duplicates were folded together.
+	if len(out) > 50 {
+		out = out[:50]
 	}
-	return out
+	return out, stats
 }
 
 // VerifyInspectorOwnership checks whether the inspector at addr belongs to

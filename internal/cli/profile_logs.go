@@ -76,7 +76,11 @@ func newProfileCmd() *cobra.Command {
 					}
 				}
 				var captureErr error
-				prof, captureErr = profiler.Capture(ctx, pid, pt, pprofAddr)
+				// CaptureWithDuration, not Capture: --duration must reach the
+				// pprof CPU path's ?seconds=N (Capture's own duration is a
+				// fixed 1s, kept only for callers that haven't adopted a
+				// duration knob yet, e.g. MCP's monitor_profile_capture).
+				prof, captureErr = profiler.CaptureWithDuration(ctx, pid, pt, pprofAddr, duration)
 				if captureErr != nil {
 					return captureErr
 				}
@@ -587,11 +591,34 @@ attached as fcheap tags + manifest context — never mixed into telemetry.`,
 	return cmd
 }
 
+// correlatedSymbol caches one codemap symbol-at + impact lookup so repeat
+// (file,func) pairs — common now that flattenCDPProfile emits one row per
+// hot *line* of the same function — only spend the codemap subprocess
+// budget once.
+type correlatedSymbol struct {
+	sym     ecosystem.SymbolAt
+	symErr  error
+	imp     ecosystem.Impact
+	impErr  error
+	impDone bool
+}
+
 // correlateProfile resolves each profile frame's file:line to its enclosing
-// codemap symbol (FQN/kind), enriching the diagnose flow. Best-effort: it
-// returns nil when codemap isn't on PATH or there are no frames, and silently
-// skips frames codemap can't resolve. codebase, when non-empty, is passed as
-// `codemap -C` so the correct index is used.
+// codemap symbol (FQN/kind/start-end line range), enriching the diagnose
+// flow. Best-effort: it returns nil when codemap isn't on PATH or there are
+// no frames, and silently skips frames codemap can't resolve. codebase, when
+// non-empty, is passed as `codemap -C` so the correct index is used.
+//
+// Frames are deduped by (file, func, funcLine) before spending the codemap
+// call budget: several rows can now share one enclosing function (e.g. the
+// same function's hottest lines from flattenCDPProfile's per-line
+// aggregation), and they resolve to the same symbol/impact, so only the
+// first occurrence of a given key triggers a subprocess call — the rest
+// reuse the cached result. FuncLine (the declaration line) is part of the
+// key, not just (file, func): V8 labels every anonymous closure the same
+// literal "(anonymous)", so two DISTINCT closures in one file would
+// otherwise collide on (file, func) alone and the second would silently
+// reuse the first's (wrong) codemap symbol/range.
 func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase string) []map[string]any {
 	if !ecosystem.CodemapAvailable() || len(syms) == 0 {
 		return nil
@@ -603,23 +630,44 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase stri
 	correlateCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	resolvedFrames := 0
+	cache := make(map[string]*correlatedSymbol)
 	for _, s := range syms {
 		if s.File == "" || s.Line <= 0 {
 			continue
 		}
-		if resolvedFrames >= 12 || correlateCtx.Err() != nil {
+		if correlateCtx.Err() != nil {
 			break
 		}
-		resolvedFrames++
+		key := fmt.Sprintf("%s\x00%s\x00%d", s.File, s.Func, s.FuncLine)
+		cs, cached := cache[key]
+		if !cached {
+			if resolvedFrames >= 12 {
+				break
+			}
+			resolvedFrames++
+			cs = &correlatedSymbol{}
+			// Bound each codemap subprocess so one slow/hung invocation can't
+			// stall the whole pipeline (and hang the stdio MCP server, whose
+			// ctx has no deadline). Mirrors ecosystem.probe()'s per-call timeout.
+			cs.sym, cs.symErr = ecosystem.CodemapSymbolAtPath(correlateCtx, s.File, s.Line, opts)
+			if cs.symErr == nil && cs.sym.FQN != "" {
+				// Enrich resolved frames with blast radius + test coverage,
+				// turning the frame list into a "fix this first" ranking.
+				// One call per (file,func), not per line.
+				cs.imp, cs.impErr = ecosystem.CodemapImpactAtPath(correlateCtx, s.File, s.Line, 0, opts)
+				cs.impDone = true
+			}
+			cache[key] = cs
+		}
 		entry := map[string]any{"func": s.Func, "file": s.File, "line": s.Line}
 		if s.Weight > 0 {
 			entry["weight_pct"] = s.Weight
 		}
-		// Bound each codemap subprocess so one slow/hung invocation can't stall
-		// the whole pipeline (and hang the stdio MCP server, whose ctx has no
-		// deadline). Mirrors ecosystem.probe()'s per-call timeout.
-		sym, err := ecosystem.CodemapSymbolAtPath(correlateCtx, s.File, s.Line, opts)
-		if err == nil {
+		if s.Cum > 0 {
+			entry["cum_pct"] = s.Cum
+		}
+		if cs.symErr == nil {
+			sym := cs.sym
 			entry["resolution"] = sym.Resolution
 			entry["indexed"] = sym.Indexed
 			if !sym.Indexed {
@@ -628,10 +676,14 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase stri
 			if sym.FQN != "" {
 				entry["fqn"] = sym.FQN
 				entry["kind"] = sym.Kind
-				// Enrich resolved frames with blast radius + test coverage,
-				// turning the frame list into a "fix this first" ranking.
-				imp, ierr := ecosystem.CodemapImpactAtPath(correlateCtx, s.File, s.Line, 0, opts)
-				if ierr == nil && imp.Found {
+				if sym.StartLine > 0 {
+					entry["start_line"] = sym.StartLine
+				}
+				if sym.EndLine > 0 {
+					entry["end_line"] = sym.EndLine
+				}
+				if cs.impDone && cs.impErr == nil && cs.imp.Found {
+					imp := cs.imp
 					entry["call_graph"] = imp.CallGraph
 					if imp.Resolution != "" {
 						entry["impact_resolution"] = imp.Resolution
@@ -645,9 +697,19 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase stri
 						entry["blast"] = blast
 						entry["tests"] = len(imp.Tests)
 						entry["untested"] = imp.Untested
-						if s.Weight > 0 {
+						// Prefer Cum (cumulative: this line plus everything
+						// sampled underneath it) over Weight (flat/self only)
+						// when the pprof proto path populated it — a wrapper
+						// whose own flat time is ~0 but whose call site is
+						// the hot line (Cum near 100%) must still outrank a
+						// low-blast leaf by its real cost, which flat alone
+						// can't represent.
+						switch {
+						case s.Cum > 0:
+							entry["score"] = s.Cum * float64(blast)
+						case s.Weight > 0:
 							entry["score"] = s.Weight * float64(blast)
-						} else {
+						default:
 							entry["score"] = float64(blast)
 						}
 					}
@@ -673,8 +735,22 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase stri
 		lj, _ := out[j]["line"].(int)
 		return li < lj
 	})
+	// Cap AFTER sorting (highest score first), so the rows kept are always
+	// the most interesting ones. profiler's own symbol caps grew from 25 to
+	// 50 (E1.1/E1.5), and cache hits no longer count against the 12-call
+	// codemap budget above (several rows legitimately share one cached
+	// lookup), so without this cap a correlated profile could carry up to
+	// 50 rows into investigate/MCP JSON — well past the payload-diet target
+	// those consumers aim for.
+	if len(out) > maxCorrelationRows {
+		out = out[:maxCorrelationRows]
+	}
 	return out
 }
+
+// maxCorrelationRows bounds correlateProfile's output independently of how
+// many distinct (file,func,funcLine) keys the codemap call budget resolved.
+const maxCorrelationRows = 20
 
 func correlationScore(m map[string]any) float64 {
 	if v, ok := m["score"].(float64); ok {

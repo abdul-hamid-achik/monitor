@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -24,6 +26,181 @@ func TestCorrelateProfileSkipsFramesWithoutFileLine(t *testing.T) {
 	}
 	if got := correlateProfile(context.Background(), syms, ""); len(got) != 0 {
 		t.Errorf("frames without file:line should be skipped; got %v", got)
+	}
+}
+
+// TestCorrelateProfileDedupesByFileFuncAndCarriesLineRange: flattenCDPProfile
+// now emits one row per hot *line* of a function, so the same (file,func)
+// can appear many times (e.g. heavyStringify's lines 3/4/5/6). correlate must
+// call codemap symbol-at/impact only once per distinct (file,func) pair and
+// still carry codemap's StartLine/EndLine through into every row that shares
+// that function.
+func TestCorrelateProfileDedupesByFileFuncAndCarriesLineRange(t *testing.T) {
+	binDir := t.TempDir()
+	callLog := filepath.Join(binDir, "calls.log")
+	script := `#!/bin/sh
+echo "$@" >> "$CODEMAP_CALL_LOG"
+case " $* " in
+  *" symbol-at "*) printf '%s' '{"file":"hot.js","line":5,"fqn":"heavyStringify","kind":"function","resolution":"enclosing","indexed":true,"start_line":1,"end_line":9}' ;;
+  *" impact "*) printf '%s' '{"symbol":"heavyStringify","found":true,"call_graph":"resolved","direct_callers":["a"],"blast_radius":["a","b"],"tests":[],"untested":true}' ;;
+  *) exit 9 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "codemap"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CODEMAP_CALL_LOG", callLog)
+
+	// Three rows, two distinct (file,func) pairs: heavyStringify appears at
+	// lines 5 and 4 (its top two hot lines), other appears once.
+	syms := []profiler.Symbol{
+		{Func: "heavyStringify", File: "hot.js", Line: 5, Weight: 60},
+		{Func: "heavyStringify", File: "hot.js", Line: 4, Weight: 30},
+		{Func: "other", File: "hot.js", Line: 20, Weight: 10},
+	}
+	got := correlateProfile(context.Background(), syms, "")
+	if len(got) != 3 {
+		t.Fatalf("expected 3 correlated rows (one per symbol), got %d: %+v", len(got), got)
+	}
+	for _, row := range got {
+		if row["func"] != "heavyStringify" {
+			continue
+		}
+		if row["start_line"] != 1 || row["end_line"] != 9 {
+			t.Errorf("row %+v missing carried start_line/end_line", row)
+		}
+	}
+	raw, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("codemap was never invoked: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	symbolAtCalls := 0
+	for _, l := range lines {
+		if strings.Contains(l, "symbol-at") {
+			symbolAtCalls++
+		}
+	}
+	// Exactly 2 unique (file,func) pairs (hot.js/heavyStringify, hot.js/other)
+	// → exactly 2 symbol-at calls, not 3.
+	if symbolAtCalls != 2 {
+		t.Errorf("symbol-at called %d times, want 2 (deduped by file,func); calls:\n%s", symbolAtCalls, raw)
+	}
+}
+
+// TestCorrelateProfileDoesNotCollideDistinctAnonymousFunctions is the major
+// finding regression: V8 labels every anonymous closure the same literal
+// "(anonymous)" (flattenCDPProfile's fallback for callFrame.functionName ==
+// ""), so two DISTINCT closures in the same file used to collide on the old
+// (file,func) cache key — the second's row silently inherited the first's
+// codemap symbol/range. Symbol.FuncLine (the declaration line) breaks the
+// tie: two rows at the same file/func but different FuncLine must each get
+// their own codemap lookup and their own start_line/end_line.
+func TestCorrelateProfileDoesNotCollideDistinctAnonymousFunctions(t *testing.T) {
+	binDir := t.TempDir()
+	callLog := filepath.Join(binDir, "calls.log")
+	// routeA spans lines 3-8 (declared at 3), routeB spans 40-50 (declared
+	// at 40); the fake codemap answers by which range the requested line
+	// falls into, exactly like a real symbol-at would.
+	script := `#!/bin/sh
+echo "$@" >> "$CODEMAP_CALL_LOG"
+case " $* " in
+  *" symbol-at "*)
+    arg="$2"
+    line="${arg##*:}"
+    if [ "$line" -ge 3 ] && [ "$line" -le 8 ]; then
+      printf '%s' '{"fqn":"routeA","kind":"function","resolution":"enclosing","indexed":true,"start_line":3,"end_line":8}'
+    else
+      printf '%s' '{"fqn":"routeB","kind":"function","resolution":"enclosing","indexed":true,"start_line":40,"end_line":50}'
+    fi
+    ;;
+  *" impact "*) printf '%s' '{"found":true,"call_graph":"resolved","direct_callers":[],"blast_radius":["a"],"tests":[]}' ;;
+  *) exit 9 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "codemap"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CODEMAP_CALL_LOG", callLog)
+
+	syms := []profiler.Symbol{
+		{Func: "(anonymous)", File: "server.js", Line: 5, FuncLine: 3, Weight: 60},
+		{Func: "(anonymous)", File: "server.js", Line: 45, FuncLine: 40, Weight: 40},
+	}
+	got := correlateProfile(context.Background(), syms, "")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 correlated rows, got %d: %+v", len(got), got)
+	}
+	byLine := map[int]map[string]any{}
+	for _, row := range got {
+		byLine[row["line"].(int)] = row
+	}
+	rowA, rowB := byLine[5], byLine[45]
+	if rowA == nil || rowB == nil {
+		t.Fatalf("missing expected rows: %+v", got)
+	}
+	if rowA["fqn"] != "routeA" || rowA["start_line"] != 3 || rowA["end_line"] != 8 {
+		t.Errorf("line 5 row = %+v, want routeA 3-8", rowA)
+	}
+	if rowB["fqn"] != "routeB" || rowB["start_line"] != 40 || rowB["end_line"] != 50 {
+		t.Errorf("line 45 row = %+v, want routeB 40-50 (must not inherit routeA's range)", rowB)
+	}
+	raw, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("codemap was never invoked: %v", err)
+	}
+	symbolAtCalls := 0
+	for _, l := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if strings.Contains(l, "symbol-at") {
+			symbolAtCalls++
+		}
+	}
+	if symbolAtCalls != 2 {
+		t.Errorf("symbol-at called %d times, want 2 (one per distinct anonymous function, keyed on FuncLine); calls:\n%s", symbolAtCalls, raw)
+	}
+}
+
+// TestCorrelateProfileScoresByCumWhenPresent: correlate's ranking score used
+// to be Weight (flat/self) x blast radius. A pprof-proto symbol whose Cum
+// (cumulative) is high but Weight (flat) is near-zero — exactly the
+// "wrapper whose hot line is a call site" shape symbolsFromPprof now
+// surfaces — must still score by its real cumulative cost, not its flat
+// time, or it would rank behind a low-blast, high-flat leaf despite being
+// the actual bottleneck.
+func TestCorrelateProfileScoresByCumWhenPresent(t *testing.T) {
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+case " $* " in
+  *" symbol-at "*) printf '%s' '{"fqn":"main.wrapper","kind":"function","resolution":"enclosing","indexed":true}' ;;
+  *" impact "*) printf '%s' '{"symbol":"main.wrapper","found":true,"call_graph":"resolved","direct_callers":[],"blast_radius":["a","b","c","d"],"tests":[]}' ;;
+  *) exit 9 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "codemap"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	syms := []profiler.Symbol{
+		{Func: "main.wrapper", File: "main.go", Line: 19, Weight: 0.5, Cum: 95},
+	}
+	got := correlateProfile(context.Background(), syms, "")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 correlated row, got %d: %+v", len(got), got)
+	}
+	row := got[0]
+	if row["cum_pct"] != 95.0 {
+		t.Errorf("row[cum_pct] = %v, want 95", row["cum_pct"])
+	}
+	score, ok := row["score"].(float64)
+	if !ok {
+		t.Fatalf("row[score] = %v (%T), want float64", row["score"], row["score"])
+	}
+	// blast=4; Cum(95) x 4 = 380, not Weight(0.5) x 4 = 2.
+	if score < 379 || score > 381 {
+		t.Errorf("score = %v, want ~380 (Cum x blast, not Weight x blast)", score)
 	}
 }
 

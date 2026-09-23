@@ -9,6 +9,7 @@ require (
 	github.com/abdul-hamid-achik/veclite v0.22.1
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/coder/websocket v1.8.15
+	github.com/google/pprof v0.0.0-20260906184651-6331bc6350fe
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/shirou/gopsutil/v4 v4.26.2
 	github.com/spf13/cobra v1.10.2
