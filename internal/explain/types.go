@@ -93,15 +93,17 @@ type Timeline struct {
 	FirstGitSHA string    `json:"first_git_sha,omitempty"`
 	Runs        []string  `json:"runs,omitempty"`
 	// TimeSource is "line" (a replayed log's own timestamp), "mtime" (the
-	// log file's mtime fallback), or "live" (monitor run -- read it as it
-	// happened) -- see docs/contracts/local-sentry-naming.md §4. Neither
-	// issues.Issue nor issues.Occurrence currently PERSIST which of the
-	// three produced an occurrence's ObservedAt (that provenance belongs to
-	// the E2.1/E2.4 producers -- internal/stacktrace's --record and
-	// internal/devrun's `monitor run --`, both built in a parallel slice of
-	// this same roadmap), so this is a documented placeholder: "live" until
-	// a producer-side field exists to say otherwise. It is never invented
-	// per-issue guesswork beyond that fixed default.
+	// log file's mtime fallback), "live" (monitor run -- read it as it
+	// happened), or "unknown" -- see docs/contracts/local-sentry-naming.md
+	// §4. Neither issues.Issue nor issues.Occurrence currently PERSIST which
+	// of the three produced an occurrence's ObservedAt (that provenance
+	// belongs to the E2.1/E2.4 producers -- internal/stacktrace's --record
+	// and internal/devrun's `monitor run --`, both built in a parallel slice
+	// of this same roadmap), so this is a documented placeholder: "unknown"
+	// until a producer-side field exists to say otherwise. Reporting "live"
+	// unconditionally would be invented provenance for every issue replayed
+	// from a log file -- exactly the "never invent data" rule this schema
+	// otherwise holds every other section to.
 	TimeSource string `json:"time_source"`
 }
 
@@ -122,9 +124,17 @@ type CulpritInfo struct {
 	// "message_search".
 	Via string `json:"via,omitempty"`
 	// Confidence is "high" for a stack culprit, "low" for an inferred one.
-	Confidence string        `json:"confidence"`
-	Range      *CulpritRange `json:"range,omitempty"`
-	Snippet    *Snippet      `json:"snippet,omitempty"`
+	Confidence string `json:"confidence"`
+	// Mapping reuses stacktrace.Frame's shared source-map confidence enum
+	// (exact|ambiguous|transpiled|inferred|"") rather than a second,
+	// incompatible one (docs/contracts/local-sentry-naming.md's `Frame.
+	// Mapping` row) -- a message_search culprit is always "inferred" (§7:
+	// "siempre marcado mapping: inferred"); a stack culprit leaves this
+	// empty (omitted), since it was read directly off a real parsed frame,
+	// not mapped through anything.
+	Mapping string        `json:"mapping,omitempty"`
+	Range   *CulpritRange `json:"range,omitempty"`
+	Snippet *Snippet      `json:"snippet,omitempty"`
 }
 
 // CulpritRange is the culprit's enclosing function/symbol range.

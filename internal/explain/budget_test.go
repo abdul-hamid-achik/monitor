@@ -128,3 +128,40 @@ func TestShrinkSnippetSingleLineNoOp(t *testing.T) {
 		t.Fatalf("single-line snippet was shrunk: %+v", s)
 	}
 }
+
+// TestCapFreeTextBoundsOversizedTitle guards the specific failure mode a
+// real Build() hit (see build_test.go's TestBuildFitsBriefBudgetWithOversizedMessage):
+// a single pathologically long Title alone, with everything else already
+// tiny, must still be bounded by the FIXED per-field caps, independent of
+// the shrink-until-it-fits backstop (which never touched title/free text).
+func TestCapFreeTextBoundsOversizedTitle(t *testing.T) {
+	c := &Context{
+		Issue:       IssueSummary{Title: strings.Repeat("x", 50_000)},
+		LastTouched: LastTouched{Status: SectionOK, Subject: strings.Repeat("y", 5_000)},
+		Degraded:    []Degraded{{Component: "codemap", State: "skipped", Detail: strings.Repeat("z", 5_000)}},
+	}
+	capFreeText(c, BudgetBrief)
+	if n := len([]rune(c.Issue.Title)); n > briefTitleMaxRunes {
+		t.Fatalf("title runes = %d, want <= %d", n, briefTitleMaxRunes)
+	}
+	if n := len([]rune(c.LastTouched.Subject)); n > freeTextFieldMaxRunes {
+		t.Fatalf("subject runes = %d, want <= %d", n, freeTextFieldMaxRunes)
+	}
+	if n := len([]rune(c.Degraded[0].Detail)); n > freeTextFieldMaxRunes {
+		t.Fatalf("degraded detail runes = %d, want <= %d", n, freeTextFieldMaxRunes)
+	}
+}
+
+func TestCapFreeTextNoOpAtFullBudget(t *testing.T) {
+	c := &Context{Issue: IssueSummary{Title: strings.Repeat("x", 50_000)}}
+	capFreeText(c, BudgetFull)
+	if n := len([]rune(c.Issue.Title)); n != 50_000 {
+		t.Fatalf("title runes = %d, want unchanged 50000 at full budget", n)
+	}
+}
+
+func TestTruncateRunesNoOpUnderLimit(t *testing.T) {
+	if got := truncateRunes("short", 100); got != "short" {
+		t.Fatalf("truncateRunes = %q, want unchanged", got)
+	}
+}

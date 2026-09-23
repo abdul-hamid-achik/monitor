@@ -77,7 +77,11 @@ func isShallowClone(ctx context.Context, root string) (bool, string) {
 		return false, ""
 	}
 	if strings.TrimSpace(string(out)) == "true" {
-		return true, "skipped: shallow clone (git rev-parse --is-shallow-repository = true)"
+		// Not "skipped: ..." -- the caller (lastTouchedFor) already prefixes
+		// every skip Detail with "skipped: " when it renders (see internal/
+		// cli/issues.go's writeSkippedLine); baking that prefix in here too
+		// produced a literal "skipped: skipped: shallow clone ..." line.
+		return true, "shallow clone (git rev-parse --is-shallow-repository = true)"
 	}
 	return false, ""
 }
@@ -123,6 +127,18 @@ func parseBlamePorcelain(out string) (LastTouched, bool) {
 		result.AuthorTime = &t
 	}
 	result.AuthorEmail = authorEmail
+	if isZeroGitSHA(result.SHA) {
+		// git's own porcelain fields for an uncommitted line are a
+		// placeholder, not real commit metadata ("Version of <file> from
+		// <file>" as the summary, "not.committed.yet" as the author-mail) --
+		// reporting them as if SHA were a real commit is misleading (see
+		// isStale, which treats this SHA as always-stale). Replace the
+		// summary with an honest label instead; author identity for an
+		// uncommitted line is never meaningful, so it is dropped rather
+		// than surfaced as "not.committed.yet".
+		result.Subject = "uncommitted change (not yet committed)"
+		result.AuthorEmail = ""
+	}
 	return result, true
 }
 
@@ -132,4 +148,58 @@ func parseBlamePorcelain(out string) (LastTouched, bool) {
 func stripAuthorEmail(lt LastTouched) LastTouched {
 	lt.AuthorEmail = ""
 	return lt
+}
+
+// zeroGitSHA is `git blame`'s own placeholder commit for a line that has not
+// been committed yet (see `git help blame`'s porcelain format) -- porcelain
+// output always prints the full 40 hex characters, so this is length-exact
+// rather than a prefix check.
+const zeroGitSHA = "0000000000000000000000000000000000000000"
+
+// isZeroGitSHA reports whether sha is git's all-zero "uncommitted change"
+// placeholder (see isStale's doc comment).
+func isZeroGitSHA(sha string) bool {
+	return sha == zeroGitSHA
+}
+
+// gitIsAncestor reports whether ancestor is an ancestor of (or equal to)
+// descendant in root, via `git merge-base --is-ancestor`. Any failure --
+// timeout, a SHA git doesn't have (a shallow clone missing history, an
+// invalid FirstGitSHA), or git itself erroring -- reports false (not an
+// ancestor) rather than panicking or blocking isStale's caller: an
+// inconclusive check degrades to "possibly stale", never a hang.
+func gitIsAncestor(ctx context.Context, root, ancestor, descendant string) bool {
+	if root == "" || ancestor == "" || descendant == "" {
+		return false
+	}
+	cctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "git", "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd.Dir = root
+	cmd.WaitDelay = 500 * time.Millisecond
+	return cmd.Run() == nil
+}
+
+// gitFileDiffers reports whether relFile's current working-tree content
+// differs from its content at rev, via `git diff --quiet`. Any failure
+// (timeout, rev unknown to this clone, relFile not present at rev) reports
+// true (treat it as differing / possibly stale) rather than false: an
+// inconclusive check must never suppress a real staleness signal.
+func gitFileDiffers(ctx context.Context, root, rev, relFile string) bool {
+	if root == "" || rev == "" || relFile == "" {
+		return true
+	}
+	cctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "git", "diff", "--quiet", rev, "--", relFile)
+	cmd.Dir = root
+	cmd.WaitDelay = 500 * time.Millisecond
+	err := cmd.Run()
+	if err == nil {
+		return false // `git diff --quiet` exits 0 when there is no difference
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		return true // exit 1: a real difference, not a failure
+	}
+	return true // timeout, rev/path unknown to this clone, or another git error
 }

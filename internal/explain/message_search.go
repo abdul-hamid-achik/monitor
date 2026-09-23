@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -30,6 +31,18 @@ const maxSearchFragmentLen = 200
 // on these runs isolates its literal, searchable fragments.
 var dynamicRun = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|0x[0-9a-fA-F]+|[0-9]+`)
 
+// quotedRun matches a single- or double-quoted span -- the OTHER common
+// shape of an interpolated runtime value a source line's format string
+// would never contain verbatim: Python's `f"...{token!r}"` and `%r` render
+// the value already wrapped in quotes, a Go %q does the same, and many
+// loggers quote a bare string field. Without stripping these, a fragment
+// like "malformed payload near token 'bad-payl'" only ever exact-matches
+// wherever that specific interpolated value happens to appear verbatim
+// (typically nowhere in source, but often in a test/golden fixture that
+// merely asserts against a recorded example of the rendered message --
+// giving the WRONG culprit for the right reason).
+var quotedRun = regexp.MustCompile(`'[^']*'|"[^"]*"`)
+
 // fragmentTrim is punctuation left dangling at a fragment's edge once its
 // neighboring dynamic run is cut away (a trailing ':' before a batch id, a
 // leading '.' after a port number, quote marks around an interpolated
@@ -42,7 +55,13 @@ const fragmentTrim = " \t:,.\"'`()[]{}"
 // "" when nothing survives that clears minSearchFragmentLen.
 func longestLiteralFragment(message string) string {
 	message = strings.Join(strings.Fields(message), " ") // collapse whitespace/newlines
-	parts := dynamicRun.Split(message, -1)
+	// Strip quoted spans BEFORE the digit/UUID split (both are "dynamic":
+	// see quotedRun's doc comment) using a marker byte no source message
+	// legitimately contains, then split on either.
+	const marker = "\x00"
+	normalized := quotedRun.ReplaceAllString(message, marker)
+	normalized = dynamicRun.ReplaceAllString(normalized, marker)
+	parts := strings.Split(normalized, marker)
 	best := ""
 	for _, p := range parts {
 		p = strings.Trim(p, fragmentTrim)
@@ -105,7 +124,7 @@ func culpritForMessage(ctx context.Context, root, message string) (*messageSearc
 	} else {
 		hits, err := ecosystem.KeywordSearch(ctx, root, fragment, 3)
 		if err == nil && len(hits) > 0 {
-			if r, ok := resultFromVecgrepHit(hits[0], fragment); ok {
+			if r, ok := bestVecgrepResult(hits, fragment); ok {
 				return r, nil
 			}
 		}
@@ -127,6 +146,55 @@ func culpritForMessage(ctx context.Context, root, message string) (*messageSearc
 		return nil, vecgrepDegraded
 	}
 	return nil, &Degraded{Component: "message_search", State: "skipped", Detail: gitErr.Error()}
+}
+
+// testyPathSegment matches a path component that marks a file as tests,
+// fixtures, golden data, or specs -- the kind of file whose CONTENT commonly
+// reproduces a real runtime message verbatim (a golden fixture, a recorded
+// log sample used as expected output) without being the line that actually
+// PRINTED it. Deliberately does not exclude "examples" or "docs": monitor's
+// own dogfood fixtures live under examples/polyglot and ARE legitimate
+// culprit source there.
+var testyPathSegment = regexp.MustCompile(`(?i)(^|/)(test|tests|testdata|__tests__|__mocks__|spec|specs|fixtures?|golden)(/|$)`)
+
+// testyFileSuffix matches a filename shape that marks it as a test, spec, or
+// plain-text/markdown document rather than source: Go's `_test.go`,
+// JS/TS's `.test.*`/`.spec.*`, Python's `test_*.py`, and `.md`/`.txt`/`.rst`.
+var testyFileSuffix = regexp.MustCompile(`(?i)(_test|\.test|\.spec|_spec)\.[a-zA-Z0-9]+$|(^|/)test_[^/]+\.[a-zA-Z0-9]+$|\.(md|txt|rst|adoc)$`)
+
+// isLikelySourceNoise reports whether path looks like a test, fixture, spec,
+// or doc file rather than the application source E2.8's message-search
+// culprit is supposed to point at (see testyPathSegment/testyFileSuffix).
+func isLikelySourceNoise(path string) bool {
+	p := filepath.ToSlash(path)
+	return testyPathSegment.MatchString(p) || testyFileSuffix.MatchString(p)
+}
+
+// bestVecgrepResult turns hits into a messageSearchResult, preferring the
+// first hit whose file does not look like test/fixture noise (see
+// isLikelySourceNoise) over a plain "first hit wins" -- vecgrep's own
+// ranking has no notion of "is this actually source", so a golden fixture
+// that scores well on the query text can otherwise outrank the real source
+// line. Falls back to the first hit at all when every one of them looks
+// noisy, rather than reporting no result.
+func bestVecgrepResult(hits []ecosystem.VecgrepHit, fragment string) (*messageSearchResult, bool) {
+	var fallback *messageSearchResult
+	for _, hit := range hits {
+		r, ok := resultFromVecgrepHit(hit, fragment)
+		if !ok {
+			continue
+		}
+		if !isLikelySourceNoise(r.File) {
+			return r, true
+		}
+		if fallback == nil {
+			fallback = r
+		}
+	}
+	if fallback != nil {
+		return fallback, true
+	}
+	return nil, false
 }
 
 // resultFromVecgrepHit turns a vecgrep hit into a messageSearchResult,
@@ -151,8 +219,10 @@ func resultFromVecgrepHit(hit ecosystem.VecgrepHit, fragment string) (*messageSe
 }
 
 // gitGrepFragment runs `git grep -n -F -e <fragment>` in root, capped at 2s,
-// and returns the FIRST match as file:line (git grep's own output order,
-// stable across otherwise-identical trees).
+// and returns the best match as file:line: the first hit (git grep's own
+// output order, stable across otherwise-identical trees) that does not look
+// like a test/fixture/spec file (see isLikelySourceNoise), falling back to
+// the literal first hit when every match looks noisy.
 func gitGrepFragment(ctx context.Context, root, fragment string) (*messageSearchResult, error) {
 	if _, err := exec.LookPath("git"); err != nil {
 		return nil, fmt.Errorf("git not on PATH")
@@ -181,18 +251,27 @@ func gitGrepFragment(ctx context.Context, root, fragment string) (*messageSearch
 		}
 		return nil, fmt.Errorf("git grep: %s", detail)
 	}
-	file, line, ok := parseGitGrepFirstMatch(stdout.String())
+	matches, ok := parseGitGrepMatches(stdout.String())
 	if !ok {
 		return nil, fmt.Errorf("git grep produced no parseable match")
 	}
+	file, line := preferSourceMatch(matches)
 	return &messageSearchResult{File: file, Line: line, Via: "git_grep"}, nil
 }
 
-// parseGitGrepFirstMatch reads the first "path:lineno:content" line from
-// `git grep -n`'s output. A matched path containing a literal ':' (rare, but
-// legal on POSIX filesystems) is handled by only ever splitting on the FIRST
-// two colons, since git grep's own -n format is exactly path:lineno:rest.
-func parseGitGrepFirstMatch(out string) (file string, line int, ok bool) {
+// gitGrepMatch is one "path:lineno" pair parsed from `git grep -n`'s output.
+type gitGrepMatch struct {
+	File string
+	Line int
+}
+
+// parseGitGrepMatches reads every "path:lineno:content" line from `git
+// grep -n`'s output, in the order git printed them. A matched path
+// containing a literal ':' (rare, but legal on POSIX filesystems) is
+// handled by only ever splitting on the FIRST two colons, since git grep's
+// own -n format is exactly path:lineno:rest.
+func parseGitGrepMatches(out string) ([]gitGrepMatch, bool) {
+	var matches []gitGrepMatch
 	scanner := bufio.NewScanner(strings.NewReader(out))
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -210,9 +289,23 @@ func parseGitGrepFirstMatch(out string) (file string, line int, ok bool) {
 		if err != nil || n <= 0 {
 			continue
 		}
-		return l[:first], n, true
+		matches = append(matches, gitGrepMatch{File: l[:first], Line: n})
 	}
-	return "", 0, false
+	return matches, len(matches) > 0
+}
+
+// preferSourceMatch returns the first match whose file does not look like
+// test/fixture/spec noise (see isLikelySourceNoise), falling back to the
+// literal first match when every one of them looks noisy -- still better
+// than reporting no culprit at all, and Source is already "message_search"/
+// confidence "low" either way.
+func preferSourceMatch(matches []gitGrepMatch) (string, int) {
+	for _, m := range matches {
+		if !isLikelySourceNoise(m.File) {
+			return m.File, m.Line
+		}
+	}
+	return matches[0].File, matches[0].Line
 }
 
 func firstNonEmptyString(values ...string) string {

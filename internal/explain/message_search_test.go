@@ -139,3 +139,68 @@ func TestGitGrepFragmentNoMatch(t *testing.T) {
 		t.Fatal("expected an error for no match")
 	}
 }
+
+// TestGitGrepFragmentPrefersSourceOverTestFixture is the review's exact
+// repro: a decoy test/golden fixture that reproduces the rendered message
+// verbatim, sorting BEFORE the real source file in git grep's own path
+// order, must not win over the actual source line.
+func TestGitGrepFragmentPrefersSourceOverTestFixture(t *testing.T) {
+	root := newGitRepo(t, map[string]string{
+		// "tests/" sorts before "workload.py" -- without filtering, git
+		// grep's first hit is the decoy.
+		"tests/workload.py": "EXPECTED = \"flaky_parse: malformed payload near token 'bad-payl'\"\n",
+		"workload.py": "def flaky_parse(payload):\n" +
+			"    raise ValueError(f\"flaky_parse: malformed payload near token {payload!r}\")\n",
+	})
+	result, err := gitGrepFragment(context.Background(), root, "flaky_parse: malformed payload near token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.File != "workload.py" || result.Line != 2 {
+		t.Fatalf("result = %+v, want workload.py:2 (the real source), not the tests/ fixture", result)
+	}
+}
+
+// TestGitGrepFragmentFallsBackToNoisyMatchWhenNothingElseMatches: every hit
+// looking like test/fixture noise still returns the first one rather than
+// reporting no result at all.
+func TestGitGrepFragmentFallsBackToNoisyMatchWhenNothingElseMatches(t *testing.T) {
+	root := newGitRepo(t, map[string]string{"tests/only.go": "// TARGET FRAGMENT ONLY HERE\n"})
+	result, err := gitGrepFragment(context.Background(), root, "TARGET FRAGMENT ONLY HERE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.File != "tests/only.go" {
+		t.Fatalf("result = %+v, want the only match even though it looks noisy", result)
+	}
+}
+
+func TestIsLikelySourceNoise(t *testing.T) {
+	noisy := []string{
+		"internal/explain/build_test.go", "internal/stacktrace/golden_test.go",
+		"testdata/fixture.json", "specs/issues.yml", "spec/foo_spec.rb",
+		"__tests__/foo.test.ts", "src/foo.spec.js", "python/test_workload.py",
+		"docs/README.md", "notes.txt",
+	}
+	for _, p := range noisy {
+		if !isLikelySourceNoise(p) {
+			t.Errorf("isLikelySourceNoise(%q) = false, want true", p)
+		}
+	}
+	clean := []string{
+		"examples/polyglot/js/workload.js", "src/reconcile.py", "internal/explain/build.go",
+	}
+	for _, p := range clean {
+		if isLikelySourceNoise(p) {
+			t.Errorf("isLikelySourceNoise(%q) = true, want false", p)
+		}
+	}
+}
+
+func TestLongestLiteralFragmentStripsQuotedSegments(t *testing.T) {
+	got := longestLiteralFragment("flaky_parse: malformed payload near token 'bad-payl'")
+	want := "flaky_parse: malformed payload near token"
+	if got != want {
+		t.Errorf("longestLiteralFragment = %q, want %q", got, want)
+	}
+}
