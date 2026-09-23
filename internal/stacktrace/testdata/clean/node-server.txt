@@ -1,0 +1,8 @@
+[server] pid=4821 listening on http://127.0.0.1:3000
+[server] config loaded: errorRateThreshold=0.05, retries=3
+[server] GET /health 200 2ms
+[server] GET /api/widgets 200 14ms
+[server] POST /api/widgets 201 22ms
+[server] error handling middleware registered
+[server] GET /api/widgets/42 200 5ms
+[server] shutting down gracefully

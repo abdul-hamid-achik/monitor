@@ -1,0 +1,6 @@
+I, [2026-09-22T10:00:00.100000 #501]  INFO -- : Listening on http://127.0.0.1:3001
+I, [2026-09-22T10:00:01.204000 #501]  INFO -- : Started GET "/health" for 127.0.0.1
+I, [2026-09-22T10:00:01.206000 #501]  INFO -- : Completed 200 OK in 2ms
+I, [2026-09-22T10:00:02.400000 #501]  INFO -- : Started GET "/widgets" for 127.0.0.1
+I, [2026-09-22T10:00:02.415000 #501]  INFO -- : Completed 200 OK in 15ms (no errors raised)
+I, [2026-09-22T10:00:03.900000 #501]  INFO -- : error_reporter middleware: 0 errors in queue

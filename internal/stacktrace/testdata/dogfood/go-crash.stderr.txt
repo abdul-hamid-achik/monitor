@@ -1,0 +1,5 @@
+panic: go-crash workload: intentional uncaught failure
+
+goroutine 1 [running]:
+main.main()
+	/repo/examples/polyglot/go-crash/main.go:11 +0x60

@@ -1,0 +1,11 @@
+[go-zap-stdout] starting
+2026-09-23T01:31:07.777749Z	error	request failed	{"error":"root cause boom","request_id":"abc123"}
+root cause boom
+main.doWork
+	/repo/examples/polyglot/go-zap-stdout/main.go:61
+main.main
+	/repo/examples/polyglot/go-zap-stdout/main.go:66
+runtime.main
+	/usr/local/go/src/runtime/proc.go:290
+runtime.goexit
+	/usr/local/go/src/runtime/asm_arm64.s:1447

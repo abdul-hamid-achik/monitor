@@ -7,7 +7,7 @@ import (
 )
 
 func TestTslogSynthetic(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("testdata", "synthetic", "tslog.log"))
+	b, err := os.ReadFile(filepath.Join("testdata", "synthetic", "tslog.txt"))
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
