@@ -1,0 +1,1543 @@
+Sampling process 40025 for 1 second with 1 millisecond of run time between samples
+Sampling completed, processing symbols...
+Sample analysis of process 40025 written to file /tmp/gowork_2026-09-22_172600_XMl3.sample.txt
+
+Analysis of sampling gowork (pid 40025) every 1 millisecond
+Process:         gowork [40025]
+Path:            /repo/internal/profiler/testdata/src/gowork
+Load Address:    0x104bdc000
+Identifier:      gowork
+Version:         ???
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  launchd [1]
+Target Type:     live task
+
+Date/Time:       2026-09-22 17:26:00.612 -0600
+Launch Time:     2026-09-22 17:26:00.062 -0600
+OS Version:      macOS 26.5.1 (25F80)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         12.2M
+Physical footprint (peak):  12.2M
+Idle exit:                  untracked
+----
+
+Call graph:
+    784 Thread_28989881   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 784 runtime.kevent_trampoline.abi0  (in gowork) + 40  [0x104c61f08]
+    +   784 kevent  (in libsystem_kernel.dylib) + 8  [0x18b44bfc4]
+    784 Thread_28989884
+    + 773 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + ! 740 runtime.usleep_trampoline.abi0  (in gowork) + 20  [0x104c61e44]
+    + ! : 740 usleep  (in libsystem_c.dylib) + 68  [0x18b325bd8]
+    + ! :   740 nanosleep  (in libsystem_c.dylib) + 220  [0x18b325cc0]
+    + ! :     739 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x18b449308]
+    + ! :     1 __semwait_signal  (in libsystem_kernel.dylib) + 28  [0x18b44931c]
+    + ! :       1 cerror  (in libsystem_kernel.dylib) + 0  [0x18b4475d4]
+    + ! 31 runtime.pthread_cond_signal_trampoline.abi0  (in gowork) + 20  [0x104c62224]
+    + ! : 31 pthread_cond_signal  (in libsystem_pthread.dylib) + 708  [0x18b488f88]
+    + ! :   31 __psynch_cvsignal  (in libsystem_kernel.dylib) + 8  [0x18b44aa64]
+    + ! 2 runtime.pthread_cond_timedwait_relative_np_trampoline.abi0  (in gowork) + 28  [0x104c621fc]
+    + !   2 _pthread_cond_wait  (in libsystem_pthread.dylib) + 1024  [0x18b48a154]
+    + !     2 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+    + 8 runtime.retake  (in gowork) + 48  [0x104c32e40]
+    + ! 8 runtime.lock2  (in gowork) + 0  [0x104bf4980]
+    + 1 runtime.(*limiterEvent).stop  (in gowork) + 140  [0x104c03edc]
+    + 1 runtime.sysmon  (in gowork) + 236  [0x104c329cc]
+    + ! 1 runtime.nanotime1.abi0  (in gowork) + 0  [0x104c443d0]
+    + 1 runtime.usleep.abi0  (in gowork) + 28  [0x104c4431c]
+    784 Thread_28989885
+    + 647 ???  (in <unknown binary>)  [0xd65f03c0]
+    + ! 647 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + !   647 runtime.pthread_cond_wait_trampoline.abi0  (in gowork) + 24  [0x104c621c8]
+    + !     647 _pthread_cond_wait  (in libsystem_pthread.dylib) + 980  [0x18b48a128]
+    + !       647 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+    + 13 runtime.mallocgcSmallScanNoHeader  (in gowork) + 64,152,...  [0x104bf6720,0x104bf6778,...]
+    + 12 internal/runtime/maps.(*Iter).Next  (in gowork) + 1384,1392,...  [0x104be2148,0x104be2150,...]
+    + 11 runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 12,192,...  [0x104bf88fc,0x104bf89b0,...]
+    + 9 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + ! 7 runtime.pthread_cond_signal_trampoline.abi0  (in gowork) + 20  [0x104c62224]
+    + ! : 6 pthread_cond_signal  (in libsystem_pthread.dylib) + 708  [0x18b488f88]
+    + ! : | 6 __psynch_cvsignal  (in libsystem_kernel.dylib) + 8  [0x18b44aa64]
+    + ! : 1 pthread_cond_signal  (in libsystem_pthread.dylib) + 428  [0x18b488e70]
+    + ! 1 runtime.pthread_cond_timedwait_relative_np_trampoline.abi0  (in gowork) + 28  [0x104c621fc]
+    + ! : 1 _pthread_cond_wait  (in libsystem_pthread.dylib) + 1024  [0x18b48a154]
+    + ! :   1 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+    + ! 1 runtime.usleep_trampoline.abi0  (in gowork) + 20  [0x104c61e44]
+    + !   1 usleep  (in libsystem_c.dylib) + 68  [0x18b325bd8]
+    + !     1 nanosleep  (in libsystem_c.dylib) + 220  [0x18b325cc0]
+    + !       1 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x18b449308]
+    + 8 runtime.goexit.abi0  (in gowork) + 4  [0x104c611a4]
+    + ! 8 main.main.func1  (in gowork) + 32  [0x104e097a0]
+    + !   6 main.heavyStringify  (in gowork) + 296  [0x104e094c8]
+    + !   : 4 encoding/json.Marshal  (in gowork) + 140  [0x104cb15fc]
+    + !   : | 4 encoding/json.(*encodeState).marshal  (in gowork) + 172  [0x104cb1abc]
+    + !   : |   4 encoding/json.(*encodeState).reflectValue  (in gowork) + 112  [0x104cb1cf0]
+    + !   : |     4 encoding/json.mapEncoder.encode-fm  (in gowork) + 68  [0x104cc3174]
+    + !   : |       1 encoding/json.mapEncoder.encode  (in gowork) + 476  [0x104cb4aac]
+    + !   : |       + 1 runtime.makeslice  (in gowork) + 80  [0x104c5bd20]
+    + !   : |       +   1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + !   : |       +     1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 332  [0x104bf682c]
+    + !   : |       +       1 runtime.(*mcache).nextFree  (in gowork) + 132  [0x104bf5f74]
+    + !   : |       +         1 runtime.(*mcache).refill  (in gowork) + 456  [0x104bf9a08]
+    + !   : |       +           1 runtime.(*mcentral).cacheSpan  (in gowork) + 1140  [0x104bfa4e4]
+    + !   : |       +             1 runtime.(*mcentral).grow  (in gowork) + 68  [0x104bfa664]
+    + !   : |       +               1 runtime.(*mheap).alloc  (in gowork) + 76  [0x104c11d6c]
+    + !   : |       +                 1 runtime.systemstack.abi0  (in gowork) + 104  [0x104c5f188]
+    + !   : |       +                   1 runtime.(*mheap).alloc.func1  (in gowork) + 104  [0x104c11e08]
+    + !   : |       +                     1 runtime.(*mheap).allocSpan  (in gowork) + 104  [0x104c121f8]
+    + !   : |       +                       1 runtime.(*pageAlloc).update  (in gowork) + 796  [0x104c15f8c]
+    + !   : |       1 encoding/json.mapEncoder.encode  (in gowork) + 652  [0x104cb4b5c]
+    + !   : |       + 1 reflect.(*MapIter).Key  (in gowork) + 88  [0x104c72ad8]
+    + !   : |       +   1 reflect.copyVal  (in gowork) + 92  [0x104c779ac]
+    + !   : |       +     1 runtime.typedmemmove  (in gowork) + 108  [0x104c57cfc]
+    + !   : |       1 encoding/json.mapEncoder.encode  (in gowork) + 740  [0x104cb4bb4]
+    + !   : |       + 1 reflect.(*MapIter).Value  (in gowork) + 88  [0x104c72b88]
+    + !   : |       +   1 reflect.typedmemmove  (in gowork) + 32  [0x104c57d30]
+    + !   : |       1 encoding/json.mapEncoder.encode  (in gowork) + 988  [0x104cb4cac]
+    + !   : |         1 encoding/json.interfaceEncoder  (in gowork) + 204  [0x104cb438c]
+    + !   : |           1 encoding/json.(*encodeState).reflectValue  (in gowork) + 72  [0x104cb1cc8]
+    + !   : |             1 encoding/json.valueEncoder  (in gowork) + 84  [0x104cb1d84]
+    + !   : |               1 encoding/json.typeEncoder  (in gowork) + 80  [0x104cb1e10]
+    + !   : |                 1 internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load  (in gowork) + 256  [0x104c68660]
+    + !   : |                   1 runtime.efaceeq  (in gowork) + 16  [0x104bece30]
+    + !   : 1 encoding/json.Marshal  (in gowork) + 304  [0x104cb16a0]
+    + !   : | 1 encoding/json.Marshal.deferwrap1  (in gowork) + 36  [0x104cb1754]
+    + !   : |   1 sync.(*Pool).pin  (in gowork) + 76  [0x104c659ec]
+    + !   : 1 runtime.growslice  (in gowork) + 1236  [0x104c5c274]
+    + !   1 main.heavyStringify  (in gowork) + 120  [0x104e09418]
+    + !   : 1 runtime.mapassign_faststr  (in gowork) + 156  [0x104be4cbc]
+    + !   :   1 internal/runtime/maps.(*Map).growToSmall  (in gowork) + 44  [0x104bdf9fc]
+    + !   :     1 internal/runtime/maps.newarray  (in gowork) + 28  [0x104c57a5c]
+    + !   :       1 runtime.newarray  (in gowork) + 112  [0x104c579c0]
+    + !   :         1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + !   :           1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 332  [0x104bf682c]
+    + !   :             1 runtime.(*mcache).nextFree  (in gowork) + 132  [0x104bf5f74]
+    + !   :               1 runtime.(*mcache).refill  (in gowork) + 456  [0x104bf9a08]
+    + !   :                 1 runtime.(*mcentral).cacheSpan  (in gowork) + 1140  [0x104bfa4e4]
+    + !   :                   1 runtime.(*mcentral).grow  (in gowork) + 68  [0x104bfa664]
+    + !   :                     1 runtime.(*mheap).alloc  (in gowork) + 76  [0x104c11d6c]
+    + !   :                       1 runtime.systemstack.abi0  (in gowork) + 104  [0x104c5f188]
+    + !   :                         1 runtime.(*mheap).alloc.func1  (in gowork) + 104  [0x104c11e08]
+    + !   :                           1 runtime.(*mheap).allocSpan  (in gowork) + 1000  [0x104c12578]
+    + !   :                             1 runtime.newMarkBits  (in gowork) + 836  [0x104c15524]
+    + !   1 main.heavyStringify  (in gowork) + 196  [0x104e09464]
+    + !     1 runtime.convTstring  (in gowork) + 72  [0x104c57558]
+    + !       1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + !         1 runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 360  [0x104bf8a58]
+    + 8 runtime.mallocgc  (in gowork) + 100,192,...  [0x104c577a4,0x104c57800,...]
+    + 6 encoding/json.appendString[go.shape.string]  (in gowork) + 180,1964,...  [0x104cbf5e4,0x104cbfcdc,...]
+    + 5 runtime.mallocgcSmallScanNoHeader  (in gowork) + 392  [0x104bf6868]
+    + ! 5 runtime.memclrNoHeapPointers  (in gowork) + 0,104,...  [0x104c61500,0x104c61568,...]
+    + 4 runtime.mallocgcSmallNoscan  (in gowork) + 352,484,...  [0x104bf6540,0x104bf65c4,...]
+    + 3 internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load  (in gowork) + 80,160,...  [0x104c685b0,0x104c68600,...]
+    + 3 runtime.pidleput  (in gowork) + 108,452,...  [0x104c345cc,0x104c34724,...]
+    + 2 encoding/json.Marshal  (in gowork) + 124,140  [0x104cb15ec,0x104cb15fc]
+    + 2 encoding/json.typeEncoder  (in gowork) + 80  [0x104cb1e10]
+    + ! 2 internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load  (in gowork) + 0  [0x104c68560]
+    + 2 internal/strconv.AppendUint  (in gowork) + 356  [0x104beaef4]
+    + ! 2 runtime.memmove  (in gowork) + 0,56  [0x104c616b0,0x104c616e8]
+    + 2 runtime.mallocgcTiny  (in gowork) + 152,196  [0x104bf6178,0x104bf61a4]
+    + 2 runtime.mapassign_faststr  (in gowork) + 116  [0x104be4c94]
+    + ! 2 aeshashbody  (in gowork) + 80,136  [0x104c5e680,0x104c5e6b8]
+    + 2 runtime.procresize  (in gowork) + 2352,2908  [0x104c31c00,0x104c31e2c]
+    + 2 runtime.rand  (in gowork) + 36,76  [0x104c5a494,0x104c5a4bc]
+    + 2 strings.Repeat  (in gowork) + 136,992  [0x104cad958,0x104cadcb0]
+    + 1 bytes.(*Buffer).Write  (in gowork) + 32  [0x104caf100]
+    + 1 encoding/json.(*encodeState).marshal  (in gowork) + 172  [0x104cb1abc]
+    + ! 1 encoding/json.(*encodeState).reflectValue  (in gowork) + 0  [0x104cb1c80]
+    + 1 encoding/json.(*encodeState).reflectValue  (in gowork) + 72  [0x104cb1cc8]
+    + ! 1 encoding/json.valueEncoder  (in gowork) + 0  [0x104cb1d30]
+    + 1 encoding/json.(*encodeState).reflectValue  (in gowork) + 48  [0x104cb1cb0]
+    + 1 encoding/json.appendString[go.shape.string]  (in gowork) + 1884  [0x104cbfc8c]
+    + ! 1 runtime.memmove  (in gowork) + 0  [0x104c616b0]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 652  [0x104cb4b5c]
+    + ! 1 reflect.(*MapIter).Key  (in gowork) + 0  [0x104c72a80]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 924  [0x104cb4c6c]
+    + ! 1 encoding/json.appendString[go.shape.string]  (in gowork) + 0  [0x104cbf530]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 956  [0x104cb4c8c]
+    + ! 1 bytes.(*Buffer).WriteByte  (in gowork) + 0  [0x104caf6b0]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 540  [0x104cb4aec]
+    + 1 encoding/json.newEncodeState  (in gowork) + 36  [0x104cb1944]
+    + ! 1 sync.(*Pool).Get  (in gowork) + 0  [0x104c65740]
+    + 1 encoding/json.stringEncoder  (in gowork) + 164  [0x104cb3cc4]
+    + ! 1 runtime.ifaceeq  (in gowork) + 0  [0x104becee0]
+    + 1 internal/chacha8rand.block  (in gowork) + 272  [0x104bec3b0]
+    + 1 internal/strconv.formatBase10  (in gowork) + 348  [0x104beb36c]
+    + 1 nanosleep  (in libsystem_c.dylib) + 220  [0x18b325cc0]
+    + ! 1 _sigtramp  (in libsystem_platform.dylib) + 0  [0x18b49370c]
+    + 1 reflect.Value.Elem  (in gowork) + 208  [0x104c769a0]
+    + 1 reflect.copyVal  (in gowork) + 72  [0x104c77998]
+    + ! 1 reflect.unsafe_New  (in gowork) + 0  [0x104c57900]
+    + 1 reflect.copyVal  (in gowork) + 92  [0x104c779ac]
+    + ! 1 reflect.typedmemmove  (in gowork) + 0  [0x104c57d10]
+    + 1 runtime.(*mcache).refill  (in gowork) + 400  [0x104bf99d0]
+    + 1 runtime.(*mheap).initSpan  (in gowork) + 64  [0x104c12880]
+    + ! 1 runtime.(*mspan).init  (in gowork) + 68  [0x104c134c4]
+    + 1 runtime.convTstring  (in gowork) + 84  [0x104c57564]
+    + 1 runtime.gcShouldScheduleWorker  (in gowork) + 40  [0x104c02798]
+    + 1 runtime.growslice  (in gowork) + 124  [0x104c5be1c]
+    + 1 runtime.kevent_trampoline.abi0  (in gowork) + 40  [0x104c61f08]
+    + ! 1 kevent  (in libsystem_kernel.dylib) + 8  [0x18b44bfc4]
+    + 1 runtime.madvise_trampoline.abi0  (in gowork) + 28  [0x104c61bcc]
+    + ! 1 madvise  (in libsystem_kernel.dylib) + 8  [0x18b4489b0]
+    + 1 runtime.makemap_small  (in gowork) + 44  [0x104c57aac]
+    + ! 1 internal/runtime/maps.rand  (in gowork) + 0  [0x104c5a4f0]
+    + 1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + ! 1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 0  [0x104bf66e0]
+    + 1 runtime.mallocgc  (in gowork) + 172  [0x104c577ec]
+    + ! 1 runtime.mallocgcTiny  (in gowork) + 0  [0x104bf60e0]
+    + 1 runtime.mapassign_faststr  (in gowork) + 236  [0x104be4d0c]
+    + ! 1 internal/runtime/maps.(*Map).putSlotSmallFastStr  (in gowork) + 0  [0x104be0b50]
+    + 1 runtime.mapassign_faststr  (in gowork) + 164  [0x104be4cc4]
+    + 1 runtime.mcall  (in gowork) + 84  [0x104c5f0f4]
+    + ! 1 runtime.park_m  (in gowork) + 580  [0x104c2d774]
+    + !   1 runtime.schedule  (in gowork) + 144  [0x104c2d2f0]
+    + !     1 runtime.findRunnable  (in gowork) + 1328  [0x104c2b4b0]
+    + !       1 runtime.stealWork  (in gowork) + 716  [0x104c2c78c]
+    + !         1 runtime.runqgrab  (in gowork) + 412  [0x104c3506c]
+    + 1 runtime.nanotime1.abi0  (in gowork) + 36  [0x104c443f4]
+    + ! 1 runtime.libcCall  (in gowork) + 0  [0x104c449b0]
+    + 1 runtime.nilinterhash  (in gowork) + 84  [0x104c569e4]
+    + ! 1 runtime.typehash  (in gowork) + 0  [0x104c56ab0]
+    + 1 runtime.nilinterhash  (in gowork) + 24  [0x104c569a8]
+    + 1 runtime.schedule  (in gowork) + 540  [0x104c2d47c]
+    + ! 1 runtime.wakep  (in gowork) + 0  [0x104c59c40]
+    + 1 runtime.startTheWorldWithSema  (in gowork) + 92  [0x104c2838c]
+    + 1 runtime.stealWork  (in gowork) + 696  [0x104c2c778]
+    + 1 runtime.tryDeferToSpanScan  (in gowork) + 232  [0x104c080d8]
+    + 1 strings.(*Builder).Grow  (in gowork) + 28  [0x104ca99bc]
+    + 1 strings.(*Builder).grow  (in gowork) + 56  [0x104ca9928]
+    784 Thread_28989886
+    + 720 ???  (in <unknown binary>)  [0xd65f03c0]
+    + ! 720 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + !   720 runtime.pthread_cond_wait_trampoline.abi0  (in gowork) + 24  [0x104c621c8]
+    + !     720 _pthread_cond_wait  (in libsystem_pthread.dylib) + 980  [0x18b48a128]
+    + !       720 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+    + 6 internal/runtime/maps.(*Iter).Next  (in gowork) + 1392,1344,...  [0x104be2150,0x104be2120,...]
+    + 4 encoding/json.mapEncoder.encode  (in gowork) + 540,752,...  [0x104cb4aec,0x104cb4bc0,...]
+    + 4 runtime.mallocgcSmallScanNoHeader  (in gowork) + 52,372,...  [0x104bf6714,0x104bf6854,...]
+    + 3 runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 132,260,...  [0x104bf8974,0x104bf89f4,...]
+    + 3 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + ! 2 runtime.pthread_cond_signal_trampoline.abi0  (in gowork) + 20  [0x104c62224]
+    + ! : 1 pthread_cond_signal  (in libsystem_pthread.dylib) + 708  [0x18b488f88]
+    + ! : | 1 __psynch_cvsignal  (in libsystem_kernel.dylib) + 8  [0x18b44aa64]
+    + ! : 1 pthread_cond_signal  (in libsystem_pthread.dylib) + 708  [0x18b488f88]
+    + ! 1 runtime.usleep_trampoline.abi0  (in gowork) + 20  [0x104c61e44]
+    + !   1 usleep  (in libsystem_c.dylib) + 68  [0x18b325bd8]
+    + !     1 nanosleep  (in libsystem_c.dylib) + 220  [0x18b325cc0]
+    + !       1 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x18b449308]
+    + 3 runtime.goexit.abi0  (in gowork) + 4  [0x104c611a4]
+    + ! 3 main.main.func1  (in gowork) + 32  [0x104e097a0]
+    + !   2 main.heavyStringify  (in gowork) + 296  [0x104e094c8]
+    + !   : 2 encoding/json.Marshal  (in gowork) + 140  [0x104cb15fc]
+    + !   :   2 encoding/json.(*encodeState).marshal  (in gowork) + 172  [0x104cb1abc]
+    + !   :     2 encoding/json.(*encodeState).reflectValue  (in gowork) + 112  [0x104cb1cf0]
+    + !   :       2 encoding/json.mapEncoder.encode-fm  (in gowork) + 68  [0x104cc3174]
+    + !   :         1 encoding/json.mapEncoder.encode  (in gowork) + 652  [0x104cb4b5c]
+    + !   :         | 1 reflect.(*MapIter).Key  (in gowork) + 88  [0x104c72ad8]
+    + !   :         |   1 reflect.copyVal  (in gowork) + 92  [0x104c779ac]
+    + !   :         |     1 reflect.typedmemmove  (in gowork) + 28  [0x104c57d2c]
+    + !   :         |       1 runtime.typedmemmove  (in gowork) + 4  [0x104c57c94]
+    + !   :         1 encoding/json.mapEncoder.encode  (in gowork) + 988  [0x104cb4cac]
+    + !   :           1 encoding/json.(*encodeState).reflectValue  (in gowork) + 116  [0x104cb1cf4]
+    + !   1 main.heavyStringify  (in gowork) + 76  [0x104e093ec]
+    + !     1 runtime.makemap_small  (in gowork) + 36  [0x104c57aa4]
+    + !       1 runtime.newobject  (in gowork) + 44  [0x104bf735c]
+    + !         1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + !           1 runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 360  [0x104bf8a58]
+    + 3 strings.Repeat  (in gowork) + 864  [0x104cadc30]
+    + ! 3 runtime.memmove  (in gowork) + 0  [0x104c616b0]
+    + 2 encoding/json.appendString[go.shape.string]  (in gowork) + 168,180  [0x104cbf5d8,0x104cbf5e4]
+    + 2 internal/chacha8rand.block  (in gowork) + 40,176  [0x104bec2c8,0x104bec350]
+    + 2 runtime.checkRunqsNoP  (in gowork) + 104  [0x104c2c958]
+    + 2 runtime.mallocgc  (in gowork) + 44,192  [0x104c5776c,0x104c57800]
+    + 2 runtime.mallocgcSmallNoscan  (in gowork) + 352,516  [0x104bf6540,0x104bf65e4]
+    + 1 bytes.(*Buffer).Write  (in gowork) + 32  [0x104caf100]
+    + 1 encoding/json.interfaceEncoder  (in gowork) + 156  [0x104cb435c]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 740  [0x104cb4bb4]
+    + ! 1 reflect.(*MapIter).Value  (in gowork) + 0  [0x104c72b30]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 860  [0x104cb4c2c]
+    + ! 1 slices.pdqsortCmpFunc[go.shape.struct { encoding/json.v reflect.Value; encoding/json.ks string }]  (in gowork) + 0  [0x104cbfd50]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 988  [0x104cb4cac]
+    + ! 1 encoding/json.interfaceEncoder  (in gowork) + 8  [0x104cb42c8]
+    + 1 internal/bytealg.MakeNoZero  (in gowork) + 188  [0x104c5c4cc]
+    + 1 internal/runtime/maps.(*Iter).Init  (in gowork) + 160  [0x104be1a60]
+    + ! 1 internal/runtime/maps.rand  (in gowork) + 0  [0x104c5a4f0]
+    + 1 internal/runtime/maps.(*Iter).Init  (in gowork) + 32  [0x104be19e0]
+    + 1 internal/runtime/maps.(*Map).putSlotSmallFastStr  (in gowork) + 360  [0x104be0cb8]
+    + 1 main.heavyStringify  (in gowork) + 136  [0x104e09428]
+    + 1 nanosleep  (in libsystem_c.dylib) + 220  [0x18b325cc0]
+    + ! 1 _sigtramp  (in libsystem_platform.dylib) + 0  [0x18b49370c]
+    + 1 reflect.(*MapIter).Value  (in gowork) + 36  [0x104c72b54]
+    + 1 runtime.(*fixalloc).alloc  (in gowork) + 24  [0x104bff608]
+    + 1 runtime.(*lfstack).pop  (in gowork) + 92  [0x104bf3f7c]
+    + 1 runtime.(*pageAlloc).update  (in gowork) + 532  [0x104c15e84]
+    + 1 runtime.growslice  (in gowork) + 1220  [0x104c5c264]
+    + ! 1 runtime.memmove  (in gowork) + 412  [0x104c6184c]
+    + 1 runtime.kevent_trampoline.abi0  (in gowork) + 40  [0x104c61f08]
+    + ! 1 kevent  (in libsystem_kernel.dylib) + 8  [0x18b44bfc4]
+    + 1 runtime.mallocgcTiny  (in gowork) + 564  [0x104bf6314]
+    + 1 runtime.mapassign_faststr  (in gowork) + 236  [0x104be4d0c]
+    + ! 1 internal/runtime/maps.(*Map).putSlotSmallFastStr  (in gowork) + 0  [0x104be0b50]
+    + 1 runtime.mapassign_faststr  (in gowork) + 276  [0x104be4d34]
+    + 1 runtime.pidleput  (in gowork) + 28  [0x104c3457c]
+    + 1 runtime.rand  (in gowork) + 36  [0x104c5a494]
+    + 1 runtime.scanObject  (in gowork) + 192  [0x104c09db0]
+    + 1 runtime.typehash  (in gowork) + 304  [0x104c56be0]
+    + ! 1 runtime.memhash64  (in gowork) + 56  [0x104c60fa8]
+    + 1 runtime.typehash  (in gowork) + 272  [0x104c56bc0]
+    + 1 runtime.wbBufFlush1  (in gowork) + 236  [0x104c1e51c]
+    + 1 slices.pdqsortCmpFunc[go.shape.struct { encoding/json.v reflect.Value; encoding/json.ks string }]  (in gowork) + 1052  [0x104cc016c]
+    + 1 strings.Repeat  (in gowork) + 760  [0x104cadbc8]
+    +   1 runtime.memmove  (in gowork) + 92  [0x104c6170c]
+    784 Thread_28989887
+    + 690 ???  (in <unknown binary>)  [0xd65f03c0]
+    + ! 690 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + !   690 runtime.pthread_cond_wait_trampoline.abi0  (in gowork) + 24  [0x104c621c8]
+    + !     690 _pthread_cond_wait  (in libsystem_pthread.dylib) + 980  [0x18b48a128]
+    + !       690 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+    + 12 runtime.goexit.abi0  (in gowork) + 4  [0x104c611a4]
+    + ! 11 main.main.func1  (in gowork) + 32  [0x104e097a0]
+    + ! : 10 main.heavyStringify  (in gowork) + 296  [0x104e094c8]
+    + ! : | 10 encoding/json.Marshal  (in gowork) + 140  [0x104cb15fc]
+    + ! : |   10 encoding/json.(*encodeState).marshal  (in gowork) + 172  [0x104cb1abc]
+    + ! : |     9 encoding/json.(*encodeState).reflectValue  (in gowork) + 112  [0x104cb1cf0]
+    + ! : |     + 9 encoding/json.mapEncoder.encode-fm  (in gowork) + 68  [0x104cc3174]
+    + ! : |     +   3 encoding/json.mapEncoder.encode  (in gowork) + 652  [0x104cb4b5c]
+    + ! : |     +   ! 3 reflect.(*MapIter).Key  (in gowork) + 88  [0x104c72ad8]
+    + ! : |     +   !   1 reflect.copyVal  (in gowork) + 72  [0x104c77998]
+    + ! : |     +   !   : 1 reflect.unsafe_New  (in gowork) + 44  [0x104c5792c]
+    + ! : |     +   !   :   1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + ! : |     +   !   :     1 runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 360  [0x104bf8a58]
+    + ! : |     +   !   1 reflect.copyVal  (in gowork) + 92  [0x104c779ac]
+    + ! : |     +   !   : 1 runtime.typedmemmove  (in gowork) + 108  [0x104c57cfc]
+    + ! : |     +   !   1 reflect.unsafe_New  (in gowork) + 48  [0x104c57930]
+    + ! : |     +   2 encoding/json.mapEncoder.encode  (in gowork) + 988  [0x104cb4cac]
+    + ! : |     +   ! 2 encoding/json.interfaceEncoder  (in gowork) + 204  [0x104cb438c]
+    + ! : |     +   !   1 encoding/json.(*encodeState).reflectValue  (in gowork) + 72  [0x104cb1cc8]
+    + ! : |     +   !   : 1 encoding/json.valueEncoder  (in gowork) + 84  [0x104cb1d84]
+    + ! : |     +   !   :   1 encoding/json.typeEncoder  (in gowork) + 80  [0x104cb1e10]
+    + ! : |     +   !   :     1 runtime.efaceeq  (in gowork) + 56  [0x104bece58]
+    + ! : |     +   !   1 encoding/json.(*encodeState).reflectValue  (in gowork) + 112  [0x104cb1cf0]
+    + ! : |     +   !     1 runtime.ifaceeq  (in gowork) + 60  [0x104becf1c]
+    + ! : |     +   2 reflect.(*MapIter).Key  (in gowork) + 92  [0x104c72adc]
+    + ! : |     +   1 encoding/json.mapEncoder.encode  (in gowork) + 740  [0x104cb4bb4]
+    + ! : |     +   ! 1 reflect.(*MapIter).Value  (in gowork) + 88  [0x104c72b88]
+    + ! : |     +   !   1 reflect.unsafe_New  (in gowork) + 48  [0x104c57930]
+    + ! : |     +   1 encoding/json.mapEncoder.encode  (in gowork) + 860  [0x104cb4c2c]
+    + ! : |     +     1 encoding/json.mapEncoder.encode.func1  (in gowork) + 60  [0x104cbc30c]
+    + ! : |     1 encoding/json.(*encodeState).reflectValue  (in gowork) + 72  [0x104cb1cc8]
+    + ! : |       1 encoding/json.valueEncoder  (in gowork) + 84  [0x104cb1d84]
+    + ! : |         1 encoding/json.typeEncoder  (in gowork) + 80  [0x104cb1e10]
+    + ! : |           1 runtime.nilinterhash  (in gowork) + 108  [0x104c569fc]
+    + ! : 1 main.heavyStringify  (in gowork) + 196  [0x104e09464]
+    + ! :   1 runtime.convTstring  (in gowork) + 72  [0x104c57558]
+    + ! :     1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 772  [0x104bf69e4]
+    + ! 1 runtime.gcenable.gowrap1  (in gowork) + 32  [0x104bff960]
+    + !   1 runtime.bgsweep  (in gowork) + 176  [0x104c0e480]
+    + !     1 runtime.sweepone  (in gowork) + 316  [0x104c0e79c]
+    + !       1 runtime.(*mspan).moveInlineMarks  (in gowork) + 156  [0x104c07fcc]
+    + 10 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + ! 7 runtime.pthread_cond_signal_trampoline.abi0  (in gowork) + 20  [0x104c62224]
+    + ! : 7 pthread_cond_signal  (in libsystem_pthread.dylib) + 708  [0x18b488f88]
+    + ! :   7 __psynch_cvsignal  (in libsystem_kernel.dylib) + 8  [0x18b44aa64]
+    + ! 2 runtime.usleep_trampoline.abi0  (in gowork) + 20  [0x104c61e44]
+    + ! : 2 usleep  (in libsystem_c.dylib) + 68  [0x18b325bd8]
+    + ! :   2 nanosleep  (in libsystem_c.dylib) + 220  [0x18b325cc0]
+    + ! :     2 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x18b449308]
+    + ! 1 runtime.pthread_cond_timedwait_relative_np_trampoline.abi0  (in gowork) + 28  [0x104c621fc]
+    + !   1 _pthread_cond_wait  (in libsystem_pthread.dylib) + 1024  [0x18b48a154]
+    + !     1 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+    + 8 internal/runtime/maps.(*Iter).Next  (in gowork) + 1660,1344,...  [0x104be225c,0x104be2120,...]
+    + 7 runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 184,12,...  [0x104bf89a8,0x104bf88fc,...]
+    + 7 runtime.mallocgcSmallScanNoHeader  (in gowork) + 124,152,...  [0x104bf675c,0x104bf6778,...]
+    + 5 runtime.mallocgc  (in gowork) + 100,192,...  [0x104c577a4,0x104c57800,...]
+    + 4 runtime.mallocgcSmallScanNoHeader  (in gowork) + 392  [0x104bf6868]
+    + ! 4 runtime.memclrNoHeapPointers  (in gowork) + 0,68,...  [0x104c61500,0x104c61544,...]
+    + 3 runtime.checkTimersNoP  (in gowork) + 100,180  [0x104c2cab4,0x104c2cb04]
+    + 3 runtime.kevent_trampoline.abi0  (in gowork) + 40  [0x104c61f08]
+    + ! 3 kevent  (in libsystem_kernel.dylib) + 8  [0x18b44bfc4]
+    + 2 encoding/json.appendString[go.shape.string]  (in gowork) + 180,1760  [0x104cbf5e4,0x104cbfc10]
+    + 2 runtime.pidleput  (in gowork) + 456  [0x104c34728]
+    + 1 bytes.(*Buffer).Write  (in gowork) + 108  [0x104caf14c]
+    + 1 encoding/json.(*encodeState).marshal  (in gowork) + 64  [0x104cb1a50]
+    + 1 encoding/json.Marshal  (in gowork) + 264  [0x104cb1678]
+    + ! 1 runtime.memmove  (in gowork) + 48  [0x104c616e0]
+    + 1 encoding/json.appendString[go.shape.string]  (in gowork) + 1884  [0x104cbfc8c]
+    + ! 1 runtime.memmove  (in gowork) + 0  [0x104c616b0]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 640  [0x104cb4b50]
+    + ! 1 reflect.(*MapIter).Next  (in gowork) + 0  [0x104c72be0]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 652  [0x104cb4b5c]
+    + ! 1 reflect.(*MapIter).Key  (in gowork) + 0  [0x104c72a80]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 1084  [0x104cb4d0c]
+    + ! 1 bytes.(*Buffer).WriteByte  (in gowork) + 0  [0x104caf6b0]
+    + 1 encoding/json.resolveKeyName  (in gowork) + 28  [0x104cb625c]
+    + 1 encoding/json.valueEncoder  (in gowork) + 36  [0x104cb1d54]
+    + 1 internal/chacha8rand.block  (in gowork) + 608  [0x104bec500]
+    + 1 internal/runtime/maps.(*Map).putSlotSmallFastStr  (in gowork) + 48  [0x104be0b80]
+    + 1 internal/strconv.formatBase10  (in gowork) + 40  [0x104beb238]
+    + 1 main.heavyStringify  (in gowork) + 136  [0x104e09428]
+    + 1 reflect.(*MapIter).Next  (in gowork) + 24  [0x104c72bf8]
+    + 1 reflect.Value.lenNonSlice  (in gowork) + 172  [0x104c7779c]
+    + 1 reflect.copyVal  (in gowork) + 92  [0x104c779ac]
+    + ! 1 reflect.typedmemmove  (in gowork) + 0  [0x104c57d10]
+    + 1 reflect.mapIterStart  (in gowork) + 52  [0x104c72a04]
+    + ! 1 internal/runtime/maps.(*Iter).Init  (in gowork) + 0  [0x104be19c0]
+    + 1 reflect.unsafe_New  (in gowork) + 44  [0x104c5792c]
+    + ! 1 runtime.mallocgc  (in gowork) + 0  [0x104c57740]
+    + 1 runtime.(*consistentHeapStats).acquire  (in gowork) + 36  [0x104c1dff4]
+    + 1 runtime.(*mheap).allocSpan  (in gowork) + 1200  [0x104c12640]
+    + 1 runtime.(*unwinder).resolveInternal  (in gowork) + 68  [0x104c492b4]
+    + 1 runtime.convT64  (in gowork) + 72  [0x104c574d8]
+    + ! 1 runtime.mallocgc  (in gowork) + 0  [0x104c57740]
+    + 1 runtime.finishsweep_m  (in gowork) + 172  [0x104c0e37c]
+    + 1 runtime.growslice  (in gowork) + 1196  [0x104c5c24c]
+    + 1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + ! 1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 0  [0x104bf66e0]
+    + 1 runtime.mapassign_faststr  (in gowork) + 236  [0x104be4d0c]
+    + ! 1 internal/runtime/maps.(*Map).putSlotSmallFastStr  (in gowork) + 0  [0x104be0b50]
+    + 1 runtime.procresize  (in gowork) + 2700  [0x104c31d5c]
+    + 1 runtime.typedmemmove  (in gowork) + 104  [0x104c57cf8]
+    + ! 1 runtime.memmove  (in gowork) + 0  [0x104c616b0]
+    + 1 runtime.typehash  (in gowork) + 272  [0x104c56bc0]
+    + 1 strings.Repeat  (in gowork) + 760  [0x104cadbc8]
+    + ! 1 runtime.memmove  (in gowork) + 0  [0x104c616b0]
+    + 1 strings.Repeat  (in gowork) + 1048  [0x104cadce8]
+    784 Thread_28989888
+    + 703 ???  (in <unknown binary>)  [0xd65f03c0]
+    + ! 703 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + !   703 runtime.pthread_cond_wait_trampoline.abi0  (in gowork) + 24  [0x104c621c8]
+    + !     703 _pthread_cond_wait  (in libsystem_pthread.dylib) + 980  [0x18b48a128]
+    + !       703 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+    + 9 runtime.mallocgcSmallScanNoHeader  (in gowork) + 152,124,...  [0x104bf6778,0x104bf675c,...]
+    + 8 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + ! 5 runtime.pthread_cond_signal_trampoline.abi0  (in gowork) + 20  [0x104c62224]
+    + ! : 5 pthread_cond_signal  (in libsystem_pthread.dylib) + 708  [0x18b488f88]
+    + ! :   5 __psynch_cvsignal  (in libsystem_kernel.dylib) + 8  [0x18b44aa64]
+    + ! 2 runtime.pthread_cond_timedwait_relative_np_trampoline.abi0  (in gowork) + 28  [0x104c621fc]
+    + ! : 2 _pthread_cond_wait  (in libsystem_pthread.dylib) + 1024  [0x18b48a154]
+    + ! :   2 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+    + ! 1 runtime.usleep_trampoline.abi0  (in gowork) + 20  [0x104c61e44]
+    + !   1 usleep  (in libsystem_c.dylib) + 68  [0x18b325bd8]
+    + !     1 nanosleep  (in libsystem_c.dylib) + 220  [0x18b325cc0]
+    + !       1 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x18b449308]
+    + 6 internal/runtime/maps.(*Iter).Next  (in gowork) + 1392,44,...  [0x104be2150,0x104be1c0c,...]
+    + 4 runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 12,76,...  [0x104bf88fc,0x104bf893c,...]
+    + 4 runtime.goexit.abi0  (in gowork) + 4  [0x104c611a4]
+    + ! 4 main.main.func1  (in gowork) + 32  [0x104e097a0]
+    + !   3 main.heavyStringify  (in gowork) + 296  [0x104e094c8]
+    + !   : 3 encoding/json.Marshal  (in gowork) + 140  [0x104cb15fc]
+    + !   :   3 encoding/json.(*encodeState).marshal  (in gowork) + 172  [0x104cb1abc]
+    + !   :     2 encoding/json.(*encodeState).reflectValue  (in gowork) + 112  [0x104cb1cf0]
+    + !   :     | 2 encoding/json.mapEncoder.encode-fm  (in gowork) + 68  [0x104cc3174]
+    + !   :     |   1 encoding/json.mapEncoder.encode  (in gowork) + 740  [0x104cb4bb4]
+    + !   :     |   + 1 reflect.(*MapIter).Value  (in gowork) + 88  [0x104c72b88]
+    + !   :     |   +   1 reflect.copyVal  (in gowork) + 72  [0x104c77998]
+    + !   :     |   +     1 runtime.mallocgc  (in gowork) + 268  [0x104c5784c]
+    + !   :     |   1 reflect.(*MapIter).Key  (in gowork) + 92  [0x104c72adc]
+    + !   :     1 encoding/json.(*encodeState).reflectValue  (in gowork) + 72  [0x104cb1cc8]
+    + !   :       1 encoding/json.valueEncoder  (in gowork) + 84  [0x104cb1d84]
+    + !   :         1 encoding/json.typeEncoder  (in gowork) + 80  [0x104cb1e10]
+    + !   :           1 internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load  (in gowork) + 80  [0x104c685b0]
+    + !   :             1 runtime.typehash  (in gowork) + 308  [0x104c56be4]
+    + !   1 main.heavyStringify  (in gowork) + 76  [0x104e093ec]
+    + !     1 runtime.makemap_small  (in gowork) + 36  [0x104c57aa4]
+    + !       1 runtime.newobject  (in gowork) + 44  [0x104bf735c]
+    + !         1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + !           1 runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 360  [0x104bf8a58]
+    + 3 encoding/json.appendString[go.shape.string]  (in gowork) + 216,180  [0x104cbf608,0x104cbf5e4]
+    + 3 runtime.mallocgc  (in gowork) + 100,192  [0x104c577a4,0x104c57800]
+    + 2 encoding/json.(*encodeState).reflectValue  (in gowork) + 48,104  [0x104cb1cb0,0x104cb1ce8]
+    + 2 encoding/json.Marshal  (in gowork) + 172,296  [0x104cb161c,0x104cb1698]
+    + 2 encoding/json.typeEncoder  (in gowork) + 76,104  [0x104cb1e0c,0x104cb1e28]
+    + 2 internal/strconv.AppendUint  (in gowork) + 356  [0x104beaef4]
+    + ! 2 runtime.memmove  (in gowork) + 0,92  [0x104c616b0,0x104c6170c]
+    + 2 reflect.Value.Elem  (in gowork) + 172,280  [0x104c7697c,0x104c769e8]
+    + 2 reflect.copyVal  (in gowork) + 72  [0x104c77998]
+    + ! 2 reflect.unsafe_New  (in gowork) + 0  [0x104c57900]
+    + 2 runtime.mallocgcTiny  (in gowork) + 152  [0x104bf6178]
+    + 2 runtime.mapassign_faststr  (in gowork) + 236  [0x104be4d0c]
+    + ! 2 internal/runtime/maps.(*Map).putSlotSmallFastStr  (in gowork) + 0  [0x104be0b50]
+    + 1 ???  (in <unknown binary>)  [0x383fb4000041]
+    + ! 1 ???  (in <unknown binary>)  [0x16b4dad98]
+    + !   1 runtime.libcCall  (in gowork) + 88  [0x104c44a08]
+    + !     1 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + !       1 runtime.pthread_cond_signal_trampoline.abi0  (in gowork) + 0  [0x104c62210]
+    + 1 bytes.(*Buffer).Write  (in gowork) + 32  [0x104caf100]
+    + 1 encoding/json.(*encodeState).marshal  (in gowork) + 184  [0x104cb1ac8]
+    + 1 encoding/json.(*encodeState).reflectValue  (in gowork) + 112  [0x104cb1cf0]
+    + ! 1 encoding/json.intEncoder  (in gowork) + 0  [0x104cb3510]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 640  [0x104cb4b50]
+    + ! 1 reflect.(*MapIter).Next  (in gowork) + 0  [0x104c72be0]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 1084  [0x104cb4d0c]
+    + ! 1 bytes.(*Buffer).WriteByte  (in gowork) + 0  [0x104caf6b0]
+    + 1 encoding/json.mapEncoder.encode.func1  (in gowork) + 56  [0x104cbc308]
+    + ! 1 cmpbody  (in gowork) + 140  [0x104bde85c]
+    + 1 gcWriteBarrier  (in gowork) + 24  [0x104c5eae8]
+    + 1 internal/bytealg.MakeNoZero  (in gowork) + 180  [0x104c5c4c4]
+    + ! 1 runtime.mallocgc  (in gowork) + 0  [0x104c57740]
+    + 1 internal/runtime/maps.(*Iter).Init  (in gowork) + 60  [0x104be19fc]
+    + 1 internal/runtime/maps.(*Map).putSlotSmallFastStr  (in gowork) + 116  [0x104be0bc4]
+    + 1 main.heavyStringify  (in gowork) + 88  [0x104e093f8]
+    + ! 1 runtime.convT64  (in gowork) + 0  [0x104c57490]
+    + 1 main.heavyStringify  (in gowork) + 192  [0x104e09460]
+    + ! 1 strings.Repeat  (in gowork) + 0  [0x104cad8d0]
+    + 1 nanosleep  (in libsystem_c.dylib) + 220  [0x18b325cc0]
+    + ! 1 _sigtramp  (in libsystem_platform.dylib) + 0  [0x18b49370c]
+    + 1 runtime.(*mheap).allocSpan  (in gowork) + 1200  [0x104c12640]
+    + 1 runtime.(*mheap).freeSpanLocked  (in gowork) + 720  [0x104c13300]
+    + 1 runtime.(*mheap).initSpan  (in gowork) + 584  [0x104c12a88]
+    + 1 runtime.asmcgocall.abi0  (in gowork) + 172  [0x104c6112c]
+    + 1 runtime.getempty  (in gowork) + 344  [0x104c10b38]
+    + 1 runtime.kevent_trampoline.abi0  (in gowork) + 40  [0x104c61f08]
+    + ! 1 kevent  (in libsystem_kernel.dylib) + 8  [0x18b44bfc4]
+    + 1 runtime.makeslice  (in gowork) + 80  [0x104c5bd20]
+    + ! 1 runtime.mallocgc  (in gowork) + 0  [0x104c57740]
+    + 1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 392  [0x104bf6868]
+    + ! 1 runtime.memclrNoHeapPointers  (in gowork) + 0  [0x104c61500]
+    + 1 runtime.mapassign_faststr  (in gowork) + 116  [0x104be4c94]
+    + ! 1 runtime.strhash  (in gowork) + 12  [0x104c60fec]
+    + 1 runtime.newMarkBits  (in gowork) + 136  [0x104c15268]
+    + 1 runtime.newarray  (in gowork) + 112  [0x104c579c0]
+    + ! 1 runtime.mallocgc  (in gowork) + 0  [0x104c57740]
+    + 1 runtime.typedmemmove  (in gowork) + 104  [0x104c57cf8]
+    + ! 1 runtime.memmove  (in gowork) + 56  [0x104c616e8]
+    + 1 runtime.typehash  (in gowork) + 304  [0x104c56be0]
+    + ! 1 runtime.memhash64  (in gowork) + 4  [0x104c60f74]
+    + 1 sync.(*Pool).Put  (in gowork) + 68  [0x104c656c4]
+    784 Thread_28989889
+    + 656 ???  (in <unknown binary>)  [0xd65f03c0]
+    + ! 656 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + !   656 runtime.pthread_cond_wait_trampoline.abi0  (in gowork) + 24  [0x104c621c8]
+    + !     656 _pthread_cond_wait  (in libsystem_pthread.dylib) + 980  [0x18b48a128]
+    + !       656 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+    + 17 runtime.mallocgcSmallScanNoHeader  (in gowork) + 288,716,...  [0x104bf6800,0x104bf69ac,...]
+    + 13 runtime.goexit.abi0  (in gowork) + 4  [0x104c611a4]
+    + ! 13 main.main.func1  (in gowork) + 32  [0x104e097a0]
+    + !   10 main.heavyStringify  (in gowork) + 296  [0x104e094c8]
+    + !   : 7 encoding/json.Marshal  (in gowork) + 140  [0x104cb15fc]
+    + !   : | 7 encoding/json.(*encodeState).marshal  (in gowork) + 172  [0x104cb1abc]
+    + !   : |   6 encoding/json.(*encodeState).reflectValue  (in gowork) + 112  [0x104cb1cf0]
+    + !   : |   + 6 encoding/json.mapEncoder.encode-fm  (in gowork) + 68  [0x104cc3174]
+    + !   : |   +   3 encoding/json.mapEncoder.encode  (in gowork) + 640  [0x104cb4b50]
+    + !   : |   +   ! 1 reflect.(*MapIter).Next  (in gowork) + 64  [0x104c72c20]
+    + !   : |   +   ! : 1 internal/runtime/maps.(*Iter).Next  (in gowork) + 1732  [0x104be22a4]
+    + !   : |   +   ! 1 reflect.(*MapIter).Next  (in gowork) + 112  [0x104c72c50]
+    + !   : |   +   ! : 1 reflect.mapIterStart  (in gowork) + 52  [0x104c72a04]
+    + !   : |   +   ! :   1 internal/runtime/maps.rand  (in gowork) + 32  [0x104c5a510]
+    + !   : |   +   ! 1 reflect.mapIterNext  (in gowork) + 32  [0x104c72a60]
+    + !   : |   +   2 encoding/json.mapEncoder.encode  (in gowork) + 740  [0x104cb4bb4]
+    + !   : |   +   ! 2 reflect.(*MapIter).Value  (in gowork) + 88  [0x104c72b88]
+    + !   : |   +   !   2 reflect.copyVal  (in gowork) + 92  [0x104c779ac]
+    + !   : |   +   !     2 reflect.typedmemmove  (in gowork) + 28  [0x104c57d2c]
+    + !   : |   +   !       2 runtime.typedmemmove  (in gowork) + 4  [0x104c57c94]
+    + !   : |   +   1 encoding/json.mapEncoder.encode  (in gowork) + 476  [0x104cb4aac]
+    + !   : |   +     1 runtime.makeslice  (in gowork) + 80  [0x104c5bd20]
+    + !   : |   +       1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + !   : |   +         1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 332  [0x104bf682c]
+    + !   : |   +           1 runtime.(*mspan).nextFreeIndex  (in gowork) + 92  [0x104bf8b0c]
+    + !   : |   1 encoding/json.(*encodeState).reflectValue  (in gowork) + 72  [0x104cb1cc8]
+    + !   : |     1 encoding/json.valueEncoder  (in gowork) + 84  [0x104cb1d84]
+    + !   : |       1 internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load  (in gowork) + 324  [0x104c686a4]
+    + !   : 2 encoding/json.Marshal  (in gowork) + 304  [0x104cb16a0]
+    + !   : | 2 encoding/json.Marshal.deferwrap1  (in gowork) + 36  [0x104cb1754]
+    + !   : |   2 sync.(*Pool).pin  (in gowork) + 76  [0x104c659ec]
+    + !   : 1 encoding/json.Marshal  (in gowork) + 60  [0x104cb15ac]
+    + !   :   1 sync.(*Pool).Get  (in gowork) + 168  [0x104c657e8]
+    + !   1 main.heavyStringify  (in gowork) + 76  [0x104e093ec]
+    + !   : 1 runtime.makemap_small  (in gowork) + 36  [0x104c57aa4]
+    + !   :   1 runtime.newobject  (in gowork) + 44  [0x104bf735c]
+    + !   :     1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + !   :       1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 756  [0x104bf69d4]
+    + !   :         1 runtime.gcStart  (in gowork) + 1552  [0x104c00410]
+    + !   :           1 runtime.systemstack.abi0  (in gowork) + 104  [0x104c5f188]
+    + !   :             1 runtime.gcStart.func4  (in gowork) + 56  [0x104c00598]
+    + !   :               1 runtime.startTheWorldWithSema  (in gowork) + 248  [0x104c28428]
+    + !   :                 1 runtime.procresize  (in gowork) + 2652  [0x104c31d2c]
+    + !   :                   1 runtime.pidleput  (in gowork) + 16  [0x104c34570]
+    + !   1 main.heavyStringify  (in gowork) + 120  [0x104e09418]
+    + !   : 1 runtime.mapassign_faststr  (in gowork) + 156  [0x104be4cbc]
+    + !   :   1 internal/runtime/maps.(*Map).growToSmall  (in gowork) + 44  [0x104bdf9fc]
+    + !   :     1 internal/runtime/maps.newarray  (in gowork) + 28  [0x104c57a5c]
+    + !   :       1 runtime.newarray  (in gowork) + 112  [0x104c579c0]
+    + !   :         1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + !   :           1 runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 360  [0x104bf8a58]
+    + !   1 runtime.convT64  (in gowork) + 92  [0x104c574ec]
+    + 11 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + ! 8 runtime.pthread_cond_signal_trampoline.abi0  (in gowork) + 20  [0x104c62224]
+    + ! : 8 pthread_cond_signal  (in libsystem_pthread.dylib) + 708  [0x18b488f88]
+    + ! :   8 __psynch_cvsignal  (in libsystem_kernel.dylib) + 8  [0x18b44aa64]
+    + ! 3 runtime.pthread_cond_timedwait_relative_np_trampoline.abi0  (in gowork) + 28  [0x104c621fc]
+    + !   3 _pthread_cond_wait  (in libsystem_pthread.dylib) + 1024  [0x18b48a154]
+    + !     3 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+    + 11 runtime.mallocgc  (in gowork) + 192,44,...  [0x104c57800,0x104c5776c,...]
+    + 7 internal/runtime/maps.(*Iter).Next  (in gowork) + 1700,1392,...  [0x104be2284,0x104be2150,...]
+    + 6 runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 12,300,...  [0x104bf88fc,0x104bf8a1c,...]
+    + 4 runtime.typedmemmove  (in gowork) + 104  [0x104c57cf8]
+    + ! 4 runtime.memmove  (in gowork) + 0,56,...  [0x104c616b0,0x104c616e8,...]
+    + 3 encoding/json.appendString[go.shape.string]  (in gowork) + 1884  [0x104cbfc8c]
+    + ! 3 runtime.memmove  (in gowork) + 0,56,...  [0x104c616b0,0x104c616e8,...]
+    + 3 runtime.mallocgcSmallScanNoHeader  (in gowork) + 392  [0x104bf6868]
+    + ! 3 runtime.memclrNoHeapPointers  (in gowork) + 396,0  [0x104c6168c,0x104c61500]
+    + 2 bytes.(*Buffer).Write  (in gowork) + 104,144  [0x104caf148,0x104caf170]
+    + 2 encoding/json.(*encodeState).reflectValue  (in gowork) + 48  [0x104cb1cb0]
+    + 2 encoding/json.appendString[go.shape.string]  (in gowork) + 188,1964  [0x104cbf5ec,0x104cbfcdc]
+    + 2 reflect.Value.lenNonSlice  (in gowork) + 148,172  [0x104c77784,0x104c7779c]
+    + 2 reflect.copyVal  (in gowork) + 72  [0x104c77998]
+    + ! 2 reflect.unsafe_New  (in gowork) + 0  [0x104c57900]
+    + 2 runtime.greyobject  (in gowork) + 208,564  [0x104c074b0,0x104c07614]
+    + 2 runtime.mallocgcSmallNoscan  (in gowork) + 348,544  [0x104bf653c,0x104bf6600]
+    + 2 runtime.rand  (in gowork) + 72  [0x104c5a4b8]
+    + 1 encoding/json.(*encodeState).reflectValue  (in gowork) + 112  [0x104cb1cf0]
+    + ! 1 encoding/json.stringEncoder  (in gowork) + 0  [0x104cb3c20]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 860  [0x104cb4c2c]
+    + ! 1 slices.pdqsortCmpFunc[go.shape.struct { encoding/json.v reflect.Value; encoding/json.ks string }]  (in gowork) + 0  [0x104cbfd50]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 924  [0x104cb4c6c]
+    + ! 1 encoding/json.appendString[go.shape.string]  (in gowork) + 4  [0x104cbf534]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 988  [0x104cb4cac]
+    + ! 1 encoding/json.interfaceEncoder  (in gowork) + 0  [0x104cb42c0]
+    + 1 encoding/json.valueEncoder  (in gowork) + 84  [0x104cb1d84]
+    + ! 1 encoding/json.typeEncoder  (in gowork) + 0  [0x104cb1dc0]
+    + 1 internal/strconv.formatBase10  (in gowork) + 456  [0x104beb3d8]
+    + 1 internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load  (in gowork) + 80  [0x104c685b0]
+    + ! 1 runtime.nilinterhash  (in gowork) + 0  [0x104c56990]
+    + 1 internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load  (in gowork) + 232  [0x104c68648]
+    + 1 main.heavyStringify  (in gowork) + 120  [0x104e09418]
+    + ! 1 runtime.mapassign_faststr  (in gowork) + 0  [0x104be4c20]
+    + 1 main.heavyStringify  (in gowork) + 196  [0x104e09464]
+    + ! 1 runtime.convTstring  (in gowork) + 0  [0x104c57510]
+    + 1 reflect.(*MapIter).Next  (in gowork) + 40  [0x104c72c08]
+    + 1 reflect.(*MapIter).Value  (in gowork) + 36  [0x104c72b54]
+    + 1 reflect.Value.NumMethod  (in gowork) + 68  [0x104c77a34]
+    + 1 reflect.copyVal  (in gowork) + 92  [0x104c779ac]
+    + ! 1 reflect.typedmemmove  (in gowork) + 0  [0x104c57d10]
+    + 1 reflect.mapIterNext  (in gowork) + 28  [0x104c72a5c]
+    + ! 1 internal/runtime/maps.(*Iter).Next  (in gowork) + 0  [0x104be1be0]
+    + 1 runtime.(*mcache).refill  (in gowork) + 180  [0x104bf98f4]
+    + ! 1 runtime.(*mcentral).uncacheSpan  (in gowork) + 0  [0x104bfa530]
+    + 1 runtime.(*mcentral).cacheSpan  (in gowork) + 268  [0x104bfa17c]
+    + 1 runtime.(*mheap).freeSpanLocked  (in gowork) + 80  [0x104c13080]
+    + 1 runtime.(*pageAlloc).update  (in gowork) + 376  [0x104c15de8]
+    + ! 1 runtime.(*pallocBits).summarize  (in gowork) + 252  [0x104c18bec]
+    + 1 runtime.(*scavChunkData).free  (in gowork) + 24  [0x104c0d918]
+    + 1 runtime.(*sweepLocked).sweep  (in gowork) + 2160  [0x104c0f350]
+    + 1 runtime.asmcgocall.abi0  (in gowork) + 172  [0x104c6112c]
+    + 1 runtime.checkRunqsNoP  (in gowork) + 104  [0x104c2c958]
+    + 1 runtime.findRunnable  (in gowork) + 224  [0x104c2b060]
+    + ! 1 _sigtramp  (in libsystem_platform.dylib) + 0  [0x18b49370c]
+    + 1 runtime.gcDrain  (in gowork) + 1220  [0x104c06c34]
+    + 1 runtime.kevent_trampoline.abi0  (in gowork) + 40  [0x104c61f08]
+    + ! 1 kevent  (in libsystem_kernel.dylib) + 8  [0x18b44bfc4]
+    + 1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + ! 1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 0  [0x104bf66e0]
+    + 1 runtime.mapassign_faststr  (in gowork) + 156  [0x104be4cbc]
+    + ! 1 internal/runtime/maps.(*Map).growToSmall  (in gowork) + 0  [0x104bdf9d0]
+    + 1 runtime.nilinterhash  (in gowork) + 40  [0x104c569b8]
+    + 1 runtime.procresize  (in gowork) + 2652  [0x104c31d2c]
+    + ! 1 runtime.pidleput  (in gowork) + 0  [0x104c34560]
+    + 1 runtime.scanObjectsSmall  (in gowork) + 484  [0x104c097d4]
+    + 1 runtime.startTheWorldWithSema  (in gowork) + 272  [0x104c28440]
+    + 1 runtime.typehash  (in gowork) + 284  [0x104c56bcc]
+    + 1 strings.(*Builder).grow  (in gowork) + 40  [0x104ca9918]
+    + ! 1 internal/bytealg.MakeNoZero  (in gowork) + 0  [0x104c5c410]
+    + 1 strings.(*Builder).grow  (in gowork) + 56  [0x104ca9928]
+    + 1 strings.Repeat  (in gowork) + 864  [0x104cadc30]
+    + ! 1 runtime.memmove  (in gowork) + 56  [0x104c616e8]
+    + 1 sync.(*Pool).Get  (in gowork) + 44  [0x104c6576c]
+    784 Thread_28989890
+    + 681 ???  (in <unknown binary>)  [0xd65f03c0]
+    + ! 681 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + !   681 runtime.pthread_cond_wait_trampoline.abi0  (in gowork) + 24  [0x104c621c8]
+    + !     681 _pthread_cond_wait  (in libsystem_pthread.dylib) + 980  [0x18b48a128]
+    + !       681 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+    + 13 runtime.goexit.abi0  (in gowork) + 4  [0x104c611a4]
+    + ! 13 main.main.func1  (in gowork) + 32  [0x104e097a0]
+    + !   10 main.heavyStringify  (in gowork) + 296  [0x104e094c8]
+    + !   : 10 encoding/json.Marshal  (in gowork) + 140  [0x104cb15fc]
+    + !   :   10 encoding/json.(*encodeState).marshal  (in gowork) + 172  [0x104cb1abc]
+    + !   :     9 encoding/json.(*encodeState).reflectValue  (in gowork) + 112  [0x104cb1cf0]
+    + !   :     | 9 encoding/json.mapEncoder.encode-fm  (in gowork) + 68  [0x104cc3174]
+    + !   :     |   4 encoding/json.mapEncoder.encode  (in gowork) + 652  [0x104cb4b5c]
+    + !   :     |   + 4 reflect.(*MapIter).Key  (in gowork) + 88  [0x104c72ad8]
+    + !   :     |   +   1 reflect.copyVal  (in gowork) + 72  [0x104c77998]
+    + !   :     |   +   ! 1 runtime.mallocgc  (in gowork) + 268  [0x104c5784c]
+    + !   :     |   +   1 reflect.copyVal  (in gowork) + 92  [0x104c779ac]
+    + !   :     |   +   ! 1 reflect.typedmemmove  (in gowork) + 28  [0x104c57d2c]
+    + !   :     |   +   !   1 runtime.typedmemmove  (in gowork) + 4  [0x104c57c94]
+    + !   :     |   +   1 reflect.typedmemmove  (in gowork) + 32  [0x104c57d30]
+    + !   :     |   +   1 reflect.unsafe_New  (in gowork) + 48  [0x104c57930]
+    + !   :     |   3 encoding/json.mapEncoder.encode  (in gowork) + 988  [0x104cb4cac]
+    + !   :     |   + 3 encoding/json.interfaceEncoder  (in gowork) + 204  [0x104cb438c]
+    + !   :     |   +   3 encoding/json.(*encodeState).reflectValue  (in gowork) + 72  [0x104cb1cc8]
+    + !   :     |   +     2 encoding/json.valueEncoder  (in gowork) + 84  [0x104cb1d84]
+    + !   :     |   +     ! 2 encoding/json.typeEncoder  (in gowork) + 80  [0x104cb1e10]
+    + !   :     |   +     !   1 internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load  (in gowork) + 256  [0x104c68660]
+    + !   :     |   +     !   : 1 runtime.efaceeq  (in gowork) + 16  [0x104bece30]
+    + !   :     |   +     !   1 runtime.nilinterhash  (in gowork) + 108  [0x104c569fc]
+    + !   :     |   +     1 encoding/json.typeEncoder  (in gowork) + 108  [0x104cb1e2c]
+    + !   :     |   1 encoding/json.appendString[go.shape.string]  (in gowork) + 2000  [0x104cbfd00]
+    + !   :     |   1 encoding/json.mapEncoder.encode  (in gowork) + 860  [0x104cb4c2c]
+    + !   :     |     1 encoding/json.mapEncoder.encode.func1  (in gowork) + 60  [0x104cbc30c]
+    + !   :     1 encoding/json.(*encodeState).reflectValue  (in gowork) + 72  [0x104cb1cc8]
+    + !   :       1 encoding/json.typeEncoder  (in gowork) + 108  [0x104cb1e2c]
+    + !   1 main.heavyStringify  (in gowork) + 120  [0x104e09418]
+    + !   : 1 runtime.mapassign_faststr  (in gowork) + 156  [0x104be4cbc]
+    + !   :   1 internal/runtime/maps.(*Map).growToSmall  (in gowork) + 44  [0x104bdf9fc]
+    + !   :     1 internal/runtime/maps.newarray  (in gowork) + 28  [0x104c57a5c]
+    + !   :       1 runtime.newarray  (in gowork) + 112  [0x104c579c0]
+    + !   :         1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + !   :           1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 332  [0x104bf682c]
+    + !   :             1 runtime.(*mspan).nextFreeIndex  (in gowork) + 92  [0x104bf8b0c]
+    + !   1 main.heavyStringify  (in gowork) + 192  [0x104e09460]
+    + !   : 1 strings.Repeat  (in gowork) + 644  [0x104cadb54]
+    + !   :   1 strings.(*Builder).Grow  (in gowork) + 100  [0x104ca9a04]
+    + !   :     1 strings.(*Builder).grow  (in gowork) + 40  [0x104ca9918]
+    + !   :       1 internal/bytealg.MakeNoZero  (in gowork) + 180  [0x104c5c4c4]
+    + !   :         1 runtime.mallocgc  (in gowork) + 88  [0x104c57798]
+    + !   :           1 runtime.deductAssistCredit  (in gowork) + 68  [0x104bf7264]
+    + !   :             1 runtime.gcAssistAlloc  (in gowork) + 716  [0x104c0547c]
+    + !   :               1 runtime.systemstack.abi0  (in gowork) + 104  [0x104c5f188]
+    + !   :                 1 runtime.gcAssistAlloc.func2  (in gowork) + 32  [0x104c05780]
+    + !   :                   1 runtime.gcAssistAlloc1  (in gowork) + 208  [0x104c058d0]
+    + !   :                     1 runtime.gcDrainN  (in gowork) + 552  [0x104c06f18]
+    + !   :                       1 runtime.findObject  (in gowork) + 260  [0x104c580d4]
+    + !   1 main.heavyStringify  (in gowork) + 196  [0x104e09464]
+    + !     1 runtime.convTstring  (in gowork) + 72  [0x104c57558]
+    + !       1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + !         1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 332  [0x104bf682c]
+    + !           1 runtime.(*mcache).nextFree  (in gowork) + 132  [0x104bf5f74]
+    + !             1 runtime.(*mcache).refill  (in gowork) + 456  [0x104bf9a08]
+    + !               1 runtime.(*mcentral).cacheSpan  (in gowork) + 1140  [0x104bfa4e4]
+    + !                 1 runtime.(*mcentral).grow  (in gowork) + 68  [0x104bfa664]
+    + !                   1 runtime.(*mheap).alloc  (in gowork) + 76  [0x104c11d6c]
+    + !                     1 runtime.systemstack.abi0  (in gowork) + 104  [0x104c5f188]
+    + !                       1 runtime.(*mheap).alloc.func1  (in gowork) + 0  [0x104c11da0]
+    + 11 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + ! 6 runtime.pthread_cond_signal_trampoline.abi0  (in gowork) + 20  [0x104c62224]
+    + ! : 6 pthread_cond_signal  (in libsystem_pthread.dylib) + 708  [0x18b488f88]
+    + ! :   6 __psynch_cvsignal  (in libsystem_kernel.dylib) + 8  [0x18b44aa64]
+    + ! 4 runtime.usleep_trampoline.abi0  (in gowork) + 20  [0x104c61e44]
+    + ! : 3 usleep  (in libsystem_c.dylib) + 68  [0x18b325bd8]
+    + ! : | 3 nanosleep  (in libsystem_c.dylib) + 220  [0x18b325cc0]
+    + ! : |   3 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x18b449308]
+    + ! : 1 usleep  (in libsystem_c.dylib) + 68  [0x18b325bd8]
+    + ! 1 runtime.pthread_cond_timedwait_relative_np_trampoline.abi0  (in gowork) + 28  [0x104c621fc]
+    + !   1 _pthread_cond_wait  (in libsystem_pthread.dylib) + 1024  [0x18b48a154]
+    + !     1 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+    + 7 internal/runtime/maps.(*Iter).Next  (in gowork) + 1700,1392,...  [0x104be2284,0x104be2150,...]
+    + 7 runtime.mallocgcSmallScanNoHeader  (in gowork) + 716,52,...  [0x104bf69ac,0x104bf6714,...]
+    + 5 slices.pdqsortCmpFunc[go.shape.struct { encoding/json.v reflect.Value; encoding/json.ks string }]  (in gowork) + 848,936,...  [0x104cc00a0,0x104cc00f8,...]
+    + 3 internal/runtime/maps.(*Map).putSlotSmallFastStr  (in gowork) + 120,360,...  [0x104be0bc8,0x104be0cb8,...]
+    + 3 internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load  (in gowork) + 80,124,...  [0x104c685b0,0x104c685dc,...]
+    + 3 main.heavyStringify  (in gowork) + 196  [0x104e09464]
+    + ! 3 runtime.convTstring  (in gowork) + 0  [0x104c57510]
+    + 3 runtime.mallocgcSmallScanNoHeader  (in gowork) + 392  [0x104bf6868]
+    + ! 3 runtime.memclrNoHeapPointers  (in gowork) + 232,344,...  [0x104c615e8,0x104c61658,...]
+    + 3 runtime.mallocgcTiny  (in gowork) + 152  [0x104bf6178]
+    + 2 runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 76,328  [0x104bf893c,0x104bf8a38]
+    + 2 runtime.convTstring  (in gowork) + 72  [0x104c57558]
+    + ! 2 runtime.mallocgc  (in gowork) + 0  [0x104c57740]
+    + 2 runtime.mallocgc  (in gowork) + 44  [0x104c5776c]
+    + 2 runtime.nanotime_trampoline.abi0  (in gowork) + 20  [0x104c61c84]
+    + ! 2 mach_absolute_time  (in libsystem_kernel.dylib) + 108  [0x18b44610c]
+    + 2 runtime.procresize  (in gowork) + 2288,2988  [0x104c31bc0,0x104c31e7c]
+    + 2 runtime.scanObjectsSmall  (in gowork) + 120,360  [0x104c09668,0x104c09758]
+    + 1 bytes.(*Buffer).Write  (in gowork) + 108  [0x104caf14c]
+    + 1 encoding/json.(*encodeState).marshal.func1  (in gowork) + 36  [0x104cb1b54]
+    + 1 encoding/json.appendString[go.shape.string]  (in gowork) + 1964  [0x104cbfcdc]
+    + 1 encoding/json.interfaceEncoder  (in gowork) + 156  [0x104cb435c]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 944  [0x104cb4c80]
+    + ! 1 bytes.(*Buffer).Write  (in gowork) + 0  [0x104caf0e0]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 880  [0x104cb4c40]
+    + 1 internal/chacha8rand.block  (in gowork) + 608  [0x104bec500]
+    + 1 internal/runtime/maps.(*Iter).Init  (in gowork) + 160  [0x104be1a60]
+    + 1 main.heavyStringify  (in gowork) + 228  [0x104e09484]
+    + ! 1 runtime.mapassign_faststr  (in gowork) + 0  [0x104be4c20]
+    + 1 main.heavyStringify  (in gowork) + 444  [0x104e0955c]
+    + ! 1 runtime.memmove  (in gowork) + 12  [0x104c616bc]
+    + 1 reflect.(*MapIter).Next  (in gowork) + 40  [0x104c72c08]
+    + 1 reflect.(*MapIter).Value  (in gowork) + 36  [0x104c72b54]
+    + 1 reflect.Value.NumMethod  (in gowork) + 36  [0x104c77a14]
+    + 1 reflect.unsafe_New  (in gowork) + 24  [0x104c57918]
+    + 1 runtime.(*mcache).nextFree  (in gowork) + 132  [0x104bf5f74]
+    + ! 1 runtime.(*mcache).refill  (in gowork) + 0  [0x104bf9840]
+    + 1 runtime.(*mcache).prepareForSweep  (in gowork) + 112  [0x104bf9ff0]
+    + 1 runtime.(*mcentral).uncacheSpan  (in gowork) + 172  [0x104bfa5dc]
+    + 1 runtime.gcShouldScheduleWorker  (in gowork) + 144  [0x104c02800]
+    + 1 runtime.kevent_trampoline.abi0  (in gowork) + 40  [0x104c61f08]
+    + ! 1 kevent  (in libsystem_kernel.dylib) + 8  [0x18b44bfc4]
+    + 1 runtime.lock  (in gowork) + 32  [0x104bf4960]
+    + 1 runtime.mallocgcSmallNoscan  (in gowork) + 80  [0x104bf6430]
+    + 1 runtime.mapassign_faststr  (in gowork) + 116  [0x104be4c94]
+    + ! 1 aeshashbody  (in gowork) + 24  [0x104c5e648]
+    + 1 runtime.nilinterhash  (in gowork) + 84  [0x104c569e4]
+    + ! 1 runtime.typehash  (in gowork) + 0  [0x104c56ab0]
+    + 1 runtime.rand  (in gowork) + 80  [0x104c5a4c0]
+    + 1 runtime.tryDeferToSpanScan  (in gowork) + 60  [0x104c0802c]
+    + 1 runtime.typedmemmove  (in gowork) + 104  [0x104c57cf8]
+    + ! 1 runtime.memmove  (in gowork) + 0  [0x104c616b0]
+    + 1 runtime.typehash  (in gowork) + 304  [0x104c56be0]
+    + ! 1 runtime.memhash64  (in gowork) + 56  [0x104c60fa8]
+    + 1 runtime.wbBufFlush1  (in gowork) + 220  [0x104c1e50c]
+    + 1 strings.(*Builder).grow  (in gowork) + 88  [0x104ca9948]
+    + ! 1 runtime.memmove  (in gowork) + 148  [0x104c61744]
+    + 1 strings.(*Builder).grow  (in gowork) + 56  [0x104ca9928]
+    + 1 strings.Repeat  (in gowork) + 760  [0x104cadbc8]
+    + ! 1 runtime.memmove  (in gowork) + 92  [0x104c6170c]
+    + 1 sync.(*Pool).Get  (in gowork) + 32  [0x104c65760]
+    + ! 1 sync.(*Pool).pin  (in gowork) + 0  [0x104c659a0]
+    + 1 sync.(*Pool).pin  (in gowork) + 36  [0x104c659c4]
+    +   1 sync.runtime_procPin  (in gowork) + 24  [0x104c5a338]
+    784 Thread_28989891
+    + 667 ???  (in <unknown binary>)  [0xd65f03c0]
+    + ! 667 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + !   667 runtime.pthread_cond_wait_trampoline.abi0  (in gowork) + 24  [0x104c621c8]
+    + !     667 _pthread_cond_wait  (in libsystem_pthread.dylib) + 980  [0x18b48a128]
+    + !       667 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+    + 11 runtime.goexit.abi0  (in gowork) + 4  [0x104c611a4]
+    + ! 11 main.main.func1  (in gowork) + 32  [0x104e097a0]
+    + !   8 main.heavyStringify  (in gowork) + 296  [0x104e094c8]
+    + !   : 8 encoding/json.Marshal  (in gowork) + 140  [0x104cb15fc]
+    + !   :   6 encoding/json.(*encodeState).marshal  (in gowork) + 172  [0x104cb1abc]
+    + !   :   | 5 encoding/json.(*encodeState).reflectValue  (in gowork) + 112  [0x104cb1cf0]
+    + !   :   | + 5 encoding/json.mapEncoder.encode-fm  (in gowork) + 68  [0x104cc3174]
+    + !   :   | +   3 encoding/json.mapEncoder.encode  (in gowork) + 988  [0x104cb4cac]
+    + !   :   | +   ! 1 encoding/json.(*encodeState).reflectValue  (in gowork) + 116  [0x104cb1cf4]
+    + !   :   | +   ! 1 encoding/json.interfaceEncoder  (in gowork) + 176  [0x104cb4370]
+    + !   :   | +   ! : 1 reflect.Value.Elem  (in gowork) + 172  [0x104c7697c]
+    + !   :   | +   ! :   1 reflect.(*rtype).NumMethod  (in gowork) + 44  [0x104c7bc6c]
+    + !   :   | +   ! 1 encoding/json.interfaceEncoder  (in gowork) + 204  [0x104cb438c]
+    + !   :   | +   !   1 encoding/json.(*encodeState).reflectValue  (in gowork) + 112  [0x104cb1cf0]
+    + !   :   | +   !     1 internal/strconv.AppendInt  (in gowork) + 100  [0x104bead64]
+    + !   :   | +   1 encoding/json.mapEncoder.encode  (in gowork) + 652  [0x104cb4b5c]
+    + !   :   | +   ! 1 reflect.(*MapIter).Key  (in gowork) + 88  [0x104c72ad8]
+    + !   :   | +   !   1 reflect.copyVal  (in gowork) + 72  [0x104c77998]
+    + !   :   | +   !     1 reflect.unsafe_New  (in gowork) + 44  [0x104c5792c]
+    + !   :   | +   !       1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + !   :   | +   !         1 runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 360  [0x104bf8a58]
+    + !   :   | +   1 encoding/json.mapEncoder.encode  (in gowork) + 740  [0x104cb4bb4]
+    + !   :   | +     1 reflect.(*MapIter).Value  (in gowork) + 88  [0x104c72b88]
+    + !   :   | +       1 reflect.copyVal  (in gowork) + 92  [0x104c779ac]
+    + !   :   | +         1 runtime.typedmemmove  (in gowork) + 108  [0x104c57cfc]
+    + !   :   | 1 encoding/json.(*encodeState).reflectValue  (in gowork) + 72  [0x104cb1cc8]
+    + !   :   |   1 encoding/json.valueEncoder  (in gowork) + 84  [0x104cb1d84]
+    + !   :   |     1 encoding/json.typeEncoder  (in gowork) + 80  [0x104cb1e10]
+    + !   :   |       1 runtime.nilinterhash  (in gowork) + 108  [0x104c569fc]
+    + !   :   2 encoding/json.(*encodeState).marshal  (in gowork) + 192  [0x104cb1ad0]
+    + !   :     2 runtime.gorecover  (in gowork) + 156  [0x104c21abc]
+    + !   2 main.heavyStringify  (in gowork) + 192  [0x104e09460]
+    + !   : 2 strings.Repeat  (in gowork) + 644  [0x104cadb54]
+    + !   :   2 strings.(*Builder).Grow  (in gowork) + 100  [0x104ca9a04]
+    + !   :     1 internal/bytealg.MakeNoZero  (in gowork) + 228  [0x104c5c4f4]
+    + !   :     1 strings.(*Builder).grow  (in gowork) + 40  [0x104ca9918]
+    + !   :       1 runtime.mallocgc  (in gowork) + 268  [0x104c5784c]
+    + !   1 main.heavyStringify  (in gowork) + 120  [0x104e09418]
+    + !     1 runtime.mapassign_faststr  (in gowork) + 156  [0x104be4cbc]
+    + !       1 internal/runtime/maps.(*Map).growToSmall  (in gowork) + 44  [0x104bdf9fc]
+    + !         1 internal/runtime/maps.newarray  (in gowork) + 28  [0x104c57a5c]
+    + !           1 runtime.newarray  (in gowork) + 112  [0x104c579c0]
+    + !             1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + !               1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 756  [0x104bf69d4]
+    + !                 1 runtime.gcStart  (in gowork) + 1552  [0x104c00410]
+    + !                   1 runtime.systemstack.abi0  (in gowork) + 104  [0x104c5f188]
+    + !                     1 runtime.gcStart.func4  (in gowork) + 56  [0x104c00598]
+    + !                       1 runtime.startTheWorldWithSema  (in gowork) + 248  [0x104c28428]
+    + !                         1 runtime.procresize  (in gowork) + 3020  [0x104c31e9c]
+    + !                           1 runtime.(*gcControllerState).assignWaitingGCWorker  (in gowork) + 76  [0x104c0ab6c]
+    + !                             1 runtime.gcShouldScheduleWorker  (in gowork) + 16  [0x104c02780]
+    + 10 internal/runtime/maps.(*Iter).Next  (in gowork) + 1392,44,...  [0x104be2150,0x104be1c0c,...]
+    + 10 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+    + ! 7 runtime.pthread_cond_signal_trampoline.abi0  (in gowork) + 20  [0x104c62224]
+    + ! : 7 pthread_cond_signal  (in libsystem_pthread.dylib) + 708  [0x18b488f88]
+    + ! :   7 __psynch_cvsignal  (in libsystem_kernel.dylib) + 8  [0x18b44aa64]
+    + ! 2 runtime.usleep_trampoline.abi0  (in gowork) + 20  [0x104c61e44]
+    + ! : 2 usleep  (in libsystem_c.dylib) + 68  [0x18b325bd8]
+    + ! :   2 nanosleep  (in libsystem_c.dylib) + 220  [0x18b325cc0]
+    + ! :     2 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x18b449308]
+    + ! 1 runtime.pthread_cond_timedwait_relative_np_trampoline.abi0  (in gowork) + 28  [0x104c621fc]
+    + !   1 _pthread_cond_wait  (in libsystem_pthread.dylib) + 1024  [0x18b48a154]
+    + !     1 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+    + 8 runtime.mallocgcSmallScanNoHeader  (in gowork) + 196,124,...  [0x104bf67a4,0x104bf675c,...]
+    + 5 runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 76,12,...  [0x104bf893c,0x104bf88fc,...]
+    + 5 runtime.mallocgcSmallNoscan  (in gowork) + 244,184,...  [0x104bf64d4,0x104bf6498,...]
+    + 5 runtime.mallocgcSmallScanNoHeader  (in gowork) + 392  [0x104bf6868]
+    + ! 5 runtime.memclrNoHeapPointers  (in gowork) + 0,112,...  [0x104c61500,0x104c61570,...]
+    + 4 encoding/json.appendString[go.shape.string]  (in gowork) + 180,216,...  [0x104cbf5e4,0x104cbf608,...]
+    + 4 runtime.mallocgc  (in gowork) + 240,152  [0x104c57830,0x104c577d8]
+    + 2 bytes.(*Buffer).Write  (in gowork) + 104  [0x104caf148]
+    + 2 internal/runtime/maps.(*Map).putSlotSmallFastStr  (in gowork) + 472  [0x104be0d28]
+    + 2 reflect.Value.NumMethod  (in gowork) + 28,36  [0x104c77a0c,0x104c77a14]
+    + 2 runtime.growslice  (in gowork) + 1220  [0x104c5c264]
+    + ! 2 runtime.memmove  (in gowork) + 0,412  [0x104c616b0,0x104c6184c]
+    + 2 runtime.nilinterhash  (in gowork) + 84  [0x104c569e4]
+    + ! 2 runtime.typehash  (in gowork) + 0  [0x104c56ab0]
+    + 2 runtime.pidleput  (in gowork) + 48  [0x104c34590]
+    + 2 runtime.typedmemmove  (in gowork) + 104  [0x104c57cf8]
+    + ! 2 runtime.memmove  (in gowork) + 0  [0x104c616b0]
+    + 2 strings.Repeat  (in gowork) + 864  [0x104cadc30]
+    + ! 2 runtime.memmove  (in gowork) + 92  [0x104c6170c]
+    + 1 bytes.(*Buffer).WriteByte  (in gowork) + 92  [0x104caf70c]
+    + 1 encoding/json.(*encodeState).marshal  (in gowork) + 64  [0x104cb1a50]
+    + 1 encoding/json.(*encodeState).reflectValue  (in gowork) + 104  [0x104cb1ce8]
+    + 1 encoding/json.Marshal  (in gowork) + 140  [0x104cb15fc]
+    + ! 1 encoding/json.(*encodeState).marshal  (in gowork) + 0  [0x104cb1a10]
+    + 1 encoding/json.intEncoder  (in gowork) + 40  [0x104cb3538]
+    + 1 encoding/json.interfaceEncoder  (in gowork) + 176  [0x104cb4370]
+    + ! 1 reflect.Value.Elem  (in gowork) + 0  [0x104c768d0]
+    + 1 encoding/json.interfaceEncoder  (in gowork) + 204  [0x104cb438c]
+    + ! 1 encoding/json.(*encodeState).reflectValue  (in gowork) + 0  [0x104cb1c80]
+    + 1 encoding/json.mapEncoder.encode  (in gowork) + 200  [0x104cb4998]
+    + 1 encoding/json.mapEncoder.encode.func1  (in gowork) + 56  [0x104cbc308]
+    + ! 1 cmpbody  (in gowork) + 128  [0x104bde850]
+    + 1 encoding/json.valueEncoder  (in gowork) + 84  [0x104cb1d84]
+    + ! 1 encoding/json.typeEncoder  (in gowork) + 0  [0x104cb1dc0]
+    + 1 internal/runtime/maps.(*Iter).Init  (in gowork) + 68  [0x104be1a04]
+    + 1 internal/strconv.AppendInt  (in gowork) + 24  [0x104bead18]
+    + 1 internal/strconv.AppendUint  (in gowork) + 356  [0x104beaef4]
+    + ! 1 runtime.memmove  (in gowork) + 0  [0x104c616b0]
+    + 1 internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load  (in gowork) + 280  [0x104c68678]
+    + 1 main.heavyStringify  (in gowork) + 196  [0x104e09464]
+    + ! 1 runtime.convTstring  (in gowork) + 0  [0x104c57510]
+    + 1 reflect.(*MapIter).Key  (in gowork) + 88  [0x104c72ad8]
+    + ! 1 reflect.copyVal  (in gowork) + 0  [0x104c77950]
+    + 1 reflect.Value.Elem  (in gowork) + 36  [0x104c768f4]
+    + 1 reflect.Value.lenNonSlice  (in gowork) + 172  [0x104c7779c]
+    + 1 reflect.copyVal  (in gowork) + 92  [0x104c779ac]
+    + ! 1 reflect.typedmemmove  (in gowork) + 0  [0x104c57d10]
+    + 1 runtime.(*consistentHeapStats).release  (in gowork) + 16  [0x104c1e0d0]
+    + 1 runtime.(*mheap).initSpan  (in gowork) + 80  [0x104c12890]
+    + ! 1 runtime.(*mheap).allocNeedsZero  (in gowork) + 0  [0x104c11f70]
+    + 1 runtime.(*pageAlloc).update  (in gowork) + 376  [0x104c15de8]
+    + ! 1 runtime.(*pallocBits).summarize  (in gowork) + 252  [0x104c18bec]
+    + 1 runtime.(*pageAlloc).update  (in gowork) + 452  [0x104c15e34]
+    + 1 runtime.(*spanSet).pop  (in gowork) + 192  [0x104c1d1a0]
+    + 1 runtime.bulkBarrierPreWrite  (in gowork) + 188  [0x104bf82fc]
+    + 1 runtime.gcShouldScheduleWorker  (in gowork) + 40  [0x104c02798]
+    + 1 runtime.growslice  (in gowork) + 1196  [0x104c5c24c]
+    + ! 1 runtime.memclrNoHeapPointers  (in gowork) + 0  [0x104c61500]
+    + 1 runtime.makemap_small  (in gowork) + 36  [0x104c57aa4]
+    + ! 1 runtime.newobject  (in gowork) + 0  [0x104bf7330]
+    + 1 runtime.makeslice  (in gowork) + 80  [0x104c5bd20]
+    + ! 1 runtime.mallocgc  (in gowork) + 0  [0x104c57740]
+    + 1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+    + ! 1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 0  [0x104bf66e0]
+    + 1 runtime.mapassign_faststr  (in gowork) + 116  [0x104be4c94]
+    + ! 1 aeshashbody  (in gowork) + 96  [0x104c5e690]
+    + 1 runtime.mapassign_faststr  (in gowork) + 104  [0x104be4c88]
+    + 1 runtime.nanotime_trampoline.abi0  (in gowork) + 20  [0x104c61c84]
+    + ! 1 mach_absolute_time  (in libsystem_kernel.dylib) + 108  [0x18b44610c]
+    + 1 runtime.procresize  (in gowork) + 2652  [0x104c31d2c]
+    + ! 1 runtime.pidleput  (in gowork) + 0  [0x104c34560]
+    + 1 runtime.rand  (in gowork) + 36  [0x104c5a494]
+    + 1 runtime.scanObject  (in gowork) + 328  [0x104c09e38]
+    + ! 1 _sigtramp  (in libsystem_platform.dylib) + 0  [0x18b49370c]
+    + 1 slices.pdqsortCmpFunc[go.shape.struct { encoding/json.v reflect.Value; encoding/json.ks string }]  (in gowork) + 976  [0x104cc0120]
+    + 1 strings.(*Builder).Grow  (in gowork) + 28  [0x104ca99bc]
+    + 1 strings.Repeat  (in gowork) + 760  [0x104cadbc8]
+    +   1 runtime.memmove  (in gowork) + 92  [0x104c6170c]
+    784 Thread_28989892
+      666 ???  (in <unknown binary>)  [0xd65f03c0]
+      ! 666 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+      !   665 runtime.pthread_cond_wait_trampoline.abi0  (in gowork) + 24  [0x104c621c8]
+      !   : 665 _pthread_cond_wait  (in libsystem_pthread.dylib) + 980  [0x18b48a128]
+      !   :   665 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b44950c]
+      !   1 runtime.pthread_kill_trampoline.abi0  (in gowork) + 24  [0x104c62278]
+      !     1 pthread_kill  (in libsystem_pthread.dylib) + 296  [0x18b4898d8]
+      !       1 __pthread_kill  (in libsystem_kernel.dylib) + 8  [0x18b44e5e8]
+      11 runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+      ! 7 runtime.pthread_cond_signal_trampoline.abi0  (in gowork) + 20  [0x104c62224]
+      ! : 7 pthread_cond_signal  (in libsystem_pthread.dylib) + 708  [0x18b488f88]
+      ! :   7 __psynch_cvsignal  (in libsystem_kernel.dylib) + 8  [0x18b44aa64]
+      ! 4 runtime.usleep_trampoline.abi0  (in gowork) + 20  [0x104c61e44]
+      !   4 usleep  (in libsystem_c.dylib) + 68  [0x18b325bd8]
+      !     4 nanosleep  (in libsystem_c.dylib) + 220  [0x18b325cc0]
+      !       4 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x18b449308]
+      11 runtime.goexit.abi0  (in gowork) + 4  [0x104c611a4]
+      ! 11 main.main.func1  (in gowork) + 32  [0x104e097a0]
+      !   11 main.heavyStringify  (in gowork) + 296  [0x104e094c8]
+      !     10 encoding/json.Marshal  (in gowork) + 140  [0x104cb15fc]
+      !     : 10 encoding/json.(*encodeState).marshal  (in gowork) + 172  [0x104cb1abc]
+      !     :   9 encoding/json.(*encodeState).reflectValue  (in gowork) + 112  [0x104cb1cf0]
+      !     :   | 9 encoding/json.mapEncoder.encode-fm  (in gowork) + 68  [0x104cc3174]
+      !     :   |   3 encoding/json.mapEncoder.encode  (in gowork) + 640  [0x104cb4b50]
+      !     :   |   + 2 reflect.(*MapIter).Next  (in gowork) + 112  [0x104c72c50]
+      !     :   |   + ! 2 reflect.mapIterStart  (in gowork) + 52  [0x104c72a04]
+      !     :   |   + !   2 internal/runtime/maps.(*Iter).Init  (in gowork) + 160  [0x104be1a60]
+      !     :   |   + !     2 runtime.rand  (in gowork) + 116  [0x104c5a4e4]
+      !     :   |   + 1 reflect.(*MapIter).Next  (in gowork) + 64  [0x104c72c20]
+      !     :   |   +   1 internal/runtime/maps.(*Iter).Next  (in gowork) + 1732  [0x104be22a4]
+      !     :   |   3 encoding/json.mapEncoder.encode  (in gowork) + 988  [0x104cb4cac]
+      !     :   |   + 3 encoding/json.interfaceEncoder  (in gowork) + 204  [0x104cb438c]
+      !     :   |   +   1 encoding/json.(*encodeState).reflectValue  (in gowork) + 72  [0x104cb1cc8]
+      !     :   |   +   ! 1 encoding/json.valueEncoder  (in gowork) + 84  [0x104cb1d84]
+      !     :   |   +   !   1 encoding/json.typeEncoder  (in gowork) + 80  [0x104cb1e10]
+      !     :   |   +   !     1 internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load  (in gowork) + 80  [0x104c685b0]
+      !     :   |   +   !       1 runtime.typehash  (in gowork) + 308  [0x104c56be4]
+      !     :   |   +   1 encoding/json.(*encodeState).reflectValue  (in gowork) + 112  [0x104cb1cf0]
+      !     :   |   +   ! 1 bytes.(*Buffer).Write  (in gowork) + 180  [0x104caf194]
+      !     :   |   +   1 encoding/json.intEncoder  (in gowork) + 348  [0x104cb366c]
+      !     :   |   2 encoding/json.mapEncoder.encode  (in gowork) + 740  [0x104cb4bb4]
+      !     :   |   + 2 reflect.(*MapIter).Value  (in gowork) + 88  [0x104c72b88]
+      !     :   |   +   1 reflect.copyVal  (in gowork) + 72  [0x104c77998]
+      !     :   |   +   ! 1 reflect.unsafe_New  (in gowork) + 44  [0x104c5792c]
+      !     :   |   +   !   1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 772  [0x104bf69e4]
+      !     :   |   +   1 reflect.typedmemmove  (in gowork) + 32  [0x104c57d30]
+      !     :   |   1 reflect.(*MapIter).Key  (in gowork) + 92  [0x104c72adc]
+      !     :   1 encoding/json.mapEncoder.encode-fm  (in gowork) + 72  [0x104cc3178]
+      !     1 encoding/json.Marshal  (in gowork) + 232  [0x104cb1658]
+      !       1 runtime.growslice  (in gowork) + 1172  [0x104c5c234]
+      !         1 runtime.mallocgcSmallNoscan  (in gowork) + 704  [0x104bf66a0]
+      10 internal/runtime/maps.(*Iter).Next  (in gowork) + 1392,1344,...  [0x104be2150,0x104be2120,...]
+      10 runtime.mallocgc  (in gowork) + 240,100,...  [0x104c57830,0x104c577a4,...]
+      10 runtime.mallocgcSmallScanNoHeader  (in gowork) + 52,124,...  [0x104bf6714,0x104bf675c,...]
+      7 runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 184,192,...  [0x104bf89a8,0x104bf89b0,...]
+      5 encoding/json.appendString[go.shape.string]  (in gowork) + 180,216,...  [0x104cbf5e4,0x104cbf608,...]
+      4 runtime.pidleput  (in gowork) + 100,44,...  [0x104c345c4,0x104c3458c,...]
+      3 strings.Repeat  (in gowork) + 72,136,...  [0x104cad918,0x104cad958,...]
+      2 internal/chacha8rand.block  (in gowork) + 536,596  [0x104bec4b8,0x104bec4f4]
+      2 runtime.mallocgcSmallScanNoHeader  (in gowork) + 392  [0x104bf6868]
+      ! 2 runtime.memclrNoHeapPointers  (in gowork) + 0,232  [0x104c61500,0x104c615e8]
+      2 strings.Repeat  (in gowork) + 864  [0x104cadc30]
+      ! 2 runtime.memmove  (in gowork) + 92,120  [0x104c6170c,0x104c61728]
+      1 encoding/json.(*encodeState).marshal  (in gowork) + 72  [0x104cb1a58]
+      1 encoding/json.(*encodeState).marshal.func1  (in gowork) + 36  [0x104cb1b54]
+      ! 1 runtime.gorecover  (in gowork) + 0  [0x104c21a20]
+      1 encoding/json.Marshal  (in gowork) + 140  [0x104cb15fc]
+      1 encoding/json.mapEncoder.encode  (in gowork) + 448  [0x104cb4a90]
+      ! 1 reflect.Value.lenNonSlice  (in gowork) + 0  [0x104c776f0]
+      1 encoding/json.mapEncoder.encode  (in gowork) + 656  [0x104cb4b60]
+      ! 1 encoding/json.resolveKeyName  (in gowork) + 0  [0x104cb6240]
+      1 encoding/json.mapEncoder.encode  (in gowork) + 988  [0x104cb4cac]
+      ! 1 encoding/json.interfaceEncoder  (in gowork) + 0  [0x104cb42c0]
+      1 encoding/json.mapEncoder.encode  (in gowork) + 52  [0x104cb4904]
+      1 encoding/json.mapEncoder.encode.func1  (in gowork) + 56  [0x104cbc308]
+      ! 1 cmpbody  (in gowork) + 0  [0x104bde7d0]
+      1 encoding/json.newEncodeState  (in gowork) + 36  [0x104cb1944]
+      ! 1 sync.(*Pool).Get  (in gowork) + 0  [0x104c65740]
+      1 encoding/json.valueEncoder  (in gowork) + 36  [0x104cb1d54]
+      1 internal/runtime/maps.(*Iter).Init  (in gowork) + 180  [0x104be1a74]
+      1 internal/runtime/maps.rand  (in gowork) + 28  [0x104c5a50c]
+      1 internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load  (in gowork) + 156  [0x104c685fc]
+      1 main.heavyStringify  (in gowork) + 228  [0x104e09484]
+      ! 1 runtime.mapassign_faststr  (in gowork) + 0  [0x104be4c20]
+      1 main.heavyStringify  (in gowork) + 444  [0x104e0955c]
+      ! 1 runtime.memmove  (in gowork) + 0  [0x104c616b0]
+      1 reflect.(*MapIter).Value  (in gowork) + 36  [0x104c72b54]
+      1 reflect.Value.NumMethod  (in gowork) + 68  [0x104c77a34]
+      1 reflect.copyVal  (in gowork) + 72  [0x104c77998]
+      ! 1 reflect.unsafe_New  (in gowork) + 0  [0x104c57900]
+      1 reflect.copyVal  (in gowork) + 92  [0x104c779ac]
+      ! 1 reflect.typedmemmove  (in gowork) + 0  [0x104c57d10]
+      1 runtime.(*mcache).refill  (in gowork) + 456  [0x104bf9a08]
+      ! 1 runtime.(*mcentral).cacheSpan  (in gowork) + 0  [0x104bfa070]
+      1 runtime.(*mheap).setSpans  (in gowork) + 72  [0x104c11ee8]
+      1 runtime.(*timers).check  (in gowork) + 52  [0x104c46054]
+      1 runtime.convTstring  (in gowork) + 84  [0x104c57564]
+      1 runtime.gcDrain  (in gowork) + 336  [0x104c068c0]
+      ! 1 _sigtramp  (in libsystem_platform.dylib) + 0  [0x18b49370c]
+      1 runtime.gcTrigger.test  (in gowork) + 272  [0x104bffdc0]
+      ! 1 runtime.(*gcControllerState).trigger  (in gowork) + 0  [0x104c0b540]
+      1 runtime.growslice  (in gowork) + 1172  [0x104c5c234]
+      ! 1 runtime.mallocgc  (in gowork) + 0  [0x104c57740]
+      1 runtime.growslice  (in gowork) + 1196  [0x104c5c24c]
+      ! 1 runtime.memclrNoHeapPointers  (in gowork) + 40  [0x104c61528]
+      1 runtime.growslice  (in gowork) + 1220  [0x104c5c264]
+      ! 1 runtime.memmove  (in gowork) + 236  [0x104c6179c]
+      1 runtime.growslice  (in gowork) + 144  [0x104c5be30]
+      1 runtime.makeslice  (in gowork) + 24  [0x104c5bce8]
+      1 runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+      ! 1 runtime.mallocgcSmallScanNoHeader  (in gowork) + 0  [0x104bf66e0]
+      1 runtime.mallocgcSmallNoscan  (in gowork) + 544  [0x104bf6600]
+      1 runtime.newMarkBits  (in gowork) + 100  [0x104c15244]
+      1 runtime.procresize  (in gowork) + 2728  [0x104c31d78]
+      1 runtime.rand  (in gowork) + 76  [0x104c5a4bc]
+      1 runtime.semawakeup  (in gowork) + 88  [0x104c1fd88]
+      ! 1 runtime.pthread_cond_signal.abi0  (in gowork) + 0  [0x104c447b0]
+      1 runtime.typedmemmove  (in gowork) + 104  [0x104c57cf8]
+      ! 1 runtime.memmove  (in gowork) + 0  [0x104c616b0]
+      1 runtime.typehash  (in gowork) + 304  [0x104c56be0]
+      ! 1 runtime.memhash64  (in gowork) + 4  [0x104c60f74]
+      1 slices.pdqsortCmpFunc[go.shape.struct { encoding/json.v reflect.Value; encoding/json.ks string }]  (in gowork) + 1280  [0x104cc0250]
+      1 strings.(*Builder).grow  (in gowork) + 40  [0x104ca9918]
+      ! 1 internal/bytealg.MakeNoZero  (in gowork) + 0  [0x104c5c410]
+      1 sync.(*Pool).Get  (in gowork) + 64  [0x104c65780]
+
+Total number in stack (recursive counted multiple, when >=5):
+        27       runtime.memmove  (in gowork) + 0  [0x104c616b0]
+        19       runtime.mallocgc  (in gowork) + 0  [0x104c57740]
+        18       runtime.asmcgocall.abi0  (in gowork) + 212  [0x104c61154]
+        18       runtime.mallocgc  (in gowork) + 140  [0x104c577cc]
+        15       __psynch_cvwait  (in libsystem_kernel.dylib) + 0  [0x18b449504]
+        15       runtime.mallocgcSmallScanNoHeader  (in gowork) + 0  [0x104bf66e0]
+        14       runtime.(*mspan).writeHeapBitsSmall  (in gowork) + 0  [0x104bf88f0]
+        13       encoding/json.(*encodeState).reflectValue  (in gowork) + 112  [0x104cb1cf0]
+        11       encoding/json.appendString[go.shape.string]  (in gowork) + 0  [0x104cbf530]
+        11       internal/runtime/maps.(*Iter).Next  (in gowork) + 0  [0x104be1be0]
+        11       nanosleep  (in libsystem_c.dylib) + 220  [0x18b325cc0]
+        11       reflect.copyVal  (in gowork) + 92  [0x104c779ac]
+        10       encoding/json.(*encodeState).reflectValue  (in gowork) + 72  [0x104cb1cc8]
+        10       encoding/json.valueEncoder  (in gowork) + 84  [0x104cb1d84]
+        9       __psynch_cvsignal  (in libsystem_kernel.dylib) + 0  [0x18b44aa5c]
+        9       bytes.(*Buffer).Write  (in gowork) + 0  [0x104caf0e0]
+        9       encoding/json.(*encodeState).marshal  (in gowork) + 172  [0x104cb1abc]
+        9       encoding/json.Marshal  (in gowork) + 140  [0x104cb15fc]
+        9       encoding/json.mapEncoder.encode  (in gowork) + 988  [0x104cb4cac]
+        9       internal/runtime/maps.(*Map).putSlotSmallFastStr  (in gowork) + 0  [0x104be0b50]
+        9       pthread_cond_signal  (in libsystem_pthread.dylib) + 708  [0x18b488f88]
+        9       reflect.copyVal  (in gowork) + 72  [0x104c77998]
+        9       runtime.memclrNoHeapPointers  (in gowork) + 0  [0x104c61500]
+        9       runtime.pthread_cond_signal_trampoline.abi0  (in gowork) + 20  [0x104c62224]
+        8       ???  (in <unknown binary>)  [0xd65f03c0]
+        8       __semwait_signal  (in libsystem_kernel.dylib) + 0  [0x18b449300]
+        8       _pthread_cond_wait  (in libsystem_pthread.dylib) + 980  [0x18b48a128]
+        8       encoding/json.(*encodeState).reflectValue  (in gowork) + 0  [0x104cb1c80]
+        8       encoding/json.mapEncoder.encode-fm  (in gowork) + 68  [0x104cc3174]
+        8       encoding/json.typeEncoder  (in gowork) + 80  [0x104cb1e10]
+        8       main.heavyStringify  (in gowork) + 296  [0x104e094c8]
+        8       main.main.func1  (in gowork) + 32  [0x104e097a0]
+        8       reflect.typedmemmove  (in gowork) + 0  [0x104c57d10]
+        8       reflect.unsafe_New  (in gowork) + 0  [0x104c57900]
+        8       runtime.goexit.abi0  (in gowork) + 4  [0x104c611a4]
+        8       runtime.pidleput  (in gowork) + 0  [0x104c34560]
+        8       runtime.pthread_cond_wait_trampoline.abi0  (in gowork) + 24  [0x104c621c8]
+        8       runtime.typehash  (in gowork) + 0  [0x104c56ab0]
+        8       runtime.usleep_trampoline.abi0  (in gowork) + 20  [0x104c61e44]
+        8       usleep  (in libsystem_c.dylib) + 68  [0x18b325bd8]
+        7       _pthread_cond_wait  (in libsystem_pthread.dylib) + 1024  [0x18b48a154]
+        7       encoding/json.mapEncoder.encode  (in gowork) + 652  [0x104cb4b5c]
+        7       encoding/json.mapEncoder.encode  (in gowork) + 740  [0x104cb4bb4]
+        7       internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load  (in gowork) + 0  [0x104c68560]
+        7       kevent  (in libsystem_kernel.dylib) + 0  [0x18b44bfbc]
+        7       runtime.kevent_trampoline.abi0  (in gowork) + 40  [0x104c61f08]
+        7       runtime.mallocgcSmallNoscan  (in gowork) + 0  [0x104bf63e0]
+        7       runtime.mallocgcSmallScanNoHeader  (in gowork) + 392  [0x104bf6868]
+        7       runtime.pthread_cond_timedwait_relative_np_trampoline.abi0  (in gowork) + 28  [0x104c621fc]
+        7       runtime.rand  (in gowork) + 0  [0x104c5a470]
+        6       _sigtramp  (in libsystem_platform.dylib) + 0  [0x18b49370c]
+        6       encoding/json.interfaceEncoder  (in gowork) + 204  [0x104cb438c]
+        6       internal/runtime/maps.(*Iter).Init  (in gowork) + 0  [0x104be19c0]
+        6       main.heavyStringify  (in gowork) + 196  [0x104e09464]
+        6       reflect.(*MapIter).Key  (in gowork) + 88  [0x104c72ad8]
+        6       reflect.(*MapIter).Value  (in gowork) + 88  [0x104c72b88]
+        6       runtime.mapassign_faststr  (in gowork) + 0  [0x104be4c20]
+        6       runtime.nilinterhash  (in gowork) + 0  [0x104c56990]
+        6       runtime.systemstack.abi0  (in gowork) + 104  [0x104c5f188]
+        6       runtime.typedmemmove  (in gowork) + 0  [0x104c57c90]
+        6       runtime.typedmemmove  (in gowork) + 104  [0x104c57cf8]
+        6       slices.pdqsortCmpFunc[go.shape.struct { encoding/json.v reflect.Value; encoding/json.ks string }]  (in gowork) + 0  [0x104cbfd50]
+        5       encoding/json.(*encodeState).marshal  (in gowork) + 0  [0x104cb1a10]
+        5       encoding/json.interfaceEncoder  (in gowork) + 0  [0x104cb42c0]
+        5       encoding/json.mapEncoder.encode  (in gowork) + 0  [0x104cb48d0]
+        5       encoding/json.typeEncoder  (in gowork) + 0  [0x104cb1dc0]
+        5       internal/chacha8rand.block  (in gowork) + 0  [0x104bec2a0]
+        5       main.heavyStringify  (in gowork) + 120  [0x104e09418]
+        5       reflect.(*MapIter).Key  (in gowork) + 0  [0x104c72a80]
+        5       reflect.(*MapIter).Next  (in gowork) + 0  [0x104c72be0]
+        5       reflect.(*MapIter).Value  (in gowork) + 0  [0x104c72b30]
+        5       runtime.convTstring  (in gowork) + 0  [0x104c57510]
+        5       runtime.mallocgcSmallScanNoHeader  (in gowork) + 332  [0x104bf682c]
+        5       runtime.mallocgcTiny  (in gowork) + 0  [0x104bf60e0]
+        5       runtime.mapassign_faststr  (in gowork) + 156  [0x104be4cbc]
+        5       runtime.newarray  (in gowork) + 112  [0x104c579c0]
+        5       sync.(*Pool).Get  (in gowork) + 0  [0x104c65740]
+
+Sort by top of stack, same collapsed (when >= 5):
+        __psynch_cvwait  (in libsystem_kernel.dylib)        5440
+        kevent  (in libsystem_kernel.dylib)        792
+        __semwait_signal  (in libsystem_kernel.dylib)        753
+        runtime.mallocgcSmallScanNoHeader  (in gowork)        82
+        __psynch_cvsignal  (in libsystem_kernel.dylib)        78
+        internal/runtime/maps.(*Iter).Next  (in gowork)        69
+        runtime.mallocgc  (in gowork)        57
+        runtime.(*mspan).writeHeapBitsSmall  (in gowork)        51
+        runtime.memmove  (in gowork)        40
+        encoding/json.appendString[go.shape.string]  (in gowork)        28
+        runtime.memclrNoHeapPointers  (in gowork)        25
+        runtime.mallocgcSmallNoscan  (in gowork)        16
+        runtime.pidleput  (in gowork)        15
+        internal/runtime/maps.(*Map).putSlotSmallFastStr  (in gowork)        13
+        internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load  (in gowork)        12
+        bytes.(*Buffer).Write  (in gowork)        11
+        encoding/json.(*encodeState).reflectValue  (in gowork)        10
+        reflect.unsafe_New  (in gowork)        10
+        runtime.rand  (in gowork)        10
+        slices.pdqsortCmpFunc[go.shape.struct { encoding/json.v reflect.Value; encoding/json.ks string }]  (in gowork)        10
+        runtime.mallocgcTiny  (in gowork)        9
+        runtime.typehash  (in gowork)        9
+        encoding/json.mapEncoder.encode  (in gowork)        8
+        reflect.typedmemmove  (in gowork)        8
+        runtime.lock2  (in gowork)        8
+        internal/chacha8rand.block  (in gowork)        7
+        runtime.convTstring  (in gowork)        7
+        runtime.typedmemmove  (in gowork)        7
+        strings.Repeat  (in gowork)        7
+        _sigtramp  (in libsystem_platform.dylib)        6
+        encoding/json.typeEncoder  (in gowork)        6
+        internal/runtime/maps.(*Iter).Init  (in gowork)        6
+        reflect.(*MapIter).Key  (in gowork)        6
+        runtime.mapassign_faststr  (in gowork)        6
+        runtime.nilinterhash  (in gowork)        6
+        runtime.procresize  (in gowork)        6
+        encoding/json.(*encodeState).marshal  (in gowork)        5
+        encoding/json.Marshal  (in gowork)        5
+        encoding/json.interfaceEncoder  (in gowork)        5
+        reflect.(*MapIter).Next  (in gowork)        5
+        reflect.(*MapIter).Value  (in gowork)        5
+        reflect.Value.Elem  (in gowork)        5
+        reflect.Value.NumMethod  (in gowork)        5
+        reflect.Value.lenNonSlice  (in gowork)        5
+        sync.(*Pool).Get  (in gowork)        5
+
+Binary Images:
+       0x104bdc000 -        0x105098c2b +gowork (???) <908DF0A8-5D39-3E3C-F07A-1A4EB8D4BE2E> /tmp/*/gowork
+       0x18b024000 -        0x18b076b4b  libobjc.A.dylib (951.7) <FF1D8AE4-ABEF-35F1-A30A-1183B9CB414F> /usr/lib/libobjc.A.dylib
+       0x18b077000 -        0x18b0abd07  libdyld.dylib (1378) <B147D877-D0C2-388F-B38D-D3132E39905F> /usr/lib/system/libdyld.dylib
+       0x18b0ac000 -        0x18b152217  dyld (1.0.0 - 1378) <A237EF81-B68B-37BA-A165-92C965529534> /usr/lib/dyld
+       0x18b153000 -        0x18b156228  libsystem_blocks.dylib (96) <CC947089-488D-316B-A9C7-46DEC0F73145> /usr/lib/system/libsystem_blocks.dylib
+       0x18b157000 -        0x18b1ab55f  libxpc.dylib (3102.120.13) <C40FCAE8-7A17-3D82-87CB-3DA4802ADEF1> /usr/lib/system/libxpc.dylib
+       0x18b1ac000 -        0x18b1cc9ff  libsystem_trace.dylib (1861.120.4) <D0FABAB3-5AE7-3F10-8C62-60CBF5D70850> /usr/lib/system/libsystem_trace.dylib
+       0x18b1cd000 -        0x18b27b5f7  libcorecrypto.dylib (1922.121.1) <A01A158D-6FE7-3B1C-A2C4-6BCB90D7314A> /usr/lib/system/libcorecrypto.dylib
+       0x18b27c000 -        0x18b2cc1d7  libsystem_malloc.dylib (812.100.31) <5FAE4807-4D2B-3A95-A63A-DD96D3DA11B4> /usr/lib/system/libsystem_malloc.dylib
+       0x18b2cd000 -        0x18b31423f  libdispatch.dylib (1542.100.32) <F071EFE4-299F-3089-ACC4-0025B8FFB52A> /usr/lib/system/libdispatch.dylib
+       0x18b315000 -        0x18b317ffb  libsystem_featureflags.dylib (103) <71FCFFBD-85F8-3365-AFE0-BECEA4369122> /usr/lib/system/libsystem_featureflags.dylib
+       0x18b318000 -        0x18b398d9f  libsystem_c.dylib (1752.120.2) <694B7881-1BF3-3D0F-8F19-B50AE4E8EF8A> /usr/lib/system/libsystem_c.dylib
+       0x18b399000 -        0x18b429ae7  libc++.1.dylib (2100.43) <5013C0F8-84A9-3B56-9FEB-C353816A750F> /usr/lib/libc++.1.dylib
+       0x18b42a000 -        0x18b44475f  libc++abi.dylib (2100.43) <E482D257-E5A0-3816-BD97-7B39342958DA> /usr/lib/libc++abi.dylib
+       0x18b445000 -        0x18b4822af  libsystem_kernel.dylib (12377.121.6) <CC1CF985-BC65-3725-809F-4C1E36B8F4BA> /usr/lib/system/libsystem_kernel.dylib
+       0x18b483000 -        0x18b48fb3b  libsystem_pthread.dylib (539.100.4) <4F33683C-18C8-39A1-800B-2E3BD43BCC13> /usr/lib/system/libsystem_pthread.dylib
+       0x18b490000 -        0x18b498963  libsystem_platform.dylib (375.120.2) <160FD864-8D15-36FC-9E97-9725388CFAFE> /usr/lib/system/libsystem_platform.dylib
+       0x18b499000 -        0x18b4c86eb  libsystem_info.dylib (600) <3D62F2D9-F516-31BF-83C7-E203D872300B> /usr/lib/system/libsystem_info.dylib
+       0x18b4c9000 -        0x18ba2731f  com.apple.CoreFoundation (6.9 - 5026.5.4) <04E3598B-F226-3250-B3B2-CE938DD4DB7E> /System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation
+       0x18ba28000 -        0x18bd42bff  com.apple.LaunchServices (1141.1 - 1141.1) <F32798D4-CA63-3935-B694-F45DAFFE5655> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/LaunchServices
+       0x18bd43000 -        0x18bf2b9bf  com.apple.gpusw.MetalTools (1.0 - 1) <2C2180C9-E027-3712-BED5-73645D651BFD> /System/Library/PrivateFrameworks/MetalTools.framework/Versions/A/MetalTools
+       0x18bf2c000 -        0x18c7264bf  libBLAS.dylib (1551.100.26) <F078C775-D8DC-3C4D-879F-A9BB228DBE06> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib
+       0x18c727000 -        0x18c83635f  com.apple.Lexicon-framework (1.0 - 195.12) <16E3C45A-3C24-33D7-AD1C-1F6A215E57E7> /System/Library/PrivateFrameworks/Lexicon.framework/Versions/A/Lexicon
+       0x18c837000 -        0x18c9a4417  libSparse.dylib (184.80.2) <C479DB8D-CF22-336C-B455-0CF900D96647> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libSparse.dylib
+       0x18c9a5000 -        0x18ca380ff  com.apple.SystemConfiguration (1.21 - 1.21) <3E3C91CD-C9CE-3186-B49F-FBF3E6F1696B> /System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration
+       0x18ca39000 -        0x18ca6d57b  libCRFSuite.dylib (55) <5220F98F-4B63-31DF-B1BA-F507F9441C35> /usr/lib/libCRFSuite.dylib
+       0x18cd36000 -        0x18dd1841f  com.apple.Foundation (6.9 - 5026.5.4) <49DD529F-1708-3767-997B-1A4639A07536> /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation
+       0x18dec8000 -        0x18dfe8cbf  com.apple.CoreDisplay (291.4 - 291.4) <C5ACFCC5-A8E3-3DA5-BEB8-F3F3B932BD63> /System/Library/Frameworks/CoreDisplay.framework/Versions/A/CoreDisplay
+       0x18dfe9000 -        0x18e3abc1f  com.apple.audio.AudioToolboxCore (1.0 - 1556.604) <868DF717-7563-39D0-95EB-19AB37629A5A> /System/Library/PrivateFrameworks/AudioToolboxCore.framework/Versions/A/AudioToolboxCore
+       0x18e3ac000 -        0x18e5d4f1f  com.apple.CoreText (877.4.0.7 - 877.4.0.7) <F7410CD3-EF38-3134-868D-C8633BD5D7F7> /System/Library/Frameworks/CoreText.framework/Versions/A/CoreText
+       0x18e5d5000 -        0x18ed6ae7f  com.apple.audio.CoreAudio (5.0 - 5.0) <242B3E7E-7A94-33DA-9D5B-C6739557CEB9> /System/Library/Frameworks/CoreAudio.framework/Versions/A/CoreAudio
+       0x18ed6b000 -        0x18f189aff  com.apple.security (7.0 - 61901.120.67) <8FDCF5BF-61B9-3D69-BF9E-D134D220B8D9> /System/Library/Frameworks/Security.framework/Versions/A/Security
+       0x18f18a000 -        0x18f45fd53  libicucore.A.dylib (76142.5.1.200) <EB0C6EA9-E934-3776-9FD1-AF5E473552AA> /usr/lib/libicucore.A.dylib
+       0x18f460000 -        0x18f469e5f  libsystem_darwin.dylib (1752.120.2) <8858F025-745A-388E-9544-080781CC9A69> /usr/lib/system/libsystem_darwin.dylib
+       0x18f46a000 -        0x18f761cbf  com.apple.CoreServices.CarbonCore (1333 - 1333) <D5517285-3BB1-37C7-9ECA-B9E6D99DF7CF> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework/Versions/A/CarbonCore
+       0x18f762000 -        0x18f7a1c1b  com.apple.CoreServicesInternal (505 - 505) <0FBC8F4C-B825-381C-8728-762844E11392> /System/Library/PrivateFrameworks/CoreServicesInternal.framework/Versions/A/CoreServicesInternal
+       0x18f7a2000 -        0x18f7e11bf  com.apple.CSStore (1141.1 - 1141.1) <1E543EF0-6C96-389F-9B2A-9614B625D198> /System/Library/PrivateFrameworks/CoreServicesStore.framework/Versions/A/CoreServicesStore
+       0x18f7e2000 -        0x18f8ca25f  com.apple.framework.IOKit (2.0.2 - 100231.120.3) <13C5D661-B23A-3AD8-88BB-2DE56023B840> /System/Library/Frameworks/IOKit.framework/Versions/A/IOKit
+       0x18f8cb000 -        0x18f8dd1b6  libsystem_notify.dylib (348.120.4) <64D76451-1E0C-369B-A631-54DA3140E083> /usr/lib/system/libsystem_notify.dylib
+       0x191217000 -        0x19122d3ff  com.apple.UniformTypeIdentifiers (709 - 709) <D24AEC54-C332-3707-A7CC-BB0710F6D193> /System/Library/Frameworks/UniformTypeIdentifiers.framework/Versions/A/UniformTypeIdentifiers
+       0x191709000 -        0x1917e195f  libboringssl.dylib (532.120.8) <611779E1-4B3F-310E-B070-1062D4707AA4> /usr/lib/libboringssl.dylib
+       0x1917e2000 -        0x191b971df  com.apple.CFNetwork (1.0 - 3860.600.21) <96293549-E281-3713-8ABF-886F0F966951> /System/Library/Frameworks/CFNetwork.framework/Versions/A/CFNetwork
+       0x191b98000 -        0x191bb2f7b  libsystem_networkextension.dylib (2226.121.1) <0331EE20-A1FB-3C0D-990A-F65939CFF505> /usr/lib/system/libsystem_networkextension.dylib
+       0x191bb3000 -        0x191bb4067  libenergytrace.dylib (23) <E59503ED-FB38-3FBC-8999-83124D31645B> /usr/lib/libenergytrace.dylib
+       0x191bb5000 -        0x191c34f3f  libMobileGestalt.dylib (1484.120.3) <FA923504-DDCB-3138-ACC5-FB1D38183C78> /usr/lib/libMobileGestalt.dylib
+       0x191c35000 -        0x191c4cfdf  libsystem_asl.dylib (406) <F40838DF-2F15-3F62-970F-DEE25706BF1B> /usr/lib/system/libsystem_asl.dylib
+       0x191c4d000 -        0x191c70797  com.apple.TCC (1.0 - 1) <46AC4453-DB23-3C07-A0EB-A68277A24098> /System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC
+       0x191c71000 -        0x192227bbf  com.apple.SkyLight (1.600.0 - 922.7) <6F1978A2-1B8A-3A44-903D-532EED7106EB> /System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/SkyLight
+       0x192228000 -        0x19297d03f  com.apple.CoreGraphics (2.0 - 1965.5.1) <3B96EADF-571C-3690-B5CE-7672B45CE859> /System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics
+       0x19297e000 -        0x192b25b8b  com.apple.ColorSync (4.13.0 - 3813.5.1) <24C07C0F-03C6-302B-9E54-5ED3A01B730E> /System/Library/Frameworks/ColorSync.framework/Versions/A/ColorSync
+       0x192f7a000 -        0x193367f5f  com.apple.CoreData (120 - 1526) <0A6EBD87-B6D8-3CFB-88A9-A091CE155610> /System/Library/Frameworks/CoreData.framework/Versions/A/CoreData
+       0x193368000 -        0x193383d5f  com.apple.ProtocolBuffer (1 - 310.25.2.9.2) <52A2B4A4-4DB3-3FC3-B3F1-21E64D2F2003> /System/Library/PrivateFrameworks/ProtocolBuffer.framework/Versions/A/ProtocolBuffer
+       0x193384000 -        0x19356ca2f  libsqlite3.dylib (382) <2197AD4A-E0F8-38FF-924C-D9A97343680F> /usr/lib/libsqlite3.dylib
+       0x19360f000 -        0x19370049f  com.apple.BaseBoard (732.1.1 - 732.1.1) <03F3FD64-6BF3-326A-8004-C4EE9563571A> /System/Library/PrivateFrameworks/BaseBoard.framework/Versions/A/BaseBoard
+       0x193701000 -        0x19376c93f  com.apple.RunningBoardServices (1.0 - 1015.100.16) <0E844E62-6BFB-3446-85DC-61C0A6488511> /System/Library/PrivateFrameworks/RunningBoardServices.framework/Versions/A/RunningBoardServices
+       0x19376d000 -        0x1937e0c37  com.apple.AE (944 - 944) <0B347618-0BCF-3104-84B4-C0C0909E9C80> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/AE.framework/Versions/A/AE
+       0x1937e1000 -        0x1937f2d87  libdns_services.dylib (2881.120.11) <E8717AA2-B706-36BB-A8FF-7EB3E64E58D5> /usr/lib/libdns_services.dylib
+       0x1937f3000 -        0x1937fb387  libsystem_symptoms.dylib (2169.120.7) <F5029F5C-1BF3-31C7-892E-BC8606AC829E> /usr/lib/system/libsystem_symptoms.dylib
+       0x1937fc000 -        0x19501975f  com.apple.Network (1.0 - 5812.121.1) <C901F589-30E9-3847-B8FD-0DA14F3E8A09> /System/Library/Frameworks/Network.framework/Versions/A/Network
+       0x19501a000 -        0x195049ddf  com.apple.analyticsd (1.0 - 1) <5F3582B5-C44E-3B5A-8C3D-E4DA63B8C6D8> /System/Library/PrivateFrameworks/CoreAnalytics.framework/Versions/A/CoreAnalytics
+       0x19504a000 -        0x19504b8bb  libDiagnosticMessagesClient.dylib (113) <0770F750-6155-3991-9FDE-968CB42647DF> /usr/lib/libDiagnosticMessagesClient.dylib
+       0x19504c000 -        0x1950b833f  com.apple.spotlight.metadata.utilities (1.0 - 2418.5.9.101) <B4AB943C-5D50-3ADF-8175-4B56301C6DC3> /System/Library/PrivateFrameworks/MetadataUtilities.framework/Versions/A/MetadataUtilities
+       0x1950b9000 -        0x195144b5f  com.apple.Metadata (26.5 - 2418.5.9.101) <E968E783-21CF-32A8-9C69-6C6870C36CDC> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Metadata
+       0x195145000 -        0x19514e1eb  com.apple.DiskArbitration (2.7 - 2.7) <18127B89-B783-3D13-882D-4F601449EA8A> /System/Library/Frameworks/DiskArbitration.framework/Versions/A/DiskArbitration
+       0x19514f000 -        0x195573063  com.apple.vImage (8.1 - 632.120.2) <F2338A5A-848F-3745-9C95-92835FED69BC> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vImage.framework/Versions/A/vImage
+       0x195574000 -        0x195989cdf  com.apple.QuartzCore (1195.14.4 - 1195.14.4) <C57B87A6-283C-3588-87EF-145BBEE8E257> /System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore
+       0x19598a000 -        0x1959db4ff  libFontRegistry.dylib (408.4.0.1) <3480BBE1-4AE8-3066-BCB7-EAA15F37C64E> /System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/ATS.framework/Versions/A/Resources/libFontRegistry.dylib
+       0x195ca2000 -        0x195cafaff  com.apple.OpenDirectory (26.5 - 666.100.1) <96F04359-D02E-3990-B798-4FE4448067BE> /System/Library/Frameworks/OpenDirectory.framework/Versions/A/OpenDirectory
+       0x195cb0000 -        0x195cd927f  com.apple.CFOpenDirectory (26.5 - 666.100.1) <270997B5-219E-3253-AFDD-619027EFDC6B> /System/Library/Frameworks/OpenDirectory.framework/Versions/A/Frameworks/CFOpenDirectory.framework/Versions/A/CFOpenDirectory
+       0x195cda000 -        0x195ce691b  com.apple.CoreServices.FSEvents (1413.100.6 - 1413.100.6) <7AA0D80A-3240-37B5-94D2-0C9B14103993> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/FSEvents
+       0x195ce7000 -        0x195d100df  com.apple.coreservices.SharedFileList (225 - 225) <997A2621-7998-38C3-B92C-7BD5A2A2B066> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/SharedFileList.framework/Versions/A/SharedFileList
+       0x195d11000 -        0x195d1408f  libapp_launch_measurement.dylib (17) <7760B2FE-B4E6-3244-B941-0A5277879853> /usr/lib/libapp_launch_measurement.dylib
+       0x195d15000 -        0x195d5d9bf  com.apple.CoreAutoLayout (1.0 - 34) <A53A5066-0626-325A-BADA-9F438AE63BB2> /System/Library/PrivateFrameworks/CoreAutoLayout.framework/Versions/A/CoreAutoLayout
+       0x195d5e000 -        0x195e4413b  libxml2.2.dylib (39.10) <F9320B7C-5B95-3777-B991-646318D41D0C> /usr/lib/libxml2.2.dylib
+       0x195e45000 -        0x195ec585f  com.apple.CoreVideo (1.8 - 734.4) <8A36CB95-D65E-3838-8837-22FD9A7E3D9C> /System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo
+       0x195ec6000 -        0x195ec8f5f  com.apple.loginsupport (3.0 - 264.4.1) <867D855C-0CD1-32D3-9345-83E99EC84CB6> /System/Library/PrivateFrameworks/login.framework/Versions/A/Frameworks/loginsupport.framework/Versions/A/loginsupport
+       0x195f07000 -        0x195f3365f  com.apple.UserManagement (1.0 - 1) <20A5542F-F968-33E9-ABEE-DF2829C727ED> /System/Library/PrivateFrameworks/UserManagement.framework/Versions/A/UserManagement
+       0x197a97000 -        0x197acf257  libsystem_containermanager.dylib (725.120.2) <518BE44D-AA31-31E6-B44B-A37AD5E47040> /usr/lib/system/libsystem_containermanager.dylib
+       0x197ad0000 -        0x197aec25f  com.apple.IOSurface (393.5.7 - 393.5.7) <B572C01C-59C9-3A03-9EA2-899DE87F3702> /System/Library/Frameworks/IOSurface.framework/Versions/A/IOSurface
+       0x197aed000 -        0x197af705f  com.apple.IOAccelerator (487.4.3 - 487.4.3) <1A671DA5-99DE-3CFC-83BF-2563BFA4E32F> /System/Library/PrivateFrameworks/IOAccelerator.framework/Versions/A/IOAccelerator
+       0x197af8000 -        0x197dd1d5f  com.apple.Metal (373.2 - 373.2) <A5124C88-37B2-3F0D-94AC-B9A984420F0C> /System/Library/Frameworks/Metal.framework/Versions/A/Metal
+       0x197dd2000 -        0x197dfb05f  com.apple.audio.caulk (1.0 - 214.600.10) <47E71130-9608-3D99-ACEB-DF5638BC08DF> /System/Library/PrivateFrameworks/caulk.framework/Versions/A/caulk
+       0x197dfc000 -        0x197f9d29f  com.apple.CoreMedia (1.0 - 3320.8.5.1) <A762A5D3-6049-3849-891B-5805936DAC48> /System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia
+       0x197f9e000 -        0x19826d25f  libFontParser.dylib (435.4.0.2) <56AE3539-AFDA-3C4B-A32F-D6470E9C877B> /System/Library/PrivateFrameworks/FontServices.framework/libFontParser.dylib
+       0x1985c3000 -        0x1989028df  com.apple.ImageIO (3.3.0 - 2784.5.4) <6018F9E4-A50C-31EC-A4D4-3591A6BA11EE> /System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO
+       0x198903000 -        0x198dedf9f  com.apple.CoreImage (19.0.0 - 1592.120.2) <49179CFD-DE4F-3C89-9139-1FFCCABD1AC2> /System/Library/Frameworks/CoreImage.framework/Versions/A/CoreImage
+       0x198dee000 -        0x198ea7ddf  com.apple.MetalPerformanceShaders.MPSCore (1.0 - 1) <5ECFEA4E-D0ED-3809-AE36-F6A226913EC1> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSCore.framework/Versions/A/MPSCore
+       0x198ea8000 -        0x198eac5d7  libsystem_configuration.dylib (1405.120.5) <0F7BBC1C-3D50-3E59-A31F-E4672A80BCEB> /usr/lib/system/libsystem_configuration.dylib
+       0x198ead000 -        0x198eb38cf  libsystem_sandbox.dylib (2680.120.12) <EC3A75EA-44C0-3A0B-9BF7-71C117B0A9C6> /usr/lib/system/libsystem_sandbox.dylib
+       0x198eb4000 -        0x198eb517f  com.apple.AggregateDictionary (1.0 - 1) <9526ACB3-9F77-3C63-94E3-1F7FF9FFD848> /System/Library/PrivateFrameworks/AggregateDictionary.framework/Versions/A/AggregateDictionary
+       0x198eb6000 -        0x198eba4d3  com.apple.AppleSystemInfo (3.1.5 - 3.1.5) <1AF0471A-7CA4-363A-A88C-878F918559C3> /System/Library/PrivateFrameworks/AppleSystemInfo.framework/Versions/A/AppleSystemInfo
+       0x198ebb000 -        0x198ebc46b  liblangid.dylib (140) <150F6708-1CA6-341A-A2A0-46CB1BA1A23C> /usr/lib/liblangid.dylib
+       0x198ebd000 -        0x198fdc45f  com.apple.CoreNLP (1.0 - 313) <50C546E9-E6E0-3E9F-9E7A-9473578D7433> /System/Library/PrivateFrameworks/CoreNLP.framework/Versions/A/CoreNLP
+       0x198fdd000 -        0x198fe391f  com.apple.LinguisticData (1.0 - 483.10) <88A7B02D-D5D3-3120-9D38-BCD3B8A1BC08> /System/Library/PrivateFrameworks/LinguisticData.framework/Versions/A/LinguisticData
+       0x198fe4000 -        0x19a06bbcf  libBNNS.dylib (1961.120.8) <27D26BDE-14F4-3EBC-9A1F-195C0F69EFB7> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBNNS.dylib
+       0x19a06c000 -        0x19a1a946f  libvDSP.dylib (1126.100.7) <81359684-F2CB-3A26-A032-265A85B354EB> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvDSP.dylib
+       0x19a1de000 -        0x19a217267  com.apple.IOMobileFramebuffer (343.0.0 - 343.0.0) <AD6AF1CD-4106-32CB-9512-A51BD8DAC459> /System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/Versions/A/IOMobileFramebuffer
+       0x19a410000 -        0x19a4276df  com.apple.MobileKeyBag (2.0 - 1.0) <DD679B3D-7C31-3A73-AA3F-E38AE71F6082> /System/Library/PrivateFrameworks/MobileKeyBag.framework/Versions/A/MobileKeyBag
+       0x19a428000 -        0x19a4360ff  com.apple.AssertionServices (1.0 - 1015.100.16) <2AFED4E5-1BEF-3620-A118-13C2487C5E8A> /System/Library/PrivateFrameworks/AssertionServices.framework/Versions/A/AssertionServices
+       0x19a437000 -        0x19a4c9a9f  com.apple.securityfoundation (6.0 - 55293) <B186B3B6-62A5-3680-8FB4-1CC6DFB3D551> /System/Library/Frameworks/SecurityFoundation.framework/Versions/A/SecurityFoundation
+       0x19a4ca000 -        0x19a4fb2ff  com.apple.coreservices.BackgroundTaskManagement (1.0 - 104) <C8C301D5-8180-31EF-ACC6-F754D14E23AC> /System/Library/PrivateFrameworks/BackgroundTaskManagement.framework/Versions/A/BackgroundTaskManagement
+       0x19a507000 -        0x19a50a1fb  libquarantine.dylib (196.120.2) <5849009B-ACA3-3796-94C4-BBDF8D300EBA> /usr/lib/system/libquarantine.dylib
+       0x19a50b000 -        0x19a5162bf  libCheckFix.dylib (33) <60BF3A9B-F3E5-3AF0-ADE5-F86DEBD5CC5C> /usr/lib/libCheckFix.dylib
+       0x19a517000 -        0x19a52e7ab  libcoretls.dylib (187.100.3) <888DACFD-0135-3166-83EE-4E14D9A4A98B> /usr/lib/libcoretls.dylib
+       0x19a52f000 -        0x19a540273  libbsm.0.dylib (90) <D82537E0-FE06-3158-BC46-D1073D1D4384> /usr/lib/libbsm.0.dylib
+       0x19a541000 -        0x19a59fc6b  libmecab.dylib (1121.5.1) <B8A7C8DB-0176-3E90-929C-238A56EF45B8> /usr/lib/libmecab.dylib
+       0x19a5a0000 -        0x19a5a241b  libgermantok.dylib (31) <55193FF8-D101-3B4B-B6FB-01EA87FC3D37> /usr/lib/libgermantok.dylib
+       0x19a5a3000 -        0x19a5b6e3f  libLinearAlgebra.dylib (1551.100.26) <3849C130-9327-3672-88E1-B0E548F4EB82> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libLinearAlgebra.dylib
+       0x19a5b7000 -        0x19a80d17f  com.apple.MetalPerformanceShaders.MPSNeuralNetwork (1.0 - 1) <A8E8C36C-8F11-3ED5-B9B3-2810EDDD4D77> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSNeuralNetwork.framework/Versions/A/MPSNeuralNetwork
+       0x19a80e000 -        0x19a86219f  com.apple.MetalPerformanceShaders.MPSRayIntersector (1.0 - 1) <FCB4E780-9954-345D-B82F-9D319958448E> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSRayIntersector.framework/Versions/A/MPSRayIntersector
+       0x19a9f6000 -        0x19aa2757f  com.apple.MetalPerformanceShaders.MPSMatrix (1.0 - 1) <21591139-CD3C-36AB-8191-28193ACD17A7> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSMatrix.framework/Versions/A/MPSMatrix
+       0x19aa28000 -        0x19abf7cdf  com.apple.MetalPerformanceShaders.MPSNDArray (1.0 - 1) <1CBC037E-8038-32F6-880A-6F3825544713> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSNDArray.framework/Versions/A/MPSNDArray
+       0x19abf8000 -        0x19ac8c1df  com.apple.MetalPerformanceShaders.MPSImage (1.0 - 1) <35130CF5-F99D-3CED-9993-48AEE13ECA36> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSImage.framework/Versions/A/MPSImage
+       0x19ac8d000 -        0x19ac984b3  com.apple.AppleFSCompression (174.100.2 - 1.0) <1B79BCD7-4B46-302B-8008-86CBD62FEB0A> /System/Library/PrivateFrameworks/AppleFSCompression.framework/Versions/A/AppleFSCompression
+       0x19ac99000 -        0x19aca50a3  libbz2.1.0.dylib (49) <928515D6-6108-3757-97F4-256F9F9CFBC8> /usr/lib/libbz2.1.0.dylib
+       0x19aca6000 -        0x19acacd03  libsystem_coreservices.dylib (191.4.5) <9576143B-C303-35A3-BA63-1FD06EDA2BB1> /usr/lib/system/libsystem_coreservices.dylib
+       0x19acad000 -        0x19acdeadf  com.apple.CoreServices.OSServices (1141.1 - 1141.1) <F42F7727-9C73-3148-B41C-186607715B54> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/OSServices.framework/Versions/A/OSServices
+       0x19b222000 -        0x19b230d97  libz.1.dylib (100.120.1) <863BB312-F115-32B0-889F-D3B42857A7A6> /usr/lib/libz.1.dylib
+       0x19b231000 -        0x19b26ea77  libsystem_m.dylib (3312.100.1) <A7E0863C-101A-31A0-922B-ED9B02626151> /usr/lib/system/libsystem_m.dylib
+       0x19b26f000 -        0x19b26fc9b  libcharset.1.dylib (115.120.2) <338A5252-594A-3AC5-B274-5AB3CE5820C6> /usr/lib/libcharset.1.dylib
+       0x19b270000 -        0x19b273527  libmacho.dylib (1378) <755441B4-C034-3E3A-8E3C-F424FBB28261> /usr/lib/system/libmacho.dylib
+       0x19b274000 -        0x19b28cdc3  libkxld.dylib (12377.121.6) <AC5F4062-6A0E-36D2-B06E-D6192FC77B7D> /usr/lib/system/libkxld.dylib
+       0x19b28d000 -        0x19b29a3a7  libcommonCrypto.dylib (600035) <CE357BB1-2D49-37CC-9FFE-D093936B1475> /usr/lib/system/libcommonCrypto.dylib
+       0x19b29b000 -        0x19b2a4ca3  libunwind.dylib (2100.2) <FC8F0C4E-6FB0-3E27-ABEF-B0FA720CD5E4> /usr/lib/system/libunwind.dylib
+       0x19b2a5000 -        0x19b2ac349  liboah.dylib (367.9) <8651ED4F-6506-3788-B56B-32EE414A85CA> /usr/lib/liboah.dylib
+       0x19b2ad000 -        0x19b2b77ff  libcopyfile.dylib (240) <8ACFAC7A-88E9-3EF4-853F-A9140FF110E5> /usr/lib/system/libcopyfile.dylib
+       0x19b2b8000 -        0x19b2bb987  libcompiler_rt.dylib (103.3) <AA79151F-C19D-3C7C-92F8-B10F04D82C1C> /usr/lib/system/libcompiler_rt.dylib
+       0x19b2bc000 -        0x19b2c078b  libsystem_collections.dylib (1752.120.2) <72DB5BE7-EF78-37D0-8AAD-53E37CFE4287> /usr/lib/system/libsystem_collections.dylib
+       0x19b2c1000 -        0x19b2c44cf  libsystem_secinit.dylib (168.100.7) <E525C566-CDA4-3D99-B12B-1615FD54A1F3> /usr/lib/system/libsystem_secinit.dylib
+       0x19b2c5000 -        0x19b2c7bf7  libremovefile.dylib (85.100.6) <635E661D-80A7-340D-A165-3F7D318FDFC9> /usr/lib/system/libremovefile.dylib
+       0x19b2c8000 -        0x19b2c8f27  libkeymgr.dylib (31) <8C08891A-DF1C-3DCC-AB64-4742FD6BE9BA> /usr/lib/system/libkeymgr.dylib
+       0x19b2c9000 -        0x19b2d1e37  libsystem_dnssd.dylib (2881.120.11) <6F45DF3F-233B-3BC3-BA8C-B43E7DA884BF> /usr/lib/system/libsystem_dnssd.dylib
+       0x19b2d2000 -        0x19b2d709b  libcache.dylib (95) <189B576E-6176-3F82-8FA4-5914B0BEAEE7> /usr/lib/system/libcache.dylib
+       0x19b2d8000 -        0x19b2d9ce3  libSystem.B.dylib (1356) <D65E4112-C151-3FF8-BEB7-4841436012D6> /usr/lib/libSystem.B.dylib
+       0x19b2da000 -        0x19b2dbfcf  libfakelink.dylib (5) <C7FBDAB2-BA25-3B1B-924B-6CD5EB501D3D> /usr/lib/libfakelink.dylib
+       0x19b2dc000 -        0x19b2dca33  com.apple.SoftLinking (1.0 - 71) <B47F8999-CDB3-308F-9129-E690590605D8> /System/Library/PrivateFrameworks/SoftLinking.framework/Versions/A/SoftLinking
+       0x19b312000 -        0x19b3192bb  libiconv.2.dylib (115.120.2) <7C02D8F4-1921-323C-9D3D-A5D9B0ACDD78> /usr/lib/libiconv.2.dylib
+       0x19b32d000 -        0x19b424edf  libarchive.2.dylib (167.120.3) <98ED60D0-2C5C-31A2-81BA-17C9C2312B7E> /usr/lib/libarchive.2.dylib
+       0x19b425000 -        0x19b48a85b  com.apple.SearchKit (1.4.2 - 1.4.2) <B73B7F8E-666B-33EA-AC89-9DE4F7C25835> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/SearchKit.framework/Versions/A/SearchKit
+       0x19b48b000 -        0x19b49318f  libThaiTokenizer.dylib (28) <43BAB012-1CCE-3DDC-9832-3A93EF0BAD9C> /usr/lib/libThaiTokenizer.dylib
+       0x19b494000 -        0x19b4b7f37  com.apple.applesauce (1.0 - 17.7) <9F8F8959-64E3-3B88-BC05-20ACA5436052> /System/Library/PrivateFrameworks/AppleSauce.framework/Versions/A/AppleSauce
+       0x19b4b8000 -        0x19b4d04ab  libapple_nghttp2.dylib (37.120.3) <7C8B8B14-EC40-3F5B-8265-8975D4D4E83B> /usr/lib/libapple_nghttp2.dylib
+       0x19b4d1000 -        0x19b4f7ac3  libSparseBLAS.dylib (1551.100.26) <EF675037-43BA-3616-8BEF-662BA272F3D7> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libSparseBLAS.dylib
+       0x19b4f8000 -        0x19b4f963f  com.apple.MetalPerformanceShaders.MetalPerformanceShaders (1.0 - 1) <1FC17E05-127E-3222-B3A2-72912C49821C> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/MetalPerformanceShaders
+       0x19b4fa000 -        0x19b4ffff7  libpam.2.dylib (35) <24C42EB6-FC23-3D66-A260-CAD78EF8637B> /usr/lib/libpam.2.dylib
+       0x19b500000 -        0x19b5d4d97  libcompression.dylib (193.120.2) <F9FEA7C5-8DE1-3EE6-BFD3-E8B5698D73A6> /usr/lib/libcompression.dylib
+       0x19b5d5000 -        0x19b5d9267  libQuadrature.dylib (8) <A285FC62-DE15-317B-8451-619953D3660A> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libQuadrature.dylib
+       0x19b5da000 -        0x19c7aa94f  libLAPACK.dylib (1551.100.26) <7275296D-74F2-3020-B2C5-E2EA0E7A6F7A> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libLAPACK.dylib
+       0x19c7ab000 -        0x19c80143f  com.apple.DictionaryServices (1.2 - 382) <1C33980B-2B1B-3374-8DFF-C0589BDA8D37> /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/DictionaryServices.framework/Versions/A/DictionaryServices
+       0x19c802000 -        0x19c8204f7  liblzma.5.dylib (21) <9F5AA0F6-7C29-3699-8AA3-C7B56284D3F4> /usr/lib/liblzma.5.dylib
+       0x19c821000 -        0x19c82285f  libcoretls_cfhelpers.dylib (187.100.3) <236BD946-7627-367C-8150-FCC9297471E1> /usr/lib/libcoretls_cfhelpers.dylib
+       0x19c823000 -        0x19c8965c3  com.apple.APFS (2811.120.14 - 2811.120.14) <37C876CB-358E-3900-A8EF-93D70E577B7C> /System/Library/PrivateFrameworks/APFS.framework/Versions/A/APFS
+       0x19c897000 -        0x19c8a5693  libxar.1.dylib (503) <689E5ED9-2D46-3B4C-8942-B5A6D7495445> /usr/lib/libxar.1.dylib
+       0x19c8a6000 -        0x19c8a979b  libutil.dylib (73) <93D2F3FE-6001-3A87-BF89-3ECABFF334CE> /usr/lib/libutil.dylib
+       0x19c8aa000 -        0x19c8d4cdf  libxslt.1.dylib (21.13) <EABDBD76-C455-3D16-A1EE-4370F95E8D3E> /usr/lib/libxslt.1.dylib
+       0x19c8dd000 -        0x19c956587  libvMisc.dylib (1126.100.7) <73154851-2341-34B7-8214-625C9219A676> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libvMisc.dylib
+       0x19c957000 -        0x19c9e645f  libate.dylib (3.0.9) <30643AB8-BA08-3222-9AD2-64248E503B89> /usr/lib/libate.dylib
+       0x19c9f0000 -        0x19ca031bf  com.apple.CrashReporterSupport (10.13 - 15140) <482F92F1-D855-36EC-8E3D-C084CFA61B27> /System/Library/PrivateFrameworks/CrashReporterSupport.framework/Versions/A/CrashReporterSupport
+       0x19cb47000 -        0x19cb87f9f  com.apple.pluginkit.framework (1.0 - 1) <6A017CC8-84D1-36E5-ADE4-2A2EDC08D67F> /System/Library/PrivateFrameworks/PlugInKit.framework/Versions/A/PlugInKit
+       0x19cbfe000 -        0x19cc469ff  com.apple.AppleVAFramework (6.2.10 - 6.2.10) <6CFBB631-D1EF-3D92-AE69-6758E7BDE4C5> /System/Library/PrivateFrameworks/AppleVA.framework/Versions/A/AppleVA
+       0x19cc47000 -        0x19cc61ccf  libexpat.1.dylib (47) <B7EE1C84-0D24-3B3F-8A1F-94ADDCFE777C> /usr/lib/libexpat.1.dylib
+       0x19cc62000 -        0x19cc6bbd3  libheimdal-asn1.dylib (710.100.4) <AF872616-7404-3D91-BA6B-A723D4269665> /usr/lib/libheimdal-asn1.dylib
+       0x19cd8b000 -        0x19ce4cedf  com.apple.MediaExperience (1.0 - 1) <507B3FE7-C5C1-30DB-935C-C478FF7B4096> /System/Library/PrivateFrameworks/MediaExperience.framework/Versions/A/MediaExperience
+       0x19ce7a000 -        0x19ce897ff  com.apple.GraphVisualizer (1.0 - 307) <6F1E4885-F5B7-3B50-9C33-044B6925A07F> /System/Library/PrivateFrameworks/GraphVisualizer.framework/Versions/A/GraphVisualizer
+       0x19ce8a000 -        0x19cec951f  com.apple.OTSVG (1.0 - 877.4.0.7) <666515E5-7CF8-349D-952E-EDD2210CF63D> /System/Library/PrivateFrameworks/OTSVG.framework/Versions/A/OTSVG
+       0x19ceca000 -        0x19ced6c7f  com.apple.xpc.AppServerSupport (1.0 - 3102.120.13) <AB36D838-16DB-3974-ABEC-220B5026013E> /System/Library/PrivateFrameworks/AppServerSupport.framework/Versions/A/AppServerSupport
+       0x19ced7000 -        0x19ceddabf  libspindump.dylib (419.10) <5EAE94A8-4A96-3DBD-8FC6-DA684427813F> /usr/lib/libspindump.dylib
+       0x19cede000 -        0x19cf9edff  com.apple.Heimdal (4.0 - 2.0) <29B023E7-2213-362C-80BD-8A463A229936> /System/Library/PrivateFrameworks/Heimdal.framework/Versions/A/Heimdal
+       0x19d26d000 -        0x19d2b16ef  com.apple.AppleJPEG (1.0 - 1) <63F815E9-899E-3F5E-8837-43C168F606C6> /System/Library/PrivateFrameworks/AppleJPEG.framework/Versions/A/AppleJPEG
+       0x19d2b2000 -        0x19d47292f  libJP2.dylib (2784.5.4) <A3392AA7-53EF-3B19-9A87-505CBACE40C2> /System/Library/Frameworks/ImageIO.framework/Versions/A/Resources/libJP2.dylib
+       0x19d473000 -        0x19d474e1f  com.apple.WatchdogClient.framework (1.0 - 333) <05DDF467-0A3F-3F3F-821F-3063D15BDDF6> /System/Library/PrivateFrameworks/WatchdogClient.framework/Versions/A/WatchdogClient
+       0x19d475000 -        0x19d4bac1f  com.apple.MultitouchSupport.framework (9450.2 - 9450.2) <20C49E65-4FDC-3FA2-ADD2-8BD540F8849B> /System/Library/PrivateFrameworks/MultitouchSupport.framework/Versions/A/MultitouchSupport
+       0x19d4bb000 -        0x19da1129f  com.apple.VideoToolbox (1.0 - 3320.8.5.1) <0B641B4E-092B-3EC7-A20E-B99157F4DDB7> /System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox
+       0x19da12000 -        0x19da3720f  libAudioToolboxUtility.dylib (1556.604) <8679E444-23B4-3B9F-8D0A-18ACEED541C5> /usr/lib/libAudioToolboxUtility.dylib
+       0x19da38000 -        0x19da6201f  libPng.dylib (2784.5.4) <42EE7A25-5004-3435-A453-0158C53A6C93> /System/Library/Frameworks/ImageIO.framework/Versions/A/Resources/libPng.dylib
+       0x19da63000 -        0x19dac3a77  libTIFF.dylib (2784.5.4) <FC3ACF96-0841-360F-B36A-50A3B08AF198> /System/Library/Frameworks/ImageIO.framework/Versions/A/Resources/libTIFF.dylib
+       0x19dac4000 -        0x19dae3257  com.apple.IOPresentment (67 - 67) <C9C0A630-F275-3ABE-BFE2-86ECE91F83CA> /System/Library/PrivateFrameworks/IOPresentment.framework/Versions/A/IOPresentment
+       0x19dae4000 -        0x19dae87d3  com.apple.GPUWrangler (8.1.12 - 8.1.12) <1644240B-3D71-35E7-AC5B-2A69E6B29535> /System/Library/PrivateFrameworks/GPUWrangler.framework/Versions/A/GPUWrangler
+       0x19dae9000 -        0x19daeb913  libRadiance.dylib (2784.5.4) <86335ED6-B791-37F5-B57E-B6F9C50652D8> /System/Library/Frameworks/ImageIO.framework/Versions/A/Resources/libRadiance.dylib
+       0x19daec000 -        0x19daf12f3  com.apple.DSExternalDisplay (3.1 - 380) <DDF7A5A5-72F8-3580-9FF6-2A02E4ADE864> /System/Library/PrivateFrameworks/DSExternalDisplay.framework/Versions/A/DSExternalDisplay
+       0x19daf2000 -        0x19db1cbaf  libJPEG.dylib (2784.5.4) <5B4F384D-EC75-3A03-BA74-A644FDF3F722> /System/Library/Frameworks/ImageIO.framework/Versions/A/Resources/libJPEG.dylib
+       0x19db4b000 -        0x19db509fb  libGIF.dylib (2784.5.4) <D054410B-09D0-3856-B7CB-EEF320362B0B> /System/Library/Frameworks/ImageIO.framework/Versions/A/Resources/libGIF.dylib
+       0x19db51000 -        0x19db6119f  com.apple.CMCaptureCore (1.0 - 665.120.8) <95190CD1-3456-355B-9369-5604AA49C1F3> /System/Library/PrivateFrameworks/CMCaptureCore.framework/Versions/A/CMCaptureCore
+       0x19ead9000 -        0x19eb4786f  libusrtcp.dylib (5812.121.1) <54F1B848-D6B1-3DB0-B640-FA6A86262C1D> /usr/lib/libusrtcp.dylib
+       0x19eb48000 -        0x19f0e97bf  libswiftCore.dylib (6.3.2 - 6.3.2.1.3) <7669D858-D332-36C7-9C6C-4564FFBEA8D2> /usr/lib/swift/libswiftCore.dylib
+       0x19f19d000 -        0x19f1f217f  libSessionUtility.dylib (398.601) <3D82E6A1-1D29-3274-84DD-BDF36B6F7962> /System/Library/PrivateFrameworks/AudioSession.framework/libSessionUtility.dylib
+       0x19f1f3000 -        0x19f3c7c3f  com.apple.audio.toolbox.AudioToolbox (1.14 - 1.14) <B0ED86EE-4A99-3D39-AFC1-BC3361F630D8> /System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox
+       0x19f3c8000 -        0x19f448b7f  com.apple.audio.AudioSession (1.0 - 398.601) <23137B46-437B-382A-BF06-17C82F58149B> /System/Library/PrivateFrameworks/AudioSession.framework/Versions/A/AudioSession
+       0x19f449000 -        0x19f46239f  libAudioStatistics.dylib (262.601) <9AD96BE7-444B-3641-9B75-8F4EE1A686BF> /usr/lib/libAudioStatistics.dylib
+       0x19f4d9000 -        0x19f4f519b  libresolv.9.dylib (96) <90D545B0-52B4-335D-A075-4A7B83C01FC8> /usr/lib/libresolv.9.dylib
+       0x19f4f6000 -        0x19f5087e7  libsasl2.2.dylib (215) <28BFB13B-08D2-3705-A634-B4E888613489> /usr/lib/libsasl2.2.dylib
+       0x19f6f1000 -        0x19f7d1337  libSMC.dylib (38) <CD66132B-7D67-36D2-82BC-FFFACBAAF05A> /usr/lib/libSMC.dylib
+       0x19f831000 -        0x19f83dc17  com.apple.NetAuth (6.2 - 6.2) <F039515C-B344-37B5-B705-E58B48AD3C5D> /System/Library/PrivateFrameworks/NetAuth.framework/Versions/A/NetAuth
+       0x19f84c000 -        0x19f859b1f  com.apple.perfdata (1.0 - 130) <63F6F6B4-A2A8-3647-BDEB-50508AE91B8F> /System/Library/PrivateFrameworks/perfdata.framework/Versions/A/perfdata
+       0x19f85a000 -        0x19f867c9f  libperfcheck.dylib (46) <F900A796-0FF7-3195-85CF-80D62DF5C477> /usr/lib/libperfcheck.dylib
+       0x19f868000 -        0x19f879187  com.apple.Kerberos (3.0 - 1) <D81F4821-8D01-394B-812B-657C3114A356> /System/Library/Frameworks/Kerberos.framework/Versions/A/Kerberos
+       0x19f87a000 -        0x19f8cbaaf  com.apple.GSS (4.0 - 2.0) <9149B4E1-8502-3A93-9944-61323F4725E1> /System/Library/Frameworks/GSS.framework/Versions/A/GSS
+       0x19f8cc000 -        0x19f8dcd6f  com.apple.CommonAuth (4.0 - 2.0) <B703DB83-34E2-3728-89DF-41421EC67747> /System/Library/PrivateFrameworks/CommonAuth.framework/Versions/A/CommonAuth
+       0x19f8dd000 -        0x19f9c101f  com.apple.MobileAssets (1.0 - 1837.121.1) <95D9C5B8-40A8-3F25-B1FC-C4468D133923> /System/Library/PrivateFrameworks/MobileAsset.framework/Versions/A/MobileAsset
+       0x19fa54000 -        0x19fa63160  com.apple.CorePhoneNumbers (1.0 - 1) <CF1CBC2C-A525-3C79-B709-D5C23B2CB33A> /System/Library/PrivateFrameworks/CorePhoneNumbers.framework/Versions/A/CorePhoneNumbers
+       0x1a163f000 -        0x1a1732a36  com.apple.combine (1.0 - 3023) <D757C287-429D-3F70-B903-C942A00F2DAA> /System/Library/Frameworks/Combine.framework/Versions/A/Combine
+       0x1a3980000 -        0x1a398086f  com.apple.Accelerate.vecLib (3.11 - vecLib 3.11) <46556F2E-DD6B-3A4A-B2A3-4F844ED123EC> /System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/vecLib
+       0x1a39a5000 -        0x1a39a598f  com.apple.CoreServices (1226 - 1226) <FF182FDE-8926-3DFB-8D12-C1258443F67F> /System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices
+       0x1a3c24000 -        0x1a3c24417  com.apple.Accelerate (1.11 - Accelerate 1.11) <1DF31AEA-3D8E-382D-9493-D74635AA1CD4> /System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate
+       0x1a4b20000 -        0x1a4b2f5df  com.apple.SymptomDiagnosticReporter (1.0 - 411.120.4) <FF9F1A47-EE31-3182-9AA1-4D325D6DA8A0> /System/Library/PrivateFrameworks/SymptomDiagnosticReporter.framework/Versions/A/SymptomDiagnosticReporter
+       0x1a4b30000 -        0x1a4b5e25f  com.apple.PowerLog (1.0 - 1) <BE05FF5C-4DE3-3B2C-B20F-BC5D46938816> /System/Library/PrivateFrameworks/PowerLog.framework/Versions/A/PowerLog
+       0x1a4b6c000 -        0x1a4c1d6df  com.apple.DiscRecording (9.0.3 - 9030.4.5) <BCE71519-708B-3376-B013-2B691BD174AC> /System/Library/Frameworks/DiscRecording.framework/Versions/A/DiscRecording
+       0x1a4c1e000 -        0x1a4c4f137  com.apple.MediaKit (16 - 938) <A01852D0-D4E4-30EC-A47C-3B0AB6711F2F> /System/Library/PrivateFrameworks/MediaKit.framework/Versions/A/MediaKit
+       0x1a5711000 -        0x1a5727950  libswiftDispatch.dylib (1542.100.32) <460CFC58-0973-3A20-B504-A0A294C1E16D> /usr/lib/swift/libswiftDispatch.dylib
+       0x1a5a72000 -        0x1a5afec3f  com.apple.BoardServices (1.0 - 732.1.1) <B4561AEC-EE52-3447-960B-4D2F2F3EF720> /System/Library/PrivateFrameworks/BoardServices.framework/Versions/A/BoardServices
+       0x1a5b3f000 -        0x1a5b4c53f  com.apple.GraphicsServices (1.0 - 1.0) <4236E533-C3F8-340F-A462-F15D599395A8> /System/Library/PrivateFrameworks/GraphicsServices.framework/Versions/A/GraphicsServices
+       0x1a5e68000 -        0x1a5e89e9f  com.apple.DebugSymbols (216 - 217) <13499229-A245-3C95-AC94-1DB8B274CF09> /System/Library/PrivateFrameworks/DebugSymbols.framework/Versions/A/DebugSymbols
+       0x1a5e8a000 -        0x1a5fe6ddf  com.apple.CoreSymbolication (16.0 - 64575.53.2) <C2CC83D4-7E1C-3E78-AEC8-1ABDE74F9FAD> /System/Library/PrivateFrameworks/CoreSymbolication.framework/Versions/A/CoreSymbolication
+       0x1a5fe7000 -        0x1a5ff109f  com.apple.CoreTime (334.0.16.3 - 334.0.16.3) <FD342B51-EA5D-388C-9BAB-29F7670FE3FB> /System/Library/PrivateFrameworks/CoreTime.framework/Versions/A/CoreTime
+       0x1a793f000 -        0x1a79b159f  com.apple.BackBoardServices (1.0 - 1.0) <DDC32AF8-8864-3DE0-A855-5283510925B9> /System/Library/PrivateFrameworks/BackBoardServices.framework/Versions/A/BackBoardServices
+       0x1a79b2000 -        0x1a79ed4ef  com.apple.LDAPFramework (2.4.28 - 194.5) <53F32E19-D2E6-3256-9206-75B92E519199> /System/Library/Frameworks/LDAP.framework/Versions/A/LDAP
+       0x1a79ee000 -        0x1a79ef7b7  com.apple.TrustEvaluationAgent (2.0 - 38) <B2593AAA-A99A-30C1-A0FC-3315ACC16951> /System/Library/PrivateFrameworks/TrustEvaluationAgent.framework/Versions/A/TrustEvaluationAgent
+       0x1a7b1d000 -        0x1a7bd657f  com.apple.DiskImagesFramework (683.100.3 - 683.100.3) <C8288C8D-4483-3393-B249-E952FFAF1EBE> /System/Library/PrivateFrameworks/DiskImages.framework/Versions/A/DiskImages
+       0x1a7c17000 -        0x1a7c2d5bf  com.apple.RemoteServiceDiscovery (1.0 - 219.120.2) <CA4D9399-0E89-3014-92DD-B722678ED9F6> /System/Library/PrivateFrameworks/RemoteServiceDiscovery.framework/Versions/A/RemoteServiceDiscovery
+       0x1a7c2e000 -        0x1a7c43c3f  com.apple.xpc.RemoteXPC (1.0 - 3102.120.13) <8CA8360A-FE67-33A5-AEE4-097AEE5B945C> /System/Library/PrivateFrameworks/RemoteXPC.framework/Versions/A/RemoteXPC
+       0x1a7cd8000 -        0x1a7d58f43  libcurl.4.dylib (166.0.0.0.1) <2F97CC24-F631-37B1-83CA-54632BF597FE> /usr/lib/libcurl.4.dylib
+       0x1a7d5f000 -        0x1a7da225f  com.apple.AppSupport (1.0.0 - 29) <7410CCEF-077F-37FF-B0B0-5D65B0D2F66C> /System/Library/PrivateFrameworks/AppSupport.framework/Versions/A/AppSupport
+       0x1a8073000 -        0x1a8075f3f  com.apple.InternationalTextSearch (1.0 - 1) <F227A966-D677-379F-BAEF-89DC18A81AB7> /System/Library/PrivateFrameworks/InternationalTextSearch.framework/Versions/A/InternationalTextSearch
+       0x1a8646000 -        0x1a86463f7  libHeimdalProxy.dylib (88) <A963CA1C-050B-3E90-B2FF-D7989435DB5D> /System/Library/Frameworks/Kerberos.framework/Versions/A/Libraries/libHeimdalProxy.dylib
+       0x1a8671000 -        0x1a868fb9f  com.apple.StreamingZip (1.0 - 1) <F297C9A4-AEDF-3553-B20E-CD7DFC54CC0B> /System/Library/PrivateFrameworks/StreamingZip.framework/Versions/A/StreamingZip
+       0x1a86e9000 -        0x1a86ec6bf  libswiftObjectiveC.dylib (951.7) <32C98979-0F18-3513-AFAB-2F5D2B9ED0B9> /usr/lib/swift/libswiftObjectiveC.dylib
+       0x1a86ed000 -        0x1a870a6ff  libswiftos.dylib (1082) <49255E53-3F00-3F06-A64A-76A63C798956> /usr/lib/swift/libswiftos.dylib
+       0x1a9654000 -        0x1a96e285f  com.apple.proactive.support.ProactiveSupport (1.0 - 418.1) <29BBA828-5852-3A0C-94D9-C03990CB86CA> /System/Library/PrivateFrameworks/ProactiveSupport.framework/Versions/A/ProactiveSupport
+       0x1a97df000 -        0x1a980329f  com.apple.ASEProcessing (1.55.0 - 1.55.0) <9271A817-7C78-3210-8B0C-91A552667200> /System/Library/PrivateFrameworks/ASEProcessing.framework/Versions/A/ASEProcessing
+       0x1aaa62000 -        0x1aab30c1f  com.apple.audio.midi.CoreMIDI (2.0 - 88) <F649A68B-864A-3F02-959A-69FD9980B29C> /System/Library/Frameworks/CoreMIDI.framework/Versions/A/CoreMIDI
+       0x1ab770000 -        0x1ab77475f  com.apple.IOSurfaceAccelerator (1.0.0 - 1.0.0) <70103161-0443-3F67-85D7-BD25455F271F> /System/Library/PrivateFrameworks/IOSurfaceAccelerator.framework/Versions/A/IOSurfaceAccelerator
+       0x1b0618000 -        0x1b062b9ff  com.apple.HID (1.0 - 1) <E5C2582B-2B2A-3B7E-A473-DF40A707C4C8> /System/Library/PrivateFrameworks/HID.framework/Versions/A/HID
+       0x1b50d3000 -        0x1b50e21ff  com.apple.NetFS (6.0 - 4.0) <EC590F25-F5DD-35D6-A594-4BE577637264> /System/Library/Frameworks/NetFS.framework/Versions/A/NetFS
+       0x1b562e000 -        0x1b5630707  libswiftDarwin.dylib (377.120.8) <F2EED553-64EC-398C-98BA-32EFDFAE0FC3> /usr/lib/swift/libswiftDarwin.dylib
+       0x1b768e000 -        0x1b77774bf  libquic.dylib (5812.121.1) <18372066-7FBC-34AD-AD6B-A7D31A879F8D> /usr/lib/libquic.dylib
+       0x1b7783000 -        0x1b77abeff  com.apple.private.SystemPolicy (1.0 - 1) <3B04FCE5-C2EF-3F95-94B5-C2E838F8F8F1> /System/Library/PrivateFrameworks/SystemPolicy.framework/Versions/A/SystemPolicy
+       0x1b8658000 -        0x1b86e6bff  com.apple.LoggingSupport (1.0 - 1861.120.4) <2619A5F3-D97D-3946-B49A-5FA3164FB197> /System/Library/PrivateFrameworks/LoggingSupport.framework/Versions/A/LoggingSupport
+       0x1b86e7000 -        0x1b86f3acb  com.apple.MallocStackLogging (1.0 - 65000) <782A39D3-C9FD-3E0B-B8FB-26E5D749BE57> /System/Library/PrivateFrameworks/MallocStackLogging.framework/Versions/A/MallocStackLogging
+       0x1b8719000 -        0x1b8771b3f  libmis.dylib (463.100.17) <B0F26447-E3DF-33C0-AF33-1109BD0701EA> /usr/lib/libmis.dylib
+       0x1b8772000 -        0x1b8775c5f  com.apple.gpusw.GPURawCounter (34 - 34) <A0191D2E-4C57-30F7-A206-78FB4188D01E> /System/Library/PrivateFrameworks/GPURawCounter.framework/Versions/A/GPURawCounter
+       0x1b8776000 -        0x1b879587f  libswiftCoreAudio.dylib (411.601) <23AF0BE1-B688-3E32-90BB-920D0C00036A> /usr/lib/swift/libswiftCoreAudio.dylib
+       0x1b8796000 -        0x1b879c327  libswiftCoreFoundation.dylib (2411) <4C233FFB-F11A-34AA-9515-74C21E8EE968> /usr/lib/swift/libswiftCoreFoundation.dylib
+       0x1b87a9000 -        0x1b87f5843  libswiftXPC.dylib (128.120.2) <0AA69D52-271B-38E0-A156-8BD7F73A4C9C> /usr/lib/swift/libswiftXPC.dylib
+       0x1b87f7000 -        0x1b87f78a3  libswiftIOKit.dylib (1) <D47B9CC1-B622-31ED-8957-FA79ED1718CE> /usr/lib/swift/libswiftIOKit.dylib
+       0x1ba824000 -        0x1ba85d2c7  libbootpolicy.dylib (289.100.5) <53AF23CF-CBCF-35E7-A3D6-1C4742A617AD> /usr/lib/libbootpolicy.dylib
+       0x1bc2e8000 -        0x1bc2ff88b  libswiftsimd.dylib (23) <C949C0B7-988E-3352-9778-3568FC2BC4EA> /usr/lib/swift/libswiftsimd.dylib
+       0x1bda0d000 -        0x1bda1637f  com.apple.IOAccelMemoryInfo (1.0 - 1) <3DFF5F1E-C080-3C9D-A8C5-3C56854BD24D> /System/Library/PrivateFrameworks/IOAccelMemoryInfo.framework/Versions/A/IOAccelMemoryInfo
+       0x1bf0d0000 -        0x1bf0d90be  libswiftCoreMIDI.dylib (6) <68160211-1089-3958-A8A1-3E8B3C389499> /usr/lib/swift/libswiftCoreMIDI.dylib
+       0x1bf8bc000 -        0x1bf8c2bbf  com.apple.MSUDataAccessor (1.0 - 1) <B73070EE-3FE8-354E-A3BB-84894636D3BA> /System/Library/PrivateFrameworks/MSUDataAccessor.framework/Versions/A/MSUDataAccessor
+       0x1bfce4000 -        0x1bfd46a5f  com.apple.SoftwareUpdateCoreSupport (1.0 - 1) <34E714DF-AC10-3E52-862E-7FD8AE96EFA7> /System/Library/PrivateFrameworks/SoftwareUpdateCoreSupport.framework/Versions/A/SoftwareUpdateCoreSupport
+       0x1c3808000 -        0x1c385f23f  com.apple.biome.BiomeFoundation (1.0 - 209.18) <6F0943D8-345B-328C-8A5E-8D10B3BC3CC3> /System/Library/PrivateFrameworks/BiomeFoundation.framework/Versions/A/BiomeFoundation
+       0x1c6737000 -        0x1c6744a1f  libswiftMetal.dylib (373.2) <16B01E1B-6BDD-3C6B-9A8B-495C3B661B9B> /usr/lib/swift/libswiftMetal.dylib
+       0x1c6745000 -        0x1c674be05  libswiftCompression.dylib (11) <5EA10BB9-2198-33D7-811A-BE5EAE0A2EED> /usr/lib/swift/libswiftCompression.dylib
+       0x1c7676000 -        0x1c7720d5f  libFDR.dylib (1499.100.48) <62340EBF-17DB-3393-9653-003A30263E5D> /usr/lib/libFDR.dylib
+       0x1c77a2000 -        0x1c7d6ce9f  com.apple.biome.BiomeStreams (1.0 - 209.18) <B05E6A84-BC87-3977-B790-2391073FF393> /System/Library/PrivateFrameworks/BiomeStreams.framework/Versions/A/BiomeStreams
+       0x1c8240000 -        0x1c82548ff  com.apple.SoftwareUpdateCoreConnect (1.0 - 1) <8B5F0FE6-EFC0-32B3-8414-6E67E97CCD87> /System/Library/PrivateFrameworks/SoftwareUpdateCoreConnect.framework/Versions/A/SoftwareUpdateCoreConnect
+       0x1ca691000 -        0x1ca6fbc1f  com.apple.osanalytics.OSAnalytics (1.0 - 1) <D3398082-B264-37E9-B546-1BB0DE974E81> /System/Library/PrivateFrameworks/OSAnalytics.framework/Versions/A/OSAnalytics
+       0x1cbb2b000 -        0x1cbb2cf9f  libswiftQuartzCore.dylib (5) <481AAE69-579E-3DF4-B1F0-113E54B8EAA9> /usr/lib/swift/libswiftQuartzCore.dylib
+       0x1cbf1e000 -        0x1cbf238e7  com.apple.kperf (1.0 - 1) <23264FF1-B323-3B46-893D-42378F45FE8A> /System/Library/PrivateFrameworks/kperf.framework/Versions/A/kperf
+       0x1cc035000 -        0x1cc03a63f  com.apple.MobileSystemServices (1.0 - 1) <05D57959-6BE2-3FFE-A842-09A3FA930624> /System/Library/PrivateFrameworks/MobileSystemServices.framework/Versions/A/MobileSystemServices
+       0x1cd626000 -        0x1cd64829f  libamsupport.dylib (434.120.4) <C01C56CE-81B4-308E-A1BE-07C445941133> /usr/lib/libamsupport.dylib
+       0x1cda24000 -        0x1cda840bf  com.apple.biome.BiomePubSub (1.0 - 209.18) <5BA2374F-9154-3DC4-A761-D3C6E167F148> /System/Library/PrivateFrameworks/BiomePubSub.framework/Versions/A/BiomePubSub
+       0x1cda85000 -        0x1cdac7fff  com.apple.biome.BiomeStorage (1.0 - 209.18) <A69679B4-A9DF-39B0-B361-F116246BB7D7> /System/Library/PrivateFrameworks/BiomeStorage.framework/Versions/A/BiomeStorage
+       0x1d05be000 -        0x1d05cd13f  libswiftUniformTypeIdentifiers.dylib (877.5.1) <BD304D00-8CE3-3528-914A-DBAD4831A95E> /usr/lib/swift/libswiftUniformTypeIdentifiers.dylib
+       0x1d05ce000 -        0x1d0693a9b  libswiftAccelerate.dylib (77.100.2) <4A2ADA9C-22FB-307F-AA1E-1D85F1579BCF> /usr/lib/swift/libswiftAccelerate.dylib
+       0x1d07e8000 -        0x1d07f911f  libpartition2_dynamic.dylib (3476.120.8.0.2) <B57303C4-A549-35C8-9857-DEAC6891A79D> /usr/lib/libpartition2_dynamic.dylib
+       0x1d0d55000 -        0x1d0d5ffdf  com.apple.AFKUser (1.0 - 1) <51F853F3-E890-3D4D-A00D-12C7869B9B22> /System/Library/PrivateFrameworks/AFKUser.framework/Versions/A/AFKUser
+       0x1d4749000 -        0x1d47aa75f  libswiftCoreMedia.dylib (3320.8.5.1) <1FA37857-B3AE-320D-A11A-675B3739BA08> /usr/lib/swift/libswiftCoreMedia.dylib
+       0x1d5efc000 -        0x1d5efdbbf  libswiftOSLog.dylib (10) <964AB4ED-4361-33BF-949F-C7DE591C5EBE> /usr/lib/swift/libswiftOSLog.dylib
+       0x1d9fcb000 -        0x1da0d7d5f  com.apple.Symbolication (16.0 - 64575.70.1) <1BAEF090-27B4-316B-8C9F-E891180781AE> /System/Library/PrivateFrameworks/Symbolication.framework/Versions/A/Symbolication
+       0x1de60d000 -        0x1de61d3df  com.apple.OSLog (1.0 - 1861.120.4) <68746C62-44B2-377E-BB29-B0B4A6A92B5F> /System/Library/Frameworks/OSLog.framework/Versions/A/OSLog
+       0x1de91f000 -        0x1dea3075f  com.apple.InternalSwiftProtobuf (1.0 - 1.26.0) <41595ABE-4110-3482-8DA3-839277732E08> /System/Library/PrivateFrameworks/InternalSwiftProtobuf.framework/Versions/A/InternalSwiftProtobuf
+       0x1deaf6000 -        0x1deb010bf  com.apple.HIDDisplay (1.0 - 1) <E74DCF87-47C7-326B-A77B-1CBB94583B79> /System/Library/PrivateFrameworks/HIDDisplay.framework/Versions/A/HIDDisplay
+       0x1e6ae8000 -        0x1e6ae8af3  com.apple.FeatureFlags (1.0 - 103) <9F17EE22-3F47-3F98-A9B9-1C46372AEE83> /System/Library/PrivateFrameworks/FeatureFlags.framework/Versions/A/FeatureFlags
+       0x1f01fb000 -        0x1f01fd5bf  com.apple.ConfigProfileHelper (18.0 - 1800) <097D7995-F903-3DA6-91D6-31952FBB2D32> /System/Library/PrivateFrameworks/ConfigProfileHelper.framework/Versions/A/ConfigProfileHelper
+       0x230962000 -        0x2309692a3  libCoreFSCache.dylib (352.1) <6B2BF8F5-A992-3C28-9BCE-CDC8E4D40E78> /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libCoreFSCache.dylib
+       0x23096a000 -        0x23096f947  libCoreVMClient.dylib (352.1) <5E0DFF0A-81BA-36FB-9AD5-E3494D15B2CA> /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libCoreVMClient.dylib
+       0x230970000 -        0x2309802b7  com.apple.opengl (23.1.1 - 23.1.1) <E473AA13-611E-32CB-A676-213173E3AA9E> /System/Library/Frameworks/OpenGL.framework/Versions/A/OpenGL
+       0x230981000 -        0x2309837bf  libCVMSPluginSupport.dylib (23.1.1) <B2CF6AE8-6BAA-3374-BF7E-311343B0104D> /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libCVMSPluginSupport.dylib
+       0x230984000 -        0x23098c4ff  libGFXShared.dylib (23.1.1) <C699C599-0DD8-302A-A96F-3C50B9BD5BC7> /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGFXShared.dylib
+       0x23098d000 -        0x2309c054b  libGLImage.dylib (23.1.1) <FC8B70C2-0EAE-303D-AF43-459CA7FB4B15> /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGLImage.dylib
+       0x2309c1000 -        0x2309fa5bf  libGLU.dylib (23.1.1) <04FFC1B1-DD4D-3355-8EBD-FEA62D339822> /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGLU.dylib
+       0x230b51000 -        0x230b5abc7  libGL.dylib (23.1.1) <110554B2-60B8-39FE-B33B-27CE9F4E5F05> /System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/libGL.dylib
+       0x2329ec000 -        0x232b5ff1f  com.apple.ExtensionFoundation (97 - 97) <A3567BE3-4AA2-3554-81AE-FE7EF41E535B> /System/Library/Frameworks/ExtensionFoundation.framework/Versions/A/ExtensionFoundation
+       0x233dd0000 -        0x233e12a1f  com.apple.LightweightCodeRequirements (1.0 - 1) <DB4F053F-0498-30C7-B2B9-697925B9F03B> /System/Library/Frameworks/LightweightCodeRequirements.framework/Versions/A/LightweightCodeRequirements
+       0x234c36000 -        0x234c541ff  com.apple.MPSBenchmarkLoop (1.0 - 1) <A8171300-A2FE-39A3-8166-5ED347A9CD56> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSBenchmarkLoop.framework/Versions/A/MPSBenchmarkLoop
+       0x234c55000 -        0x234c68e7f  com.apple.MPSFunctions (1.0 - 1) <C50883F0-037D-3888-BC83-5DC5EEE82345> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSFunctions.framework/Versions/A/MPSFunctions
+       0x234c69000 -        0x234c6e53f  com.apple.MPSHost (1.0 - 1) <7A6AC05D-88B2-31A8-A0A7-F876BF0451B1> /System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSHost.framework/Versions/A/MPSHost
+       0x237f16000 -        0x2380824bf  com.apple.SwiftData (1.0 - 135) <69089200-C33B-348E-8E66-8C5954BCF335> /System/Library/Frameworks/SwiftData.framework/Versions/A/SwiftData
+       0x23eb63000 -        0x23eb77abf  com.apple.AppleDeviceQuerySupport (1.0 - 408.120.3) <B517FF44-3D3C-333E-BA06-5BF7F91B6D7E> /System/Library/PrivateFrameworks/AppleDeviceQuerySupport.framework/Versions/A/AppleDeviceQuerySupport
+       0x23f2f3000 -        0x23f36e1d6  com.apple.AppleKeyStore (1.0 - 1.0) <0DE316FC-3C90-3738-8C19-A74D6E247698> /System/Library/PrivateFrameworks/AppleKeyStore.framework/Versions/A/AppleKeyStore
+       0x23fc9a000 -        0x23fcb29df  com.apple.private.AppleMobileFileIntegrity-fmk (1.0 - 1) <9B11DD7D-75DD-3784-945A-411BAED10953> /System/Library/PrivateFrameworks/AppleMobileFileIntegrity.framework/Versions/A/AppleMobileFileIntegrity
+       0x2401ac000 -        0x2401be799  com.apple.AtomicsInternal (1.1.0 - 5026.5.5) <5BFF8B6A-704D-3822-804F-ED870A72A295> /System/Library/PrivateFrameworks/AtomicsInternal.framework/Versions/A/AtomicsInternal
+       0x24027b000 -        0x24029ddff  com.apple.imgaudio.AudioAnalytics (1.0 - 1) <8B4F7F16-1296-3152-A4E2-A360ACAE9622> /System/Library/PrivateFrameworks/AudioAnalytics.framework/Versions/A/AudioAnalytics
+       0x2408df000 -        0x2409277df  com.apple.BackBoardHIDEventFoundation (1.0 - 1) <0F0C872C-C531-3898-95BF-3BF1817C87FC> /System/Library/PrivateFrameworks/BackBoardHIDEventFoundation.framework/Versions/A/BackBoardHIDEventFoundation
+       0x2409c0000 -        0x2409d98df  com.apple.biome.BiomeDSL (1.0 - 209.18) <F43D5A2A-4470-3827-8CCD-3E7AAA76242E> /System/Library/PrivateFrameworks/BiomeDSL.framework/Versions/A/BiomeDSL
+       0x2409da000 -        0x24128c19f  com.apple.BiomeLibrary (274.57) <9C4145CD-3C99-35D4-930E-8F0BA4D34596> /System/Library/PrivateFrameworks/BiomeLibrary.framework/Versions/A/BiomeLibrary
+       0x24128d000 -        0x241292b5f  com.apple.biome.BiomeSync (1.0 - 209.18) <BD7C9096-8861-331A-BBD3-FC18BE64D611> /System/Library/PrivateFrameworks/BiomeSync.framework/Versions/A/BiomeSync
+       0x2428c3000 -        0x24295b8bf  com.apple.biome.CascadeSets (1.0 - 209.18) <137A490E-E366-31C3-A126-FDB5550738F7> /System/Library/PrivateFrameworks/CascadeSets.framework/Versions/A/CascadeSets
+       0x243d13000 -        0x243e514ee  com.apple.CollectionsInternal (1.2.0 - 5026.5.5) <9691DBE8-E342-36B5-8BC3-65954843303A> /System/Library/PrivateFrameworks/CollectionsInternal.framework/Versions/A/CollectionsInternal
+       0x24b3bc000 -        0x24b3cf49f  com.apple.DeviceRecovery (1.0 - 1) <785D04A0-C0D8-3364-BDA5-560381C6553E> /System/Library/PrivateFrameworks/DeviceRecovery.framework/Versions/A/DeviceRecovery
+       0x24d65a000 -        0x24d65d2ff  com.apple.FontServices (1.0 - 1) <A46AB82E-AF94-37A8-A8D8-48B6689934EB> /System/Library/PrivateFrameworks/FontServices.framework/Versions/A/FontServices
+       0x24d65e000 -        0x24d74de2f  libXTFontStaticRegistryData.dylib (335.4.0.6) <9092FEA3-2DFB-32A9-BEFB-01B43E166C48> /System/Library/PrivateFrameworks/FontServices.framework/libXTFontStaticRegistryData.dylib
+       0x24d74f000 -        0x24d75bc9f  com.apple.FramePacing (1.0 - 1) <0CEB865C-17EB-3C26-B9C0-CE3689942DB2> /System/Library/PrivateFrameworks/FramePacing.framework/Versions/A/FramePacing
+       0x24e87d000 -        0x24e882f07  libGPUCompilerUtils.dylib (32023.884) <C4FEB8D0-1E65-3664-8CBE-0FFAB464AABC> /System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/32023/Libraries/libGPUCompilerUtils.dylib
+       0x252cf0000 -        0x252d2f797  libllvm-flatbuffers.dylib (32023.884) <DA37B086-97F7-3DC1-AA07-442AECCB1666> /System/Library/PrivateFrameworks/GPUCompiler.framework/Versions/32023/Libraries/libllvm-flatbuffers.dylib
+       0x25a60e000 -        0x25a7172df  com.apple.InstalledContentLibrary (1.0 - 1.0) <AEEEDDBF-FCD1-3251-B0E9-940CE296B1E1> /System/Library/PrivateFrameworks/InstalledContentLibrary.framework/Versions/A/InstalledContentLibrary
+       0x25d039000 -        0x25d807cbf  com.apple.IntelligencePlatformLibrary (274.57) <A1865439-B63E-3211-A2C4-DAE7F7D25698> /System/Library/PrivateFrameworks/IntelligencePlatformLibrary.framework/Versions/A/IntelligencePlatformLibrary
+       0x25f0e9000 -        0x25f77f923  com.apple.MIL (3520.4 - 3520.4.1) <43AB1D6B-D19B-3115-A2C0-25DF31A5786E> /System/Library/PrivateFrameworks/MIL.framework/Versions/A/MIL
+       0x2642f5000 -        0x264356abf  com.apple.MessageSecurity (1.0 - 195.121.2) <0BAED8A7-51DE-39EE-9686-893CE0916B1B> /System/Library/PrivateFrameworks/MessageSecurity.framework/Versions/A/MessageSecurity
+       0x269356000 -        0x26937fb1f  com.apple.OSEligibility (319.121.1) <5C282C8D-F611-3A3F-B0C2-A9F376FE029F> /System/Library/PrivateFrameworks/OSEligibility.framework/Versions/A/OSEligibility
+       0x269fe2000 -        0x26a0fa85f  com.apple.ParsingInternal (0.0.1 - 5026.5.5) <7FD0C201-E1CC-3F69-AD54-681B3CD37313> /System/Library/PrivateFrameworks/ParsingInternal.framework/Versions/A/ParsingInternal
+       0x26d48f000 -        0x26d4b0e1f  com.apple.accessibility.PhotosensitivityProcessing (1.0 - 1) <EA136E97-3E2F-371B-A65D-A0BD5E1898D8> /System/Library/PrivateFrameworks/PhotosensitivityProcessing.framework/Versions/A/PhotosensitivityProcessing
+       0x26d8a3000 -        0x26d8dfa3c  com.apple.PoirotSQLite (1.0 - 1) <F6CD54D6-1342-3624-9949-5690E8135D66> /System/Library/PrivateFrameworks/PoirotSQLite.framework/Versions/A/PoirotSQLite
+       0x26d8e0000 -        0x26d94d25f  com.apple.PoirotSchematizer (1.0 - 1) <31B04A5B-1569-37D6-B5E3-22CA260A9A41> /System/Library/PrivateFrameworks/PoirotSchematizer.framework/Versions/A/PoirotSchematizer
+       0x26d94e000 -        0x26d983bff  com.apple.PoirotUDFs (1.0 - 1) <257AE39F-8DAA-36F7-A806-1A38920A0131> /System/Library/PrivateFrameworks/PoirotUDFs.framework/Versions/A/PoirotUDFs
+       0x26eb1c000 -        0x26ec5811f  com.apple.ProDisplayLibrary (10.4.28 - 10.4.28) <C91E3E87-39F7-3515-8D68-33537486959D> /System/Library/PrivateFrameworks/ProDisplayLibrary.framework/Versions/A/ProDisplayLibrary
+       0x26fc12000 -        0x26fc1a4df  com.apple.ReflectionInternal (1.0.0 - 5026.5.5) <EA5C8DB0-0187-3AB8-80B0-5AC888E8CDB1> /System/Library/PrivateFrameworks/ReflectionInternal.framework/Versions/A/ReflectionInternal
+       0x270b65000 -        0x270b789d7  com.apple.RuntimeInternal (1.0.0 - 5026.5.5) <04ADBC99-92B0-32EE-98A8-A4D73DCCCE6C> /System/Library/PrivateFrameworks/RuntimeInternal.framework/Versions/A/RuntimeInternal
+       0x270db7000 -        0x270e24abf  com.apple.SILManager (53.19 - 53.19) <4D5E48C2-F64C-3E12-B831-9D3BAE05317F> /System/Library/PrivateFrameworks/SILManager.framework/Versions/A/SILManager
+       0x27c292000 -        0x27c2be4a1  com.apple.security.SwiftASN1Internal (1.0 - 1) <B9F3D5F5-9880-3CFB-B799-1A2DE78AD70B> /System/Library/PrivateFrameworks/SwiftASN1Internal.framework/Versions/A/SwiftASN1Internal
+       0x27f6e5000 -        0x27f7211df  com.apple.tightbeam (1.0 - 483.100.88) <AC90942B-457E-3814-959B-85EFAACBCA58> /System/Library/PrivateFrameworks/Tightbeam.framework/Versions/A/Tightbeam
+       0x283e55000 -        0x283e562cf  com.apple.VideoToolboxParavirtualizationSupport (64.4.7 - 64.4.7) <C881C3D9-A5B6-36D5-B11A-4EE6D037DD24> /System/Library/PrivateFrameworks/VideoToolboxParavirtualizationSupport.framework/Versions/A/VideoToolboxParavirtualizationSupport
+       0x28e0bc000 -        0x28e15635f  libAppleArchive.dylib (450.100.4) <0FBEE8ED-BE69-3AC5-AC4E-6C28EEC29CF6> /usr/lib/libAppleArchive.dylib
+       0x28e211000 -        0x28e21b45f  libCoreEntitlements.dylib (80.100.6) <C9580199-FB51-35A3-AFCE-D4B3464E6E23> /usr/lib/libCoreEntitlements.dylib
+       0x28e507000 -        0x28e50e87f  libReverseProxyDevice.dylib (104.120.1.0.1) <37A5DD0C-9615-3BBD-8A88-0451A406D25F> /usr/lib/libReverseProxyDevice.dylib
+       0x28e50f000 -        0x28e516349  libRosetta.dylib (367.9) <8651ED4F-6506-3788-B56B-32EE414A85CA> /usr/lib/libRosetta.dylib
+       0x28e57e000 -        0x28e5873ff  libTLE.dylib (80.100.6) <207A2987-1BD0-3E47-B72C-E81934A6C74C> /usr/lib/libTLE.dylib
+       0x28ed83000 -        0x28ee94b17  libcrypto.46.dylib (109.100.2) <F9685724-6622-3592-8336-B3811B583E83> /usr/lib/libcrypto.46.dylib
+       0x28efcf000 -        0x28efeb762  libhvf.dylib (11) <43426C58-BE90-3643-9103-B9EE4A06A18A> /usr/lib/libhvf.dylib
+       0x28f922000 -        0x28f95a527  libssl.48.dylib (109.100.2) <83762FDF-B375-3BB1-B568-854F8F11CF89> /usr/lib/libssl.48.dylib
+       0x28f995000 -        0x28f9c316f  libswiftPrespecialized.dylib (0) <1CC9F48A-BC65-37E0-88A5-260C70D14A8F> /usr/lib/libswiftPrespecialized.dylib
+       0x28fc5f000 -        0x28fc71043  libswiftDistributed.dylib (6.3.2 - 6.3.2.1.3) <67A11C98-0E0D-3DF8-846F-34276C54ECF3> /usr/lib/swift/libswiftDistributed.dylib
+       0x28fc88000 -        0x28fc97ebc  libswiftObservation.dylib (6.3.2 - 6.3.2.1.3) <CE9EF53F-E72B-32EC-A1F9-8EBE59A4F1BA> /usr/lib/swift/libswiftObservation.dylib
+       0x28fdc4000 -        0x28fdd78ef  libswiftSynchronization.dylib (6.3.2 - 6.3.2.1.3) <1A965373-0DB6-3B50-BE38-52C30D67A090> /usr/lib/swift/libswiftSynchronization.dylib
+       0x28fdd8000 -        0x28fdf0e60  libswiftSystem.dylib (75) <A4F80949-97A7-3A1A-A340-45D2D7A5AB89> /usr/lib/swift/libswiftSystem.dylib
+       0x28fdf2000 -        0x28fe0879f  libswiftVideoToolbox.dylib (3320.8.5.1) <3C381F76-0925-338E-BEDA-2ECB42333EBC> /usr/lib/swift/libswiftVideoToolbox.dylib
+       0x28fe0a000 -        0x28fe0a669  libswift_Builtin_float.dylib (6.3.2.1.3) <15ED1E36-16BC-327E-8FAA-9130DE11923C> /usr/lib/swift/libswift_Builtin_float.dylib
+       0x28fe0b000 -        0x28fe96095  libswift_Concurrency.dylib (6.3.2 - 6.3.2.1.3) <E3545AA1-FF13-3698-8657-91BB23002DF9> /usr/lib/swift/libswift_Concurrency.dylib
+       0x28fe97000 -        0x28fe99f83  libswift_DarwinFoundation1.dylib (377.120.8) <2601FA08-2913-3370-89B6-C67DC05AC892> /usr/lib/swift/libswift_DarwinFoundation1.dylib
+       0x28fe9a000 -        0x28fe9aeeb  libswift_DarwinFoundation2.dylib (377.120.8) <38242BFE-54C8-3838-AE88-0083F7328580> /usr/lib/swift/libswift_DarwinFoundation2.dylib
+       0x28fe9b000 -        0x28fe9b7a7  libswift_DarwinFoundation3.dylib (377.120.8) <6CFBAAE9-7293-3A51-83B9-E3988230EAC2> /usr/lib/swift/libswift_DarwinFoundation3.dylib
+       0x28fe9c000 -        0x28ff3a49f  libswift_RegexParser.dylib (6.3.2 - 6.3.2.1.3) <2FED4499-861B-37B8-8C94-5ABC7FD49726> /usr/lib/swift/libswift_RegexParser.dylib
+       0x28ff3b000 -        0x28ffc70cd  libswift_StringProcessing.dylib (6.3.2 - 6.3.2.1.3) <13999576-EB4F-3A0D-874F-A95AD5D7F296> /usr/lib/swift/libswift_StringProcessing.dylib
+       0x29012c000 -        0x29012fa4b  libsystem_darwindirectory.dylib (122) <CF277A2C-C818-3F16-8B3F-3C7B39FCD164> /usr/lib/system/libsystem_darwindirectory.dylib
+       0x290130000 -        0x2901395d3  libsystem_eligibility.dylib (319.121.1) <DDAC0531-0262-3DDC-8EC8-80EB9438847A> /usr/lib/system/libsystem_eligibility.dylib
+       0x29013a000 -        0x29014188b  libsystem_sanitizers.dylib (26.1) <44C4234F-8B2D-38D3-A774-B4B3C75AF3A7> /usr/lib/system/libsystem_sanitizers.dylib
+       0x290142000 -        0x290142bb7  libsystem_trial.dylib (474.2.18.2) <68C583BA-AFF5-3916-86AE-6E38BFEF98D6> /usr/lib/system/libsystem_trial.dylib
+
