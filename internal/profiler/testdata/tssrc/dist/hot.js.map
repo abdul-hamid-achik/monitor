@@ -1,0 +1,10 @@
+{
+  "version": 3,
+  "sources": ["../hot.ts"],
+  "sourcesContent": [
+    "function heavyWork(n: number): number {\n  let total = 0;\n  for (let i = 0; i < n; i++) {\n    const s = JSON.stringify({ i, pad: \"x\".repeat(64) }); // HOT LINE\n    total += s.length;\n  }\n  return total;\n}\n\nconst deadline = Date.now() + 1200;\nwhile (Date.now() < deadline) {\n  heavyWork(3000);\n}\n"
+  ],
+  "mappings": ";AAAA,SAAS,SAAS,CAAC,GAAmB;AAAA,EACpC,IAAI,QAAQ;AAAA,EACZ,SAAS,IAAI,EAAG,IAAI,GAAG,KAAK;AAAA,IAC1B,MAAM,IAAI,KAAK,UAAU,EAAE,GAAG,KAAK,IAAI,OAAO,EAAE,EAAE,CAAC;AAAA,IACnD,SAAS,EAAE;AAAA,EACb;AAAA,EACA,OAAO;AAAA;AAGT,IAAM,WAAW,KAAK,IAAI,IAAI;AAC9B,OAAO,KAAK,IAAI,IAAI,UAAU;AAAA,EAC5B,UAAU,IAAI;AAChB;",
+  "debugId": "11B6DFFC7A2F446D64756E2164756E21",
+  "names": []
+}

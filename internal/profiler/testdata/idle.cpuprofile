@@ -1,0 +1,10 @@
+{
+  "nodes": [
+    {"id":1,"callFrame":{"functionName":"(root)","scriptId":"0","url":"","lineNumber":-1,"columnNumber":-1},"hitCount":0,"children":[2,3]},
+    {"id":2,"callFrame":{"functionName":"(idle)","scriptId":"0","url":"","lineNumber":-1,"columnNumber":-1},"hitCount":980,"children":[]},
+    {"id":3,"callFrame":{"functionName":"poll","scriptId":"1","url":"file:///repo/internal/profiler/testdata/src/idle.js","lineNumber":0,"columnNumber":0},"hitCount":20,"children":[],"positionTicks":[{"line":2,"ticks":20}]}
+  ],
+  "samples": [2],
+  "startTime": 0,
+  "endTime": 1000000
+}

@@ -12,3 +12,8 @@ dogfood run. Local paths were rewritten to `/repo/internal/profiler/testdata/src
 | `jsc-trackingComplete.json` | Bun inspector `ScriptProfiler.trackingComplete` over WebKit protocol | Shape of JSC live-profiling data (`src/loop.js`). Bun does not serve `/json/list`. |
 | `darwin-sample-go.txt` | `/usr/bin/sample <pid>` on a Go binary without pprof (`src/gowork.go`) | Real multi-thread `sample` output with `+ ! : \|` tree prefixes; `main.heavyStringify` must be found. |
 | `py-probe-window.folded` | prototype Python sampling probe on `src/pywork.py` | Collapsed stacks with per-line frames. |
+| `idle.cpuprofile` | hand-built (E3.1) | 98% `(idle)`, 2% `poll` (`src/idle.js`) — `monitor hot`'s AC-5 "mostly idle: slowness is off-CPU" warning, from a small, exact fixture rather than a real capture (idle time isn't reliably reproducible on demand). |
+
+`tssrc/` (E3.1, E3.3a wiring) is a separate, self-contained fixture — a real
+`bun build --sourcemap=external` output profiled with a real `node
+--cpu-prof` — documented in its own `tssrc/README.md`.

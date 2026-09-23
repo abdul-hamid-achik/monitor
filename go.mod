@@ -8,6 +8,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.4
 	github.com/abdul-hamid-achik/veclite v0.22.1
 	github.com/charmbracelet/x/ansi v0.11.7
+	github.com/charmbracelet/x/term v0.2.2
 	github.com/coder/websocket v1.8.15
 	github.com/google/pprof v0.0.0-20260906184651-6331bc6350fe
 	github.com/modelcontextprotocol/go-sdk v1.6.1
@@ -18,7 +19,6 @@ require (
 require (
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260525132238-948f4557a654 // indirect
-	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
