@@ -1,0 +1,10 @@
+{
+  "version": 3,
+  "sources": ["../greeter.ts"],
+  "sourcesContent": [
+    "export interface Greeting {\n  name: string;\n  times: number;\n}\n\nexport function greet(g: Greeting): string {\n  const parts: string[] = [];\n  for (let i = 0; i < g.times; i++) {\n    parts.push(`Hello, ${g.name}!`);\n  }\n  return parts.join(\" \");\n}\n\nfunction main(): void {\n  const result = greet({ name: \"World\", times: 3 });\n  console.log(result);\n}\n\nmain();\n"
+  ],
+  "mappings": ";AAKO,SAAS,KAAK,CAAC,GAAqB;AAAA,EACzC,MAAM,QAAkB,CAAC;AAAA,EACzB,SAAS,IAAI,EAAG,IAAI,EAAE,OAAO,KAAK;AAAA,IAChC,MAAM,KAAK,UAAU,EAAE,OAAO;AAAA,EAChC;AAAA,EACA,OAAO,MAAM,KAAK,GAAG;AAAA;AAGvB,SAAS,IAAI,GAAS;AAAA,EACpB,MAAM,SAAS,MAAM,EAAE,MAAM,SAAS,OAAO,EAAE,CAAC;AAAA,EAChD,QAAQ,IAAI,MAAM;AAAA;AAGpB,KAAK;",
+  "debugId": "E9869E90A3791BA764756E2164756E21",
+  "names": []
+}
