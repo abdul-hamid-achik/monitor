@@ -87,11 +87,28 @@ outcomes:
           grep -qE '^>[[:space:]]+5[[:space:]]*\|'
 
   - id: idle_profile_warns_instead_of_naming_a_line
-    description: a 98%-idle profile prints the AC-5 honesty warning, not a fabricated hot line
+    description: >-
+      a 98%-idle profile prints the AC-5 honesty warning AND never prints a
+      '>' hot-line marker — the warning replaces a fabricated hot line
+      instead of merely accompanying one
     verify:
       command:
         run: >-
-          ./bin/monitor hot --file internal/profiler/testdata/idle.cpuprofile | grep -q 'mostly idle: slowness is off-CPU'
+          OUT=$(./bin/monitor hot --file internal/profiler/testdata/idle.cpuprofile) &&
+          echo "$OUT" | grep -q 'mostly idle: slowness is off-CPU' &&
+          ! echo "$OUT" | grep -qE '^>'
+
+  - id: bun_default_output_without_func_names_hot_line
+    description: >-
+      the DEFAULT `monitor hot --file` output (no --func) on the Bun
+      fixture names the real hot line, not a location-less native builtin
+      (Bun's own stringify/repeat) rendered as line 0 of an empty file
+    verify:
+      command:
+        run: >-
+          OUT=$(./bin/monitor hot --file internal/profiler/testdata/bun-cpu-prof.cpuprofile) &&
+          echo "$OUT" | grep -qE '^>[[:space:]]+5[[:space:]]*\|' &&
+          ! echo "$OUT" | grep -qE '^>[[:space:]]+0[[:space:]]*\|'
 
   - id: json_line_heatmap_v1_schema
     description: --json emits the monitor.line_heatmap.v1 schema id
@@ -126,8 +143,9 @@ outcomes:
     verify:
       command:
         run: >-
-          ./bin/monitor hot --file /tmp/monitor-spec-hot-file/tssrc/dist/hot.cpuprofile --func heavyWork --json |
-          grep -q '"file":[[:space:]]*"/tmp/monitor-spec-hot-file/tssrc/hot.ts"' &&
+          JSON=$(./bin/monitor hot --file /tmp/monitor-spec-hot-file/tssrc/dist/hot.cpuprofile --func heavyWork --json) &&
+          echo "$JSON" | grep -q '"file":[[:space:]]*"/tmp/monitor-spec-hot-file/tssrc/hot.ts"' &&
+          echo "$JSON" | grep -q '"mapping":[[:space:]]*"exact"' &&
           ./bin/monitor hot --file /tmp/monitor-spec-hot-file/tssrc/dist/hot.cpuprofile --func heavyWork |
           grep -qE '^>[[:space:]]+4[[:space:]]*\|'
 
