@@ -28,6 +28,17 @@ func resolveHistoryPath(dbPath string) (string, error) {
 	return history.DefaultPath()
 }
 
+// newHistoryCollector builds the collector `monitor history record` samples
+// from. sampleSystem only reads CPU/Memory/Network/Disk fields, so this
+// bypasses NewCollector's powermetrics-backed temperature hook and disables
+// process enumeration: unlike watch/Studio/investigate, a recording session
+// ticks indefinitely and used to pay for a full host process enumeration (and
+// spawn a sudo powermetrics subprocess) on every tick without ever looking at
+// either (bug 18 quick win).
+func newHistoryCollector() *collector.Collector {
+	return collector.New(collector.Options{DisableProcesses: true})
+}
+
 // sampleSystem extracts the recorded scalar metric series from a snapshot.
 func sampleSystem(ts time.Time, info collector.SystemInfo) []history.Sample {
 	return []history.Sample{
@@ -62,7 +73,7 @@ func newHistoryRecordCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("open history store: %w", err)
 			}
-			c := NewCollector(0)
+			c := newHistoryCollector()
 			ctx, cancel := Context()
 			defer cancel()
 
