@@ -258,6 +258,19 @@ to 'info' (or 'error' for stderr lines without a level).`,
 					_ = store.Close()
 				}
 			}()
+			// No separate SIGTERM/SIGINT Sync goroutine here. store.Close()
+			// below (reached promptly once ctx is canceled, thanks to
+			// capture.go's pipe-close-on-cancel fix) always performs a full,
+			// unconditional flush regardless of the batched Append policy
+			// (see logger.Store.Close / veclite's own Close, which syncs
+			// before releasing storage). A separate goroutine calling
+			// store.Sync() right before that Close would just pay for the
+			// same full-database rewrite twice on every signal-driven
+			// shutdown, widening the window in which a supervisor's
+			// follow-up SIGKILL could land mid-save instead of narrowing it.
+			// The store's own background flusher (logger.Store.startFlusher)
+			// already bounds how long a captured line can stay unflushed
+			// while capture keeps running.
 
 			runner := capture.NewRunner(store)
 			runner.MaxLines = maxLines

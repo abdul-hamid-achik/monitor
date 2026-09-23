@@ -95,6 +95,51 @@ func TestAnalyzeWindowNoAnomalies(t *testing.T) {
 	}
 }
 
+// TestAnalyzeWindowSurfacesAlerts is the wire regression for bug 17's second
+// half: analyzeWindow's engine (NewDefaultEngine) runs the same rules
+// `monitor watch` does, but analyzeWindow used to discard every Alert
+// Observe returned and surface only the separate cross-signal Diagnose
+// table. A zombie process is flat CPU/RSS (never a Diagnose finding) but
+// must always raise a zombie_process Alert, so seeing it in res.Alerts
+// proves the plain rule findings now reach the caller. It also covers the
+// dedup-by-rule+PID requirement (a zombie present for the whole window would
+// otherwise repeat once per sample) and the pid filter already covered for
+// Diagnoses above.
+func TestAnalyzeWindowSurfacesAlerts(t *testing.T) {
+	const zombiePID = int32(300)
+	collect := func(context.Context) collector.SystemInfo {
+		return collector.SystemInfo{
+			LastUpdate: time.Now(),
+			Processes: []collector.ProcessInfo{
+				{PID: zombiePID, Name: "reaper-orphan", Status: "Z", Memory: 0, CPUPercent: 0},
+			},
+		}
+	}
+	res, err := analyzeWindow(context.Background(), collect, 40*time.Millisecond, 5*time.Millisecond, 0)
+	if err != nil {
+		t.Fatalf("analyzeWindow: %v", err)
+	}
+	if res.Samples < 4 {
+		t.Fatalf("Samples = %d, want >= 4 samples to prove dedup across repeats", res.Samples)
+	}
+	if len(res.Alerts) != 1 {
+		t.Fatalf("Alerts = %+v, want exactly 1 deduplicated zombie_process alert across %d samples", res.Alerts, res.Samples)
+	}
+	if res.Alerts[0].Rule != "zombie_process" || res.Alerts[0].PID != zombiePID {
+		t.Errorf("Alerts[0] = %+v, want rule=zombie_process pid=%d", res.Alerts[0], zombiePID)
+	}
+
+	// Focusing on an unrelated PID must drop the zombie alert, same as it
+	// drops another process's Diagnosis.
+	focused, err := analyzeWindow(context.Background(), collect, 40*time.Millisecond, 5*time.Millisecond, zombiePID+1)
+	if err != nil {
+		t.Fatalf("analyzeWindow (focused): %v", err)
+	}
+	if len(focused.Alerts) != 0 {
+		t.Errorf("Alerts = %+v with pid filter set to a different PID, want none", focused.Alerts)
+	}
+}
+
 // TestAnalyzeWindowContextCancelled verifies a cancelled context aborts the
 // sampling loop with ctx.Err() instead of running to the deadline.
 func TestAnalyzeWindowContextCancelled(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/abdul-hamid-achik/monitor/internal/analyzer"
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/config"
 	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
@@ -169,6 +170,17 @@ func getIssueForMCP(_ context.Context, id string, occurrenceLimit int) (issue is
 // fresh engine per call keeps the history window scoped to exactly this
 // analysis, matching `monitor watch`'s per-run engine.
 //
+// It also collects every rule Alert the engine's Observe raises across the
+// window (bug 17's second half: NewDefaultEngine made this window register
+// the same CPUSpike/RSSGrowth/DiskFill/SwapPressure/Zombie/Threshold rules
+// `monitor watch` runs, but analyzeWindow used to throw away Observe's return
+// value entirely and only ever surfaced the separate cross-signal Diagnose
+// table — an agent calling monitor_analyze never saw a plain threshold, spike,
+// or zombie finding that watch would have raised for the same window). Alerts
+// are deduplicated by rule+PID (a sustained condition would otherwise repeat
+// once per sample) and, like Diagnoses, dropped to those matching pid when
+// pid != 0.
+//
 // Extracted from the mcp.Service.Analyze closure so the sampling/diagnosis
 // wiring is unit-testable without a live collector or multi-second
 // wall-clock waits (tests pass a tiny sampleInterval).
@@ -176,14 +188,24 @@ func analyzeWindow(ctx context.Context, collect func(context.Context) collector.
 	if sampleInterval <= 0 {
 		sampleInterval = time.Second
 	}
-	engine := analyzer.NewEngine()
+	// NewDefaultEngine is the single rule-set source shared with `monitor
+	// watch` and Studio (bug 17: this window used to register zero rules, so
+	// an agent calling monitor_analyze never saw a threshold/spike/growth
+	// finding that `monitor watch` would have raised for the same window).
+	settings, err := config.Load()
+	if err != nil || settings == nil {
+		settings = config.Default()
+	}
+	engine := analyzer.NewDefaultEngine(*settings)
 	samples := 0
+	var alerts []collector.Alert
+	seenAlerts := map[string]bool{}
 	deadline := time.After(window)
 	ticker := time.NewTicker(sampleInterval)
 	defer ticker.Stop()
 	for {
 		info := collect(ctx)
-		engine.Observe(collector.Event{
+		for _, a := range engine.Observe(collector.Event{
 			Timestamp: info.LastUpdate,
 			Hostname:  info.Hostname,
 			CPU:       info.CPU,
@@ -191,7 +213,17 @@ func analyzeWindow(ctx context.Context, collect func(context.Context) collector.
 			Network:   info.Network,
 			Disk:      info.Disk,
 			Processes: info.Processes,
-		})
+		}) {
+			if pid != 0 && a.PID != pid {
+				continue
+			}
+			key := fmt.Sprintf("%s|%d", a.Rule, a.PID)
+			if seenAlerts[key] {
+				continue
+			}
+			seenAlerts[key] = true
+			alerts = append(alerts, a)
+		}
 		samples++
 		select {
 		case <-ctx.Done():
@@ -205,7 +237,7 @@ func analyzeWindow(ctx context.Context, collect func(context.Context) collector.
 			} else {
 				diags = engine.Diagnose()
 			}
-			return mcp.AnalyzeResult{Samples: samples, Diagnoses: diags}, nil
+			return mcp.AnalyzeResult{Samples: samples, Diagnoses: diags, Alerts: alerts}, nil
 		case <-ticker.C:
 		}
 	}

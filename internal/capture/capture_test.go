@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -203,6 +204,126 @@ func TestIngestStopsOnContextCancel(t *testing.T) {
 	}
 	if res.Duration > 2*time.Second {
 		t.Errorf("Duration = %v; expected to honor the 200ms ctx deadline", res.Duration)
+	}
+}
+
+// TestRunCommandReturnsPromptlyWhenGrandchildOutlivesKilledChild is a
+// regression for a hang found while testing SIGINT durability: `sh -c 'echo
+// ...; sleep N'` forks `sleep` as sh's OWN child. Killing sh (what ctx
+// cancellation does via exec.CommandContext) does not touch that
+// grandchild, which keeps the inherited stdout/stderr pipe write-end open
+// until it exits on its own — without closing our own read-end directly,
+// ingest's blocking Scan() never sees EOF and Run hangs for as long as the
+// grandchild keeps running, well past ctx cancellation.
+func TestRunCommandReturnsPromptlyWhenGrandchildOutlivesKilledChild(t *testing.T) {
+	dir := t.TempDir()
+	store, err := logger.OpenStore(dbPathFor(t, dir))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	closeTestStore(t, store)
+
+	src := Source{
+		Command: "sh",
+		Args:    []string{"sh", "-c", "echo INFO: quick_line; sleep 5"},
+		Name:    "grandchild",
+	}
+	r := NewRunner(store)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan Result, 1)
+	go func() { done <- r.Run(ctx, src) }()
+
+	// Give the child time to print its line and reach the sleep before we
+	// cancel, so the grandchild is definitely alive and still holding the
+	// pipe when cancellation happens.
+	time.Sleep(300 * time.Millisecond)
+	start := time.Now()
+	cancel()
+
+	select {
+	case res := <-done:
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("Run took %s to return after cancel, want well under the grandchild's 5s sleep", elapsed)
+		}
+		if res.Lines != 1 {
+			t.Errorf("Lines = %d, want 1 (the line printed before sleep)", res.Lines)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("Run did not return within 4s of ctx cancellation — hung on the orphaned grandchild's pipe")
+	}
+}
+
+// TestRunCommandKillsGrandchildProcessGroupOnCancel is the regression for the
+// minor finding that survived the pipe-close fix above: closing our own end
+// of the pipes unblocks Run's Scan() promptly, but exec.CommandContext's
+// default Cancel only ever signals cmd.Process (here, `sh`) — the `sleep 5`
+// it forks to run the rest of the script is `sh`'s own child, not a
+// separate job, and previously kept running as an orphan after monitor
+// exited (holding a port, a socket, or just burning CPU). runCommand now
+// puts the child in its own process group (Setpgid) and overrides Cancel to
+// SIGKILL the whole group, so the grandchild must be gone too, not merely
+// unblocking the pipe read.
+func TestRunCommandKillsGrandchildProcessGroupOnCancel(t *testing.T) {
+	dir := t.TempDir()
+	store, err := logger.OpenStore(dbPathFor(t, dir))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	closeTestStore(t, store)
+
+	src := Source{
+		Command: "sh",
+		Args:    []string{"sh", "-c", "echo INFO: quick_line; sleep 5"},
+		Name:    "grandchild-group",
+	}
+	r := NewRunner(store)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan Result, 1)
+	go func() { done <- r.Run(ctx, src) }()
+
+	// Give the child time to print its line and reach the sleep before
+	// cancellation, so the grandchild is definitely alive and part of the
+	// group when we cancel.
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(4 * time.Second):
+		t.Fatal("Run did not return within 4s of ctx cancellation")
+	}
+
+	// Recover the real child's PID (== the process group id, since
+	// Setpgid is set with no explicit Pgid) from the entry captured before
+	// it slept — Run() resets Result.Source to the caller's original,
+	// PID-less Source, so this is read back from the store instead.
+	entries, err := store.Search("quick_line", 1)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(entries) != 1 || entries[0].PID == 0 {
+		t.Fatalf("captured entries = %+v, want exactly one with a nonzero PID", entries)
+	}
+	pgid := int(entries[0].PID)
+
+	// The whole process group — sh AND the sleep it forked — must be gone,
+	// not just sh itself. Poll briefly for the OS to finish reaping;
+	// Kill(-pgid, 0) is a pure existence probe (signal 0 sends nothing).
+	deadline := time.Now().Add(2 * time.Second)
+	var alive bool
+	for {
+		alive = syscall.Kill(-pgid, 0) == nil
+		if !alive || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if alive {
+		t.Fatalf("process group %d still has live members after cancel; the grandchild ('sleep 5') outlived its killed parent", pgid)
 	}
 }
 

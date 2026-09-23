@@ -5,7 +5,37 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	veclite "github.com/abdul-hamid-achik/veclite"
 )
+
+// openWithMaxRecords opens a fresh history store whose Go-level maxRecords
+// cap is set BEFORE the collection is created (Open always uses
+// defaultMaxRecords for that). Tests that need a small cap in effect at
+// creation time — to exercise veclite's own per-insert eviction behavior
+// rather than only enforceRecordLimitLocked's after-the-fact batching — use
+// this instead of Open + a post-hoc `w.maxRecords = n` override, which only
+// ever changes the Go-level cap and leaves the (much larger) cap baked into
+// the collection at creation time alone.
+func openWithMaxRecords(t *testing.T, path string, maxRecords int) *Store {
+	t.Helper()
+	db, err := veclite.Open(path)
+	if err != nil {
+		t.Fatalf("veclite.Open: %v", err)
+	}
+	s := &Store{
+		db:           db,
+		maxRecords:   maxRecords,
+		syncEvery:    defaultSyncEvery,
+		syncInterval: defaultSyncInterval,
+		lastSync:     time.Now(),
+	}
+	if err := s.ensureCollection(); err != nil {
+		_ = db.Close()
+		t.Fatalf("ensureCollection: %v", err)
+	}
+	return s
+}
 
 func TestAppendAndQuery(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "h.veclite")
@@ -42,6 +72,94 @@ func TestAppendAndQuery(t *testing.T) {
 	}
 }
 
+// TestMemoryLimitsSurviveReopen is the regression for bug 13 (veclite side):
+// veclite v0.22.1 does not persist a collection's MemoryConfig across a
+// reopen (loadFromSnapshot rebuilds the collection without it), so relying
+// solely on WithMemoryLimits at CreateCollection time silently disabled the
+// cap forever the first time the store was closed and reopened — reproduced
+// upstream with MaxRecords=5 growing to 15 records after one reopen.
+// enforceRecordLimitLocked re-applies the cap from Go-level Store state on
+// every Append instead, so it must stay capped across Close+Open.
+func TestMemoryLimitsSurviveReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.veclite")
+
+	w, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	w.maxRecords = 5
+	for i := 0; i < 10; i++ {
+		if err := w.Append(Sample{Metric: "cpu.usage", Value: float64(i)}); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	w2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	closeStoreOnCleanup(t, w2)
+	w2.maxRecords = 5
+	for i := 0; i < 10; i++ {
+		if err := w2.Append(Sample{Metric: "cpu.usage", Value: float64(100 + i)}); err != nil {
+			t.Fatalf("post-reopen Append %d: %v", i, err)
+		}
+	}
+
+	pts, err := w2.Query("cpu.usage", time.Time{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(pts) != 5 {
+		t.Fatalf("record count after reopen = %d, want capped at 5 (MaxRecords lost on reopen was bug 13)", len(pts))
+	}
+}
+
+// TestFreshStoreDoesNotEvictOnEveryInsert is history's counterpart to the
+// same regression covered in internal/logger: veclite@v0.22.1's own
+// per-insert enforcement (only triggered by a MemoryConfig passed to
+// CreateCollection) evicted one record via a full sorted scan on EVERY
+// insert once the collection reached its cap, in the very same session that
+// created the store — pinning Count() at maxRecords and defeating
+// enforceRecordLimitLocked's batching below, which used to only take effect
+// after a reopen. ensureCollection no longer passes WithMemoryLimits, so a
+// fresh store (never reopened) must let the collection grow past maxRecords
+// by up to ~10% before evicting, then evict the whole accumulated batch.
+func TestFreshStoreDoesNotEvictOnEveryInsert(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.veclite")
+	w := openWithMaxRecords(t, path, 100)
+	closeStoreOnCleanup(t, w)
+
+	for i := 0; i < 105; i++ {
+		if err := w.Append(Sample{Metric: "cpu.usage", Value: float64(i)}); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	pts, err := w.Query("cpu.usage", time.Time{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(pts) != 105 {
+		t.Fatalf("record count after 105 appends = %d, want 105 (no per-insert eviction on a fresh store)", len(pts))
+	}
+
+	for i := 0; i < 5; i++ {
+		if err := w.Append(Sample{Metric: "cpu.usage", Value: float64(200 + i)}); err != nil {
+			t.Fatalf("Append (batch trigger) %d: %v", i, err)
+		}
+	}
+	pts, err = w.Query("cpu.usage", time.Time{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(pts) != 100 {
+		t.Fatalf("record count after 110 appends = %d, want capped back to 100 by the batched eviction", len(pts))
+	}
+}
+
 // TestPersistsAcrossReopen verifies the recorder/query split: data written by
 // one Store survives a Close + reopen (the Unix-nano timestamp round-trips).
 func TestPersistsAcrossReopen(t *testing.T) {
@@ -75,18 +193,21 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	}
 }
 
-// TestAppendIsDurableBeforeClose is the regression for the durability finding:
-// Append must flush each batch to disk immediately, so a SIGKILL/crash before
-// Close loses at most the in-flight tick rather than the whole recording
-// session. veclite's default syncOnWrite is off, so before Append called
-// db.Sync() the on-disk file stayed frozen at the last clean Close.
+// TestAppendIsDurableWithinSyncBounds is the regression for the durability
+// finding: Append must flush within a bounded number of batches or a bounded
+// time window, so a SIGKILL/crash loses at most that window rather than the
+// whole recording session. veclite's default syncOnWrite is off, so before
+// Append called db.Sync() at all the on-disk file stayed frozen at the last
+// clean Close; Append no longer syncs on EVERY batch (that re-gob-encoded and
+// fsynced the whole database every tick — see maybeSyncLocked), so this
+// appends syncEvery batches to cross the count-based bound instead of one.
 //
 // We assert the invariant by snapshotting the live (still-open) DB file to a
 // second path and opening that copy read-only — it must already contain the
-// just-appended sample. (veclite holds an exclusive lock on the writer's path,
+// just-appended samples. (veclite holds an exclusive lock on the writer's path,
 // so a second handle on the *same* path is intentionally not possible; the copy
 // stands in for "what a post-crash reader would recover from disk".)
-func TestAppendIsDurableBeforeClose(t *testing.T) {
+func TestAppendIsDurableWithinSyncBounds(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "h.veclite")
 	w, err := Open(path)
@@ -96,8 +217,13 @@ func TestAppendIsDurableBeforeClose(t *testing.T) {
 	closeStoreOnCleanup(t, w)
 
 	ts := time.Now().Add(-time.Minute).Truncate(time.Second)
-	if err := w.Append(Sample{Timestamp: ts, Metric: "cpu.usage", Value: 73}); err != nil {
-		t.Fatalf("Append: %v", err)
+	for i := 0; i < w.syncEvery; i++ {
+		if err := w.Append(Sample{Timestamp: ts.Add(time.Duration(i) * time.Second), Metric: "cpu.usage", Value: 73}); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	if got := w.SyncCount(); got != 1 {
+		t.Fatalf("SyncCount = %d after crossing syncEvery, want exactly 1", got)
 	}
 
 	// Copy the on-disk file WITHOUT closing the writer, then open the copy.
@@ -118,8 +244,54 @@ func TestAppendIsDurableBeforeClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if len(pts) != 1 || pts[0].Value != 73 {
-		t.Fatalf("on-disk snapshot = %+v, want one value 73 (Append must sync before Close)", pts)
+	if len(pts) != w.syncEvery {
+		t.Fatalf("on-disk snapshot = %+v, want %d values (Append must sync within syncEvery batches)", pts, w.syncEvery)
+	}
+}
+
+// TestAppendDoesNotSyncEveryBatch is the efficiency regression: with fewer
+// than syncEvery batches and less than syncInterval elapsed, Append must NOT
+// have triggered a full rewrite yet.
+func TestAppendDoesNotSyncEveryBatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.veclite")
+	w, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	closeStoreOnCleanup(t, w)
+
+	for i := 0; i < w.syncEvery-1; i++ {
+		if err := w.Append(Sample{Metric: "cpu.usage", Value: float64(i)}); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	if got := w.SyncCount(); got != 0 {
+		t.Fatalf("SyncCount = %d before crossing syncEvery or syncInterval, want 0", got)
+	}
+}
+
+// TestAppendBatchesSyncsAcrossManyTicks is the write-amplification regression
+// for bug 13/E1.11: history.Append used to call db.Sync() (a full gob-encode +
+// fsync of the whole database) on every single tick. With the default
+// syncEvery, a long recording session of many ticks must produce far fewer
+// full rewrites than ticks.
+func TestAppendBatchesSyncsAcrossManyTicks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.veclite")
+	w, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	closeStoreOnCleanup(t, w)
+
+	const ticks = 500
+	for i := 0; i < ticks; i++ {
+		if err := w.Append(Sample{Metric: "cpu.usage", Value: float64(i)}); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	want := ticks / w.syncEvery
+	if got := w.SyncCount(); got != want {
+		t.Fatalf("SyncCount = %d for %d ticks at syncEvery=%d, want exactly %d", got, ticks, w.syncEvery, want)
 	}
 }
 

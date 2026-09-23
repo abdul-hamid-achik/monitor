@@ -2,9 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -114,6 +119,70 @@ func TestWriteLogEntriesExportFormats(t *testing.T) {
 				t.Fatalf("output = %q, want substring %q", out.String(), tc.want)
 			}
 		})
+	}
+}
+
+// TestHelperLogsCaptureUntilSignal is not a real test; it's re-executed as a
+// subprocess by TestLogsCaptureSyncsStoreOnSIGTERM to prove SIGTERM really
+// reaches `monitor logs capture` end to end (Context()'s signal.NotifyContext
+// -> ctx cancellation -> capture.go's process-group kill -> store.Close's
+// flush), not just Store.Close in isolation. Run directly, it is a no-op
+// because the env var below is unset.
+func TestHelperLogsCaptureUntilSignal(t *testing.T) {
+	path := os.Getenv("MONITOR_LOGS_SIGTEST_PATH")
+	if path == "" {
+		return
+	}
+	cmd := newLogsCaptureCmd()
+	cmd.SetArgs([]string{"--store", path, "--", "sh", "-c", "echo INFO: sigterm_needle; sleep 30"})
+	if err := cmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "helper execute:", err)
+		os.Exit(1)
+	}
+}
+
+// TestLogsCaptureSyncsStoreOnSIGTERM is the regression for the minor finding
+// that the SIGTERM/SIGINT durability path (profile_logs.go's `logs capture`
+// relying on store.Close(), reached promptly by capture.go's pipe-close/
+// process-group fix, rather than a separate pre-Close Sync goroutine) was
+// untested end to end. A real SIGTERM to a real subprocess must still leave
+// the just-captured line on disk.
+func TestLogsCaptureSyncsStoreOnSIGTERM(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGTERM semantics differ on windows")
+	}
+	path := filepath.Join(t.TempDir(), "logs.veclite")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperLogsCaptureUntilSignal$", "-test.v")
+	cmd.Env = append(os.Environ(), "MONITOR_LOGS_SIGTEST_PATH="+path)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper subprocess: %v", err)
+	}
+	// Give the helper (and the `sh -c` grandchild it captures) time to print
+	// its line and reach the sleep before signaling.
+	time.Sleep(500 * time.Millisecond)
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM helper subprocess: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("logs capture did not exit within 5s of SIGTERM")
+	}
+
+	reader, err := logger.OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly after SIGTERM: %v", err)
+	}
+	closeLogStoreOnCleanup(t, reader)
+	got, err := reader.Search("sigterm_needle", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("lines visible after SIGTERM = %d, want 1 (store.Close's flush must have persisted it)", len(got))
 	}
 }
 

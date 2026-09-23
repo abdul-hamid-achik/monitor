@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/abdul-hamid-achik/monitor/internal/logger"
@@ -156,6 +157,25 @@ func (r *Runner) runCommand(ctx context.Context, src Source) Result {
 	if len(src.Env) > 0 {
 		cmd.Env = append(os.Environ(), src.Env...)
 	}
+	// Put the child in its own process group so a shell wrapper's own
+	// children share it (Setpgid without an explicit Pgid makes the group ID
+	// equal the child's own PID). CommandContext's default Cancel only signals
+	// cmd.Process (the direct child, e.g. `sh`); a grandchild it forked to run
+	// the REST of a shell script (`sh -c 'echo x; sleep 30'` runs `sleep` as
+	// sh's own child, not a separate job) is reparented to init and keeps
+	// running — holding a port, a socket, or just wasting CPU — instead of
+	// exiting with monitor. Overriding Cancel to signal the whole group kills
+	// that grandchild too.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return fmt.Errorf("kill process group %d: %w", cmd.Process.Pid, err)
+		}
+		return nil
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return Result{Err: fmt.Errorf("stdout pipe: %w", err)}
@@ -170,6 +190,17 @@ func (r *Runner) runCommand(ctx context.Context, src Source) Result {
 	// Stamp wrapped-command entries with the real child PID so later
 	// `logs search --pid` filters are useful in both capture modes.
 	src.PID = int32(cmd.Process.Pid)
+
+	// Belt-and-suspenders backstop for the process-group kill set up above:
+	// close our own end of the pipes directly on cancellation so ingest's
+	// blocking Scan() below is unblocked immediately even if some descendant
+	// somehow escapes the group (e.g. a double-forked daemon that calls its
+	// own setpgid) and keeps a pipe write-end open.
+	go func() {
+		<-ctx.Done()
+		_ = stdout.Close()
+		_ = stderr.Close()
+	}()
 
 	var wg sync.WaitGroup
 	ingestErrs := make(chan error, 2)
