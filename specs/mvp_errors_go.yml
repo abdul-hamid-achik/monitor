@@ -1,0 +1,66 @@
+version: 1
+name: monitor_mvp_errors_go
+
+intent: |
+  Golden-table coverage (docs/contracts/local-sentry-naming.md,
+  "go: 1 panic"): `monitor run -- <go-crash binary>` records exactly one
+  issue for the panic, with the correct culprit file:line, and
+  propagates the compiled binary's own panic exit code (2 -- a `go run`
+  wrapper exits 1 on a panic, but a compiled binary exits 2, which is
+  exactly why this builds the binary first rather than using `go run`).
+  go-crash panics immediately (see examples/polyglot/go-crash/main.go's
+  doc comment), so it needs no WORKLOAD_SECONDS short knob.
+
+target:
+  cmd: ["./bin/monitor", "run", "--", "/tmp/monitor-spec-mvp-go/go-crash"]
+  cwd: "."
+  env:
+    XDG_STATE_HOME: "/tmp/monitor-spec-mvp-go/state"
+    MONITOR_ISSUES_STORE: "/tmp/monitor-spec-mvp-go/data/issues.veclite"
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v go"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-mvp-go && mkdir -p /tmp/monitor-spec-mvp-go/state /tmp/monitor-spec-mvp-go/data"
+      timeoutMs: 5000
+    - run: "(cd examples/polyglot/go-crash && go build -o /tmp/monitor-spec-mvp-go/go-crash .)"
+      timeoutMs: 60000
+    - run: "cat > /tmp/monitor-spec-mvp-go/check.sh <<'SH'\n#!/bin/sh\nset -e\nMONITOR_ISSUES_STORE=/tmp/monitor-spec-mvp-go/data/issues.veclite ./bin/monitor issues list --json > /tmp/monitor-spec-mvp-go/issues.json\npython3 -c \"\nimport json\nd = json.load(open('/tmp/monitor-spec-mvp-go/issues.json'))\nassert len(d) == 1, d\ni = d[0]\nassert i['exception_type'] == 'panic', i\nassert i['occurrence_count'] == 1, i\nassert i['culprit']['function'] == 'main.main', i['culprit']\nassert i['culprit']['file'] == 'examples/polyglot/go-crash/main.go', i['culprit']\nassert i['culprit']['line'] == 11, i['culprit']\nprint('ok')\n\"\nSH\nchmod +x /tmp/monitor-spec-mvp-go/check.sh"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      screen:
+        contains: "panic: go-crash workload"
+      timeoutMs: 10000
+  - wait:
+      process:
+        exitCode: 2
+      timeoutMs: 10000
+
+outcomes:
+  - id: new_issue_banner
+    description: a NEW issue banner is printed for the panic
+    verify:
+      screen:
+        contains: "monitor > NEW"
+  - id: exit_code_propagated
+    description: monitor's own exit code is the compiled binary's real panic exit code (2)
+    verify:
+      process:
+        exitCode: 2
+  - id: one_issue_with_correct_culprit
+    description: exactly one issue is recorded, with the correct culprit file:line
+    verify:
+      command:
+        run: "/tmp/monitor-spec-mvp-go/check.sh"

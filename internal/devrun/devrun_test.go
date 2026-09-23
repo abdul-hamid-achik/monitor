@@ -92,6 +92,28 @@ func TestRunPropagatesChildExitCodeAndRecordsIssue(t *testing.T) {
 	}
 }
 
+// TestRunInheritsStdinForInteractiveRead is the roadmap's explicit
+// done-when scenario: `sh -c 'read x; echo $x'` must work, proving stdin is
+// inherited/forwarded to the child exactly like a plain, unwrapped launch
+// would -- regardless of --scan, which only affects stdout/stderr.
+func TestRunInheritsStdinForInteractiveRead(t *testing.T) {
+	opts := baseOptions(t, []string{"sh", "-c", "read x; echo GOT:$x"})
+	opts.Stdin = strings.NewReader("hello-tty\n")
+	var stdout, stderr, banner bytes.Buffer
+	opts.Stdout, opts.Stderr, opts.Banner = &stdout, &stderr, &banner
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Errorf("ExitCode = %d, want 0", result.ExitCode)
+	}
+	if !strings.Contains(stdout.String(), "GOT:hello-tty") {
+		t.Errorf("stdout = %q, want the child's `read` to see the piped stdin", stdout.String())
+	}
+}
+
 func TestRunSuccessfulChildRecordsNoIssues(t *testing.T) {
 	opts := baseOptions(t, []string{"sh", "-c", "echo all good; exit 0"})
 	var stdout, stderr, banner bytes.Buffer
