@@ -159,6 +159,57 @@ func TestDecodeInvalidJSON(t *testing.T) {
 	}
 }
 
+// TestDecodeStripsXSSIPrefix proves a map that leads with the spec-allowed
+// ")]}'" XSSI-protection line still decodes, instead of failing on it as
+// invalid JSON.
+func TestDecodeStripsXSSIPrefix(t *testing.T) {
+	data := []byte(")]}'\n" + `{"version":3,"mappings":""}`)
+	m, err := Decode(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.Version != 3 {
+		t.Errorf("got version %d, want 3", m.Version)
+	}
+}
+
+// TestDecodeStripsUTF8BOM proves a map saved with a leading UTF-8
+// byte-order mark still decodes.
+func TestDecodeStripsUTF8BOM(t *testing.T) {
+	data := append([]byte{0xEF, 0xBB, 0xBF}, []byte(`{"version":3,"mappings":""}`)...)
+	m, err := Decode(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.Version != 3 {
+		t.Errorf("got version %d, want 3", m.Version)
+	}
+}
+
+// TestDecodeStripsBOMThenXSSIPrefix proves the two preambles compose in the
+// order a real tool would emit them: BOM first (the file's own encoding
+// marker), then the XSSI-protection line.
+func TestDecodeStripsBOMThenXSSIPrefix(t *testing.T) {
+	data := append([]byte{0xEF, 0xBB, 0xBF}, []byte(")]}'\n"+`{"version":3,"mappings":""}`)...)
+	if _, err := Decode(data); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestDecodeSectionsNullIsNotAnIndexMap proves an explicit "sections":
+// null - which encoding/json hands back as the raw bytes "null", not as an
+// empty/absent field - is not mistaken for a real index map.
+func TestDecodeSectionsNullIsNotAnIndexMap(t *testing.T) {
+	data := []byte(`{"version":3,"sections":null,"mappings":"AAAA"}`)
+	m, err := Decode(data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(m.Lines) != 1 {
+		t.Errorf("got %d lines, want 1", len(m.Lines))
+	}
+}
+
 // TestDecodeMappingsRejectsNegativeSourcePosition proves a corrupted
 // "mappings" string that drives a cumulative field negative is a decode
 // error, not a silently wrong position. "AADA" is a=0 (genCol +0), A=0

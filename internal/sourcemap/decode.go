@@ -1,6 +1,7 @@
 package sourcemap
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,11 +69,12 @@ type rawMap struct {
 
 // Decode parses a Source Map v3 JSON document.
 func Decode(data []byte) (*Map, error) {
+	data = stripDecodePreamble(data)
 	var raw rawMap
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("sourcemap: decode: %w", err)
 	}
-	if len(raw.Sections) > 0 {
+	if isIndexMap(raw.Sections) {
 		return nil, ErrIndexMap
 	}
 	if raw.Version != 3 {
@@ -102,6 +104,43 @@ func Decode(data []byte) (*Map, error) {
 	}
 	m.Lines = lines
 	return m, nil
+}
+
+// utf8BOM is the byte-order mark some editors and tools prepend to UTF-8
+// files. It is invisible in most viewers, so a .map that has one looks
+// identical to one that doesn't - but json.Unmarshal rejects it outright.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// xssiPrefix is the ")]}'" line some servers (Chrome DevTools' own protocol
+// among them) prepend to JSON responses to block cross-site script
+// inclusion; the spec explicitly allows a source map to start with it.
+const xssiPrefix = ")]}'"
+
+// stripDecodePreamble removes a leading UTF-8 BOM and/or a leading XSSI
+// ")]}'" line (in either order, each optional) so the JSON that follows
+// decodes normally. Neither is part of the JSON document itself.
+func stripDecodePreamble(data []byte) []byte {
+	data = bytes.TrimPrefix(data, utf8BOM)
+	if bytes.HasPrefix(data, []byte(xssiPrefix)) {
+		rest := data[len(xssiPrefix):]
+		if nl := bytes.IndexByte(rest, '\n'); nl >= 0 {
+			data = rest[nl+1:]
+		} else {
+			data = nil
+		}
+	}
+	return bytes.TrimPrefix(data, utf8BOM)
+}
+
+// isIndexMap reports whether a decoded "sections" field denotes a real
+// Source Map v3 index map. The field is absent (raw is nil/empty) in the
+// overwhelmingly common case of a plain map; encoding/json also captures an
+// explicit "sections": null as the 4-byte literal "null" rather than
+// leaving raw empty, which is not an index map either - only a present,
+// non-null value (the sections array itself) is.
+func isIndexMap(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 }
 
 // decodeMappings decodes the semicolon/comma-delimited "mappings" field into
