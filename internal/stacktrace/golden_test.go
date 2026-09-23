@@ -249,10 +249,17 @@ var goldenCases = []struct {
 		`gopanic/go fatal unhandled panic: runtime error: invalid memory address or nil pointer dereference @example.com/app/internal/svc.(*Server).Handle@svc.go:13(2)`,
 	}},
 	{"real/go/recovered.txt", []string{
-		`gopanic/go fatal unhandled panic: re-panic after: first failure @main.recovered.func1@main.go:18(4) <= panic: first failure @-(0)`,
+		`gopanic/go fatal unhandled panic: re-panic after: first failure @main.recovered.func1@main.go:18(4) <= panic: first failure @main.recovered@main.go:21(2)`,
 	}},
 	{"real/go/repanic.txt", []string{
-		`gopanic/go fatal unhandled panic: same value @main.repanicSame.func1@main.go:27(4)`,
+		// Re-panicked with the same value: the fault is where it was
+		// first raised (main.go:29), not the deferred re-panic (:27).
+		`gopanic/go fatal unhandled panic: same value @main.repanicSame@main.go:29(2)`,
+	}},
+	// `go test`: the testing package re-panics every test panic with the
+	// same value; the crash frame is the helper that divided by zero.
+	{"real/go/test-panic.txt", []string{
+		`gopanic/go fatal unhandled panic: runtime error: integer divide by zero @example.com/x.helper@x_test.go:7(3)`,
 	}},
 	{"real/go/zap-dev-sugar.txt", []string{
 		`zap/go error handled "load: db timeout" @example.com/app/internal/svc.(*Store).Load@svc.go:20(5) <= "load: db timeout" @example.com/app/internal/svc.fetch@svc.go:24(6) [2026-09-23T04:30:26.319Z]`,

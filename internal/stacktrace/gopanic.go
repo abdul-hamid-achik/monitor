@@ -150,6 +150,33 @@ func parseGopanic(block Block) *Exception {
 	if goroutineIdx >= 0 {
 		frames = goStanzaFrames(lines, goroutineIdx)
 	}
+	// Frames are oldest-first; each runtime panic() frame sits right above
+	// the frame that raised one of the earlier panic values (the deferred
+	// functions that re-panicked run on top of it).
+	var panicAt []int
+	for i, f := range frames {
+		if f.Function == "panic" {
+			panicAt = append(panicAt, i)
+		}
+	}
+	var causeFrames [][]Frame
+	if repanicked(lines[0], values) {
+		// The same value re-raised by a deferred recover (the testing
+		// package does this for every panicking test): the fault is
+		// where it was first raised, not the re-panicking defer.
+		values = values[:1]
+		if len(panicAt) > 0 {
+			frames = frames[:panicAt[0]]
+		}
+	} else {
+		for k := 0; k < len(values)-1; k++ {
+			var fs []Frame
+			if k < len(panicAt) {
+				fs = append([]Frame(nil), frames[:panicAt[k]]...)
+			}
+			causeFrames = append(causeFrames, fs)
+		}
+	}
 
 	ex := &Exception{
 		Runtime:    "go",
@@ -164,10 +191,27 @@ func parseGopanic(block Block) *Exception {
 		ObservedAt: blockTimestamp(block),
 	}
 	for i := len(values) - 2; i >= 0; i-- {
-		ex.Chained = append(ex.Chained, Exception{Type: "panic", Value: values[i]})
+		ex.Chained = append(ex.Chained, Exception{Type: "panic", Value: values[i], Frames: causeFrames[i]})
 	}
 	inheritChain(ex)
 	return ex
+}
+
+// repanicked reports a panic re-raised with its own value: Go 1.23+ marks
+// it "[recovered, repanicked]"; older releases print the same value twice.
+func repanicked(header string, values []string) bool {
+	if strings.HasSuffix(header, ", repanicked]") {
+		return true
+	}
+	if len(values) < 2 {
+		return false
+	}
+	for _, v := range values[1:] {
+		if v != values[0] {
+			return false
+		}
+	}
+	return true
 }
 
 // goStanzaFrames parses the goroutine stanza whose header is lines[header]
