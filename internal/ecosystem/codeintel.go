@@ -314,8 +314,16 @@ func runJSONDirDetailed(ctx context.Context, dir, bin string, args ...string) ([
 // ArtifactRefV1 mirrors file.cheap's portable reference envelope so Chalupa
 // and other consumers can link incident evidence without copying bytes.
 // See https://file.cheap/integrations/local-artifact-references
+//
+// $schema has no `omitempty`: Chalupa's validator (chalupa-ci.py
+// validate_monitor_incident_ref, contract.ts's z.literal(ARTIFACT_REF_V1_SCHEMA))
+// and file.cheap's own Go type (internal/artifactref.ArtifactRefV1) both treat
+// it as a required, always-present field, never one that's silently dropped
+// when empty. Keeping `omitempty` here let a caller that forgot to set Schema
+// serialize a still-"valid-looking" object missing the one field every
+// consumer keys its trust on.
 type ArtifactRefV1 struct {
-	Schema     string            `json:"$schema,omitempty"`
+	Schema     string            `json:"$schema"`
 	Version    int               `json:"version"`
 	Provider   string            `json:"provider"`
 	URI        string            `json:"uri"`
@@ -364,6 +372,31 @@ func ValidateLocalStashID(id string) error {
 		return fmt.Errorf("stash id %q is not a portable local artifact id", id)
 	}
 	return nil
+}
+
+// NewLocalArtifactRef constructs and validates a portable, fcheap-local
+// ArtifactRefV1: $schema, version, provider, and uri are all derived, never
+// left for the caller to get right (or forget) by hand. It mirrors
+// file.cheap's own constructor (internal/artifactref.NewLocal in
+// ~/projects/file.cheap) so a locally-built reference is byte-for-byte the
+// same shape file.cheap's canonical implementation produces. producer may be
+// nil. monitor's production path (ArtifactRef, below) still gets its
+// reference from `fcheap artifact-ref --json` rather than building one
+// locally — this constructor is for any other local caller that needs one.
+func NewLocalArtifactRef(artifactID, kind string, producer *ArtifactProducer) (ArtifactRefV1, error) {
+	ref := ArtifactRefV1{
+		Schema:     artifactRefSchema,
+		Version:    1,
+		Provider:   artifactRefProvider,
+		URI:        "fcheap://stash/" + artifactID,
+		ArtifactID: artifactID,
+		Kind:       kind,
+		Producer:   producer,
+	}
+	if err := ref.Validate(); err != nil {
+		return ArtifactRefV1{}, err
+	}
+	return ref, nil
 }
 
 // Validate enforces the immutable local ArtifactRefV1 handoff contract.
