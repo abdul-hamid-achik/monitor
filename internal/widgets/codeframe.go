@@ -22,6 +22,13 @@ type CodeFrameLine struct {
 	Percent float64
 	// CumPercent sizes the CUM column bar. Only read when ShowCum is set.
 	CumPercent float64
+	// Issues lists pre-formatted "SHORTID xN status" entries for local
+	// issues whose culprit lands on this line (E3.4: errors × heat overlay
+	// — see the roadmap's "6. Errores × calor en la misma vista" mockup).
+	// Rendered as "E <entry>[, <entry>...]" appended after this line's bar.
+	// nil/empty (every line before E3.4 populated this) renders nothing
+	// extra, byte-for-byte the same output as before this field existed.
+	Issues []string
 }
 
 // CodeFrame renders one function's touched lines — line numbers, a '>'
@@ -123,11 +130,27 @@ func (f CodeFrame) Render() string {
 		b.WriteByte('\n')
 		b.WriteString(f.renderLine(l, l.Line == hotLine, lineNumWidth, width))
 	}
+	if f.hasIssues() {
+		b.WriteByte('\n')
+		b.WriteString(f.style(frameDimStyle, "     E = issues whose culprit is this line"))
+	}
 	if f.Footer != "" {
 		b.WriteByte('\n')
 		b.WriteString(f.style(frameDimStyle, "     "+f.Footer))
 	}
 	return b.String()
+}
+
+// hasIssues reports whether any line carries an E3.4 issue overlay, so
+// Render can print the "E = issues whose culprit is this line" legend only
+// when it's actually needed instead of on every CodeFrame.
+func (f CodeFrame) hasIssues() bool {
+	for _, l := range f.Lines {
+		if len(l.Issues) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (f CodeFrame) hasLine(line int) bool {
@@ -243,27 +266,59 @@ func (f CodeFrame) renderLine(l CodeFrameLine, isHot bool, lineNumWidth, width i
 	}
 
 	code := padCode(l.Code, codeColumnWidth)
+	issueSuffix := f.renderIssueSuffix(l)
+	// The suffix's own display width, measured on the PLAIN text (never
+	// f.style's ANSI-escaped form, whose byte length has nothing to do with
+	// what a terminal actually renders) — subtracted from the bar's budget
+	// below so a marked line stays within width instead of overflowing it
+	// (see the E3.1 golden-width review finding: an "E 5C1D x10 open" line
+	// used to render 17+ runes past every other row).
+	issueSuffixWidth := ansi.StringWidth(f.issueSuffixText(l))
 
 	if f.ShowCum {
 		// Fixed (non-bar) columns: marker(1) space num(lineNumWidth)
 		// " | "(3) FLAT(7) sep(1) CUM(7) " | "(3) code(codeColumnWidth)
-		// " "(1) — whatever's left of width goes to the bar.
-		fixed := 1 + 1 + lineNumWidth + 3 + pctFieldWidth + len(dualColumnSep) + pctFieldWidth + 3 + codeColumnWidth + 1
+		// " "(1) issueSuffix(issueSuffixWidth) — whatever's left of width
+		// goes to the bar.
+		fixed := 1 + 1 + lineNumWidth + 3 + pctFieldWidth + len(dualColumnSep) + pctFieldWidth + 3 + codeColumnWidth + 1 + issueSuffixWidth
 		// A bar sized by SELF would be empty on exactly the rows CUM makes
 		// interesting: a pprof wrapper's SELF is routinely ~0 (see
 		// profiler_test.go's TestSymbolsFromPprofWrapperHasZeroFlatButFullCum).
 		// Both numbers are still printed, in FLAT-then-CUM column order.
 		cumBar := f.style(frameCumBarStyle, bar(l.CumPercent, barWidth(width, fixed)))
-		return fmt.Sprintf("%s %s | %*.1f%%%s%*.1f%% | %s %s",
-			marker, numStr, pctFieldWidth-1, l.Percent, dualColumnSep, pctFieldWidth-1, l.CumPercent, code, cumBar)
+		return fmt.Sprintf("%s %s | %*.1f%%%s%*.1f%% | %s %s%s",
+			marker, numStr, pctFieldWidth-1, l.Percent, dualColumnSep, pctFieldWidth-1, l.CumPercent, code, cumBar, issueSuffix)
 	}
 
 	// Fixed (non-bar) columns: marker(1) space num(lineNumWidth) " | "(3)
-	// code(codeColumnWidth) " "(1) pct(6) " |"(2).
-	fixed := 1 + 1 + lineNumWidth + 3 + codeColumnWidth + 1 + 6 + 2
+	// code(codeColumnWidth) " "(1) pct(6) " |"(2) issueSuffix(issueSuffixWidth).
+	fixed := 1 + 1 + lineNumWidth + 3 + codeColumnWidth + 1 + 6 + 2 + issueSuffixWidth
 	pctStr := fmt.Sprintf("%5.1f%%", l.Percent)
 	barStr := f.style(frameBarStyle, bar(l.Percent, barWidth(width, fixed)))
-	return fmt.Sprintf("%s %s | %s %s |%s", marker, numStr, code, pctStr, barStr)
+	return fmt.Sprintf("%s %s | %s %s |%s%s", marker, numStr, code, pctStr, barStr, issueSuffix)
+}
+
+// issueSuffixText is renderIssueSuffix's PLAIN (unstyled) text — "  E
+// <entry>[, <entry>...]", the roadmap mockup's "E 5C1D x10 open" marker —
+// used both to render the suffix and, via its own display width, to size
+// down the bar budget that precedes it (see renderLine). "" when l carries
+// no issue overlay.
+func (f CodeFrame) issueSuffixText(l CodeFrameLine) string {
+	if len(l.Issues) == 0 {
+		return ""
+	}
+	return "  E " + strings.Join(l.Issues, ", ")
+}
+
+// renderIssueSuffix renders issueSuffixText, styled, appended after a
+// line's bar. "" when l carries no issue overlay, so a CodeFrame with no
+// E3.4 data renders byte-for-byte the same as before this field existed.
+func (f CodeFrame) renderIssueSuffix(l CodeFrameLine) string {
+	text := f.issueSuffixText(l)
+	if text == "" {
+		return ""
+	}
+	return f.style(frameHotStyle, text)
 }
 
 // barWidth is however much of width the fixed (non-bar) columns leave over,

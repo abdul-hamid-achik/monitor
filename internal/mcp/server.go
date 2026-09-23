@@ -134,11 +134,22 @@ type Service struct {
 	// monitor_profile_capture. Optional; if nil the tool reports
 	// unavailable.
 	//
+	// lines mirrors the typed input's lines:true (E3.6): when true, the
+	// implementation builds a bounded monitor.line_heatmap.v1 from the SAME
+	// capture, BEFORE the keep/discard step above runs (a CDP CPU capture's
+	// only raw evidence, Profile.Text, would otherwise already be gone by
+	// the time a caller could build one from it) — capped to a few
+	// functions and a few lines each so the response stays small regardless
+	// of how large the underlying profile is. A capture whose method
+	// carries no per-line detail at all (macOS `sample`, a CDP HEAP
+	// snapshot) degrades honestly to a {"status":"skipped",...}
+	// LineHeatmapPayload instead of an empty or fabricated heatmap.
+	//
 	// An error satisfying errors.As(err, *UnavailableError) marks a capture
 	// that will never succeed for a known reason (Bun's JSC inspector, not
 	// V8 CDP) rather than an unexpected failure; handleProfileCapture
 	// surfaces those as status:"unavailable" instead of a bare "error".
-	Profile func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep bool) (profiler.Profile, profiler.Receipt, error)
+	Profile func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep, lines bool) (ProfileCaptureResult, error)
 
 	// Investigate runs the diagnostic pipeline for the given PID. Used by
 	// monitor_investigate. Optional; if nil the tool reports a stub result
@@ -364,7 +375,10 @@ func (s *Server) register() {
 			"Runtime-aware: Node/Deno with --inspect get a real CDP capture (file:line frames); Bun reports " +
 			"unavailable with an honest reason instead of failing oddly (Bun speaks JSC, not CDP). " +
 			"pprof_addr targets a non-default net/http/pprof port and asserts ownership. keep:true retains the " +
-			"raw profile text and on-disk temp file; the default discards both after the call.",
+			"raw profile text and on-disk temp file; the default discards both after the call. lines:true adds a " +
+			"bounded line_heatmap (which LINE, not just which function; top 3 functions, top 8 lines each) from " +
+			"the same capture, or an honest skipped status when this capture method carries no file:line detail " +
+			"(sample). Never returns ws:// inspector URLs.",
 		Annotations: mutatingAnnotations("Capture process profile", false, false),
 	}, s.handleProfileCapture)
 	mcp.AddTool(s.srv, &mcp.Tool{
@@ -513,7 +527,15 @@ type profileInput struct {
 	Type      string `json:"type,omitempty"       jsonschema:"profile type: heap, cpu, goroutine, sample (default heap)"`
 	PprofAddr string `json:"pprof_addr,omitempty" jsonschema:"loopback host:port (localhost/127.0.0.1 only) of the target's net/http/pprof server (Go heap/cpu/goroutine only); setting this asserts the endpoint belongs to pid and skips the ownership check, like the CLI's --pprof-addr — a non-loopback host is refused"`
 	Keep      bool   `json:"keep,omitempty"       jsonschema:"keep the captured profile's raw text and on-disk temp file; default false discards both after the call so repeated captures don't leak /tmp/monitor-<type>-* files or bloat the response"`
-	Confirm   bool   `json:"confirm"              jsonschema:"must be true; confirms intent to capture a profile"`
+	// Lines is E3.6: "which line is hot?" from MCP, in the same call as the
+	// capture itself. true returns a bounded monitor.line_heatmap.v1
+	// (top 3 functions, top 8 lines each, capped around 6 KB) instead of
+	// the profile's raw per-function symbols — a `sample` capture (or a CDP
+	// heap snapshot) carries no file:line detail to build one from and
+	// degrades honestly (line_heatmap.status:"skipped") rather than failing
+	// the whole call.
+	Lines   bool `json:"lines,omitempty"      jsonschema:"return a bounded line-level heatmap (monitor.line_heatmap.v1, top 3 functions/top 8 lines each) alongside the capture; default false"`
+	Confirm bool `json:"confirm"              jsonschema:"must be true; confirms intent to capture a profile"`
 }
 
 // investigateInput is the typed input for monitor_investigate.
@@ -884,6 +906,35 @@ func (e *UnavailableError) Error() string {
 	return e.Limitation + " (" + e.Recovery + ")"
 }
 
+// HeatmapSkip explains why a Service.Profile call made with lines:true
+// (E3.6) could not produce a line_heatmap for THIS particular capture —
+// e.g. a macOS `sample` capture, or a CDP heap snapshot, neither of which
+// carries the file:line detail profiler.BuildHeatmap needs — honest
+// degradation (see the roadmap's golden rule), never a fabricated or empty
+// heatmap. handleProfileCapture surfaces this as line_heatmap:{status:
+// "skipped", detail, recovery} instead of a monitor.line_heatmap.v1 shape.
+type HeatmapSkip struct {
+	Detail   string `json:"detail"`
+	Recovery string `json:"recovery,omitempty"`
+}
+
+// ProfileCaptureResult is what a Service.Profile call returns: the captured
+// profile (already shaped for the wire — its own Symbols cleared when
+// LineHeatmapPayload holds a real heatmap, since that replaces rather than
+// supplements the raw per-function list) and its verified artifact receipt,
+// plus — only when the caller asked for lines:true and Receipt is Verified —
+// LineHeatmapPayload, the ready-to-marshal "line_heatmap" response value:
+// either a *profiler.Heatmap or a {"status":"skipped","detail":...,
+// "recovery":...} map, already decided by the Service (internal/cli/mcp.go's
+// buildProfileService), never by handleProfileCapture — see the roadmap's
+// "no business logic in [MCP] handlers" rule. nil when lines was false or
+// the capture wasn't verified.
+type ProfileCaptureResult struct {
+	Profile            profiler.Profile
+	Receipt            profiler.Receipt
+	LineHeatmapPayload any
+}
+
 // handleProfileCapture implements monitor_profile_capture. Defaults to
 // "heap" if the agent omits the type. Returns a structured refusal when
 // the profile service is not wired.
@@ -909,8 +960,12 @@ func (s *Server) handleProfileCapture(ctx context.Context, _ *mcp.CallToolReques
 	// That policy decision lives in the Service (cli/mcp.go), not here —
 	// this handler stays free of capture-specific business logic, matching
 	// how monitor_investigate's include_raw redaction also lives in the
-	// Service rather than being reimplemented per handler.
-	prof, receipt, err := s.svc.Profile(ctx, in.PID, profiler.ProfileType(in.Type), in.PprofAddr, in.Keep)
+	// Service rather than being reimplemented per handler. lines:true's
+	// bounded line_heatmap — Symbols cleared, skip shaped to its wire map —
+	// is built and shaped the same way, inside the Service, BEFORE that
+	// discard step (see Service.Profile's doc comment and
+	// ProfileCaptureResult.LineHeatmapPayload's).
+	res, err := s.svc.Profile(ctx, in.PID, profiler.ProfileType(in.Type), in.PprofAddr, in.Keep, in.Lines)
 	if err != nil {
 		var unavail *UnavailableError
 		if errors.As(err, &unavail) {
@@ -925,24 +980,28 @@ func (s *Server) handleProfileCapture(ctx context.Context, _ *mcp.CallToolReques
 		}
 		return result(map[string]any{"captured": false, "error": err.Error(), "pid": in.PID})
 	}
-	if !receipt.Verified {
+	if !res.Receipt.Verified {
 		return result(map[string]any{
 			"captured":   false,
 			"pid":        in.PID,
 			"type":       in.Type,
-			"limitation": receipt.Limitation,
+			"limitation": res.Receipt.Limitation,
 			"next_actions": []string{
 				"try type:sample (works for any process on macOS, no pprof needed)",
 				"ensure the target exposes net/http/pprof on localhost:6060, or profile via the CLI with --pprof-addr",
 			},
 		})
 	}
-	return result(map[string]any{
+	payload := map[string]any{
 		"captured": true,
 		"pid":      in.PID,
-		"profile":  prof,
-		"artifact": receipt, // {"verified":true,"size_bytes":N}
-	})
+		"profile":  res.Profile, // already Symbols-cleared by the Service when LineHeatmapPayload holds a real heatmap
+		"artifact": res.Receipt, // {"verified":true,"size_bytes":N}
+	}
+	if in.Lines && res.LineHeatmapPayload != nil {
+		payload["line_heatmap"] = res.LineHeatmapPayload
+	}
+	return result(payload)
 }
 
 // handleInvestigate implements monitor_investigate. If the service has

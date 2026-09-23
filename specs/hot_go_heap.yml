@@ -1,0 +1,168 @@
+version: 1
+name: monitor_hot_go_heap
+
+intent: |
+  E3.5: `monitor hot <pid> --type heap` names a real Go heap allocation
+  LINE, not just a function, against a real `go run .` launch of
+  examples/polyglot/go-pprof. This exercises two things together:
+
+  - leaf resolution through the `go run` toolchain wrapper (E3.2):
+    `monitor hot <pid-of-the-go-toolchain-process>` must resolve down to
+    the COMPILED CHILD it execs, via tree.go's looksLikeGoRunBinary
+    reclassification (path-shape match on the child's exe, independent of
+    its process name) — the same mechanism
+    internal/cli/hot_test.go's own TestRunHotPIDLiveGoRunHeapNamesAllocationLine
+    pins down at the Go level. A directly-run, already-compiled binary
+    (verified live) is NOT resolvable today: classifyRuntime only
+    recognizes a bare process named "go" or ending in ".test", so `go run
+    .` is the one launch shape this repo can reliably profile by pid today
+    — this spec exercises exactly that shape, not a hypothetical one.
+  - `heat.Build`'s pprof HEAP path (inuse_space): go-pprof's planted
+    retained allocation, main.buildIndex's `Row{..., Key: fmt.Sprintf(...),
+    Pad: strings.Repeat(...)}` composite literal (main.go's own "HOT LINE
+    (heap)" comment — line 96 as of this fixture's current shape; verified
+    live against a real capture, not assumed from source alone), must be
+    the named hot line, not main.go:99's cheaper map-insertion line. This
+    is checked via python3's max-self selection (not an assumed line
+    order), matching specs/hot_pid.yml and specs/mcp_profile_lines.yml's
+    own technique.
+
+  The pprof port (127.0.0.1:6069) is hardcoded, matching
+  specs/hot_file.yml's own real-pprof-capture outcome for the same fixture
+  — both attach AFTER the fact rather than owning the launch, so there is
+  no shared state to collide on beyond the port itself, and only one of
+  these specs runs its go-pprof capture at a time (glyph runs one spec at a
+  time). Every outcome launches its OWN fresh `go run .` IN ITS OWN PROCESS
+  GROUP (`set -m` job control, so the backgrounded subshell's pid IS its
+  own pgid — verified live: a real `go run .` toolchain process and the
+  COMPILED CHILD it execs both land in that same group, since neither ever
+  calls setpgid itself) and tears down that WHOLE group with a signal to
+  -$P, never a `lsof`-by-port lookup: on a dev machine running concurrent
+  go-pprof work (this fixture's own port collision note, and
+  hot_test.go's own attemptHotGoHeap retry loop, already document this
+  happens), killing whatever process happens to own the port at cleanup
+  time could SIGKILL an unrelated process instead of this outcome's own.
+
+target:
+  cmd:
+    [
+      "sh",
+      "-c",
+      "set -m; (cd examples/polyglot/go-pprof && exec go run .) >/tmp/monitor-spec-hot-go-heap.log 2>&1 & P=$!; sleep 2; ./bin/monitor hot \"$P\" --type heap --pprof-addr 127.0.0.1:6069 --func main.buildIndex --json; R=$?; kill -TERM -\"$P\" 2>/dev/null; sleep 0.3; kill -KILL -\"$P\" 2>/dev/null; exit $R",
+    ]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v go"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "test -f examples/polyglot/go-pprof/main.go"
+      timeoutMs: 5000
+    # Warm the build cache so the real `go run .` in the outcomes below
+    # starts fast (process startup only, no compile-on-first-use jitter
+    # eating into the fixed sleep window).
+    - run: "cd examples/polyglot/go-pprof && go build -o /tmp/monitor-spec-hot-go-heap-warm . && rm -f /tmp/monitor-spec-hot-go-heap-warm"
+      timeoutMs: 60000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 20000
+
+outcomes:
+  - id: names_allocation_line_96_json
+    description: |
+      the JSON heatmap's main.buildIndex names line 96 (the composite
+      literal doing the actual retained allocation) as its MAX-SELF line,
+      not line 99 (the cheaper map-insertion append).
+    verify:
+      command:
+        timeoutMs: 20000
+        # A literal block (never a folded ">-" one): the python3 heredoc
+        # below needs its own real newlines preserved. YAML's folded style
+        # joins every line break into a single space instead -- verified
+        # live: that collapsed the whole python script onto ONE line with
+        # its original per-line indentation still attached, which Python
+        # then rejected outright ("IndentationError: unexpected indent")
+        # before ever reaching the assertion this outcome exists to check.
+        run: |
+          set -m;
+          (cd examples/polyglot/go-pprof && exec go run .) >/tmp/monitor-spec-hot-go-heap.log 2>&1 &
+          P=$!; sleep 2;
+          ./bin/monitor hot "$P" --type heap --pprof-addr 127.0.0.1:6069 --func main.buildIndex --json > /tmp/monitor-spec-hot-go-heap.json 2>&1;
+          kill -TERM -"$P" 2>/dev/null; sleep 0.3; kill -KILL -"$P" 2>/dev/null;
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/monitor-spec-hot-go-heap.json'))
+          fn = next(f for f in d['functions'] if f['name'] == 'main.buildIndex')
+          best = max(fn['lines'], key=lambda l: l.get('self', 0))
+          assert best['line'] == 96, fn['lines']
+          "
+
+  - id: names_allocation_line_96_human
+    description: the human CodeFrame marks line 96 with the '>' hot-line marker
+    verify:
+      command:
+        timeoutMs: 20000
+        run: >-
+          set -m;
+          (cd examples/polyglot/go-pprof && exec go run .) >/tmp/monitor-spec-hot-go-heap.log 2>&1 &
+          P=$!; sleep 2;
+          ./bin/monitor hot "$P" --type heap --pprof-addr 127.0.0.1:6069 --func main.buildIndex > /tmp/monitor-spec-hot-go-heap.txt 2>&1;
+          kill -TERM -"$P" 2>/dev/null; sleep 0.3; kill -KILL -"$P" 2>/dev/null;
+          grep -qE '^>[[:space:]]+96[[:space:]]*\|' /tmp/monitor-spec-hot-go-heap.txt
+
+  - id: profile_type_heap_inuse
+    description: the JSON reports profile_type heap_inuse (inuse_space), not cpu
+    verify:
+      command:
+        timeoutMs: 20000
+        run: >-
+          set -m;
+          (cd examples/polyglot/go-pprof && exec go run .) >/tmp/monitor-spec-hot-go-heap.log 2>&1 &
+          P=$!; sleep 2;
+          ./bin/monitor hot "$P" --type heap --pprof-addr 127.0.0.1:6069 --json > /tmp/monitor-spec-hot-go-heap.json 2>&1;
+          kill -TERM -"$P" 2>/dev/null; sleep 0.3; kill -KILL -"$P" 2>/dev/null;
+          grep -q '"profile_type":[[:space:]]*"heap_inuse"' /tmp/monitor-spec-hot-go-heap.json
+
+  - id: leaf_resolved_to_compiled_child_not_go_toolchain
+    description: |
+      the live header names the resolved leaf (go pid != the requested go
+      toolchain pid) and says so honestly via the "(child of go N)" clause
+      — proof the pid handed to monitor hot was the WRAPPER, not the
+      already-resolved leaf.
+    verify:
+      command:
+        timeoutMs: 20000
+        run: >-
+          set -m;
+          (cd examples/polyglot/go-pprof && exec go run .) >/tmp/monitor-spec-hot-go-heap.log 2>&1 &
+          P=$!; sleep 2;
+          OUT=$(./bin/monitor hot "$P" --type heap --pprof-addr 127.0.0.1:6069);
+          kill -TERM -"$P" 2>/dev/null; sleep 0.3; kill -KILL -"$P" 2>/dev/null;
+          echo "$OUT" | head -1 | grep -q "^monitor > go pid" &&
+          echo "$OUT" | head -1 | grep -q "(child of go $P)"
+
+  - id: clean_exit
+    description: the binary exits cleanly
+    verify:
+      command:
+        timeoutMs: 20000
+        run: >-
+          set -m;
+          (cd examples/polyglot/go-pprof && exec go run .) >/tmp/monitor-spec-hot-go-heap.log 2>&1 &
+          P=$!; sleep 2;
+          ./bin/monitor hot "$P" --type heap --pprof-addr 127.0.0.1:6069 --json >/dev/null 2>&1;
+          R=$?;
+          kill -TERM -"$P" 2>/dev/null; sleep 0.3; kill -KILL -"$P" 2>/dev/null;
+          [ $R -eq 0 ]

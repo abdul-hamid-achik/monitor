@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -142,9 +143,18 @@ func newMCPServeCmd() *cobra.Command {
 //
 // keep/discard and the receipt live here, not in server.go's
 // handleProfileCapture: the same principle that keeps monitor_investigate's
-// include_raw redaction in the Service instead of the handler.
-func buildProfileService() func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep bool) (profiler.Profile, profiler.Receipt, error) {
-	return func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep bool) (profiler.Profile, profiler.Receipt, error) {
+// include_raw redaction in the Service instead of the handler. lines:true's
+// bounded line_heatmap (E3.6) is built here too, BEFORE the keep/discard
+// step below runs — a CDP CPU capture's only raw evidence, Profile.Text, is
+// gone once discarded, so building the heatmap has to happen first. The
+// response-shaping this used to leave to handleProfileCapture (dropping
+// Profile.Symbols when a heatmap was built, and turning a HeatmapSkip into
+// its {"status":"skipped",...} wire shape) is also done here, into
+// LineHeatmapPayload: the roadmap says "no business logic in [MCP]
+// handlers", so the handler's own job shrinks to marshaling whatever the
+// Service already decided.
+func buildProfileService() func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep, lines bool) (mcp.ProfileCaptureResult, error) {
+	return func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep, lines bool) (mcp.ProfileCaptureResult, error) {
 		binding, inspectErr := procbind.Inspect(ctx, pid, "")
 		var bindingPtr *procbind.Binding
 		if inspectErr == nil {
@@ -152,22 +162,202 @@ func buildProfileService() func(ctx context.Context, pid int32, ptype profiler.P
 		}
 		prof, _, step := captureRuntimeAwareProfile(ctx, pid, bindingPtr, ptype, pprofAddr, "", pprofAddr != "", 0, true)
 		if step.Status == stepUnavailable {
-			return profiler.Profile{}, profiler.Receipt{}, &mcp.UnavailableError{Limitation: step.Limitation, Recovery: step.Recovery}
+			return mcp.ProfileCaptureResult{}, &mcp.UnavailableError{Limitation: step.Limitation, Recovery: step.Recovery}
 		}
 		if step.Status != stepOK {
 			msg := step.Limitation
 			if step.Recovery != "" {
 				msg = fmt.Sprintf("%s (%s)", msg, step.Recovery)
 			}
-			return profiler.Profile{}, profiler.Receipt{}, fmt.Errorf("%s", msg)
+			return mcp.ProfileCaptureResult{}, fmt.Errorf("%s", msg)
 		}
 		receipt := prof.VerifyArtifact()
+
+		var linePayload any
+		if lines && receipt.Verified {
+			heatmap, heatmapSkip := buildMCPLineHeatmap(ctx, prof, bindingPtr)
+			switch {
+			case heatmap != nil:
+				// "a bounded line_heatmap ... instead of raw symbols": the
+				// per-function Symbols list is redundant with (and coarser
+				// than) the line-level heatmap this call already carries.
+				// Cleared on prof directly — prof is this closure's own
+				// local copy of the captured Profile (captureRuntimeAwareProfile
+				// returns it by value), never anything the caller already
+				// holds a reference to, so this can't surprise a caller
+				// re-checking some OTHER copy of the same capture.
+				prof.Symbols = nil
+				linePayload = heatmap
+			case heatmapSkip != nil:
+				linePayload = map[string]any{
+					"status":   "skipped",
+					"detail":   heatmapSkip.Detail,
+					"recovery": heatmapSkip.Recovery,
+				}
+			}
+		}
+
 		if receipt.Verified && !keep {
 			if err := prof.DiscardRawArtifact(); err != nil {
 				receipt.Limitation = joinLimitation(receipt.Limitation, "cleanup: "+err.Error())
 			}
 		}
-		return prof, receipt, nil
+		return mcp.ProfileCaptureResult{Profile: prof, Receipt: receipt, LineHeatmapPayload: linePayload}, nil
+	}
+}
+
+// mcpHeatmapMaxFunctions/mcpHeatmapMaxLines bound monitor_profile_capture's
+// lines:true response to E3.6's payload budget (roughly 6 KB): top 3
+// functions, top 8 lines each — by weight, never the WHOLE per-line
+// breakdown a saved .cpuprofile/.pb.gz can carry.
+const (
+	mcpHeatmapMaxFunctions = 3
+	mcpHeatmapMaxLines     = 8
+)
+
+// buildMCPLineHeatmap builds a bounded monitor.line_heatmap.v1 from a
+// JUST-captured profile — the same profiler.BuildHeatmap `monitor hot`
+// uses, via profilerSourceFromCapture (hot.go) — before buildProfileService
+// discards the capture's raw text/temp file. A capture with no file:line
+// detail at all (macOS `sample`; a CDP HEAP snapshot, a completely
+// different wire shape than the CPU .cpuprofile LoadFile parses) degrades
+// honestly to a HeatmapSkip instead of an empty or fabricated heatmap —
+// checked by prof.Method BEFORE profilerSourceFromCapture ever stages
+// anything to disk, so the skip's own Detail never leaks an internal temp
+// path or misdescribes a sample dump as a malformed .cpuprofile (see the
+// E3.6 review). Never touches or returns anything ws://-shaped:
+// profiler.Profile carries no inspector websocket URL at all, only the
+// already-captured .cpuprofile/pprof bytes.
+func buildMCPLineHeatmap(ctx context.Context, prof profiler.Profile, binding *procbind.Binding) (*profiler.Heatmap, *mcp.HeatmapSkip) {
+	runtime := ""
+	if binding != nil {
+		runtime = string(binding.Runtime)
+	}
+	switch prof.Method {
+	case "sample":
+		return nil, &mcp.HeatmapSkip{
+			Detail:   fmt.Sprintf("this sample capture (method %s) has no line-level detail: macOS `sample` reports function names only, never source lines", prof.Method),
+			Recovery: mcpLineHeatmapRecovery(runtime, "sample"),
+		}
+	case "inspector_heap":
+		return nil, &mcp.HeatmapSkip{
+			Detail:   fmt.Sprintf("this heap capture (method %s) has no line-level detail: a CDP heap snapshot is an object graph, not a per-line sample profile", prof.Method),
+			Recovery: mcpLineHeatmapRecovery(runtime, "inspector_heap"),
+		}
+	}
+	src, cleanup, err := profilerSourceFromCapture(prof)
+	if err != nil {
+		return nil, &mcp.HeatmapSkip{Detail: err.Error(), Recovery: mcpLineHeatmapRecovery(runtime, prof.Method)}
+	}
+	defer cleanup()
+	heatType := profiler.HeatCPU
+	switch prof.Type {
+	case profiler.ProfileHeap:
+		heatType = profiler.HeatHeapInuse
+	case profiler.ProfileGoroutine:
+		heatType = profiler.HeatGoroutine
+	}
+	// Built at a generous Top so DefaultTarget (see mcpSelectFunctions) is
+	// always computed from the real, full function list — never capped to
+	// mcpHeatmapMaxFunctions before that selection runs, or the hottest
+	// function could already be gone before mcpSelectFunctions gets a
+	// chance to keep it.
+	hm, buildErr := profiler.BuildHeatmap(ctx, src, profiler.HeatOptions{
+		ProfileType: heatType,
+		Runtime:     runtime,
+		NoReadCode:  true, // payload diet: line numbers/percentages answer "which line", not the source text itself
+	})
+	if buildErr != nil {
+		return nil, &mcp.HeatmapSkip{Detail: buildErr.Error(), Recovery: mcpLineHeatmapRecovery(runtime, prof.Method)}
+	}
+	mcpSelectFunctions(hm, mcpHeatmapMaxFunctions)
+	boundHeatmapLines(hm, mcpHeatmapMaxLines)
+	return hm, nil
+}
+
+// mcpLineHeatmapRecovery names a retry that could actually work, instead of
+// a one-size-fits-all suggestion that can include the very type/runtime
+// combination that just failed (see the E3.6 review: node type:heap failing
+// and then being told to retry with type:heap). method is the JUST-FAILED
+// capture's own prof.Method ("sample", "inspector_heap", or "" when the
+// failure happened before a method was even chosen).
+func mcpLineHeatmapRecovery(runtime, method string) string {
+	switch runtime {
+	case string(procbind.RuntimeNode), string(procbind.RuntimeDeno):
+		return "retry with type:cpu on this Node/Deno --inspect target for line-level CPU heat; heap/goroutine line-level detail needs a Go pprof target instead"
+	case string(procbind.RuntimeBun):
+		return "Bun has no line-level detail via MCP yet; run the app with `bun --cpu-prof` and inspect the .cpuprofile directly"
+	case string(procbind.RuntimeGo):
+		if method == "sample" {
+			return "retry with pprof_addr set so type:cpu/type:heap/type:goroutine can reach this target's net/http/pprof endpoint"
+		}
+		return "retry with type:cpu, type:heap, or type:goroutine against this Go target's pprof endpoint (pprof_addr)"
+	default:
+		return "retry with type:cpu on a Node/Deno --inspect target, or type:cpu/type:heap/type:goroutine against a Go pprof target (pprof_addr) — a plain macOS sample capture has no line-level detail to build a heatmap from"
+	}
+}
+
+// mcpSelectFunctions trims hm.Functions to at most max entries BEFORE
+// boundHeatmapLines runs, always keeping hm.DefaultTarget (the function
+// BuildHeatmap itself determined is the REAL hottest by self time, computed
+// from the full, unfiltered function list — see Heatmap.DefaultTarget's own
+// doc comment) even when it would otherwise fall outside the top-max-by-cum
+// slice: a top-3-by-cum cap alone routinely keeps nothing but near-zero-self
+// wrapper frames in a stack more than two or three ancestors deep (handler
+// -> service -> repo -> hot loop is a completely ordinary shape), dropping
+// the one function an agent asking "which line is hot?" actually needs (see
+// the E3.6 review's "deep.js" reproduction). DefaultTarget is inserted
+// FIRST, then the highest-Cum% OTHER functions fill the remaining slots —
+// preserving the schema's documented cum-descending function order (see
+// docs/contracts/line-heatmap-v1.md) among everything after it.
+func mcpSelectFunctions(hm *profiler.Heatmap, max int) {
+	if hm == nil || max <= 0 || len(hm.Functions) <= max {
+		return
+	}
+	defaultKey := func(f profiler.HeatFunction) string { return f.Name + "\x00" + f.File }
+	var kept []profiler.HeatFunction
+	seen := map[string]bool{}
+	if hm.DefaultTarget != nil {
+		kept = append(kept, *hm.DefaultTarget)
+		seen[defaultKey(*hm.DefaultTarget)] = true
+	}
+	for _, f := range hm.Functions {
+		if len(kept) >= max {
+			break
+		}
+		if seen[defaultKey(f)] {
+			continue
+		}
+		kept = append(kept, f)
+		seen[defaultKey(f)] = true
+	}
+	hm.Functions = kept
+}
+
+// boundHeatmapLines trims each function's Lines to its top maxLines by
+// weight (Self desc, then Cum desc), re-sorted back to ascending Line order
+// afterward — the same reading order every other Heatmap consumer
+// (CodeFrame, --json) expects. A function with maxLines or fewer lines is
+// left untouched.
+func boundHeatmapLines(hm *profiler.Heatmap, maxLines int) {
+	if hm == nil {
+		return
+	}
+	for i := range hm.Functions {
+		f := &hm.Functions[i]
+		if len(f.Lines) <= maxLines {
+			continue
+		}
+		trimmed := append([]profiler.HeatLine(nil), f.Lines...)
+		sort.SliceStable(trimmed, func(a, b int) bool {
+			if trimmed[a].Self != trimmed[b].Self {
+				return trimmed[a].Self > trimmed[b].Self
+			}
+			return trimmed[a].Cum > trimmed[b].Cum
+		})
+		trimmed = trimmed[:maxLines]
+		sort.Slice(trimmed, func(a, b int) bool { return trimmed[a].Line < trimmed[b].Line })
+		f.Lines = trimmed
 	}
 }
 

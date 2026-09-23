@@ -455,9 +455,9 @@ func TestHandleKillStillRunningSurfacesNextAction(t *testing.T) {
 // TestHandleProfileCaptureRefusesWithoutConfirm mirrors TestHandleKill.
 func TestHandleProfileCaptureRefusesWithoutConfirm(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Profile: func(context.Context, int32, profiler.ProfileType, string, bool) (profiler.Profile, profiler.Receipt, error) {
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
 			t.Fatalf("Profile must not be called without confirm")
-			return profiler.Profile{}, profiler.Receipt{}, nil
+			return ProfileCaptureResult{}, nil
 		},
 	})
 	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 1234, Type: "heap"})
@@ -478,14 +478,14 @@ func TestHandleProfileCaptureRefusesWithoutConfirm(t *testing.T) {
 func TestHandleProfileCaptureDefaultsType(t *testing.T) {
 	got := profiler.ProfileType("")
 	s := newTestServer(t, &Service{
-		Profile: func(_ context.Context, pid int32, ptype profiler.ProfileType, _ string, keep bool) (profiler.Profile, profiler.Receipt, error) {
+		Profile: func(_ context.Context, pid int32, ptype profiler.ProfileType, _ string, keep, _ bool) (ProfileCaptureResult, error) {
 			got = ptype
 			prof := profiler.Profile{PID: pid, Type: ptype, Taken: time.Now(), Text: "heap profile: 1"}
 			receipt := prof.VerifyArtifact()
 			if !keep {
 				_ = prof.DiscardRawArtifact()
 			}
-			return prof, receipt, nil
+			return ProfileCaptureResult{Profile: prof, Receipt: receipt}, nil
 		},
 	})
 	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Confirm: true})
@@ -509,9 +509,9 @@ func TestHandleProfileCaptureDefaultsType(t *testing.T) {
 // a limitation, never as a blind success.
 func TestHandleProfileCaptureRefusesEmptyArtifact(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Profile: func(context.Context, int32, profiler.ProfileType, string, bool) (profiler.Profile, profiler.Receipt, error) {
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
 			prof := profiler.Profile{PID: 7, Type: "heap"}
-			return prof, prof.VerifyArtifact(), nil
+			return ProfileCaptureResult{Profile: prof, Receipt: prof.VerifyArtifact()}, nil
 		},
 	})
 	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Confirm: true})
@@ -537,9 +537,9 @@ func TestHandleProfileCaptureRefusesEmptyArtifact(t *testing.T) {
 // is reported as captured=true with a verified artifact receipt.
 func TestHandleProfileCaptureVerifiedArtifact(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Profile: func(context.Context, int32, profiler.ProfileType, string, bool) (profiler.Profile, profiler.Receipt, error) {
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
 			prof := profiler.Profile{PID: 7, Type: "heap", Text: "heap profile: 1"}
-			return prof, prof.VerifyArtifact(), nil
+			return ProfileCaptureResult{Profile: prof, Receipt: prof.VerifyArtifact()}, nil
 		},
 	})
 	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Confirm: true})
@@ -562,6 +562,101 @@ func TestHandleProfileCaptureVerifiedArtifact(t *testing.T) {
 	}
 }
 
+// TestHandleProfileCaptureLinesTrueEmbedsHeatmapAndDropsSymbols is the E3.6
+// handler-level regression: with lines:true and the Service returning a
+// Heatmap, the payload carries line_heatmap (the monitor.line_heatmap.v1
+// shape) AND the embedded profile's own Symbols are cleared — "a bounded
+// line_heatmap ... instead of raw symbols" — while profile.text/other
+// fields are untouched (this test's Profile carries none, but the point is
+// the clearing is scoped to Symbols only, done on a COPY, never mutating
+// what the Service itself returned).
+func TestHandleProfileCaptureLinesTrueEmbedsHeatmapAndDropsSymbols(t *testing.T) {
+	hm := &profiler.Heatmap{
+		Schema: "monitor.line_heatmap.v1", ProfileType: profiler.HeatCPU, Method: profiler.MethodV8PositionTicks,
+		Functions: []profiler.HeatFunction{{Name: "heavyStringify", File: "js/workload.js", Lines: []profiler.HeatLine{{Line: 17, Self: 100, PctOfFunction: 99.9}}}},
+	}
+	s := newTestServer(t, &Service{
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
+			prof := profiler.Profile{PID: 7, Type: "cpu", Method: "inspector_cpu", Symbols: []profiler.Symbol{{Func: "heavyStringify", File: "js/workload.js", Line: 17}}}
+			receipt := prof.VerifyArtifact()
+			// A real Service (internal/cli/mcp.go's buildProfileService)
+			// clears Symbols itself, AFTER computing the receipt, since
+			// LineHeatmapPayload (hm below) replaces rather than
+			// supplements it; this stub mirrors that by hand.
+			prof.Symbols = nil
+			return ProfileCaptureResult{Profile: prof, Receipt: receipt, LineHeatmapPayload: hm}, nil
+		},
+	})
+	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Type: "cpu", Lines: true, Confirm: true})
+	if err != nil {
+		t.Fatalf("handleProfileCapture returned hard error: %v", err)
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", payload)
+	}
+	lh, ok := m["line_heatmap"].(map[string]any)
+	if !ok {
+		t.Fatalf("line_heatmap missing or wrong type; payload=%v", m)
+	}
+	if lh["schema"] != "monitor.line_heatmap.v1" {
+		t.Errorf("line_heatmap.schema = %v, want monitor.line_heatmap.v1", lh["schema"])
+	}
+	profMap, ok := m["profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("profile missing or wrong type; payload=%v", m)
+	}
+	if _, ok := profMap["symbols"]; ok {
+		t.Errorf("profile.symbols should be dropped when lines:true returns a heatmap; payload=%v", profMap)
+	}
+	if strings.Contains(fmt.Sprintf("%v", m), "ws://") {
+		t.Errorf("payload must never carry a ws:// inspector URL: %v", m)
+	}
+}
+
+// TestHandleProfileCaptureLinesTrueSkipsHonestly is lines:true's honest
+// degradation half: when the Service can't build a heatmap for this capture
+// (e.g. a macOS `sample`, which carries no file:line detail at all),
+// line_heatmap reports status:"skipped" with a detail/recovery, never an
+// empty or fabricated monitor.line_heatmap.v1 document, and the call still
+// reports captured:true (the underlying profile capture itself succeeded).
+func TestHandleProfileCaptureLinesTrueSkipsHonestly(t *testing.T) {
+	s := newTestServer(t, &Service{
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
+			prof := profiler.Profile{PID: 7, Type: "sample", Method: "sample", Text: "sample dump"}
+			return ProfileCaptureResult{
+				Profile: prof, Receipt: prof.VerifyArtifact(),
+				LineHeatmapPayload: map[string]any{
+					"status":   "skipped",
+					"detail":   "sample carries no file:line detail",
+					"recovery": "use type:cpu or type:heap instead",
+				},
+			}, nil
+		},
+	})
+	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Type: "sample", Lines: true, Confirm: true})
+	if err != nil {
+		t.Fatalf("handleProfileCapture returned hard error: %v", err)
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", payload)
+	}
+	if captured, _ := m["captured"].(bool); !captured {
+		t.Fatalf("captured should stay true when only the heatmap was skipped; got %v", m)
+	}
+	lh, ok := m["line_heatmap"].(map[string]any)
+	if !ok {
+		t.Fatalf("line_heatmap missing or wrong type; payload=%v", m)
+	}
+	if lh["status"] != "skipped" {
+		t.Errorf("line_heatmap.status = %v, want skipped", lh["status"])
+	}
+	if lh["detail"] == "" {
+		t.Errorf("line_heatmap.detail should be non-empty; payload=%v", lh)
+	}
+}
+
 // TestHandleProfileCaptureUnavailableStatus verifies a Service.Profile
 // error satisfying errors.As(err, *UnavailableError) (Bun's "speaks JSC,
 // not CDP" case being the only producer today) surfaces as a distinguishable
@@ -571,8 +666,8 @@ func TestHandleProfileCaptureVerifiedArtifact(t *testing.T) {
 // failed, retry might help".
 func TestHandleProfileCaptureUnavailableStatus(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Profile: func(context.Context, int32, profiler.ProfileType, string, bool) (profiler.Profile, profiler.Receipt, error) {
-			return profiler.Profile{}, profiler.Receipt{}, &UnavailableError{
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
+			return ProfileCaptureResult{}, &UnavailableError{
 				Limitation: "Bun speaks the WebKit/JSC inspector protocol, not V8 CDP",
 				Recovery:   "run the app with `bun --cpu-prof`",
 			}
@@ -1453,9 +1548,9 @@ func TestCallToolMutatingToolsRefuseWithoutConfirmOnWire(t *testing.T) {
 			t.Fatal("Kill must not be called without confirm")
 			return kill.Result{}, nil
 		},
-		Profile: func(context.Context, int32, profiler.ProfileType, string, bool) (profiler.Profile, profiler.Receipt, error) {
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
 			t.Fatal("Profile must not be called without confirm")
-			return profiler.Profile{}, profiler.Receipt{}, nil
+			return ProfileCaptureResult{}, nil
 		},
 		Investigate: func(context.Context, int32, InvestigateOptions) map[string]any {
 			t.Fatal("Investigate must not be called without confirm")
@@ -1579,22 +1674,22 @@ func TestCallToolProfileCaptureLiveNodeInspectorReturnsCPULines(t *testing.T) {
 		// this test's job is narrower — the MCP wire/schema round trip
 		// (tool registration, typed input, structuredContent shape) against
 		// a REAL node --inspect process, not a synthetic Profile.
-		Profile: func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep bool) (profiler.Profile, profiler.Receipt, error) {
+		Profile: func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep, _ bool) (ProfileCaptureResult, error) {
 			if ptype != profiler.ProfileCPU {
-				return profiler.Profile{}, profiler.Receipt{}, fmt.Errorf("unexpected profile type %q", ptype)
+				return ProfileCaptureResult{}, fmt.Errorf("unexpected profile type %q", ptype)
 			}
 			if own, detail := profiler.VerifyInspectorOwnership(ctx, pid, addr); own != profiler.OwnershipOwned {
-				return profiler.Profile{}, profiler.Receipt{}, fmt.Errorf("inspector %s not proven to belong to pid %d: %s", addr, pid, detail)
+				return ProfileCaptureResult{}, fmt.Errorf("inspector %s not proven to belong to pid %d: %s", addr, pid, detail)
 			}
 			prof, err := profiler.ProfileInspector(ctx, pid, addr, 2*time.Second)
 			if err != nil {
-				return profiler.Profile{}, profiler.Receipt{}, err
+				return ProfileCaptureResult{}, err
 			}
 			receipt := prof.VerifyArtifact()
 			if !keep {
 				_ = prof.DiscardRawArtifact()
 			}
-			return prof, receipt, nil
+			return ProfileCaptureResult{Profile: prof, Receipt: receipt}, nil
 		},
 	}
 	s := NewServer(svc, "test")

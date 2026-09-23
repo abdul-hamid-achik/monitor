@@ -1121,6 +1121,89 @@ func TestReadCodeTruncatesPathologicallyLongLines(t *testing.T) {
 	}
 }
 
+// --- BuildHeatmapFromSample (E3.2/AC-1's darwin `sample` fallback) --------
+
+// TestBuildHeatmapFromSampleIsFunctionLevelOnly asserts the honest-
+// degradation contract: MethodDarwinSample, the disclosure warning, and
+// every function's Lines staying empty (no per-line detail exists for a
+// macOS `sample` capture at all — see the package doc comment).
+func TestBuildHeatmapFromSampleIsFunctionLevelOnly(t *testing.T) {
+	prof := Profile{
+		Type: ProfileSample, Method: "sample",
+		Symbols: []Symbol{
+			{Func: "hot_leaf", File: "myapp", Weight: 71.0, Cum: 71.0},
+			{Func: "cold_leaf", File: "myapp", Weight: 4.0, Cum: 4.0},
+		},
+		Stats: &Stats{Samples: 100, ActiveSamples: 75, IdlePct: 25},
+	}
+	hm, err := BuildHeatmapFromSample(context.Background(), prof, HeatOptions{Runtime: "python"})
+	if err != nil {
+		t.Fatalf("BuildHeatmapFromSample: %v", err)
+	}
+	if hm.Method != MethodDarwinSample {
+		t.Errorf("Method = %q, want %q", hm.Method, MethodDarwinSample)
+	}
+	if hm.ProfileType != HeatCPU {
+		t.Errorf("ProfileType = %q, want cpu", hm.ProfileType)
+	}
+	if hm.Runtime != "python" {
+		t.Errorf("Runtime = %q, want python", hm.Runtime)
+	}
+	if hm.Samples != 100 || hm.ActiveSamples != 75 || hm.IdlePct != 25 {
+		t.Errorf("Stats not carried through: Samples=%d ActiveSamples=%d IdlePct=%v", hm.Samples, hm.ActiveSamples, hm.IdlePct)
+	}
+	found := false
+	for _, w := range hm.Warnings {
+		if strings.Contains(w, "function-level only") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Warnings = %v, want one disclosing function-level-only", hm.Warnings)
+	}
+	f := findHeatFunc(t, hm, "hot_leaf")
+	if len(f.Lines) != 0 {
+		t.Errorf("hot_leaf.Lines = %+v, want empty (no per-line detail from sample)", f.Lines)
+	}
+	if f.StartLine != 0 || f.EndLine != 0 {
+		t.Errorf("hot_leaf range = [%d,%d], want [0,0] (no line data at all)", f.StartLine, f.EndLine)
+	}
+	if f.SelfPct != 71.0 {
+		t.Errorf("hot_leaf.SelfPct = %v, want 71.0", f.SelfPct)
+	}
+}
+
+// TestBuildHeatmapFromSampleDefaultTargetIsHighestSelf asserts the same
+// DefaultTarget contract every other producer honors, so `monitor hot`'s
+// shared renderer picks the right function by default even for a
+// sample-sourced Heatmap.
+func TestBuildHeatmapFromSampleDefaultTargetIsHighestSelf(t *testing.T) {
+	prof := Profile{
+		Type: ProfileSample, Method: "sample",
+		Symbols: []Symbol{
+			{Func: "wrapper", File: "myapp", Weight: 1.0, Cum: 90.0},
+			{Func: "hot_leaf", File: "myapp", Weight: 89.0, Cum: 89.0},
+		},
+		Stats: &Stats{Samples: 100, ActiveSamples: 100},
+	}
+	hm, err := BuildHeatmapFromSample(context.Background(), prof, HeatOptions{})
+	if err != nil {
+		t.Fatalf("BuildHeatmapFromSample: %v", err)
+	}
+	if hm.DefaultTarget == nil || hm.DefaultTarget.Name != "hot_leaf" {
+		t.Errorf("DefaultTarget = %+v, want hot_leaf (highest self)", hm.DefaultTarget)
+	}
+}
+
+// TestBuildHeatmapFromSampleNoSymbolsErrors guards the other honesty rule:
+// a capture with nothing to show produces an error, never a fabricated
+// empty-but-valid-looking Heatmap.
+func TestBuildHeatmapFromSampleNoSymbolsErrors(t *testing.T) {
+	if _, err := BuildHeatmapFromSample(context.Background(), Profile{Type: ProfileSample, Method: "sample"}, HeatOptions{}); err == nil {
+		t.Fatal("expected an error for a sample capture with no symbols")
+	}
+}
+
 func copyTestdataFile(t *testing.T, src, dst string) {
 	t.Helper()
 	data, err := os.ReadFile(src)

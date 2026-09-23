@@ -19,8 +19,12 @@ intent: |
     through it to the ORIGINAL .ts line, marked mapping exact — not the
     generated .js line.
   - an idle profile (testdata/idle.cpuprofile, 98% (idle)): the AC-5
-    honesty warning ("mostly idle: slowness is off-CPU") appears instead of
-    a fabricated hot line.
+    honesty warning ("CPU heat only: this process is mostly idle, so its
+    slowness is off-CPU") appears instead of a fabricated hot line — the
+    E3.5 review's own mandated wording, replacing the older two-line
+    "mostly idle: slowness is off-CPU" / "this process is mostly idle..."
+    pair (see renderHeatBody, internal/cli/hot.go), which this outcome's
+    own assertion below was updated to match.
 
   Each outcome greps the plain human CodeFrame render for its `>` marker
   line, rather than parsing --json, so the check exercises the same output
@@ -95,7 +99,7 @@ outcomes:
       command:
         run: >-
           OUT=$(./bin/monitor hot --file internal/profiler/testdata/idle.cpuprofile) &&
-          echo "$OUT" | grep -q 'mostly idle: slowness is off-CPU' &&
+          echo "$OUT" | grep -q 'CPU heat only: this process is mostly idle, so its slowness is off-CPU' &&
           ! echo "$OUT" | grep -qE '^>'
 
   - id: bun_default_output_without_func_names_hot_line

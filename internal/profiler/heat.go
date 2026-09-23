@@ -77,7 +77,25 @@ const (
 	// (Go cpu/heap/goroutine), read in-process with no `go` toolchain
 	// dependency.
 	MethodPprofProto HeatMethod = "pprof_proto"
+	// MethodDarwinSample means the profile came from a macOS `sample <pid>`
+	// capture (see BuildHeatmapFromSample): FUNCTION-LEVEL only — macOS
+	// `sample` carries no per-line detail at all (no positionTicks, no
+	// pprof line table), only a self/cum weight per function name, so a
+	// Heatmap built this way always has empty Lines/StartLine/EndLine on
+	// every function. It exists so a target `hot` otherwise has no working
+	// CPU capture path for at all — Python, Ruby, or a Go binary with no
+	// reachable pprof endpoint — still gets a real, honestly-labeled
+	// answer on macOS instead of a dead end (AC-1's own documented
+	// requirement for the `sample` producer).
+	MethodDarwinSample HeatMethod = "darwin_sample"
 )
+
+// sampleFunctionLevelOnlyWarning is BuildHeatmapFromSample's own honesty
+// disclosure, appended to every Heatmap it produces: macOS `sample` has no
+// source-line detail at all (see MethodDarwinSample), so a caller (`monitor
+// hot`) must not render this the way it renders a real per-line CodeFrame —
+// the warning is what tells it (and any JSON/MCP consumer) so.
+const sampleFunctionLevelOnlyWarning = "function-level only: macOS `sample` reports functions, not source lines — no positionTicks or pprof proto is available for this target"
 
 // Heatmap is monitor.line_heatmap.v1: heat.Build's per-line CPU/heap/
 // goroutine attribution model. See docs/contracts/line-heatmap-v1.md.
@@ -316,6 +334,80 @@ func BuildHeatmap(ctx context.Context, src *Source, opts HeatOptions) (*Heatmap,
 	// pick monitor hot's default CodeFrame target) from whatever sliver of
 	// functions survived filtering, not the real profile.
 	addWarnings(hm)
+	finalizeFunctions(hm, opts)
+	return hm, nil
+}
+
+// BuildHeatmapFromSample builds a Heatmap from an already-captured macOS
+// `sample <pid>` Profile (profiler.Profile.Symbols, from parseSampleTree) —
+// the AC-1/AC-5 "darwin sample fallback" for a target with no working CDP
+// or pprof capture path at all (Python, Ruby, an unlinked Go binary, or any
+// process whose pprof endpoint isn't owned/explicit). Unlike BuildHeatmap,
+// this is NOT dispatched from a Source/SourceKind: `sample`'s own call-graph
+// text carries no file:line at all (see internal/profiler/sample_parse.go's
+// own doc comment — Symbol.Line is always 0 here), so there is no
+// SourceSample kind for it to join, and no per-line model to build —
+// FUNCTION-LEVEL ONLY, honestly disclosed via MethodDarwinSample and
+// sampleFunctionLevelOnlyWarning rather than silently degrading into a
+// misleadingly empty-but-otherwise-normal-looking per-line Heatmap.
+//
+// A caller renders this exactly like any other Heatmap (the same CodeFrame,
+// table, and --json shapes `monitor hot` always uses): every HeatFunction's
+// Lines stays empty (CodeFrame.Render already handles that honestly, with
+// "(no lines to show)"), and StartLine/EndLine/RangeSource stay unset (0/"")
+// since there is no line to anchor a range to.
+func BuildHeatmapFromSample(ctx context.Context, prof Profile, opts HeatOptions) (*Heatmap, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(prof.Symbols) == 0 {
+		return nil, fmt.Errorf("heat.Build: this sample capture has no symbols to build a heatmap from")
+	}
+
+	runtime := opts.Runtime
+	if runtime == "" {
+		runtime = "unknown"
+	}
+	hm := &Heatmap{
+		Schema:      HeatSchema,
+		ProfileType: HeatCPU, // `sample` only ever measures CPU; there is no heap/goroutine sample capture.
+		Unit:        "samples",
+		Method:      MethodDarwinSample,
+		Runtime:     runtime,
+	}
+	if prof.Stats != nil {
+		hm.Samples = prof.Stats.Samples
+		hm.ActiveSamples = prof.Stats.ActiveSamples
+		hm.IdlePct = prof.Stats.IdlePct
+		hm.GCPct = prof.Stats.GCPct
+		hm.IdleMeasured = true
+	} else {
+		// parseSampleTree only omits Stats when it found nothing at all
+		// (allTotal<=0) — which would already have left prof.Symbols empty
+		// too (see its own early return), so this branch is defensive only.
+		hm.Samples = len(prof.Symbols)
+		hm.ActiveSamples = hm.Samples
+	}
+
+	for _, sym := range prof.Symbols {
+		hm.Functions = append(hm.Functions, HeatFunction{
+			Name: sym.Func,
+			// File is `sample`'s own "image" (containing binary/dylib) —
+			// the closest thing to a location this format has, never a
+			// real source path — surfaced honestly as the table's
+			// LOCATION column would otherwise be blank.
+			File:    sym.File,
+			SelfPct: sym.Weight,
+			CumPct:  sym.Cum,
+		})
+	}
+
+	resolveRanges(ctx, hm, opts) // no-op here (no rangeHintLine ever set), kept for pipeline symmetry with BuildHeatmap.
+	if !opts.NoReadCode {
+		readCode(hm) // no-op here too (every function's Lines is empty).
+	}
+	addWarnings(hm)
+	hm.Warnings = append(hm.Warnings, sampleFunctionLevelOnlyWarning)
 	finalizeFunctions(hm, opts)
 	return hm, nil
 }
