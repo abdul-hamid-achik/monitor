@@ -257,7 +257,7 @@ monitor/
 
 `task check` runs tidy + lint + test + a release build. Add a test alongside
 every change, and a glyphrun spec in `specs/` for observable behavior. See
-`AGENTS.md` and `CLAUDE.md` for the full contributor guide.
+`AGENTS.md` for the full contributor and agent guide.
 
 ## License
 
