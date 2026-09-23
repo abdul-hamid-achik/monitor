@@ -11,11 +11,17 @@ intent: |
   than "wrong protocol".
 
   captureRuntimeAwareProfile detects RuntimeBun (via procbind) BEFORE
-  attempting any CDP discovery and fails fast with an honest limitation
-  instead. This spec verifies, against a REAL `bun --inspect` process (not
-  a stub), that monitor_profile_capture over MCP for both type:cpu and
-  type:heap comes back captured:false with an error that names the real
-  cause (mentions Bun's JSC/WebKit inspector) and never mentions 404 or
+  attempting any CDP discovery, and before checking whether --inspect was
+  even passed (a Bun process with no --inspect must get the SAME honest
+  answer, not a generic "start it with --inspect" that only leads to the
+  same JSC dead end), and fails fast with a distinguishable
+  status:"unavailable" payload instead of a bare "error" string — an agent
+  can tell "this will never work as asked" apart from "an attempt failed,
+  retry might help". This spec verifies, against a REAL `bun --inspect`
+  process (not a stub), that monitor_profile_capture over MCP for both
+  type:cpu and type:heap comes back captured:false, status:"unavailable",
+  with a limitation that names the real cause (mentions Bun's JSC/WebKit
+  inspector) and a non-empty recovery, and never mentions 404 or
   "Not Found".
 
 target:
@@ -54,12 +60,13 @@ steps:
 outcomes:
   - id: cpu_type_is_honest_not_a_404
     description: |
-      type:cpu against a real bun --inspect process: captured:false, error
-      mentions Bun's JSC/WebKit inspector, never "404" or "Not Found".
+      type:cpu against a real bun --inspect process: captured:false,
+      status:"unavailable", limitation mentions Bun's JSC/WebKit inspector
+      and a non-empty recovery, never "404" or "Not Found".
     verify:
       command:
         timeoutMs: 20000
-        run: "bun --inspect examples/polyglot/js/workload.js >/tmp/monitor-spec-mcp-bun/cpu.stderr.log 2>&1 & P=$!; sleep 1; { printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"method\\\":\\\"tools/call\\\",\\\"params\\\":{\\\"name\\\":\\\"monitor_profile_capture\\\",\\\"arguments\\\":{\\\"pid\\\":$P,\\\"type\\\":\\\"cpu\\\",\\\"confirm\\\":true}}}\"; sleep 4; } | ./bin/monitor mcp serve 2>&1 | tail -1 > /tmp/monitor-spec-mcp-bun/cpu.json; kill \"$P\" 2>/dev/null; python3 -c \"import json;d=json.load(open('/tmp/monitor-spec-mcp-bun/cpu.json'));sc=d['result']['structuredContent'];assert sc.get('captured') is False, sc;err=sc.get('error','');assert 'JSC' in err or 'WebKit' in err, err;assert '404' not in err, err;assert 'Not Found' not in err, err\""
+        run: "bun --inspect examples/polyglot/js/workload.js >/tmp/monitor-spec-mcp-bun/cpu.stderr.log 2>&1 & P=$!; sleep 1; { printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"method\\\":\\\"tools/call\\\",\\\"params\\\":{\\\"name\\\":\\\"monitor_profile_capture\\\",\\\"arguments\\\":{\\\"pid\\\":$P,\\\"type\\\":\\\"cpu\\\",\\\"confirm\\\":true}}}\"; sleep 4; } | ./bin/monitor mcp serve 2>&1 | tail -1 > /tmp/monitor-spec-mcp-bun/cpu.json; kill \"$P\" 2>/dev/null; python3 -c \"import json;d=json.load(open('/tmp/monitor-spec-mcp-bun/cpu.json'));sc=d['result']['structuredContent'];assert sc.get('captured') is False, sc;assert sc.get('status')=='unavailable', sc;lim=sc.get('limitation','');assert 'JSC' in lim or 'WebKit' in lim, lim;assert '404' not in lim, lim;assert 'Not Found' not in lim, lim;assert sc.get('recovery'), sc\""
   - id: heap_type_is_also_honest_not_a_404
     description: |
       type:heap against the same real bun --inspect process behaves
@@ -68,4 +75,15 @@ outcomes:
     verify:
       command:
         timeoutMs: 20000
-        run: "bun --inspect examples/polyglot/js/workload.js >/tmp/monitor-spec-mcp-bun/heap.stderr.log 2>&1 & P=$!; sleep 1; { printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"method\\\":\\\"tools/call\\\",\\\"params\\\":{\\\"name\\\":\\\"monitor_profile_capture\\\",\\\"arguments\\\":{\\\"pid\\\":$P,\\\"type\\\":\\\"heap\\\",\\\"confirm\\\":true}}}\"; sleep 4; } | ./bin/monitor mcp serve 2>&1 | tail -1 > /tmp/monitor-spec-mcp-bun/heap.json; kill \"$P\" 2>/dev/null; python3 -c \"import json;d=json.load(open('/tmp/monitor-spec-mcp-bun/heap.json'));sc=d['result']['structuredContent'];assert sc.get('captured') is False, sc;err=sc.get('error','');assert 'JSC' in err or 'WebKit' in err, err;assert '404' not in err, err;assert 'Not Found' not in err, err\""
+        run: "bun --inspect examples/polyglot/js/workload.js >/tmp/monitor-spec-mcp-bun/heap.stderr.log 2>&1 & P=$!; sleep 1; { printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"method\\\":\\\"tools/call\\\",\\\"params\\\":{\\\"name\\\":\\\"monitor_profile_capture\\\",\\\"arguments\\\":{\\\"pid\\\":$P,\\\"type\\\":\\\"heap\\\",\\\"confirm\\\":true}}}\"; sleep 4; } | ./bin/monitor mcp serve 2>&1 | tail -1 > /tmp/monitor-spec-mcp-bun/heap.json; kill \"$P\" 2>/dev/null; python3 -c \"import json;d=json.load(open('/tmp/monitor-spec-mcp-bun/heap.json'));sc=d['result']['structuredContent'];assert sc.get('captured') is False, sc;assert sc.get('status')=='unavailable', sc;lim=sc.get('limitation','');assert 'JSC' in lim or 'WebKit' in lim, lim;assert '404' not in lim, lim;assert 'Not Found' not in lim, lim;assert sc.get('recovery'), sc\""
+  - id: no_inspect_flag_still_honest_not_a_dead_end
+    description: |
+      a Bun process with NO --inspect flag at all must get the SAME
+      status:"unavailable" JSC/WebKit answer, never the generic
+      "has no inspector address ... start it with --inspect" message
+      (which would only lead a Bun user to the same JSC dead end) — the
+      Bun check runs BEFORE the missing-inspector-address check.
+    verify:
+      command:
+        timeoutMs: 20000
+        run: "bun examples/polyglot/js/workload.js >/tmp/monitor-spec-mcp-bun/noinspect.stderr.log 2>&1 & P=$!; sleep 1; { printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"method\\\":\\\"tools/call\\\",\\\"params\\\":{\\\"name\\\":\\\"monitor_profile_capture\\\",\\\"arguments\\\":{\\\"pid\\\":$P,\\\"type\\\":\\\"cpu\\\",\\\"confirm\\\":true}}}\"; sleep 4; } | ./bin/monitor mcp serve 2>&1 | tail -1 > /tmp/monitor-spec-mcp-bun/noinspect.json; kill \"$P\" 2>/dev/null; python3 -c \"import json;d=json.load(open('/tmp/monitor-spec-mcp-bun/noinspect.json'));sc=d['result']['structuredContent'];assert sc.get('captured') is False, sc;assert sc.get('status')=='unavailable', sc;lim=sc.get('limitation','');assert 'JSC' in lim or 'WebKit' in lim, lim;assert 'start it with --inspect' not in lim, lim\""
