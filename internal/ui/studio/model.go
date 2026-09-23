@@ -129,12 +129,11 @@ func NewModelWithOptions(opts Options) Model {
 		interval = time.Second
 	}
 	c := collector.New(collector.Options{Interval: interval, HistorySize: 60})
-	engine := analyzer.NewEngine()
-	engine.AddRule(&analyzer.CPUSpikeRule{})
-	engine.AddRule(&analyzer.RSSGrowthRule{})
-	engine.AddRule(&analyzer.DiskFillRule{})
-	engine.AddRule(&analyzer.SwapPressureRule{})
-	engine.AddRule(&analyzer.ZombieRule{})
+	// NewDefaultEngine is the single rule-set source shared with `monitor
+	// watch` and the MCP/CLI analyze window (bug 17: Studio's engine used to
+	// have no ThresholdRule, so the config.json alert thresholds had no
+	// effect here even though watch honored them).
+	engine := analyzer.NewDefaultEngine(*settings)
 
 	if !opts.DisableTemperatureSource {
 		ts := temperature.New(ctx, temperature.Options{

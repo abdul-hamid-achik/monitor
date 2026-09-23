@@ -10,6 +10,7 @@ import (
 
 	"github.com/abdul-hamid-achik/monitor/internal/analyzer"
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/config"
 	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
@@ -176,7 +177,15 @@ func analyzeWindow(ctx context.Context, collect func(context.Context) collector.
 	if sampleInterval <= 0 {
 		sampleInterval = time.Second
 	}
-	engine := analyzer.NewEngine()
+	// NewDefaultEngine is the single rule-set source shared with `monitor
+	// watch` and Studio (bug 17: this window used to register zero rules, so
+	// an agent calling monitor_analyze never saw a threshold/spike/growth
+	// finding that `monitor watch` would have raised for the same window).
+	settings, err := config.Load()
+	if err != nil || settings == nil {
+		settings = config.Default()
+	}
+	engine := analyzer.NewDefaultEngine(*settings)
 	samples := 0
 	deadline := time.After(window)
 	ticker := time.NewTicker(sampleInterval)

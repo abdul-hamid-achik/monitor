@@ -231,17 +231,14 @@ durable issue index with their run context and evidence reference.`,
 				}
 			}
 
-			// Build the analyzer and wire the OnAlert hook.
-			engine := analyzer.NewEngine()
-			engine.AddRule(&analyzer.CPUSpikeRule{Factor: 3.0})
-			engine.AddRule(&analyzer.RSSGrowthRule{})
-			engine.AddRule(&analyzer.DiskFillRule{})
-			engine.AddRule(&analyzer.SwapPressureRule{})
-			engine.AddRule(&analyzer.ZombieRule{})
-			// Give the config.json cpu/memory alert thresholds teeth.
-			if cfg, err := config.Load(); err == nil && (cfg.CPUAlertThreshold > 0 || cfg.MemoryAlertThreshold > 0) {
-				engine.AddRule(&analyzer.ThresholdRule{CPUPercent: cfg.CPUAlertThreshold, MemPercent: cfg.MemoryAlertThreshold})
+			// Build the analyzer and wire the OnAlert hook. NewDefaultEngine is
+			// the single rule-set source shared with Studio and the MCP/CLI
+			// analyze window (bug 17: they used to drift apart).
+			settings, err := config.Load()
+			if err != nil || settings == nil {
+				settings = config.Default()
 			}
+			engine := analyzer.NewDefaultEngine(*settings)
 
 			// Each enabled sink is one alert handler; all run in goroutines so
 			// the watch loop never blocks on I/O. A WaitGroup tracks every
@@ -350,7 +347,7 @@ durable issue index with their run context and evidence reference.`,
 				deliveries.wait()
 				return err
 			}
-			err := watchLoop(ctx, c, engine, interval, gate, handlers)
+			err = watchLoop(ctx, c, engine, interval, gate, handlers)
 			// On shutdown (ctx cancel), let the final tick's deliveries finish.
 			deliveries.wait()
 			return err
