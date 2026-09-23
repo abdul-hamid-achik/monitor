@@ -22,6 +22,13 @@ type CodeFrameLine struct {
 	Percent float64
 	// CumPercent sizes the CUM column bar. Only read when ShowCum is set.
 	CumPercent float64
+	// Issues lists pre-formatted "SHORTID xN status" entries for local
+	// issues whose culprit lands on this line (E3.4: errors × heat overlay
+	// — see the roadmap's "6. Errores × calor en la misma vista" mockup).
+	// Rendered as "E <entry>[, <entry>...]" appended after this line's bar.
+	// nil/empty (every line before E3.4 populated this) renders nothing
+	// extra, byte-for-byte the same output as before this field existed.
+	Issues []string
 }
 
 // CodeFrame renders one function's touched lines — line numbers, a '>'
@@ -123,11 +130,27 @@ func (f CodeFrame) Render() string {
 		b.WriteByte('\n')
 		b.WriteString(f.renderLine(l, l.Line == hotLine, lineNumWidth, width))
 	}
+	if f.hasIssues() {
+		b.WriteByte('\n')
+		b.WriteString(f.style(frameDimStyle, "     E = issues whose culprit is this line"))
+	}
 	if f.Footer != "" {
 		b.WriteByte('\n')
 		b.WriteString(f.style(frameDimStyle, "     "+f.Footer))
 	}
 	return b.String()
+}
+
+// hasIssues reports whether any line carries an E3.4 issue overlay, so
+// Render can print the "E = issues whose culprit is this line" legend only
+// when it's actually needed instead of on every CodeFrame.
+func (f CodeFrame) hasIssues() bool {
+	for _, l := range f.Lines {
+		if len(l.Issues) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (f CodeFrame) hasLine(line int) bool {
@@ -243,6 +266,7 @@ func (f CodeFrame) renderLine(l CodeFrameLine, isHot bool, lineNumWidth, width i
 	}
 
 	code := padCode(l.Code, codeColumnWidth)
+	issueSuffix := f.renderIssueSuffix(l)
 
 	if f.ShowCum {
 		// Fixed (non-bar) columns: marker(1) space num(lineNumWidth)
@@ -254,8 +278,8 @@ func (f CodeFrame) renderLine(l CodeFrameLine, isHot bool, lineNumWidth, width i
 		// profiler_test.go's TestSymbolsFromPprofWrapperHasZeroFlatButFullCum).
 		// Both numbers are still printed, in FLAT-then-CUM column order.
 		cumBar := f.style(frameCumBarStyle, bar(l.CumPercent, barWidth(width, fixed)))
-		return fmt.Sprintf("%s %s | %*.1f%%%s%*.1f%% | %s %s",
-			marker, numStr, pctFieldWidth-1, l.Percent, dualColumnSep, pctFieldWidth-1, l.CumPercent, code, cumBar)
+		return fmt.Sprintf("%s %s | %*.1f%%%s%*.1f%% | %s %s%s",
+			marker, numStr, pctFieldWidth-1, l.Percent, dualColumnSep, pctFieldWidth-1, l.CumPercent, code, cumBar, issueSuffix)
 	}
 
 	// Fixed (non-bar) columns: marker(1) space num(lineNumWidth) " | "(3)
@@ -263,7 +287,18 @@ func (f CodeFrame) renderLine(l CodeFrameLine, isHot bool, lineNumWidth, width i
 	fixed := 1 + 1 + lineNumWidth + 3 + codeColumnWidth + 1 + 6 + 2
 	pctStr := fmt.Sprintf("%5.1f%%", l.Percent)
 	barStr := f.style(frameBarStyle, bar(l.Percent, barWidth(width, fixed)))
-	return fmt.Sprintf("%s %s | %s %s |%s", marker, numStr, code, pctStr, barStr)
+	return fmt.Sprintf("%s %s | %s %s |%s%s", marker, numStr, code, pctStr, barStr, issueSuffix)
+}
+
+// renderIssueSuffix renders l.Issues as "  E <entry>[, <entry>...]" — the
+// roadmap mockup's "E 5C1D x10 open" marker — appended after a line's bar.
+// "" when l carries no issue overlay, so a CodeFrame with no E3.4 data
+// renders byte-for-byte the same as before this field existed.
+func (f CodeFrame) renderIssueSuffix(l CodeFrameLine) string {
+	if len(l.Issues) == 0 {
+		return ""
+	}
+	return f.style(frameHotStyle, "  E "+strings.Join(l.Issues, ", "))
 }
 
 // barWidth is however much of width the fixed (non-bar) columns leave over,

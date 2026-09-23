@@ -288,3 +288,56 @@ func TestCodeFrameGoldenAt100ColumnsNoColor(t *testing.T) {
 		t.Errorf("golden mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
+
+// TestCodeFrameRendersIssueOverlay is the E3.4 (errors × heat) regression:
+// a line carrying Issues gets an "E <entry>" marker after its bar, and the
+// frame gains the "E = issues whose culprit is this line" legend — but only
+// when at least one line actually has an overlay, so a plain heatmap with
+// no matching issues renders exactly as before (see
+// TestCodeFrameGoldenAt100ColumnsNoColor, which has no Issues set anywhere).
+func TestCodeFrameRendersIssueOverlay(t *testing.T) {
+	f := selfOnlyFixture()
+	f.Color = false
+	f.Lines[2].Issues = []string{"5C1D x10 open"}
+	out := f.Render()
+
+	var hotLine string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "17 |") {
+			hotLine = l
+		}
+	}
+	if !strings.Contains(hotLine, "E 5C1D x10 open") {
+		t.Errorf("hot line = %q, want an E marker for the overlaid issue", hotLine)
+	}
+	if !strings.Contains(out, "E = issues whose culprit is this line") {
+		t.Errorf("output missing the E legend:\n%s", out)
+	}
+}
+
+// TestCodeFrameOmitsIssueLegendWithNoOverlay guards the "byte-for-byte
+// unchanged when nothing overlays" half of the same finding: with every
+// line's Issues empty (the zero value, same as before this field existed),
+// neither an "E " marker nor the legend line appears anywhere.
+func TestCodeFrameOmitsIssueLegendWithNoOverlay(t *testing.T) {
+	out := selfOnlyFixture().Render()
+	if strings.Contains(out, "issues whose culprit") {
+		t.Errorf("output must omit the E legend with no overlaid issues:\n%s", out)
+	}
+}
+
+// TestCodeFrameIssueOverlayInDualColumnView asserts the marker also renders
+// in the pprof dual-column (ShowCum) layout, not just the CDP self-only one.
+func TestCodeFrameIssueOverlayInDualColumnView(t *testing.T) {
+	f := CodeFrame{
+		FuncName: "buildIndex", File: "go-pprof/main.go", StartLine: 40, EndLine: 52,
+		ShowCum: true, Width: 100,
+		Lines: []CodeFrameLine{
+			{Line: 47, Code: `idx[key] = append(idx[key], r)`, Percent: 0.0, CumPercent: 74.1, Issues: []string{"9F2A x3 open"}},
+		},
+	}
+	out := f.Render()
+	if !strings.Contains(out, "E 9F2A x3 open") {
+		t.Errorf("dual-column output missing the E marker:\n%s", out)
+	}
+}
