@@ -2,9 +2,11 @@
 
 > **Status: Implemented (E2.5/E2.7/E2.8).** Produced by `internal/explain.
 > Build` and consumed by `monitor issue <id|short-prefix|latest>` (human,
-> `--json`, `--md`) and MCP's `monitor_issue` (additively, alongside its
-> pre-E2.7 `{issue, occurrences, occurrences_truncated}` shape — see
-> "Compatibility" below). Studio and cortex are still later work. See the
+> `--json`, `--md`) and MCP's `monitor_issue`, whose DEFAULT response now
+> **is** this bounded schema (its own small `issue` summary included) — see
+> "Compatibility" below for the opt-in legacy `{issue, occurrences,
+> occurrences_truncated}` shape and how it interacts with this one.
+> Studio and cortex are still later work. See the
 > [naming ADR](./local-sentry-naming) for the rules this schema encodes
 > (fingerprint/culprit, `ObservedAt`, `--scan`). A few shape details were
 > settled during implementation and are called out inline below, since the
@@ -15,10 +17,16 @@
 Before E2.5, `monitor issues show <id>` returned whatever the `issues` store
 held verbatim (see [Local Issues](/guide/issues)), and `internal/cli/
 issues.go` registered `issue` only as a cobra **alias** of `issues`, so
-`monitor issue <anything>` just printed the `issues` command's help. E2.5
-gave `monitor issue <id>` its own command, taking over that alias (see the
-naming ADR's `issue`/`issues` collision row) — `monitor issues list/show/
-resolve/reopen/ignore` keep working exactly as before. Once exceptions carry
+`monitor issue list|show|resolve|reopen|ignore ...` behaved exactly like
+`monitor issues list|show|resolve|reopen|ignore ...`, but a bare `monitor
+issue <id>` (a real id, not one of those subcommand names) had no meaning of
+its own — cobra had nothing to dispatch "an id" to, so it fell through to
+usage/help rather than the enriched page below. E2.5 gave `monitor issue
+<id>` its own command, taking over that alias (see the naming ADR's `issue`/
+`issues` collision row); `monitor issue list|show|resolve|reopen|ignore ...`
+keeps working during the deprecation by delegating to the matching `issues`
+subcommand (with a deprecation note on stderr) rather than being removed
+outright. Once exceptions carry
 frames, causes, and a culprit (§6 of the naming ADR), the issue page needs
 one producer that reads the store once, enriches it with codemap/git/
 vecgrep, and degrades honestly when any of those are unavailable — instead
@@ -98,13 +106,18 @@ second call to be useful. The CLI's `monitor issue <id>` defaults to
     "reopened": 1,
     "first_git_sha": "a1b2c3d",
     "runs": ["CI-4821", "CI-4830"], // MONITOR_LAUNCH_ID / CHALUPA_CI_RUN_ID seen
-    // "line" | "mtime" | "live" — see naming ADR §4. Neither issues.Issue
-    // nor issues.Occurrence PERSISTS which of the three produced an
-    // occurrence's ObservedAt yet (that provenance belongs to the E2.1/E2.4
-    // producers, `stacktrace parse --record` and `monitor run --`, on a
-    // parallel branch not merged here); until a producer-side field exists,
-    // this is a documented placeholder that always reads "live".
-    "time_source": "live"
+    // "line" | "mtime" | "live" | "unknown" — see naming ADR §4. Neither
+    // issues.Issue nor issues.Occurrence PERSISTS which of the three
+    // produced an occurrence's ObservedAt yet (that provenance belongs to
+    // the E2.1/E2.4 producers, `stacktrace parse --record` and `monitor
+    // run --`, on a parallel branch not merged here); until a producer-side
+    // field exists, this is a documented placeholder that always reads
+    // "unknown" — NOT "live": every issue on this branch is seeded through
+    // internal/explain/testdata/seed / issues.RecordException directly,
+    // never through a real log-replay producer, so claiming "live"
+    // unconditionally would be fabricated provenance, not an honest
+    // placeholder.
+    "time_source": "unknown"
   },
 
   "culprit": {
@@ -116,8 +129,17 @@ second call to be useful. The CLI's `monitor issue <id>` defaults to
     "file": "src/users.ts",
     "line": 42,
     "source": "stack", // "stack" | "message_search" — see naming ADR §7
-    "via": "vecgrep", // "vecgrep" | "git_grep" — omitted when source is "stack"
-    "confidence": "high", // "high" | "low"
+    "confidence": "high", // "high" | "low"; always "low" when source is "message_search"
+    // "via" and "mapping" are BOTH omitted entirely when source is "stack"
+    // (a real frame needs neither); a "message_search" culprit (E2.8: no
+    // in_app frame anywhere in the chain, resolved by searching the
+    // normalized message's longest literal fragment) instead carries both:
+    //   "via": "vecgrep",      // "vecgrep" | "git_grep" — which tool found it
+    //   "mapping": "inferred", // ALWAYS "inferred" for message_search —
+    //                          // naming ADR §7's "siempre marcado mapping:
+    //                          // inferred"; reuses stacktrace.Frame's
+    //                          // existing source-map confidence enum as the
+    //                          // vocabulary for "not read off a real frame"
     // range.source is "codemap" when CodemapSymbolAt resolved it, or
     // "frame" for a synthetic +-4-line window around the culprit line when
     // codemap is unavailable/unhealthy or found nothing there.
@@ -225,18 +247,27 @@ degraded incluye la recuperación".
 - `full` budget frames and `related_notes` bodies are additive to the
   existing `issues.Issue` / `issues.Occurrence` JSON — v1.15 consumers that
   decode today's fields keep working unchanged.
-- MCP's `monitor_issue` (E2.7) merges this schema's fields ADDITIVELY into
-  its existing response, keyed exactly as above (`schema`, `budget`,
-  `generated_at`, `resolved_from`, `timeline`, `culprit`, `causes`,
-  `frames`, `impact`, `last_touched`, `related_notes`, `degraded`, `next`,
-  `truncated`, `privacy`), alongside its pre-E2.7
-  `{issue, occurrences, occurrences_truncated}` shape. The one exception is
-  this schema's OWN `issue` field (the small `{id, short_id, status, kind,
-  title, exception_type, handled, project, service}` summary above): its
-  key is reserved by the pre-existing, richer `issue` field (the full
-  `issues.Issue`, unchanged), so `short_id` is only ever visible via the
-  CLI/`--json`'s dedicated `monitor issue` page, not spread into
-  `monitor_issue`'s response.
+- MCP's `monitor_issue` (E2.7) response, BY DEFAULT (no `occurrence_limit`,
+  or `occurrence_limit: 0`), IS this schema — keyed exactly as above
+  (`schema`, `budget`, `generated_at`, `resolved_from`, `issue`, `timeline`,
+  `culprit`, `causes`, `frames`, `impact`, `last_touched`, `related_notes`,
+  `degraded`, `next`, `truncated`, `privacy`) at the `brief` budget, INCLUDING
+  this schema's own small `issue` summary (`{id, short_id, status, kind,
+  title, exception_type, handled, project, service}`). The pre-E2.7
+  `{issue, occurrences, occurrences_truncated}` shape is NOT merged in by
+  default any more: it is an explicit opt-in via `occurrence_limit > 0`
+  (max 200), and when a caller does opt in, its own `issue` key — the
+  full, richer `issues.Issue`, unchanged since before E2.7 — OVERWRITES
+  this schema's small summary above, so `short_id` is then visible only
+  through the CLI/`--json`'s dedicated `monitor issue` page, not through
+  `monitor_issue`'s response. This is a deliberate size-budget decision,
+  not the schema's original "always additive" design: the legacy
+  `issue`/`occurrences` fields have no size bound of their own (a long
+  exception message, or a large occurrence count, took the ALWAYS-merged
+  response well past AC-6's "brief ≤ 4 KB, ~1.5k tokens" promise even
+  after this schema's OWN budget enforcement was fixed), so the response
+  a caller gets by default had to become the bounded schema alone, with
+  the richer legacy shape available only at explicit extra cost.
 - `id:"latest"` (E2.7) is a NEW accepted value for `monitor_issue`'s `id`
   field and the CLI's `monitor issue` positional argument — additive to
   the existing literal-id/prefix behavior, never a required change for an
