@@ -396,15 +396,20 @@ type flatKey struct {
 func flattenCDPProfile(prof cdpProfile) ([]Symbol, Stats) {
 	var totalHits, idleHits, gcHits, excludedHits int64
 	totals := make(map[flatKey]int64)
+	declLines := make(map[flatKey]int)
 	var order []flatKey
 
-	add := func(fn, file string, line int, ticks int64) {
+	add := func(fn, file string, line int, ticks int64, funcLine int) {
 		if ticks <= 0 {
 			return
 		}
 		k := flatKey{Func: fn, File: file, Line: line}
 		if _, ok := totals[k]; !ok {
 			order = append(order, k)
+			// First occurrence wins: every node that contributes to this
+			// key is a sample of the exact same statement, so any of them
+			// carries the same enclosing function's declaration line.
+			declLines[k] = funcLine
 		}
 		totals[k] += ticks
 	}
@@ -430,15 +435,16 @@ func flattenCDPProfile(prof cdpProfile) ([]Symbol, Stats) {
 			continue
 		}
 		file := decodeCDPFileURL(f.URL)
+		funcLine := int(f.LineNumber) + 1
 		if len(n.PositionTicks) > 0 {
 			for _, pt := range n.PositionTicks {
-				add(fn, file, pt.Line, pt.Ticks)
+				add(fn, file, pt.Line, pt.Ticks, funcLine)
 			}
 			continue
 		}
 		// No positionTicks (older V8, or a native frame with no source
 		// lines): fall back to the node's own declaration line.
-		add(fn, file, int(f.LineNumber)+1, n.HitCount)
+		add(fn, file, funcLine, n.HitCount, funcLine)
 	}
 
 	if totalHits <= 0 {
@@ -459,7 +465,7 @@ func flattenCDPProfile(prof cdpProfile) ([]Symbol, Stats) {
 		if active > 0 {
 			weight = float64(totals[k]) / float64(active) * 100
 		}
-		out = append(out, Symbol{Func: k.Func, File: k.File, Line: k.Line, Weight: weight})
+		out = append(out, Symbol{Func: k.Func, File: k.File, Line: k.Line, Weight: weight, FuncLine: declLines[k]})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Weight != out[j].Weight {

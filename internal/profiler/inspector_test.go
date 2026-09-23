@@ -99,35 +99,71 @@ func TestFlattenCDPProfileStripsFileScheme(t *testing.T) {
 // to report a hot function's declaration line (lineNumber+1) even when the
 // node's own positionTicks show the real hot statement elsewhere. Both
 // fixtures plant the hot line at 5 inside heavyStringify (declared at line
-// 1); flattening must surface line 5, not 1.
+// 1); flattening must surface line 5, not 1, and no pseudo-frame
+// ((idle)/(program)/(garbage collector)/(root)) must ever appear.
+//
+// AC-1 also asks for "the first symbol is the hot line with >=90% of its
+// function's weight". v8-hot.cpuprofile can't clear that literal bar: its
+// real capture splits heavyStringify's own ticks 66%/33% across lines 5
+// and 4 (see testdata/README.md) — genuine V8 sampling noise, not a parser
+// bug — so line 5 is confirmed as both the single hottest symbol in the
+// WHOLE profile (not just among heavyStringify's own lines) and the
+// hottest line of its function, without asserting a percentage the fixture
+// cannot honestly reach.
 func TestFlattenCDPProfileUsesPositionTicks(t *testing.T) {
-	for _, fixture := range []string{"testdata/v8-hot.cpuprofile", "testdata/bun-cpu-prof.cpuprofile"} {
-		t.Run(fixture, func(t *testing.T) {
-			raw, err := os.ReadFile(fixture)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var prof cdpProfile
-			if err := json.Unmarshal(raw, &prof); err != nil {
-				t.Fatalf("unmarshal %s: %v", fixture, err)
-			}
-			syms, _ := flattenCDPProfile(prof)
-			var top *Symbol
-			for i := range syms {
-				if syms[i].Func != "heavyStringify" {
-					continue
-				}
-				if top == nil || syms[i].Weight > top.Weight {
-					top = &syms[i]
-				}
-			}
-			if top == nil {
-				t.Fatalf("no heavyStringify symbol in %+v", syms)
-			}
-			if top.Line != 5 {
-				t.Errorf("heavyStringify hottest line = %d, want 5 (not the declaration line 1)", top.Line)
-			}
-		})
+	raw, err := os.ReadFile("testdata/v8-hot.cpuprofile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prof cdpProfile
+	if err := json.Unmarshal(raw, &prof); err != nil {
+		t.Fatal(err)
+	}
+	syms, _ := flattenCDPProfile(prof)
+	if len(syms) == 0 {
+		t.Fatal("no symbols")
+	}
+	if syms[0].Func != "heavyStringify" || syms[0].Line != 5 {
+		t.Errorf("hottest symbol overall = %+v, want heavyStringify:5 (not the declaration line 1)", syms[0])
+	}
+	for _, s := range syms {
+		if isPseudoCDPFrame(s.Func) {
+			t.Errorf("pseudo-frame %q leaked into symbols: %+v", s.Func, syms)
+		}
+	}
+
+	// bun-cpu-prof.cpuprofile: heavyStringify itself calls two native
+	// builtins (String.prototype.repeat, JSON.stringify) with far more raw
+	// hitCount than heavyStringify's own line 5 — legitimately outranking
+	// it overall — so this fixture only checks heavyStringify's own
+	// hottest line, not syms[0].
+	raw, err = os.ReadFile("testdata/bun-cpu-prof.cpuprofile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &prof); err != nil {
+		t.Fatal(err)
+	}
+	syms, _ = flattenCDPProfile(prof)
+	var top *Symbol
+	for i := range syms {
+		if syms[i].Func != "heavyStringify" {
+			continue
+		}
+		if top == nil || syms[i].Weight > top.Weight {
+			top = &syms[i]
+		}
+	}
+	if top == nil {
+		t.Fatalf("no heavyStringify symbol in %+v", syms)
+	}
+	if top.Line != 5 {
+		t.Errorf("heavyStringify hottest line = %d, want 5 (not the declaration line 1)", top.Line)
+	}
+	for _, s := range syms {
+		if isPseudoCDPFrame(s.Func) {
+			t.Errorf("pseudo-frame %q leaked into symbols: %+v", s.Func, syms)
+		}
 	}
 }
 
@@ -205,13 +241,13 @@ func TestFlattenCDPProfileExcludesPseudoFrames(t *testing.T) {
 // percent-escaped bytes (spaces, '+') must decode to the real filesystem
 // path via url.Parse, not keep the raw escape sequences.
 func TestFlattenCDPProfileDecodesPercentEncodedFileURL(t *testing.T) {
-	raw := `{"nodes":[{"id":1,"callFrame":{"functionName":"main","url":"file:///Users/abdul%20hamid/hot%2Bcold.js","lineNumber":0},"hitCount":1,"children":[]}]}`
+	raw := `{"nodes":[{"id":1,"callFrame":{"functionName":"main","url":"file:///repo/my%20app/hot%2Bcold.js","lineNumber":0},"hitCount":1,"children":[]}]}`
 	var prof cdpProfile
 	if err := json.Unmarshal([]byte(raw), &prof); err != nil {
 		t.Fatal(err)
 	}
 	syms, _ := flattenCDPProfile(prof)
-	if len(syms) != 1 || syms[0].File != "/Users/abdul hamid/hot+cold.js" {
+	if len(syms) != 1 || syms[0].File != "/repo/my app/hot+cold.js" {
 		t.Fatalf("expected decoded path; got %+v", syms)
 	}
 }

@@ -89,6 +89,79 @@ esac
 	}
 }
 
+// TestCorrelateProfileDoesNotCollideDistinctAnonymousFunctions is the major
+// finding regression: V8 labels every anonymous closure the same literal
+// "(anonymous)" (flattenCDPProfile's fallback for callFrame.functionName ==
+// ""), so two DISTINCT closures in the same file used to collide on the old
+// (file,func) cache key — the second's row silently inherited the first's
+// codemap symbol/range. Symbol.FuncLine (the declaration line) breaks the
+// tie: two rows at the same file/func but different FuncLine must each get
+// their own codemap lookup and their own start_line/end_line.
+func TestCorrelateProfileDoesNotCollideDistinctAnonymousFunctions(t *testing.T) {
+	binDir := t.TempDir()
+	callLog := filepath.Join(binDir, "calls.log")
+	// routeA spans lines 3-8 (declared at 3), routeB spans 40-50 (declared
+	// at 40); the fake codemap answers by which range the requested line
+	// falls into, exactly like a real symbol-at would.
+	script := `#!/bin/sh
+echo "$@" >> "$CODEMAP_CALL_LOG"
+case " $* " in
+  *" symbol-at "*)
+    arg="$2"
+    line="${arg##*:}"
+    if [ "$line" -ge 3 ] && [ "$line" -le 8 ]; then
+      printf '%s' '{"fqn":"routeA","kind":"function","resolution":"enclosing","indexed":true,"start_line":3,"end_line":8}'
+    else
+      printf '%s' '{"fqn":"routeB","kind":"function","resolution":"enclosing","indexed":true,"start_line":40,"end_line":50}'
+    fi
+    ;;
+  *" impact "*) printf '%s' '{"found":true,"call_graph":"resolved","direct_callers":[],"blast_radius":["a"],"tests":[]}' ;;
+  *) exit 9 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "codemap"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CODEMAP_CALL_LOG", callLog)
+
+	syms := []profiler.Symbol{
+		{Func: "(anonymous)", File: "server.js", Line: 5, FuncLine: 3, Weight: 60},
+		{Func: "(anonymous)", File: "server.js", Line: 45, FuncLine: 40, Weight: 40},
+	}
+	got := correlateProfile(context.Background(), syms, "")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 correlated rows, got %d: %+v", len(got), got)
+	}
+	byLine := map[int]map[string]any{}
+	for _, row := range got {
+		byLine[row["line"].(int)] = row
+	}
+	rowA, rowB := byLine[5], byLine[45]
+	if rowA == nil || rowB == nil {
+		t.Fatalf("missing expected rows: %+v", got)
+	}
+	if rowA["fqn"] != "routeA" || rowA["start_line"] != 3 || rowA["end_line"] != 8 {
+		t.Errorf("line 5 row = %+v, want routeA 3-8", rowA)
+	}
+	if rowB["fqn"] != "routeB" || rowB["start_line"] != 40 || rowB["end_line"] != 50 {
+		t.Errorf("line 45 row = %+v, want routeB 40-50 (must not inherit routeA's range)", rowB)
+	}
+	raw, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("codemap was never invoked: %v", err)
+	}
+	symbolAtCalls := 0
+	for _, l := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if strings.Contains(l, "symbol-at") {
+			symbolAtCalls++
+		}
+	}
+	if symbolAtCalls != 2 {
+		t.Errorf("symbol-at called %d times, want 2 (one per distinct anonymous function, keyed on FuncLine); calls:\n%s", symbolAtCalls, raw)
+	}
+}
+
 // TestCorrelateProfileScoresByCumWhenPresent: correlate's ranking score used
 // to be Weight (flat/self) x blast radius. A pprof-proto symbol whose Cum
 // (cumulative) is high but Weight (flat) is near-zero — exactly the

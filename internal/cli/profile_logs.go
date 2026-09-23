@@ -592,12 +592,16 @@ type correlatedSymbol struct {
 // no frames, and silently skips frames codemap can't resolve. codebase, when
 // non-empty, is passed as `codemap -C` so the correct index is used.
 //
-// Frames are deduped by (file, func) before spending the codemap call
-// budget: several rows can now share one enclosing function (e.g. the same
-// function's hottest lines from flattenCDPProfile's per-line aggregation),
-// and they resolve to the same symbol/impact, so only the first occurrence
-// of a given (file, func) triggers a subprocess call — the rest reuse the
-// cached result.
+// Frames are deduped by (file, func, funcLine) before spending the codemap
+// call budget: several rows can now share one enclosing function (e.g. the
+// same function's hottest lines from flattenCDPProfile's per-line
+// aggregation), and they resolve to the same symbol/impact, so only the
+// first occurrence of a given key triggers a subprocess call — the rest
+// reuse the cached result. FuncLine (the declaration line) is part of the
+// key, not just (file, func): V8 labels every anonymous closure the same
+// literal "(anonymous)", so two DISTINCT closures in one file would
+// otherwise collide on (file, func) alone and the second would silently
+// reuse the first's (wrong) codemap symbol/range.
 func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase string) []map[string]any {
 	if !ecosystem.CodemapAvailable() || len(syms) == 0 {
 		return nil
@@ -617,7 +621,7 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase stri
 		if correlateCtx.Err() != nil {
 			break
 		}
-		key := s.File + "\x00" + s.Func
+		key := fmt.Sprintf("%s\x00%s\x00%d", s.File, s.Func, s.FuncLine)
 		cs, cached := cache[key]
 		if !cached {
 			if resolvedFrames >= 12 {
@@ -714,8 +718,22 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase stri
 		lj, _ := out[j]["line"].(int)
 		return li < lj
 	})
+	// Cap AFTER sorting (highest score first), so the rows kept are always
+	// the most interesting ones. profiler's own symbol caps grew from 25 to
+	// 50 (E1.1/E1.5), and cache hits no longer count against the 12-call
+	// codemap budget above (several rows legitimately share one cached
+	// lookup), so without this cap a correlated profile could carry up to
+	// 50 rows into investigate/MCP JSON — well past the payload-diet target
+	// those consumers aim for.
+	if len(out) > maxCorrelationRows {
+		out = out[:maxCorrelationRows]
+	}
 	return out
 }
+
+// maxCorrelationRows bounds correlateProfile's output independently of how
+// many distinct (file,func,funcLine) keys the codemap call budget resolved.
+const maxCorrelationRows = 20
 
 func correlationScore(m map[string]any) float64 {
 	if v, ok := m["score"].(float64); ok {

@@ -42,11 +42,25 @@ type Symbol struct {
 	// Cum is the frame's cumulative share of the profile as a percentage:
 	// this line's own weight plus everything sampled underneath it on the
 	// stack (e.g. a wrapper that only ever calls into a hot function has
-	// Weight ~0 but Cum close to that callee's total). Additive; only pprof
-	// proto captures (cpu/heap/goroutine) populate it today. When present,
+	// Weight ~0 but Cum close to that callee's total). Additive; pprof
+	// proto captures (cpu/heap/goroutine) and macOS `sample` captures
+	// populate it; CDP (Node/Bun/Deno) does not, since V8 positionTicks are
+	// already self-time at statement granularity — there is no separate
+	// "cumulative" concept to compute at that level. When present,
 	// correlation scoring prefers it over Weight (a wrapper's hot *line* —
 	// the call site — is exactly what Cum surfaces and Weight alone can't).
 	Cum float64 `json:"cum,omitempty"`
+	// FuncLine is the function's own declaration line (1-based), when known
+	// — for CDP captures, callFrame.lineNumber+1. It disambiguates two
+	// distinct hot-line rows that share the same (File, Func) but are not
+	// actually the same function: V8 labels every anonymous closure "" /
+	// "(anonymous)", so two unrelated closures in one file are otherwise
+	// indistinguishable by (File, Func) alone (see correlateProfile's cache
+	// key in internal/cli/profile_logs.go). Additive; 0 when unknown (pprof
+	// proto and macOS `sample` symbols never set it — Go/native function
+	// names are already unique, so the collision this exists for can't
+	// happen there).
+	FuncLine int `json:"func_line,omitempty"`
 }
 
 // Profile is the result of a capture.
