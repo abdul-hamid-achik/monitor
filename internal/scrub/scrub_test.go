@@ -758,6 +758,9 @@ func BenchmarkScrubberString1KBMetrics(b *testing.B) {
 // as a detector's cheap substring guard being removed or a regexp losing
 // its literal anchor.
 func TestScrubberStringStaysWellUnderBudget(t *testing.T) {
+	if raceEnabled || testing.Short() {
+		t.Skip("wall-clock budget is meaningless under -race or -short; see BenchmarkScrubberString*")
+	}
 	const budget = 500 * time.Microsecond
 	const iterations = 200
 
