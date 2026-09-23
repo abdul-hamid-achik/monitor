@@ -66,7 +66,7 @@ type Row struct {
 // reads or writes it, so it deliberately carries no mutex/sync import: a
 // second writer would need one, but adding one preemptively here would
 // shift every line number below it, which every OTHER spec/fixture in this
-// repo that names a specific main.go line (json.Marshal at line 20 above,
+// repo that names a specific main.go line (json.Marshal at line 19 above,
 // specs/profile_go_pprof.yml and specs/hot_file.yml) depends on staying
 // put.
 var idx = map[string][]Row{}
