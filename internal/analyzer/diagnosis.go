@@ -330,6 +330,16 @@ func buildMemoryLeak(s signalState) collector.Diagnosis {
 		NextActions: []string{
 			fmt.Sprintf("monitor_profile_capture pid:%d type:heap confirm:true", s.pid),
 			fmt.Sprintf("monitor_investigate pid:%d confirm:true", s.pid),
+			// E3.5: point at the LINE-level heap view, not just the
+			// function-level capture above. `monitor hot --type heap` only
+			// names a real line for a Go target (heat.Build's pprof heap
+			// path is the only heap format it can parse into per-line
+			// detail — see internal/profiler/heat.go); the analyzer has no
+			// runtime signal to gate on (signalState carries only a process
+			// name), so both forms are offered together rather than
+			// guessing which one applies.
+			fmt.Sprintf("monitor hot %d --type heap", s.pid),
+			fmt.Sprintf("monitor profile %d -t heap", s.pid),
 		},
 	}
 }
