@@ -148,40 +148,11 @@ Showing nodes accounting for 2990ms, 100% of 2990ms total
 	}
 }
 
-// TestParseSampleExtractsFrames uses a real macOS `sample` call-graph dump
-// (captured from `sample <pid> 1`). The old parser matched only lines
-// starting with "0x", which real `sample` output never produces.
-func TestParseSampleExtractsFrames(t *testing.T) {
-	text := `Call graph:
-    869 Thread_331472   DispatchQueue_1: com.apple.main-thread  (serial)
-      869 start  (in dyld) + 6992  [0x1804abe00]
-        869 ???  (in sleep)  load address 0x1048e0000 + 0x740  [0x1048e0740]
-          869 nanosleep  (in libsystem_c.dylib) + 220  [0x180705cc0]
-            869 __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x180829308]
-
-Sort by top of stack, same collapsed (when >= 5):
-        __semwait_signal  (in libsystem_kernel.dylib)        869
-`
-	syms := parseSample(text)
-	byName := map[string]Symbol{}
-	for _, s := range syms {
-		byName[s.Func] = s
-	}
-	for _, want := range []string{"start", "nanosleep", "__semwait_signal"} {
-		if _, ok := byName[want]; !ok {
-			t.Errorf("parseSample missing frame %q; got %+v", want, syms)
-		}
-	}
-	if s, ok := byName["nanosleep"]; ok && s.File != "libsystem_c.dylib" {
-		t.Errorf("nanosleep image = %q, want libsystem_c.dylib", s.File)
-	}
-	// The Thread header line must not be parsed as a frame.
-	for _, bad := range []string{"Thread_331472", "DispatchQueue_1:"} {
-		if _, ok := byName[bad]; ok {
-			t.Errorf("parseSample wrongly parsed header token %q as a frame", bad)
-		}
-	}
-}
+// parseSample (a single-line regex parser with no tree/self-time semantics)
+// was replaced by parseSampleTree (see sample_parse_test.go): the regex
+// required a digit at the start of the line, but real `sample` output
+// prefixes nested frames with '+'/'!'/':'/'|', so it returned zero symbols
+// in practice.
 
 // TestPprofURLMapsCPUToProfile is a regression for the bug where
 // ProfileCPU built /debug/pprof/cpu (a 404 — net/http/pprof has no "cpu"

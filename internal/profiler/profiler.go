@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"time"
 
@@ -132,14 +131,7 @@ func Capture(ctx context.Context, pid int32, t ProfileType, addr string) (Profil
 		p.Symbols = goToolPprofTop(ctx, path)
 		return p, nil
 	case ProfileSample:
-		p.Method = "sample"
-		out, err := exec.CommandContext(ctx, "sample", fmt.Sprintf("%d", pid), "1", "-mayDie").CombinedOutput()
-		if err != nil {
-			return p, fmt.Errorf("sample: %w", err)
-		}
-		p.Text = string(out)
-		p.Symbols = parseSample(string(out))
-		return p, nil
+		return captureSample(ctx, pid)
 	default:
 		return p, fmt.Errorf("unknown profile type %q", t)
 	}
@@ -320,40 +312,6 @@ func parsePprof(text string) []Symbol {
 			if len(syms) >= 25 {
 				return syms
 			}
-			break
-		}
-	}
-	return syms
-}
-
-// sampleFrameRe matches a macOS `sample` call-graph frame line, e.g.
-//
-//	"          869 nanosleep  (in libsystem_c.dylib) + 220  [0x180705cc0]"
-//
-// Group 1 is the function name, group 2 the containing image. The required
-// leading sample count anchors it so the Thread header line (ends in
-// "(serial)", no "(in …)"), the "Sort by top of stack" rows (no leading
-// count), and the Binary Images table (different shape) are all excluded.
-var sampleFrameRe = regexp.MustCompile(`^\s*\d+\s+(.+?)\s+\(in\s+([^)]+)\)`)
-
-// parseSample extracts the unique stack frames from macOS `sample` output.
-func parseSample(text string) []Symbol {
-	sc := bufio.NewScanner(strings.NewReader(text))
-	var syms []Symbol
-	seen := map[string]bool{}
-	for sc.Scan() {
-		m := sampleFrameRe.FindStringSubmatch(sc.Text())
-		if m == nil {
-			continue
-		}
-		fn := strings.TrimSpace(m[1])
-		if fn == "" || seen[fn] {
-			continue
-		}
-		seen[fn] = true
-		// File carries the containing image (sample has no file:line info).
-		syms = append(syms, Symbol{Func: fn, File: strings.TrimSpace(m[2])})
-		if len(syms) >= 25 {
 			break
 		}
 	}

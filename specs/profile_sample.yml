@@ -4,11 +4,15 @@ name: monitor_profile_sample
 intent: |
   `monitor profile <pid> -t sample --json` captures a sample profile of a
   running process and returns JSON with the PID, type, timestamp, raw `sample`
-  text, and parsed top symbols. The spec spawns a detached short-lived sleep
-  process (so the wrapper shell exits immediately) and profiles it.
+  text, and the tree-parsed top symbols (parseSampleTree: self time per
+  function across every thread, idle syscall leaves bucketed out of the
+  denominator). The spec spawns a detached, CPU-bound `yes` process (not
+  `sleep`: a process parked entirely in nanosleep/semwait has zero *active*
+  self time under the idle-exclusion model, so `symbols` would legitimately
+  be empty) so the profile always has real, non-idle self time to report.
 
 target:
-  cmd: ["sh", "-c", "TARGET_PID=$(sh -c 'nohup sleep 30 >/dev/null 2>&1 & echo $!'); exec ./bin/monitor profile \"$TARGET_PID\" -t sample --json"]
+  cmd: ["sh", "-c", "TARGET_PID=$(sh -c 'nohup yes >/dev/null 2>&1 & echo $!'); exec ./bin/monitor profile \"$TARGET_PID\" -t sample --json; kill \"$TARGET_PID\" 2>/dev/null"]
   cwd: "."
 
 terminal:
@@ -32,19 +36,26 @@ outcomes:
     description: stdout marks the profile type as sample
     verify:
       command:
-        run: "P=$(sh -c 'nohup sleep 30 >/dev/null 2>&1 & echo $!'); ./bin/monitor profile \"$P\" -t sample --json 2>&1 | grep -q '\"type\":[[:space:]]*\"sample\"'"
+        run: "P=$(sh -c 'nohup yes >/dev/null 2>&1 & echo $!'); ./bin/monitor profile \"$P\" -t sample --json 2>&1 | grep -q '\"type\":[[:space:]]*\"sample\"'; R=$?; kill \"$P\" 2>/dev/null; exit $R"
   - id: text_present
     description: stdout includes the raw sample text block
     verify:
       command:
-        run: "P=$(sh -c 'nohup sleep 30 >/dev/null 2>&1 & echo $!'); ./bin/monitor profile \"$P\" -t sample --json 2>&1 | grep -q '\"text\"'"
-  - id: symbols_array
-    description: stdout includes the parsed symbols array
+        run: "P=$(sh -c 'nohup yes >/dev/null 2>&1 & echo $!'); ./bin/monitor profile \"$P\" -t sample --json 2>&1 | grep -q '\"text\"'; R=$?; kill \"$P\" 2>/dev/null; exit $R"
+  - id: symbols_nonempty
+    description: >-
+      stdout includes a non-empty parsed symbols array (parseSampleTree found
+      at least one function with real, non-idle self time). Symbols carries
+      json:",omitempty", so an empty/absent result would leave the key out of
+      the JSON entirely rather than emit "symbols":[]. Output is pretty-printed
+      (one field per line), so this checks for both the "symbols" key and at
+      least one "func" entry (unique to a Symbol object; no other Profile
+      field is named "func") rather than a single-line array pattern.
     verify:
       command:
-        run: "P=$(sh -c 'nohup sleep 30 >/dev/null 2>&1 & echo $!'); ./bin/monitor profile \"$P\" -t sample --json 2>&1 | grep -q '\"symbols\"'"
+        run: "P=$(sh -c 'nohup yes >/dev/null 2>&1 & echo $!'); OUT=$(./bin/monitor profile \"$P\" -t sample --json 2>&1); kill \"$P\" 2>/dev/null; echo \"$OUT\" | grep -q '\"symbols\"' && echo \"$OUT\" | grep -q '\"func\"'"
   - id: clean_exit
     description: the binary exits cleanly
     verify:
       command:
-        run: "P=$(sh -c 'nohup sleep 30 >/dev/null 2>&1 & echo $!'); ./bin/monitor profile \"$P\" -t sample --json >/dev/null 2>&1; [ $? -eq 0 ]"
+        run: "P=$(sh -c 'nohup yes >/dev/null 2>&1 & echo $!'); ./bin/monitor profile \"$P\" -t sample --json >/dev/null 2>&1; R=$?; kill \"$P\" 2>/dev/null; [ $R -eq 0 ]"
