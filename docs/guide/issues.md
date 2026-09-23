@@ -5,9 +5,17 @@ groups recurring events into durable issues, keeps each occurrence with its run
 context and evidence references, and lets you triage the result without a
 hosted backend.
 
-This is not a Sentry SDK or protocol implementation. Monitor does not ingest
-arbitrary application exceptions, symbolicate source maps, or send issue data
-to a cloud service.
+This is not a Sentry SDK or protocol implementation: there is no client
+library to install, no envelope wire format, and issue data never leaves your
+machine. Monitor does ingest application exceptions, though — without an SDK.
+Its stack-trace parser turns a crash or a caught-and-printed error straight
+out of a process's stderr/stdout or an existing log file (Node, Deno, Bun,
+Python, Ruby, and Go are all covered) into a structured exception, and
+`issues.RecordException` turns that into a durable issue with a culprit
+`file:line`, its in-app frames, and its causal chain — see
+[Exception issues](#exception-issues) below. What monitor still does not do
+is symbolicate source maps for that exception path, accept a Sentry SDK
+envelope over the wire, or send issue data to a cloud service.
 
 ## The data model
 
@@ -33,7 +41,80 @@ Fingerprint V1 normalizes project, service, kind, exception type, message, and
 symbols. Dynamic numbers, UUIDs, and long hexadecimal values in messages are
 normalized, and symbol order does not matter. PID, timestamp, run, release,
 tree hash, and artifact identity deliberately remain occurrence context, so a
-restart or CI retry does not split the same problem into a new issue.
+restart or CI retry does not split the same problem into a new issue. This is
+the scheme `monitor investigate` and `monitor watch`'s alert rules still use.
+
+A parsed application exception instead groups under fingerprint V2 (see
+[Exception issues](#exception-issues)): a different, narrower scheme built
+around the exception's type and in-app call shape rather than a normalized
+free-text message. `fingerprint_version` on the stored issue says which
+scheme produced it; nothing about reading or triaging an issue depends on
+that distinction.
+
+## Exception issues
+
+`issues.RecordException` is the single place a parsed
+`stacktrace.Exception` becomes a durable issue occurrence. Two later
+pieces of local Sentry share it: `monitor run -- <cmd>` (which detects a
+crash or a printed error live, from a launched process's stderr/stdout) and
+`monitor stacktrace parse --record` (which replays an existing log file
+idempotently). Both call the same function so the fingerprint and culprit
+rule below has exactly one implementation, not one per entry point.
+
+**FingerprintV2Exception** hashes:
+
+- the project (from `internal/project.Resolve`),
+- the outer exception's type (the one that actually propagated: an
+  `uncaughtException`, a Go panic that reached `main`, the traceback the
+  interpreter itself reports),
+- the outer exception's top-5 **in-app** frames, closest to the crash,
+  rendered `func@relfile` with **no line or column numbers** — so a one-line
+  diff elsewhere in the file does not fragment the same crash into a new
+  issue — or, when the outer exception has no in-app frame at all (a
+  message-only event such as `logging.error(...)` called without
+  `exc_info`), the outer exception's normalized message instead, and
+- the innermost cause's type, from the end of the exception's chain
+  (`Chained`) when there is one.
+
+Sampled/profiler symbols, codemap FQNs, vecgrep scores, PIDs, releases, and
+the service name never enter this hash.
+
+**Culprit** is the single frame monitor blames as the most actionable line:
+the innermost cause's own crash frame when that frame is in-app, otherwise
+the outer exception's crash frame when that one is in-app, otherwise no
+culprit at all (a crash that bottoms out entirely inside a dependency). The
+rationale: the innermost cause is usually the one line an in-app developer
+can actually fix, but when even that bottoms out inside `node_modules`,
+`site-packages`, `vendor`, or a language's own standard library, the outer
+exception's own in-app frame is a more actionable pointer than a third-party
+line.
+
+**Chain ordering.** Runtimes disagree on which order they print a chained
+exception in — Node's `[cause]` and Go's `pkg/errors`-style `%+v` both print
+the outer exception first and the cause after; Python prints the innermost
+cause's traceback first, then "The above exception was the direct cause of
+the following exception:" (or "During handling of the above exception..."),
+then the outer exception last. The parser normalizes both into the same
+`Chained` order (outer's immediate cause down to the innermost/root cause)
+before fingerprinting ever runs, so the identity rule above never has to
+special-case a runtime's print order.
+
+Each stored issue additionally carries `culprit`, `latest_exception` (type,
+value, runtime, handled, up to 12 in-app frames, and up to 3 causes with
+their own culprits — capped around 2 KB), `first_git_sha` (the local git
+HEAD when the issue was first observed), `level` (`fatal`, `error`, or
+`warning`), and `handled`. A stored occurrence keeps its own `exception`
+detail only on an issue's *first* occurrence, to bound store size; every
+later occurrence relies on the issue's `latest_exception` instead. All of
+this is additive JSON: an issue or occurrence written before this existed
+still decodes with these fields simply absent.
+
+`issues.RecordException` does not scrub the exception text itself — the
+caller (`monitor run --`, `monitor stacktrace parse --record`) is expected
+to run it through `internal/scrub` first, the same "error text is untrusted
+data" rule every other local-Sentry entry point follows. It also never calls
+codemap: a culprit's fully-qualified name is filled in later, on read, by a
+codemap-aware reader.
 
 ## Create occurrences
 
@@ -68,6 +149,7 @@ directory is mode `0700` and the database is mode `0600`. Use the persistent
 ```bash
 monitor issues list
 monitor issues list --status open --project checkout --service api --json
+monitor issues list --since 24h --run-id ci-4821 --release v1.16.0 --kind exception --json
 monitor issues show ISS-0123456789ABCDEF --occurrences 50 --json
 monitor issues resolve ISS-0123456789ABCDEF
 monitor issues ignore ISS-0123456789ABCDEF
@@ -77,6 +159,20 @@ monitor issues reopen ISS-0123456789ABCDEF
 `issue` is an alias for `issues`. Lists are newest-first. `--status` is
 repeatable and accepts `open`, `resolved`, or `ignored`; list and occurrence
 limits default to 50 and 20 respectively and must be between 1 and 200.
+
+`list` also takes window filters:
+
+| Flag | Matches |
+|------|---------|
+| `--since` / `--until` | an issue whose activity window (`first_seen`..`last_seen`) overlaps the given bound. Accepts an RFC3339 timestamp or a duration (`10m`, `24h`) meaning "that long ago". |
+| `--run-id` | an issue that has seen this run id on any occurrence (`MONITOR_LAUNCH_ID` / `CHALUPA_CI_RUN_ID`, not just its first). |
+| `--release` | an issue that has seen this release on any occurrence. |
+| `--kind` | `exception`, `alert` (any `monitor.alert.<rule>` kind), `investigation`, or `any` (the default). |
+
+`--run-id`/`--release` match against a small, bounded, deduplicated set of
+every distinct value an issue has seen (its 25 most recent), not a scan of
+every retained occurrence — a window query stays fast even over a store
+holding tens of thousands of occurrences.
 
 Lifecycle behavior is intentionally small:
 
@@ -99,8 +195,14 @@ The two MCP tools are read-only and do not take `confirm`:
 
 | Tool | Input | Result |
 |------|-------|--------|
-| `monitor_issues` | `statuses`, `project`, `service`, `limit` | `{issues, total, truncated}`; default 50, max 200 |
+| `monitor_issues` | `statuses`, `project`, `service`, `since`, `until`, `run_id`, `release`, `kind`, `limit` | `{issues, total, truncated}`; default 50, max 200 |
 | `monitor_issue` | required `id`, optional `occurrence_limit` | `{issue, occurrences, occurrences_truncated}`; default 20, max 200 |
+
+`monitor_issues`'s `since`/`until`/`run_id`/`release`/`kind` are the exact
+same filters the CLI's `--since`/`--until`/`--run-id`/`--release`/`--kind`
+flags apply, parsed and matched by the same store code — an agent and a
+human asking "which issues touched release v1.16.0 in the last 24 hours"
+get the same answer either way.
 
 Issue state changes remain explicit CLI actions. MCP agents can inspect and
 recommend a transition, but this release does not expose an MCP mutation for
