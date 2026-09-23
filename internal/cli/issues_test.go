@@ -184,11 +184,39 @@ func TestIssuesListWindowFlags(t *testing.T) {
 		t.Fatalf("--since 1m = %+v, want none (seeded 1h ago)", got)
 	}
 
+	// --until N means "active at/before N ago": a bound OLDER than the
+	// issues' first_seen (1h ago) excludes them (their whole window starts
+	// after the bound); a bound more RECENT than first_seen includes them.
+	output, err = executeIssuesCommand(t, path, "list", "--until", "2h", "--json")
+	if err != nil {
+		t.Fatalf("list --until 2h: %v", err)
+	}
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("--until 2h = %+v, want none (both issues' first_seen is 1h ago, after the 2h-ago bound)", got)
+	}
+
+	output, err = executeIssuesCommand(t, path, "list", "--until", "30m", "--json")
+	if err != nil {
+		t.Fatalf("list --until 30m: %v", err)
+	}
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("--until 30m = %+v, want both issues (first_seen 1h ago is at/before the 30m-ago bound)", got)
+	}
+
 	if _, err := executeIssuesCommand(t, path, "list", "--kind", "bogus"); err == nil {
 		t.Fatal("--kind bogus succeeded")
 	}
 	if _, err := executeIssuesCommand(t, path, "list", "--since", "not-a-time"); err == nil {
 		t.Fatal("--since not-a-time succeeded")
+	}
+	if _, err := executeIssuesCommand(t, path, "list", "--until", "not-a-time"); err == nil {
+		t.Fatal("--until not-a-time succeeded")
 	}
 }
 

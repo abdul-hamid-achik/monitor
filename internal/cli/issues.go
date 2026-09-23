@@ -133,6 +133,13 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 			if entries == nil {
 				entries = []issues.Issue{}
 			}
+			// Payload diet (AC-6): a list row carries only a trimmed
+			// LatestException summary, never the full frame/cause detail --
+			// see issues.SummarizeForList. `issues show` (Store.Get, one
+			// issue) keeps the untrimmed detail.
+			for i := range entries {
+				entries[i] = issues.SummarizeForList(entries[i])
+			}
 			if JSONOutput(cmd) {
 				return writeIssueJSON(cmd.OutOrStdout(), entries)
 			}
