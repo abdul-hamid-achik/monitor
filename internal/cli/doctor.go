@@ -72,9 +72,10 @@ func newDoctorCmd() *cobra.Command {
 Beyond raw tool presence, doctor also reports code-intelligence health
 (whether codemap/vecgrep are actually usable against the current directory —
 not just on PATH — distinguishing a stale/schema-skewed index from a project
-that simply isn't indexed yet) and binary hygiene (every "monitor doctor
---strict"-relevant tool's resolved PATH, version, and whether a duplicate
-install on PATH shadows it).
+that simply isn't indexed yet) and binary hygiene for monitor, codemap, glyph,
+cairn, and vecgrep — the exact tools monitor itself shells out to, which is
+a different (smaller) set than --strict checks — reporting each one's
+resolved PATH, version, and whether a duplicate install on PATH shadows it.
 
 Use --require for CI or scripts that depend on specific integrations. Use
 --strict to require every known integration. Status is still printed before a

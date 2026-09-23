@@ -76,8 +76,8 @@ carries none, so `state == "ok"` is the whole object plus `tool`/`version`/
 | `ok` | The binary is present and the project/branch is indexed and queryable. | — |
 | `schema_skew` | The on-disk index was written by a **newer** binary than the one on PATH. The index itself is fine. | Upgrade the binary. **Never** run a reindex — that would rewrite the shared index with an older schema for every other consumer. |
 | `index_corrupt` | The index exists but genuinely won't open (not a schema skew: disk/permission/truncation damage). | Back it up, then reindex. |
-| `not_indexed` | The tool is healthy, but this project (codemap) or this git branch (vecgrep) has no index yet. | Build one (`codemap index` / `vecgrep index`, or `vecgrep branch switch` first to check for an existing snapshot). |
-| `unavailable` | The binary is missing from PATH, the probe timed out (3s), or it failed in a way that doesn't fit the above. | Install the tool, or investigate why it's hanging/crashing. |
+| `not_indexed` | The tool is healthy, but this project (codemap) or this git branch (vecgrep) has no index yet. codemap: also covers "registered, but zero indexed nodes" (`codemap init` without `codemap index`) — `registered: true` alone is not enough to call it `ok`. | codemap: `codemap index`. vecgrep, already `vecgrep init`-ed: `vecgrep branch switch` first (cheap — activates an existing snapshot for this branch, if any), then `vecgrep index`. vecgrep, never `vecgrep init`-ed at all: `vecgrep init`, then `vecgrep index` — `branch switch` fails until `init` has run. |
+| `unavailable` | The binary is missing from PATH, the probe's caller (`ctx`) was itself canceled or past its own deadline, the probe timed out (3s status call; see the real worst-case bound below), or it failed in a way that doesn't fit the above. | Install the tool, retry with a fresh context, or investigate why it's hanging/crashing. |
 
 ### Why `schema_skew` is not `index_corrupt`
 
@@ -104,12 +104,29 @@ never indexed. `not_indexed`'s recovery names both `vecgrep branch switch`
 
 ### Degradation and cost
 
-- Each probe has an internal 3-second timeout against the underlying
-  `codemap status --json` / `vecgrep status --format json --lightweight`
-  call. A hang degrades to `unavailable`, never blocks doctor.
+- Each probe's status call (`codemap status --json` / `vecgrep status
+  --format json --lightweight`) has an internal 3-second timeout, plus up to
+  1 extra second of process-cleanup grace (`cmd.WaitDelay`) if a hung
+  process forked descendants that outlive killing the direct child. Before
+  that call, each probe separately runs `<tool> --version` for the
+  `version` field, with its own independent ~2-second timeout (plus up to
+  0.5s of cleanup grace) — that call is **not** counted in the "3 second"
+  figure above. A binary that hangs on both calls can therefore make one
+  probe take up to ~6.5s worst case, not 3s. Either way, a hang degrades to
+  `unavailable`, never blocks doctor.
+- Every probe also honors the caller's own `context.Context` throughout: if
+  it's already canceled or past its deadline (or becomes so mid-probe, e.g.
+  a caller-supplied deadline shorter than 3s), the probe reports
+  `unavailable` with a detail naming the caller's cancellation specifically
+  — distinct from a genuine "timed out after 3s" caused by the tool itself
+  hanging — and that result is **never cached** (see the next bullet): a
+  cancellation on one caller's context must never poison the result a
+  different, uncancelled caller gets for the same tool/dir.
 - Results are cached in-process for 60 seconds, keyed by (tool, directory,
   binary path + modification time) — a `go install`/`brew upgrade` of the
   binary invalidates the cache immediately rather than waiting out the TTL.
+  A result is only stored if the caller's `context.Context` was still live
+  when the probe finished.
 - `vecgrep status --lightweight` never opens the vector store; `codemap
   status --json --skip-stale` never walks the working tree for drift. Both
   are the cheapest health signal each tool exposes.
