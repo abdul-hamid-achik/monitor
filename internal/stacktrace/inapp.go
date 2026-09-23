@@ -22,6 +22,23 @@ var dependencySegments = map[string]bool{
 	"gems":             true,
 }
 
+// reSourceExt is a real file extension ("", ".<anonymous>" and the like
+// are not).
+var reSourceExt = regexp.MustCompile(`^\.[A-Za-z0-9]+$`)
+
+// reWebpackPath matches a webpack dev-server module path as Next.js 14
+// prints it: "webpack-internal:///(rsc)/./app/page.tsx".
+var reWebpackPath = regexp.MustCompile(`^webpack(?:-internal)?://(?:[^/]*)/(?:\([^)/]*\)/)?(?:\./)?`)
+
+// webpackPath reduces a webpack module path to the project-relative path
+// it names, so dev-server frames of app code can be in-app.
+func webpackPath(p string) string {
+	if loc := reWebpackPath.FindStringIndex(p); loc != nil {
+		return p[loc[1]:]
+	}
+	return p
+}
+
 // reURLScheme matches a pseudo-path scheme such as "node:", "bun:", "ext:",
 // "deno:", "https:" or "webpack:" (two or more letters, so a Windows drive
 // letter "C:" is not a scheme).
@@ -35,7 +52,8 @@ func isPseudoPath(p string) bool {
 	switch {
 	case p == "", p == "native":
 		return true
-	case strings.HasPrefix(p, "<"), strings.HasPrefix(p, "["):
+	case strings.HasPrefix(p, "["), strings.ContainsAny(p, "<>"):
+		// <anonymous>, <frozen runpy>, evalmachine.<anonymous>, [eval].
 		return true
 	case !isWindowsAbs(p) && reURLScheme.MatchString(p):
 		return true
@@ -102,7 +120,7 @@ func hasDependencySegment(rel string) bool {
 // Go reserves for the standard library).
 func relativeInApp(rel string) bool {
 	rel = strings.TrimPrefix(strings.ReplaceAll(rel, `\`, "/"), "./")
-	if strings.HasPrefix(rel, "../") || path.Ext(rel) == "" {
+	if strings.HasPrefix(rel, "../") || !reSourceExt.MatchString(path.Ext(rel)) {
 		return false
 	}
 	if strings.HasPrefix(rel, "internal/") && strings.HasSuffix(rel, ".js") {
@@ -133,6 +151,7 @@ func InApp(f Frame, gitRoot string) bool {
 		p = f.Filename
 	}
 	p = strings.TrimPrefix(p, "file://")
+	p = webpackPath(p)
 	if isPseudoPath(p) {
 		return false
 	}

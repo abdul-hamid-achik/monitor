@@ -67,7 +67,6 @@ type blockRule struct {
 var blockRules = []blockRule{
 	pythonRule,
 	pythonSyntaxRule,
-	pythonGroupRule,
 	gopanicRule,
 	goroutineDumpRule,
 	zapConsoleRule,

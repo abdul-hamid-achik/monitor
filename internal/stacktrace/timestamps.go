@@ -19,6 +19,10 @@ var (
 	// ISO 8601 / RFC 3339 with a zone: "Z", "-07:00" or zap's
 	// ISO8601TimeEncoder "-0700".
 	reISOZoned = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})`)
+	// A space-separated date-time that does carry a zone: gunicorn's
+	// "[2026-09-22 10:04:37 +0000]", Ruby's Time#to_s "2026-09-22
+	// 10:05:00 -0600".
+	reSpaceZoned = regexp.MustCompile(`(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[,.]\d+)?) ?(Z|[+-]\d{2}:?\d{2})\b`)
 	// Python logging's default asctime: "2026-09-22 10:04:37,123" (local
 	// wall-clock time, no zone).
 	rePyAsctime = regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[,.]\d+)?`)
@@ -48,6 +52,15 @@ func parseTimestamp(line string, loc *time.Location) (time.Time, bool) {
 		m = strings.Replace(m, ",", ".", 1)
 		for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999Z0700"} {
 			if t, err := time.Parse(layout, m); err == nil {
+				return t, true
+			}
+		}
+	}
+	if m := findEarly(reSpaceZoned, line); m != "" {
+		sm := reSpaceZoned.FindStringSubmatch(m)
+		stamp := strings.Replace(sm[1], ",", ".", 1) + sm[2]
+		for _, layout := range []string{"2006-01-02 15:04:05.999999999Z07:00", "2006-01-02 15:04:05.999999999Z0700"} {
+			if t, err := time.Parse(layout, stamp); err == nil {
 				return t, true
 			}
 		}

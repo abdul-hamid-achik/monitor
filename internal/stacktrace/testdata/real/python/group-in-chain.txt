@@ -1,0 +1,16 @@
+  + Exception Group Traceback (most recent call last):
+  |   File "/repo/app/app.py", line 77, in <module>
+  |     raise ExceptionGroup("many", [ValueError("a"), TypeError("b")])
+  | ExceptionGroup: many (2 sub-exceptions)
+  +-+---------------- 1 ----------------
+    | ValueError: a
+    +---------------- 2 ----------------
+    | TypeError: b
+    +------------------------------------
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/repo/app/app.py", line 79, in <module>
+    raise RuntimeError("outer") from eg
+RuntimeError: outer

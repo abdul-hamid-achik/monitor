@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/repo/app/app.py", line 45, in <module>
+    make_local_exc()
+    ~~~~~~~~~~~~~~^^
+  File "/repo/app/app.py", line 14, in make_local_exc
+    raise LocalErr("from a local class")
+make_local_exc.<locals>.LocalErr: from a local class

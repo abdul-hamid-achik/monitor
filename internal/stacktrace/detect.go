@@ -34,8 +34,6 @@ func Parse(block Block) *Exception {
 		return parsePython(block)
 	case "python-syntax":
 		return parsePythonSyntax(block)
-	case "python-group":
-		return parsePythonGroup(block)
 	case "ruby-handled":
 		return parseRubyHandled(block)
 	case "ruby-fatal":

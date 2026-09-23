@@ -9,13 +9,14 @@
 //     message-only logger.error(...);
 //   - a compile-time "  File "x.py", line N" + caret + "SyntaxError: ..."
 //     dump (no Traceback header);
-//   - the top level of an ExceptionGroup ("  + Exception Group Traceback").
+//   - ExceptionGroup renderings ("  + Exception Group Traceback"), alone or
+//     as one link of a chain, read at their top nesting level.
 //
 // Handled vs uncaught. CPython prints a caught-and-printed traceback exactly
 // like an uncaught one, so the parser uses the structural signals it has, in
 // order: a logging prefix on the block or a log record with a level on the
 // line just before it (logger.exception, Flask's "ERROR in app: ...") means
-// handled; "Exception in thread ..." before it means an uncaught thread
+// handled, at that record's level; "Exception in thread ..." before it means an uncaught thread
 // crash; a traceback whose oldest frame is the module top level ("<module>")
 // or runpy's entry point ("<frozen runpy>", `python -m pkg`) reached the top
 // of the interpreter's stack, which only an uncaught exception can do;
@@ -45,15 +46,18 @@ var (
 	// location line.
 	rePyFileLine = regexp.MustCompile(`^  File "(.*)", line (\d+)(?:, in (.*))?$`)
 	rePySyntaxAt = regexp.MustCompile(`^  File "(.*)", line (\d+)$`)
-	// The segment's closing "Type: message" (or bare "Type") line.
-	rePyClosingLine = regexp.MustCompile(`^[A-Za-z_][\w.]*(?::(?: .*)?)?$`)
+	// The segment's closing "Type: message" (or bare "Type") line; a class
+	// defined in a function prints as "make.<locals>.LocalErr".
+	rePyClosingLine = regexp.MustCompile(`^[A-Za-z_][\w.<>]*(?::(?: .*)?)?$`)
 	// A log record with a warning-or-worse level on the line before a
 	// traceback: "2026-09-22 10:04:37,123 ERROR app: ...", "ERROR in app:".
-	rePyLogRecordPrev = regexp.MustCompile(`\b(?:ERROR|CRITICAL|EXCEPTION|FATAL|WARNING)\b`)
+	rePyLogRecordPrev = regexp.MustCompile(`\b(ERROR|CRITICAL|EXCEPTION|FATAL|WARNING)\b`)
+	// A line of an ExceptionGroup rendering ("  | ...", "  +-+----").
+	rePyGroupLine = regexp.MustCompile(`^\s+[|+]`)
 )
 
 func pythonBlockStart(line string) bool {
-	return reTracebackHeader.MatchString(line) || reLoggingPrefix.MatchString(line)
+	return reTracebackHeader.MatchString(line) || reLoggingPrefix.MatchString(line) || rePyGroupHeader.MatchString(line)
 }
 
 // Python traceback grammar states.
@@ -63,6 +67,7 @@ const (
 	pyStFrames           // inside File/source/caret lines, expecting the closing line
 	pyStClosed           // saw the closing "Type: msg" line
 	pyStConnector        // saw a chain connector sentence, expecting the next Traceback
+	pyStGroup            // inside an ExceptionGroup rendering
 )
 
 type pythonGrammar struct{ st int }
@@ -71,8 +76,11 @@ var pythonRule = blockRule{
 	kind:  "python",
 	start: pythonBlockStart,
 	open: func(first string) grammar {
-		if reTracebackHeader.MatchString(first) {
+		switch {
+		case reTracebackHeader.MatchString(first):
 			return &pythonGrammar{st: pyStHeader}
+		case rePyGroupHeader.MatchString(first):
+			return &pythonGrammar{st: pyStGroup}
 		}
 		return &pythonGrammar{st: pyStPrefix}
 	},
@@ -86,11 +94,25 @@ func (g *pythonGrammar) next(line string, boundary bool) verdict {
 	blank := strings.TrimSpace(line) == ""
 	switch g.st {
 	case pyStPrefix, pyStConnector:
-		if reTracebackHeader.MatchString(line) {
+		switch {
+		case reTracebackHeader.MatchString(line):
 			g.st = pyStHeader
 			return vAccept
+		case rePyGroupHeader.MatchString(line):
+			g.st = pyStGroup
+			return vAccept
+		case g.st == pyStConnector && blank:
+			return vTentative
 		}
-		if g.st == pyStConnector && blank {
+		return vReject
+	case pyStGroup:
+		switch {
+		case rePyGroupLine.MatchString(line) && !boundary:
+			return vAccept
+		case blank:
+			// Either the end of the group or the gap before a chain
+			// connector sentence.
+			g.st = pyStClosed
 			return vTentative
 		}
 		return vReject
@@ -189,20 +211,45 @@ func parsePythonSegment(lines []string) pySegment {
 	return seg
 }
 
-// pythonDisposition decides Handled/Level for the outer segment (see the
-// file doc for the order of signals).
-func pythonDisposition(b Block, prefixed bool, outer pySegment) (handled bool) {
-	switch {
-	case prefixed:
-		return true
-	case strings.HasPrefix(b.Prev, "Exception in thread "):
-		return false
-	case b.Prev != "" && (reLoggingPrefix.MatchString(b.Prev) || rePyLogRecordPrev.MatchString(b.Prev)):
-		return true
-	case outer.topLevel():
-		return false
+// pythonDisposition decides Handled for the outer segment (see the file doc
+// for the order of signals) and the level: a logged traceback takes its
+// logger's level
+// (WARNING:root: -> warning, CRITICAL -> fatal), an uncaught one is fatal,
+// anything else caught is an error.
+func pythonDisposition(b Block, outer pySegment) (handled bool, level string) {
+	if m := reLoggingPrefix.FindStringSubmatch(b.Lines[0]); m != nil {
+		return true, logRecordLevel(m[1])
 	}
-	return true
+	switch {
+	case strings.HasPrefix(b.Prev, "Exception in thread "):
+		return false, LevelFatal
+	case b.Prev != "":
+		if m := reLoggingPrefix.FindStringSubmatch(b.Prev); m != nil {
+			return true, logRecordLevel(m[1])
+		}
+		if m := rePyLogRecordPrev.FindStringSubmatch(b.Prev); m != nil {
+			return true, logRecordLevel(m[1])
+		}
+	}
+	if outer.topLevel() {
+		return false, LevelFatal
+	}
+	return true, LevelError
+}
+
+// logRecordLevel maps a logging level word to a Level; logger.exception
+// records at ERROR, so EXCEPTION is an error too.
+func logRecordLevel(word string) string {
+	if level, ok := levelFromLogPrefix(word); ok {
+		return level
+	}
+	return LevelError
+}
+
+// isPySegmentStart reports a line that opens one section of a (possibly
+// chained) Python dump: a Traceback header or an ExceptionGroup header.
+func isPySegmentStart(l string) bool {
+	return reTracebackHeader.MatchString(l) || rePyGroupHeader.MatchString(l)
 }
 
 // parsePython turns a joined "python"-kind block into an Exception. Frames
@@ -213,11 +260,10 @@ func parsePython(block Block) *Exception {
 	buf := block.Lines
 	var segStarts []int
 	for i, l := range buf {
-		if reTracebackHeader.MatchString(l) {
+		if isPySegmentStart(l) {
 			segStarts = append(segStarts, i)
 		}
 	}
-	prefixed := reLoggingPrefix.MatchString(buf[0])
 	if len(segStarts) == 0 {
 		return parsePythonMessageOnly(block)
 	}
@@ -227,13 +273,17 @@ func parsePython(block Block) *Exception {
 		if i+1 < len(segStarts) {
 			end = segStarts[i+1]
 		}
+		if rePyGroupHeader.MatchString(buf[start]) {
+			segs = append(segs, parsePythonGroupSegment(buf[start:end]))
+			continue
+		}
 		segs = append(segs, parsePythonSegment(buf[start:end]))
 	}
 	outer := segs[len(segs)-1]
 	if outer.typ == "" && len(outer.frames) == 0 {
 		return nil
 	}
-	handled := pythonDisposition(block, prefixed, outer)
+	handled, level := pythonDisposition(block, outer)
 	ex := &Exception{
 		Runtime:    "python",
 		Type:       outer.typ,
@@ -241,7 +291,7 @@ func parsePython(block Block) *Exception {
 		Parser:     "python",
 		Handled:    boolPtr(handled),
 		Frames:     outer.frames,
-		Level:      levelFor(!handled),
+		Level:      level,
 		LineStart:  block.LineStart,
 		LineEnd:    block.LineEnd,
 		ObservedAt: blockTimestamp(block),
@@ -327,54 +377,20 @@ func parsePythonSyntax(block Block) *Exception {
 	}
 }
 
-// --- ExceptionGroup (top level only) ---
+// --- ExceptionGroup segments ---
 
-var pythonGroupRule = blockRule{
-	kind:  "python-group",
-	start: rePyGroupHeader.MatchString,
-	open:  func(string) grammar { return &pyGroupGrammar{} },
-}
-
-type pyGroupGrammar struct{}
-
-var rePyGroupLine = regexp.MustCompile(`^\s+[|+]`)
-
-func (g *pyGroupGrammar) next(line string, boundary bool) verdict {
-	if boundary {
-		return vReject
-	}
-	if rePyGroupLine.MatchString(line) {
-		return vAccept
-	}
-	return vReject
-}
-
-// parsePythonGroup parses the group's own traceback (the "  | " lines at the
-// top nesting level); the sub-exceptions are summarized by the group's own
-// message ("... (2 sub-exceptions)") and not turned into Chained causes,
-// since they are siblings, not causes.
-func parsePythonGroup(block Block) *Exception {
-	lines := []string{"Traceback (most recent call last):"}
-	for _, l := range block.Lines[1:] {
+// parsePythonGroupSegment parses an ExceptionGroup rendering's own
+// traceback (the "  | " lines at the top nesting level); the
+// sub-exceptions are summarized by the group's message ("... (2
+// sub-exceptions)") and not turned into Chained causes, since they are
+// siblings, not causes. The group may itself be a link of a chain
+// ("raise RuntimeError(...) from eg").
+func parsePythonGroupSegment(lines []string) pySegment {
+	tb := []string{"Traceback (most recent call last):"}
+	for _, l := range lines[1:] {
 		if rest, ok := strings.CutPrefix(l, "  | "); ok {
-			lines = append(lines, rest)
+			tb = append(tb, rest)
 		}
 	}
-	seg := parsePythonSegment(lines)
-	if seg.typ == "" {
-		return nil
-	}
-	handled := pythonDisposition(block, false, seg)
-	return &Exception{
-		Runtime:    "python",
-		Type:       seg.typ,
-		Value:      seg.val,
-		Parser:     "python",
-		Handled:    boolPtr(handled),
-		Level:      levelFor(!handled),
-		Frames:     seg.frames,
-		LineStart:  block.LineStart,
-		LineEnd:    block.LineEnd,
-		ObservedAt: blockTimestamp(block),
-	}
+	return parsePythonSegment(tb)
 }

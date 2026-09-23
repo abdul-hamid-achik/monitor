@@ -33,6 +33,8 @@ var (
 	reRubyCaret        = regexp.MustCompile(`^\s*\^+\s*$`)
 	reRubyLogger       = regexp.MustCompile(`^([DIWEFA]), \[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?) #\d+\]\s+(DEBUG|INFO|WARN|ERROR|FATAL|ANY|UNKNOWN) -- ([^:]*): (.*)$`)
 	reRubyMsgClass     = regexp.MustCompile(`^(.*) \(([A-Z][\w:]*)\)$`)
+	// "ArgumentError: bad config" as an app prints "#{e.class}: #{e.message}".
+	reRubyClassMsg = regexp.MustCompile(`^([A-Z][\w:]*(?:Error|Exception)): (.*)$`)
 )
 
 func rubyFrame(file string, line string, method string) Frame {
@@ -77,7 +79,7 @@ func parseRubyHandled(block Block) *Exception {
 	if len(frames) == 0 {
 		return nil
 	}
-	return &Exception{
+	ex := &Exception{
 		Runtime:    "ruby",
 		Parser:     "ruby",
 		Handled:    boolPtr(true),
@@ -87,6 +89,12 @@ func parseRubyHandled(block Block) *Exception {
 		LineEnd:    block.LineEnd,
 		ObservedAt: blockTimestamp(block),
 	}
+	// `warn "#{e.class}: #{e.message}"; warn e.backtrace` prints the class
+	// and message on the line just before the backtrace.
+	if m := reRubyClassMsg.FindStringSubmatch(block.Prev); m != nil {
+		ex.Type, ex.Value = m[1], m[2]
+	}
+	return ex
 }
 
 // --- uncaught dump ---
@@ -202,7 +210,9 @@ func parseRubyLogger(block Block) *Exception {
 		ex.Parser = "ruby"
 		ex.Frames = frames
 		if mc := reRubyMsgClass.FindStringSubmatch(m[5]); mc != nil {
-			ex.Value, ex.Type = mc[1], mc[2]
+			ex.Value, ex.Type = mc[1], mc[2] // logger.error(e): "msg (Class)"
+		} else if mc := reRubyClassMsg.FindStringSubmatch(m[5]); mc != nil {
+			ex.Type, ex.Value = mc[1], mc[2] // "#{e.class}: #{e.message}"
 		}
 	}
 	return ex

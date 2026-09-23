@@ -297,24 +297,26 @@ func parseZapConsole(block Block) *Exception {
 	}
 	ts, levelTok := cols[0], cols[1]
 	rest := cols[2:]
-	// Optional logger-name and caller columns before the message.
-	for i := 0; i < len(rest) && i < 2; i++ {
+	// A trailing JSON fields column.
+	var fields map[string]any
+	if n := len(rest); n > 1 && strings.HasPrefix(rest[n-1], "{") && json.Unmarshal([]byte(rest[n-1]), &fields) == nil {
+		rest = rest[:n-1]
+	}
+	// Optional logger-name and caller columns before the message: the
+	// message follows the caller when there is one, else it is the last
+	// remaining column (a Named logger without WithCaller prints
+	// "<ts>\tERROR\tapi\t<msg>").
+	msgAt := len(rest) - 1
+	for i := 0; i < len(rest)-1 && i < 2; i++ {
 		if reZapCaller.MatchString(rest[i]) {
-			rest = rest[i+1:]
+			msgAt = i + 1
 			break
 		}
 	}
-	if len(rest) == 0 {
+	if msgAt < 0 {
 		return nil
 	}
-	msg := rest[0]
-	var fields map[string]any
-	if len(rest) > 1 {
-		last := rest[len(rest)-1]
-		if strings.HasPrefix(last, "{") {
-			_ = json.Unmarshal([]byte(last), &fields)
-		}
-	}
+	msg := strings.Join(rest[msgAt:], "\t")
 	ex := zapException(block, levelTok, msg)
 	if ex == nil {
 		return nil

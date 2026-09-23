@@ -41,12 +41,13 @@ func tslogStart(line string) bool {
 var tslogRule = blockRule{
 	kind:  "tslog",
 	start: tslogStart,
-	open:  func(string) grammar { return tslogGrammar{} },
+	open:  func(string) grammar { return &tslogGrammar{} },
 }
 
-type tslogGrammar struct{}
+type tslogGrammar struct{ lines int }
 
-func (tslogGrammar) next(line string, boundary bool) verdict {
+func (g *tslogGrammar) next(line string, boundary bool) verdict {
+	g.lines++
 	switch {
 	case boundary:
 		return vReject
@@ -55,10 +56,27 @@ func (tslogGrammar) next(line string, boundary bool) verdict {
 		// A printf-style logger ("<ts> ERROR [api] ${err.stack}") puts
 		// ordinary V8 "at" frames under the same header.
 		return vAccept
+	case g.lines == 1 && reJSHeader.MatchString(line):
+		// "<ts> ERROR [api] request failed" + "\n" + err.stack: the
+		// error's own header on the next line, confirmed by its frames.
+		return vTentative
 	case strings.TrimSpace(line) == "":
 		return vTentative
 	}
 	return vReject
+}
+
+// tslogHeaderTypeValue reads Type and Value from the text after the logger
+// name: a JS error header, possibly after the logger message ("request
+// failed: TypeError: x"), else the synthetic "Type: message" form.
+func tslogHeaderTypeValue(s string) (typ, val string) {
+	if m := reJSHeader.FindStringSubmatch(s); m != nil {
+		return m[1], m[3]
+	}
+	if m := reJSHeaderPrefixed.FindStringSubmatch(s); m != nil {
+		return m[2], m[4]
+	}
+	return tslogTypeValue(s)
 }
 
 // tslogTypeValue splits "Type: message" as printed after the level/logger
@@ -90,7 +108,10 @@ func parseTslog(block Block) *Exception {
 	if !ok {
 		return nil
 	}
-	typ, val := tslogTypeValue(header[3])
+	typ, val := tslogHeaderTypeValue(header[3])
+	if len(lines) > 1 && reJSHeader.MatchString(lines[1]) {
+		typ, val = splitJSTypeValue(lines[1]) // err.stack on the next line
+	}
 	ex := &Exception{
 		Runtime:    "node",
 		Type:       typ,
