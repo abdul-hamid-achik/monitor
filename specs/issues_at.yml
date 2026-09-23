@@ -40,6 +40,8 @@ preconditions:
       timeoutMs: 5000
     - run: "command -v go"
       timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
 
 steps:
   - wait:
@@ -83,7 +85,7 @@ outcomes:
           '
 
   - id: at_human_output_names_the_line_and_falls_back_honestly
-    description: the human --at view names LINE/ID/EVENTS/STATUS/TITLE and, without a codemap index for this repo, says so rather than inventing a function range
+    description: the human --at view names LINE/ID/EVENTS/STATUS/TITLE and, without a codemap index for this repo, says so (no range resolved) rather than inventing a function range
     verify:
       command:
         run: |
@@ -95,9 +97,9 @@ outcomes:
             --file examples/polyglot/js/workload.js --line 31 --function flakyParse \
             --type Error --value "flakyParse: malformed payload" --level error --handled=true --count 10 >/dev/null
 
-          out=$(./bin/monitor issues --at examples/polyglot/js/workload.js:31)
+          out=$(./bin/monitor issues --at examples/polyglot/js/workload.js:31 --all)
           echo "$out" | grep -q "^LINE" || { echo "missing LINE header: $out"; exit 1; }
-          echo "$out" | grep -qE "codemap" || { echo "missing an honest codemap status note: $out"; exit 1; }
+          echo "$out" | grep -qE "no range resolved" || { echo "missing an honest no-range-resolved status note: $out"; exit 1; }
 
   - id: at_no_match_returns_empty_not_every_issue
     description: a line with no culprit returns zero issues, never every issue in the store
@@ -114,6 +116,54 @@ outcomes:
 
           n=$(./bin/monitor issues --at examples/polyglot/js/workload.js:9999 --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["issues"]))')
           [ "$n" = "0" ]
+
+  - id: at_resolves_the_enclosing_function_range_via_codemap
+    description: with a healthy codemap on PATH, --at resolves the enclosing function's range (not just an exact-line fallback) and matches an issue anywhere inside it
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          want=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 31 --function flakyParse \
+            --type Error --value "flakyParse: malformed payload" --level error --handled=true --count 10)
+          go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 49 --function detonate \
+            --type Error --value "node workload intentional uncaught failure" --level fatal --handled=false >/dev/null
+
+          # A fake, healthy `codemap` on PATH: status/symbol-at report the
+          # flakyParse function as indexed and spanning lines 28-35, so
+          # --at:31 (a line INSIDE that range, not the range's own start)
+          # must resolve via the range, not the exact-line fallback.
+          fakebin="$d/fakebin"; mkdir -p "$fakebin"
+          cat > "$fakebin/codemap" <<'SCRIPT'
+          #!/bin/sh
+          case "$*" in
+            *--version*) echo "codemap 0.66.0 (fake)"; exit 0 ;;
+            *"status --json --skip-stale"*) printf '{"registered":true,"project":"polyglot","nodes":1}'; exit 0 ;;
+            *"symbol-at "*) printf '{"file":"examples/polyglot/js/workload.js","line":31,"symbol":"flakyParse","fqn":"workload.flakyParse","kind":"function","start_line":28,"end_line":35,"resolution":"exact","indexed":true}'; exit 0 ;;
+            *) exit 1 ;;
+          esac
+          SCRIPT
+          chmod +x "$fakebin/codemap"
+
+          PATH="$fakebin:$PATH" ./bin/monitor issues --at examples/polyglot/js/workload.js:31 --all --json > "$d/out.json"
+          python3 -c '
+          import json
+          with open("'"$d"'/out.json") as f:
+              o = json.load(f)
+          assert o["range_resolved"] is True, o
+          assert o["symbol"] == "flakyParse", o
+          assert o["start"] == 28 and o["end"] == 35, o
+          ids = [i["id"] for i in o["issues"]]
+          assert ids == ["'"$want"'"], ids
+          '
+
+          human=$(PATH="$fakebin:$PATH" ./bin/monitor issues --at examples/polyglot/js/workload.js:31 --all)
+          echo "$human" | grep -qE "flakyParse.*\(codemap\)" || { echo "human output missing the codemap-resolved range: $human"; exit 1; }
 
   - id: at_different_file_same_line_does_not_match
     description: --at requires BOTH the file and the line to match, not just the line number

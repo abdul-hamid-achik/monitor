@@ -51,10 +51,13 @@ preconditions:
       timeoutMs: 5000
     - run: "command -v go"
       timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
     - run: |
         python3 - <<'PY'
+        import os
         from pathlib import Path
-        Path('/tmp/monitor-mcp-issue-latest-parse.py').write_text(r'''
+        Path(os.environ.get('TMPDIR', '/tmp'), 'monitor-mcp-issue-latest-parse.py').write_text(r'''
         import json, sys
         lines = [line for line in sys.stdin if line.strip().startswith('{')]
         response = json.loads(lines[-1])
@@ -83,6 +86,7 @@ outcomes:
         run: |
           set -e
           d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          tmpdir="$TMPDIR"; [ -n "$tmpdir" ] || tmpdir=/tmp
           export MONITOR_ISSUES_STORE="$d/issues.veclite"
           want=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
             --project polyglot --service workload --root "$(pwd)" \
@@ -102,7 +106,7 @@ outcomes:
               '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
               "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_issue\",\"arguments\":{\"id\":\"latest\",\"project\":\"polyglot\"}}}";
             sleep 1;
-          } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 /tmp/monitor-mcp-issue-latest-parse.py > "$d/out.json"
+          } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 "$tmpdir/monitor-mcp-issue-latest-parse.py" > "$d/out.json"
 
           python3 -c '
           import json
@@ -113,6 +117,25 @@ outcomes:
           assert p["resolved_from"]["kind"] == "exception", p["resolved_from"]
           assert p["schema"] == "monitor.issue_context.v1", p.get("schema")
           assert p["budget"] == "brief", p.get("budget")
+          # The DEFAULT response is the bounded brief only -- no
+          # occurrence_limit was passed, so the legacy occurrences shape
+          # must be ABSENT (the AC-6 size budget), not an empty array.
+          assert "occurrences" not in p, p.keys()
+          '
+
+          { printf '%s\n%s\n%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}' \
+              '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+              "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_issue\",\"arguments\":{\"id\":\"latest\",\"project\":\"polyglot\",\"occurrence_limit\":5}}}";
+            sleep 1;
+          } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 "$tmpdir/monitor-mcp-issue-latest-parse.py" > "$d/out-legacy.json"
+
+          python3 -c '
+          import json
+          with open("'"$d"'/out-legacy.json") as f:
+              p = json.load(f)
+          # occurrence_limit > 0 opts into the legacy issue/occurrences shape.
+          assert p["issue"]["id"] == "'"$want"'", p["issue"]
           assert "occurrences" in p, p.keys()
           '
 
@@ -123,6 +146,7 @@ outcomes:
         run: |
           set -e
           d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          tmpdir="$TMPDIR"; [ -n "$tmpdir" ] || tmpdir=/tmp
           export MONITOR_ISSUES_STORE="$d/issues.veclite"
           go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
             --project polyglot --service workload --root "$(pwd)" \
@@ -137,7 +161,7 @@ outcomes:
               '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
               "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_issue\",\"arguments\":{\"id\":\"latest\",\"project\":\"polyglot\",\"kind\":\"any\"}}}";
             sleep 1;
-          } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 /tmp/monitor-mcp-issue-latest-parse.py > "$d/out.json"
+          } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 "$tmpdir/monitor-mcp-issue-latest-parse.py" > "$d/out.json"
 
           python3 -c '
           import json
@@ -152,13 +176,14 @@ outcomes:
       command:
         run: |
           d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          tmpdir="$TMPDIR"; [ -n "$tmpdir" ] || tmpdir=/tmp
           export MONITOR_ISSUES_STORE="$d/issues.veclite"
           { printf '%s\n%s\n%s\n' \
               '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}' \
               '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
               '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"monitor_issue","arguments":{"id":"latest","project":"nothing-here"}}}';
             sleep 1;
-          } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 /tmp/monitor-mcp-issue-latest-parse.py | python3 -c '
+          } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 "$tmpdir/monitor-mcp-issue-latest-parse.py" | python3 -c '
           import json, sys
           p = json.load(sys.stdin)
           assert p["not_found"] is True, p
