@@ -165,6 +165,15 @@ var goldenCases = []struct {
 	{"real/bun/throw-string.txt", []string{
 		`js/bun fatal unhandled Error: plain string failure @-(0)`,
 	}},
+	// Two unrelated console.error(err) calls print exactly like the
+	// handled cause chain above (code frame, "error: ...", frames, blank,
+	// next code frame): without the "Bun vX" footer of an uncaught crash
+	// there is no way to tell a cause from the next error, so handled Bun
+	// blocks are never linked.
+	{"real/bun/two-errors.txt", []string{
+		`js/bun error handled Error: first unrelated failure @@two-errors.mjs:8(1)`,
+		`js/bun error handled Error: second unrelated failure @@two-errors.mjs:9(1)`,
+	}},
 	{"real/bun/typeerror.txt", []string{
 		`js/bun fatal unhandled TypeError: undefined is not an object (evaluating 'req.body.length') @handle@scenarios.mjs:34(2)`,
 	}},
