@@ -353,6 +353,11 @@ func extractMainScript(rt Runtime, cmdline []string, cwd string) string {
 	default:
 		return ""
 	}
+	if rt == RuntimeRuby {
+		if script := extractBundlerProctitleScript(cmdline, cwd); script != "" {
+			return script
+		}
+	}
 	for i := 1; i < len(cmdline); i++ {
 		arg := cmdline[i]
 		if arg == "" {
@@ -367,11 +372,31 @@ func extractMainScript(rt Runtime, cmdline []string, cwd string) string {
 			// so treating them as value-consuming here silently ate the main
 			// script argument that followed a bare --inspect.
 			switch arg {
-			case "-r", "--require", "--import", "-e", "--eval", "-p", "--print",
+			case "-r", "--require", "--import", "-e", "--eval",
 				"--inspect-port", "--cpu-prof-dir",
-				"--heap-prof-dir", "--diagnostic-dir", "-c", "--config",
-				"-I", "-C": // -I load path, -C chdir (Ruby)
+				"--heap-prof-dir", "--diagnostic-dir":
+				// Shared across every interpreter runtime we classify here:
+				// each of these always takes a separate value.
 				i++
+			case "-p", "--print", "-c", "--config":
+				// Node's "-p/--print" (evaluate+print) and Python's "-c"
+				// (eval) take a value. Ruby's "-p" (autoprint) and "-c"
+				// (syntax check only) take NONE, so this flag switch is not
+				// shareable as-is: consuming the next element for Ruby ate
+				// its real script argument (e.g. `ruby -p script.rb`).
+				if rt != RuntimeRuby {
+					i++
+				}
+			case "-I", "-C", "-E":
+				// Ruby-only: -I<dir> (load path), -C<dir> (chdir before
+				// running) and -E<enc> (external/internal encoding) all
+				// take a value. Nothing else in this runtime set defines
+				// these flags, and Python in particular has an unrelated
+				// "-I" (isolated mode) that takes NO value at all, so this
+				// must never fire for a non-Ruby runtime.
+				if rt == RuntimeRuby {
+					i++
+				}
 			}
 			// --inspect=host:port already consumed as single token.
 			continue
@@ -386,6 +411,39 @@ func extractMainScript(rt Runtime, cmdline []string, cwd string) string {
 		return resolvePath(arg, cwd)
 	}
 	return ""
+}
+
+// extractBundlerProctitleScript recognizes Bundler's kernel_load rewrite of
+// the live process's title. A Bundler-installed bin script with a Ruby
+// shebang (the common case for bin/rails, bin/rake, bin/puma) is not exec'd
+// into a new process: bundler/cli/exec.rb loads it in-process via
+// Kernel#load and then calls Process.setproctitle("#{file} #{args}"). That
+// collapses cmdline into a single whitespace-joined string in argv[0] and
+// blanks every later element, so the ordinary flag-walking loop in
+// extractMainScript never sees a separate script argument at all. When that
+// exact shape is detected, the first whitespace-separated token of argv[0]
+// is the real, already-resolved script path (e.g. an absolute path to
+// bin/rails) — it needs no further flag or extension interpretation, only
+// cwd-relative resolution.
+//
+// Processes launched as "bundle exec ruby app.rb" do not hit this path:
+// Bundler execs straight into the interpreter for that case (Kernel#exec,
+// a real execve), which leaves argv looking exactly like a plain "ruby ..."
+// invocation and is handled by the normal loop below.
+func extractBundlerProctitleScript(cmdline []string, cwd string) string {
+	if len(cmdline) < 2 || !strings.ContainsAny(cmdline[0], " \t") {
+		return ""
+	}
+	for _, rest := range cmdline[1:] {
+		if rest != "" {
+			return ""
+		}
+	}
+	fields := strings.Fields(cmdline[0])
+	if len(fields) == 0 {
+		return ""
+	}
+	return resolvePath(fields[0], cwd)
 }
 
 func looksLikeSourceFile(arg string, rt Runtime) bool {
@@ -404,16 +462,14 @@ func looksLikeSourceFile(arg string, rt Runtime) bool {
 	case RuntimePython:
 		return strings.HasSuffix(lower, ".py")
 	case RuntimeRuby:
-		if strings.HasSuffix(lower, ".rb") || strings.HasSuffix(lower, ".ru") || strings.HasSuffix(lower, ".rake") {
-			return true
-		}
-		// Bundler-installed bin scripts invoked via "bundle exec <name>"
-		// (rails/rake/puma) commonly have no extension.
-		switch filepath.Base(lower) {
-		case "rails", "rake", "puma", "rackup":
-			return true
-		}
-		return false
+		// Bundler-installed bin scripts (rails/rake/puma/rackup) commonly
+		// have no extension, but a live "bundle exec rails server" process
+		// never actually shows this argv shape: Bundler's kernel_load path
+		// rewrites the process title before this loop ever runs (see
+		// extractBundlerProctitleScript), so guessing a bare "rails"/"rake"/
+		// "puma" basename against cwd only produced a path that does not
+		// exist and is intentionally not matched here.
+		return strings.HasSuffix(lower, ".rb") || strings.HasSuffix(lower, ".ru") || strings.HasSuffix(lower, ".rake")
 	default:
 		return false
 	}

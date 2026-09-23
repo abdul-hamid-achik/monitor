@@ -80,6 +80,17 @@ func TestExtractMainScript(t *testing.T) {
 	}
 }
 
+func TestExtractMainScriptPythonIsolatedMode(t *testing.T) {
+	cwd := "/app"
+	// Regression: Python's "-I" (isolated mode) takes NO value, unlike
+	// Ruby's "-I" (load path). Both runtimes share the same flag-walking
+	// loop, so "-I" must only consume a value when the runtime is Ruby.
+	got := extractMainScript(RuntimePython, []string{"python3", "-I", "app.py"}, cwd)
+	if got != "/app/app.py" {
+		t.Fatalf("python3 -I app.py = %q, want /app/app.py", got)
+	}
+}
+
 func TestExtractMainScriptRuby(t *testing.T) {
 	cwd := "/app"
 	// Plain ruby script invocation.
@@ -93,18 +104,62 @@ func TestExtractMainScriptRuby(t *testing.T) {
 	if got != "/app/app.rb" {
 		t.Fatalf("ruby with -r/-I = %q", got)
 	}
+	// Regression: Ruby's "-p" (autoprint) and "-c" (syntax check only) take
+	// NO separate value, unlike Node's "-p/--print" and Python's "-c"
+	// (eval), which share the same flag switch. Consuming the next argv
+	// element here used to eat Ruby's real script argument.
+	got = extractMainScript(RuntimeRuby, []string{"ruby", "-p", "script.rb"}, cwd)
+	if got != "/app/script.rb" {
+		t.Fatalf("ruby -p script.rb = %q, want /app/script.rb", got)
+	}
+	got = extractMainScript(RuntimeRuby, []string{"ruby", "-c", "script.rb"}, cwd)
+	if got != "/app/script.rb" {
+		t.Fatalf("ruby -c script.rb = %q, want /app/script.rb", got)
+	}
 	// "bundle exec ruby <script>": bundle and exec are skipped, then the
 	// repeated interpreter name "ruby" is not itself a script and is
-	// skipped too, landing on the real entry point.
+	// skipped too, landing on the real entry point. This is Bundler's
+	// Kernel#exec path (a real execve into the interpreter), so a live
+	// process shows ordinary argv exactly like this.
 	got = extractMainScript(RuntimeRuby, []string{"bundle", "exec", "ruby", "app.rb"}, cwd)
 	if got != "/app/app.rb" {
 		t.Fatalf("bundle exec ruby main = %q", got)
 	}
-	// "bundle exec rails server": the bundler-installed bin script has no
-	// .rb extension; main_script still resolves to it (not "server").
+	// "bundle exec rails server" with this synthetic argv shape yields no
+	// main_script. A live process never actually preserves this shape: see
+	// TestExtractMainScriptRubyBundlerProctitle below for what a real
+	// "bundle exec rails server" process's argv looks like once Bundler's
+	// kernel_load path rewrites the process title. Guessing a bare "rails"
+	// basename against cwd only produced a path that does not exist, so
+	// this case is now honestly empty instead.
 	got = extractMainScript(RuntimeRuby, []string{"bundle", "exec", "rails", "server"}, cwd)
-	if got != "/app/rails" {
-		t.Fatalf("bundle exec rails server main = %q", got)
+	if got != "" {
+		t.Fatalf("bundle exec rails server (synthetic argv) main = %q, want \"\" (no invented path)", got)
+	}
+}
+
+func TestExtractMainScriptRubyBundlerProctitle(t *testing.T) {
+	cwd := "/app"
+	// Bundler's kernel_load path (used for ruby-shebang bin scripts like
+	// bin/rails, bin/rake, bin/puma) rewrites the live process's argv via
+	// Process.setproctitle("#{file} #{args}"): argv[0] becomes one
+	// whitespace-joined string and every later element is blanked. The
+	// first token of that joined string is the real, already-resolved
+	// script path.
+	got := extractMainScript(RuntimeRuby, []string{"/app/bin/rails server", "", ""}, cwd)
+	if got != "/app/bin/rails" {
+		t.Fatalf("bundler proctitle main = %q, want /app/bin/rails", got)
+	}
+	// A relative script path in the rewritten title still resolves against cwd.
+	got = extractMainScript(RuntimeRuby, []string{"bin/rake db:migrate", ""}, cwd)
+	if got != "/app/bin/rake" {
+		t.Fatalf("bundler proctitle relative main = %q, want /app/bin/rake", got)
+	}
+	// A normal (non-rewritten) argv must not be misread as a proctitle: no
+	// element of a real argv legitimately contains internal whitespace.
+	got = extractMainScript(RuntimeRuby, []string{"ruby", "app.rb"}, cwd)
+	if got != "/app/app.rb" {
+		t.Fatalf("plain ruby argv must not be treated as a rewritten proctitle, got %q", got)
 	}
 }
 
