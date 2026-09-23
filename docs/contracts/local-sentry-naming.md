@@ -1,7 +1,7 @@
-# Local Sentry naming ADR
+# Error tracking naming ADR
 
 - **Status**: Accepted
-- **Context**: the "local Sentry" epic (see the `feat/local-sentry` roadmap)
+- **Context**: the error-tracking epic (see the `feat/local-sentry` roadmap)
   adds a launch verb, a stack-trace parser, an exception model, a heatmap,
   and an issue-detail view, each proposed independently by several
   contributors during design. Several names collided outright (two proposed
@@ -27,11 +27,13 @@ and [`line-heatmap-v1`](./line-heatmap-v1).
 | Reprocess checkpoints | `$XDG_STATE_HOME/monitor/parse/<sha256(abspath)>.json` holding `{inode, size, offset}` | using wall-clock "now" as `ObservedAt` |
 | Heatmap | `monitor hot <pid\|service\|file> [--type cpu\|heap\|goroutine]` producing `monitor.line_heatmap.v1` | `hotspots`, `profile analyze`, `profile --lines` |
 | Issue detail | `monitor issue <id>` producing `monitor.issue_context.v1`; `monitor issues --at <file:line>` | `issue-explain.v1`, `issues context` |
-| Exception chain | see §3 (fingerprint/culprit rule) | picking the outermost or innermost exception ad hoc per parser |
+| `issue`/`issues` collision | `internal/cli/issues.go` already registers `issue` as a cobra **alias** of `issues` (`Aliases: []string{"issue"}`), so today `monitor issue <anything>` just prints the `issues` command's help rather than an issue page. E2.5's new, one-argument `monitor issue <id>` must **take over** that alias rather than add a second meaning for it; `monitor issues list\|show\|resolve\|reopen\|ignore` keep dispatching exactly as they do today, so no existing script or muscle memory breaks. This is a user-visible CLI change and belongs in the CHANGELOG. | leaving the alias as-is and hoping `<id>` never collides with a subcommand name |
+| Exception chain | see §6 (fingerprint/culprit rule) | picking the outermost or innermost exception ad hoc per parser |
 | New packages (MVP) | `internal/stacktrace`, `internal/scrub`, `internal/project`, `internal/devrun`, `internal/explain`, `internal/sourcemap` | `internal/events` for the MVP; a second, duplicated joiner under `internal/capture` |
 | Later packages | `internal/event` (a future `monitor.event/v1`), `internal/probe`, `internal/ingest/sentry`, `internal/notes` | `internal/probes`, `devrun/hooks` |
 | Probe environment (later epic) | `MONITOR_PROBE_DIR` | `MONITOR_SPOOL_DIR` |
 | `Culprit` type | `issues.Culprit{Function, FQN, File, Line, Source}`, `Source` is `stack` or `message_search` | a bare `string`, or a `*HotspotRef` |
+| `Frame.Mapping` enum | `exact \| ambiguous \| transpiled \| inferred \| ""` — one shared source-map confidence enum, set on a stack-trace `Frame` wherever a location was resolved through a source map | a second, incompatible enum per contract. `monitor.line_heatmap.v1`'s per-line `mapping` reuses these same four confidence values for the same reason, plus its own separate `stale` signal — a profiled *line* can go stale after profiling in a way a per-crash stack `Frame` has no equivalent for; see [`line-heatmap-v1`](./line-heatmap-v1) |
 | Ingest port (later epic) | `127.0.0.1:8969`, explicit failure on a port conflict, project key required | `7352`; accepting an unknown key |
 | Launch registry (v1.17) | `$XDG_STATE_HOME/monitor/services/<project>/<name>.json` (`monitor.run-service.v1`; no argv; directory `0700`, file `0600`) | pinning `MONITOR_RUN_DIR` at launch time |
 
@@ -77,8 +79,8 @@ output stream(s) feed the stack-trace detector:
 - `stderr` (default): the language runtimes in the golden table (Node, Deno,
   Bun, Python, Ruby, Go) print uncaught exceptions and panics here.
 - `stdout`: needed for loggers that write structured output to stdout by
-  convention — Graphite's zap config sets `OutputPaths`/`ErrorOutputPaths` to
-  stdout, and `pino`/many Rails loggers default there too.
+  convention — some `zap` setups point `OutputPaths`/`ErrorOutputPaths` at
+  stdout instead of stderr, and `pino`/many Rails loggers default there too.
 - `both`: scans both streams; a line is attributed to the stream it was read
   from.
 
@@ -116,6 +118,13 @@ Two independent idempotency mechanisms cover the two entry points:
   with the per-file checkpoint from §1 (`{inode, size, offset}`). Re-running
   `--record` over a log that has not grown past its checkpoint replays
   nothing; growth past the checkpoint parses only the new bytes.
+- **Checkpoint reset**: the checkpoint resets to `offset: 0` whenever the
+  file's current inode no longer matches the stored one, or the file's
+  current size is smaller than the stored offset. Both signal rotation or
+  truncation (logrotate, a restarted service overwriting its own log) rather
+  than steady growth, so re-reading from the start is correct; without this a
+  rotated log would either be skipped forever (the stale offset lands past
+  the new file's EOF) or silently miss its first bytes.
 
 Both dedupe keys are occurrence-only context: neither one enters
 `FingerprintV2Exception` (§6), so a live occurrence and a later replay of the
@@ -124,19 +133,91 @@ same log line still group into the same issue.
 ## 6. Exception-chain rule (fingerprint and culprit)
 
 An `Exception` carries `Chained []Exception`, ordered from the **outer**
-exception (what the runtime raised or logged first) to the **innermost
-cause** (what "During handling of the above exception..." / "Caused by:" /
-Go's `%+v` wrapped-error chain ultimately blames), regardless of the order
-the runtime printed them in.
+exception to the **innermost cause**, regardless of the order the runtime
+printed them in — and runtimes disagree on that order, which is exactly why
+this needs a rule instead of "whatever the parser saw first":
 
-- **`FingerprintV2Exception`** = `outer.Type` + the outer exception's top-5
-  `in_app` frames, function and file only, **with line numbers stripped** +
-  the innermost cause's `Type`. Line numbers are excluded so an unrelated
-  one-line diff above the crash does not fragment the same issue into a new
-  one; the outer type anchors the "shape" of the failure while the innermost
-  cause's type anchors its root. Sampled/profiler symbols, codemap FQNs,
-  vecgrep scores, PIDs, releases, and (for exceptions) the service name never
-  enter the fingerprint.
+- **Outer** = the exception that actually propagated to the top level: a
+  Node `uncaughtException`, a Go panic that reached `main`, the traceback the
+  Python interpreter itself reports for the process.
+- **Innermost cause** = the end of whichever chaining idiom the runtime
+  uses: Python's `__cause__`/`__context__` ("...the direct cause of the
+  following exception:" / "During handling of the above exception..."),
+  Node's `Error.cause` printed as `[cause]`, or Go's `%+v`-formatted
+  wrapped-error chain (`pkg/errors`, `fmt.Errorf("%w")`).
+
+Node's `[cause]` and Go's `%+v` both print the outer exception **first** and
+the cause **after**, which already matches this ordering. Python is the
+opposite: it prints the innermost cause's traceback first, then "During
+handling of the above exception..." / "The above exception was the direct
+cause of the following exception:", then the **outer** exception's traceback
+**last**. A parser that assumed "printed first = outer" would invert every
+Python chain — exactly the case this rule exists to normalize. For example,
+a Python worker whose top-level handler wraps a parse failure —
+
+```
+Traceback (most recent call last):
+  File "workload.py", line 31, in parse_row
+    raise ValueError(f"bad row {n}")
+ValueError: bad row 7
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "workload.py", line 52, in sync
+    raise RuntimeError("sync aborted") from exc
+RuntimeError: sync aborted
+```
+
+— prints `ValueError` first and `RuntimeError` last, but `Chained` must still
+record `[RuntimeError, ValueError]` (outer to innermost): the fingerprint
+anchors on `RuntimeError` as the outer type, and (per the `Culprit` rule
+below) the culprit falls to `ValueError`'s in-app frame at `workload.py:31`,
+not `RuntimeError`'s frame at `workload.py:52`. A Node equivalent (`throw new
+RuntimeishError(..., { cause: parseErr })`, printed as the outer error
+followed by `[cause]: ValueError-ish: bad row 7`) reaches the same
+`[outer, innermost]` order directly, without needing to reverse anything.
+
+**`FingerprintV2Exception`** =
+`sha256("v2" + "exception" + project + outer.Type + outerFrames + innermost.Type)`.
+Each component exists for a reason:
+
+- `"v2"` salts this scheme so it can never collide with `FingerprintV1`
+  (the sampled-symbol scheme `investigate` and `watch` alerts still use) or
+  with a future, unrelated fingerprint kind that reuses the same hash space.
+- `"exception"` is this fingerprint's **kind** tag — which rule produced the
+  hash — the same way `Issue.Kind` distinguishes the literal values the store
+  actually writes: `exception` (this rule), `investigation`
+  (`internal/cli/investigate.go`), and `monitor.alert.<rule>`
+  (`internal/cli/watch.go`).
+- `project` (from `project.Resolve`) scopes the hash per project. Without it,
+  two unrelated projects that happen to share a stack shape (a common
+  library's `TypeError`, say) would merge into one issue.
+- `outerFrames` is the outer exception's **top-5 `in_app` frames**, function
+  and file only, **with line numbers stripped**, rendered `func@relfile`.
+  Line numbers are excluded so an unrelated one-line diff above the crash
+  does not fragment the same issue into a new one. "Top-5" counts from the
+  **crash frame backward**: `Exception.Frames` is stored oldest-to-newest
+  with the crash frame last, so the top 5 are the slice's last 5 elements
+  (closest to where it actually broke), not its first 5 (the oldest calls on
+  the stack).
+- **Fallback when the outer exception has zero `in_app` frames** — a
+  message-only event, e.g. `logging.error("...")` called without
+  `exc_info`, or a bare `zap.Error` without a `%+v`-formatted cause —
+  `outerFrames` above is replaced by the outer exception's **normalized
+  message value**: the same template-normalized string that
+  `culprit.source: message_search` (§7) searches on, so "connection refused:
+  10.0.4.12:5432" and "connection refused: 10.0.4.19:5432" still fingerprint
+  together instead of opening a new issue per IP. This value enters the hash
+  **only** in this no-`in_app`-frames case; whenever the outer exception has
+  at least one `in_app` frame, the raw message text never enters the
+  fingerprint.
+- `innermost.Type` anchors the failure's root regardless of which of the two
+  rules above produced `outerFrames`.
+
+Sampled/profiler symbols, codemap FQNs, vecgrep scores, PIDs, releases, and
+(for exceptions) the service name never enter the fingerprint.
+
 - **`Culprit`** = the crash frame of the **innermost cause** if that frame is
   `in_app`; otherwise it falls back to the crash frame of the **outer**
   exception. Rationale: the innermost cause is usually the one line an
@@ -144,9 +225,10 @@ the runtime printed them in.
   entirely inside a dependency (`node_modules`, `site-packages`, `vendor`,
   `GOROOT`, gems), the outer exception's own in-app frame is the more
   actionable pointer than a third-party line.
-- A message-only event (no frames — `logging.error("...")` without
-  `exc_info`, a bare `zap.Error` without `%+v`) never reaches this rule; see
-  §7.
+- A message-only event still reaches the fingerprint rule above, via the
+  normalized-message fallback — it is not excluded from fingerprinting. What
+  it skips is `Culprit`'s stack-based path: with no `in_app` frame anywhere
+  in the chain, `Culprit` falls through to `message_search`; see §7.
 
 ## 7. `culprit.source`
 
