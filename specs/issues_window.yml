@@ -1,0 +1,143 @@
+version: 1
+name: monitor_issues_window
+
+intent: |
+  E2.6 (local-sentry roadmap): `monitor issues list` gains --since/--until/
+  --run-id/--release/--kind window filters, backed by issues.ListOptions'
+  new Since/Until/RunID/Release/Kind fields; the MCP monitor_issues tool
+  maps the same filters through the same issues.Store.List code. This spec
+  seeds one issue (kind "investigation", via two `monitor investigate
+  --no-save` calls tagged with distinct --run-id/--release) on an isolated
+  store, then exercises each filter: a run-id/release/kind match returns the
+  issue, a miss returns an empty list, an out-of-range --since excludes it,
+  and an invalid --kind is rejected.
+
+target:
+  cmd:
+    - "/bin/sh"
+    - "-lc"
+    - |
+      set -e
+      d="$(mktemp -d)"
+      export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state"
+      export MONITOR_ISSUES_STORE="$d/issues.veclite"
+      mkdir -p "$HOME"
+
+      ./bin/monitor investigate 1 --no-save --run-id run-a --release rel-a --json >/dev/null
+      ./bin/monitor investigate 1 --no-save --run-id run-b --release rel-b --json >/dev/null
+      echo seeded
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 20000
+
+outcomes:
+  - id: clean_exit
+    description: seeding two tagged occurrences on an isolated store exits 0
+    verify:
+      process:
+        exitCode: 0
+  - id: run_id_match_returns_issue
+    description: a --run-id an occurrence carried returns the issue
+    verify:
+      command:
+        run: |
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/issues.veclite"
+          mkdir -p "$HOME"
+          ./bin/monitor investigate 1 --no-save --run-id run-a --release rel-a --json >/dev/null
+          ./bin/monitor investigate 1 --no-save --run-id run-b --release rel-b --json >/dev/null
+          n=$(./bin/monitor issues list --run-id run-a --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          [ "$n" = "1" ]
+  - id: run_id_miss_returns_empty
+    description: an unseen --run-id returns an empty list, not every issue
+    verify:
+      command:
+        run: |
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/issues.veclite"
+          mkdir -p "$HOME"
+          ./bin/monitor investigate 1 --no-save --run-id run-a --release rel-a --json >/dev/null
+          out=$(./bin/monitor issues list --run-id no-such-run --json)
+          [ "$(echo "$out" | tr -d '[:space:]')" = "[]" ]
+  - id: release_match_returns_issue
+    description: --release matches an occurrence's release
+    verify:
+      command:
+        run: |
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/issues.veclite"
+          mkdir -p "$HOME"
+          ./bin/monitor investigate 1 --no-save --run-id run-a --release rel-a --json >/dev/null
+          ./bin/monitor investigate 1 --no-save --run-id run-b --release rel-b --json >/dev/null
+          n=$(./bin/monitor issues list --release rel-b --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          [ "$n" = "1" ]
+  - id: kind_investigation_matches_and_exception_excludes
+    description: --kind investigation matches the seeded issue; --kind exception excludes it
+    verify:
+      command:
+        run: |
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/issues.veclite"
+          mkdir -p "$HOME"
+          ./bin/monitor investigate 1 --no-save --run-id run-a --release rel-a --json >/dev/null
+          inv=$(./bin/monitor issues list --kind investigation --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          exc=$(./bin/monitor issues list --kind exception --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          any=$(./bin/monitor issues list --kind any --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          [ "$inv" = "1" ] && [ "$exc" = "0" ] && [ "$any" = "1" ]
+  - id: invalid_kind_rejected
+    description: an unrecognized --kind value is a non-zero exit, not silently ignored
+    verify:
+      command:
+        run: |
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/issues.veclite"
+          mkdir -p "$HOME"
+          ! ./bin/monitor issues list --kind bogus >/dev/null 2>&1
+  - id: since_excludes_and_includes_by_window
+    description: a --since in the future excludes the issue; a --since safely in the past includes it
+    verify:
+      command:
+        run: |
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/issues.veclite"
+          mkdir -p "$HOME"
+          ./bin/monitor investigate 1 --no-save --run-id run-a --release rel-a --json >/dev/null
+          future=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+          excluded=$(./bin/monitor issues list --since "$future" --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          included=$(./bin/monitor issues list --since 24h --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')
+          [ "$excluded" = "0" ] && [ "$included" = "1" ]
+  - id: mcp_monitor_issues_maps_the_same_filters
+    description: the MCP monitor_issues tool's run_id/kind filters agree with the CLI's
+    verify:
+      command:
+        run: |
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/issues.veclite"
+          mkdir -p "$HOME"
+          ./bin/monitor investigate 1 --no-save --run-id run-a --release rel-a --json >/dev/null
+          { printf '%s\n%s\n%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}' \
+              '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"monitor_issues","arguments":{"run_id":"run-a","kind":"investigation"}}}';
+            sleep 1;
+          } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 -c '
+          import json, sys
+          lines = [line for line in sys.stdin if line.strip().startswith("{")]
+          response = json.loads(lines[-1])
+          payload = json.loads(response["result"]["content"][0]["text"])
+          assert payload["total"] == 1, payload
+          '
