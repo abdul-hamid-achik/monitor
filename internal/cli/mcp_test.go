@@ -13,9 +13,12 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/contextids"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	monitormcp "github.com/abdul-hamid-achik/monitor/internal/mcp"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
+	"github.com/abdul-hamid-achik/monitor/internal/project"
+	"github.com/abdul-hamid-achik/monitor/internal/stacktrace"
 )
 
 // leakyCollector returns a collect func for analyzeWindow tests: pid leak
@@ -406,4 +409,188 @@ func TestProfileServiceLiveNodeInspectorViaRealDispatch(t *testing.T) {
 	if _, ok := first["func"]; !ok {
 		t.Errorf("symbols[0] missing a 'func' field: %+v", first)
 	}
+}
+
+// TestIssueContextForMCPWireLatestIgnoresAlertsAndRespectsProject is E2.7's
+// wire test: monitor_issue {id:"latest", project:...} driven through
+// issueContextForMCP -- the EXACT closure newMCPServeCmd wires into
+// mcp.Service.IssueContext for the real `monitor mcp serve` binary -- over a
+// real SDK in-memory transport, against a real isolated issues store (not a
+// hand-rolled stub; server_test.go's own IssueContext tests stay scoped to
+// the MCP wire/schema round trip with a fake Service).
+func TestIssueContextForMCPWireLatestIgnoresAlertsAndRespectsProject(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	t.Setenv(issues.StorePathEnv, storePath)
+
+	now := time.Now().UTC()
+	wantIssue := seedMCPException(t, storePath, "polyglot", "workload", now.Add(-time.Hour))
+	// More recently active, but an alert -- "latest" must ignore it
+	// (kind defaults to "exception").
+	seedMCPAlert(t, storePath, "polyglot", now)
+	// More recently active AND an exception, but a DIFFERENT project --
+	// "latest" must respect the project filter.
+	seedMCPException(t, storePath, "other-project", "svc", now)
+
+	svc := &monitormcp.Service{IssueContext: issueContextForMCP}
+	s := monitormcp.NewServer(svc, "test")
+
+	ctx := context.Background()
+	clientTr, serverTr := sdkmcp.NewInMemoryTransports()
+	ss, err := s.Connect(ctx, serverTr)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer func() { _ = ss.Close() }()
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-client", Version: "0.0.0"}, nil)
+	cs, err := client.Connect(ctx, clientTr, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	res, err := cs.CallTool(ctx, &sdkmcp.CallToolParams{
+		Name:      "monitor_issue",
+		Arguments: map[string]any{"id": "latest", "project": "polyglot"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	m, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("StructuredContent type = %T, want map[string]any (content=%+v)", res.StructuredContent, res.Content)
+	}
+	issue, ok := m["issue"].(map[string]any)
+	if !ok {
+		t.Fatalf("issue field missing or wrong type (%T); payload=%v", m["issue"], m)
+	}
+	if issue["id"] != wantIssue.ID {
+		t.Fatalf("resolved issue = %v, want %s (alerts must be excluded, project must restrict)", issue["id"], wantIssue.ID)
+	}
+	resolvedFrom, ok := m["resolved_from"].(map[string]any)
+	if !ok || resolvedFrom["project"] != "polyglot" || resolvedFrom["kind"] != "exception" {
+		t.Fatalf("resolved_from = %v", m["resolved_from"])
+	}
+	// The DEFAULT response is the bounded monitor.issue_context.v1 brief --
+	// no legacy occurrences (AC-6's size budget applies to what a caller
+	// gets without asking for more).
+	if m["schema"] != "monitor.issue_context.v1" || m["budget"] != "brief" {
+		t.Fatalf("schema/budget = %v/%v, want the brief issue_context.v1", m["schema"], m["budget"])
+	}
+	if _, ok := m["occurrences"]; ok {
+		t.Fatalf("legacy occurrences field present by default: %v, want it opt-in via occurrence_limit", m)
+	}
+
+	// occurrence_limit > 0 opts into the legacy {issue, occurrences,
+	// occurrences_truncated} shape, in the SAME response.
+	resLegacy, err := cs.CallTool(ctx, &sdkmcp.CallToolParams{
+		Name:      "monitor_issue",
+		Arguments: map[string]any{"id": "latest", "project": "polyglot", "occurrence_limit": 5},
+	})
+	if err != nil {
+		t.Fatalf("CallTool (occurrence_limit): %v", err)
+	}
+	mLegacy, ok := resLegacy.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("StructuredContent type = %T", resLegacy.StructuredContent)
+	}
+	if _, ok := mLegacy["occurrences"]; !ok {
+		t.Fatalf("legacy occurrences field missing when occurrence_limit was set: %v", mLegacy)
+	}
+	legacyIssue, ok := mLegacy["issue"].(map[string]any)
+	if !ok || legacyIssue["id"] != wantIssue.ID {
+		t.Fatalf("legacy issue = %v, want the full issue for %s", mLegacy["issue"], wantIssue.ID)
+	}
+
+	// The same query without a project filter would resolve the alert
+	// (kind:any) or the other-project exception under looser filters --
+	// confirming this test actually distinguishes "ignores alerts" and
+	// "respects project" rather than having only one issue to find.
+	resAny, err := cs.CallTool(ctx, &sdkmcp.CallToolParams{
+		Name:      "monitor_issue",
+		Arguments: map[string]any{"id": "latest", "project": "polyglot", "kind": "any"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool (kind=any): %v", err)
+	}
+	mAny := resAny.StructuredContent.(map[string]any)
+	issueAny := mAny["issue"].(map[string]any)
+	if issueAny["id"] == wantIssue.ID {
+		t.Fatalf("kind=any resolved %v, want the more recent alert to win once alerts are no longer excluded (precondition check)", issueAny["id"])
+	}
+}
+
+// TestIssueContextForMCPScrubsLegacyFreeText covers the review's exact
+// repro: a raw secret embedded in the exception message must never reach
+// the wire, even in the legacy issue/occurrences fields (which explain.
+// Build's own Options.Redact pass never touches, since they are not part of
+// its Context) -- see scrubIssueForResponse. The fake token is built by
+// concatenation (never a single literal) so it cannot trip GitHub push
+// protection on this test file itself.
+func TestIssueContextForMCPScrubsLegacyFreeText(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	fakeToken := "ghp_" + strings.Repeat("a", 36)
+	res, err := issues.RecordException(context.Background(), storePath, issues.DefaultWriterWait,
+		stacktrace.Exception{Runtime: "go", Type: "panic", Value: "auth failed with token " + fakeToken, Level: "fatal"},
+		project.Identity{Slug: "polyglot"}, contextids.IDs{},
+		issues.RecordExceptionOptions{ObservedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	t.Setenv(issues.StorePathEnv, storePath)
+	result, err := issueContextForMCP(context.Background(), res.Issue.ID, monitormcp.IssueContextFilter{}, 5)
+	if err != nil {
+		t.Fatalf("issueContextForMCP: %v", err)
+	}
+	if !result.IncludeLegacy {
+		t.Fatal("IncludeLegacy = false, want true (occurrence_limit was set)")
+	}
+	if strings.Contains(result.Issue.Title, fakeToken) || strings.Contains(result.Issue.Message, fakeToken) {
+		t.Fatalf("legacy issue leaked the raw token: title=%q message=%q", result.Issue.Title, result.Issue.Message)
+	}
+	if result.Issue.LatestException != nil && strings.Contains(result.Issue.LatestException.Value, fakeToken) {
+		t.Fatalf("legacy issue.latest_exception.value leaked the raw token: %q", result.Issue.LatestException.Value)
+	}
+	for _, occ := range result.Occurrences {
+		if strings.Contains(occ.Title, fakeToken) || strings.Contains(occ.Message, fakeToken) {
+			t.Fatalf("legacy occurrence leaked the raw token: title=%q message=%q", occ.Title, occ.Message)
+		}
+	}
+	if !strings.Contains(result.Issue.Title, "[token]") && !strings.Contains(result.Issue.Message, "[token]") {
+		t.Errorf("issue = %+v, want the redaction marker somewhere in title/message", result.Issue)
+	}
+}
+
+// seedMCPException records one exception issue via issues.RecordException
+// (the same call `monitor run --`/`stacktrace parse --record` will make
+// once E2.4/E2.1 land) for the wire test above.
+func seedMCPException(t *testing.T, storePath, projectSlug, service string, observedAt time.Time) issues.Issue {
+	t.Helper()
+	res, err := issues.RecordException(context.Background(), storePath, issues.DefaultWriterWait,
+		stacktrace.Exception{Runtime: "go", Type: "panic", Value: projectSlug + "/" + service, Level: "fatal"},
+		project.Identity{Slug: projectSlug, Service: service}, contextids.IDs{},
+		issues.RecordExceptionOptions{ObservedAt: observedAt})
+	if err != nil {
+		t.Fatalf("seedMCPException: %v", err)
+	}
+	return res.Issue
+}
+
+// seedMCPAlert writes a plain watch-style alert issue (kind
+// "monitor.alert.<rule>") -- alerts are never produced by RecordException.
+func seedMCPAlert(t *testing.T, storePath, projectSlug string, observedAt time.Time) issues.Issue {
+	t.Helper()
+	var result issues.UpsertResult
+	err := issues.WithWriter(context.Background(), storePath, issues.DefaultWriterWait, func(store *issues.Store) error {
+		var upsertErr error
+		result, upsertErr = store.UpsertOccurrenceResult(issues.OccurrenceInput{
+			ObservedAt: observedAt, Project: projectSlug, Kind: "monitor.alert.cpu_spike",
+			Title: "cpu_spike", Message: "cpu spike", Severity: "warning",
+		})
+		return upsertErr
+	})
+	if err != nil {
+		t.Fatalf("seedMCPAlert: %v", err)
+	}
+	return result.Issue
 }

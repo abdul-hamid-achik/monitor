@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,11 +13,13 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/config"
 	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
+	"github.com/abdul-hamid-achik/monitor/internal/explain"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
 	"github.com/abdul-hamid-achik/monitor/internal/mcp"
 	"github.com/abdul-hamid-achik/monitor/internal/procbind"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
+	"github.com/abdul-hamid-achik/monitor/internal/scrub"
 )
 
 func newMCPCmd() *cobra.Command {
@@ -75,8 +78,8 @@ func newMCPServeCmd() *cobra.Command {
 				Analyze: func(ctx context.Context, windowSeconds int, pid int32) (mcp.AnalyzeResult, error) {
 					return analyzeWindow(ctx, collect, time.Duration(windowSeconds)*time.Second, time.Second, pid)
 				},
-				IssuesList: listIssuesForMCP,
-				IssueGet:   getIssueForMCP,
+				IssuesList:   listIssuesForMCP,
+				IssueContext: issueContextForMCP,
 				// Mutating tools: thin wrappers over the CLI's existing logic.
 				Kill: kill.KillVerified,
 				// Profile is runtime-aware (E1.7): Node/Deno with --inspect
@@ -202,26 +205,145 @@ func listIssuesForMCP(_ context.Context, filter mcp.IssuesListFilter) (items []i
 	})
 }
 
-func getIssueForMCP(_ context.Context, id string, occurrenceLimit int) (issue issues.Issue, occurrences []issues.Occurrence, err error) {
+// issueContextForMCP is mcp.Service.IssueContext's implementation (E2.7):
+// the single place, alongside internal/cli/issues.go's `monitor issue`
+// command, that resolves "latest"+filter (via explain.ResolveLatest) or a
+// concrete id/prefix (via issues.Store.ResolveID) and builds
+// monitor.issue_context.v1 (explain.Build, budget "brief" -- see
+// docs/contracts/issue-context-v1.md: MCP defaults to brief so a "what's
+// the latest crash" question stays a small, cheap call).
+//
+// The legacy {issue, occurrences, occurrences_truncated} fields (the
+// pre-E2.7 shape) are only fetched and returned when the caller explicitly
+// asks for occurrences (occurrenceLimit > 0): AC-6's size budget applies to
+// the DEFAULT response, and the full issues.Issue plus N raw occurrences
+// have no size bound of their own (a long exception message alone, or a
+// large occurrence count, blew the response well past 4KB/16KB even after
+// explain.Build's own budget was fixed). This also builds the not_found/
+// recovery shape server.go's handleIssue merely copies, per the "zero logic
+// in MCP handlers" rule -- handleIssue used to re-derive the "latest"
+// default kind itself to word the recovery hint.
+func issueContextForMCP(ctx context.Context, id string, filter mcp.IssueContextFilter, occurrenceLimit int) (result *mcp.IssueContextResult, err error) {
 	path, err := issues.ResolvePath("")
 	if err != nil {
-		return issue, nil, err
+		return nil, err
 	}
 	store, err := issues.OpenReadOnly(path)
 	if err != nil {
-		return issue, nil, err
+		return nil, err
 	}
 	defer func() {
 		if closeErr := store.Close(); err == nil && closeErr != nil {
 			err = closeErr
 		}
 	}()
-	issue, err = store.Get(id)
-	if err != nil {
-		return issue, nil, err
+
+	var resolvedID string
+	var resolvedFrom *explain.ResolvedFrom
+	if strings.EqualFold(strings.TrimSpace(id), "latest") {
+		latest, resolved, ok, latestErr := explain.ResolveLatest(store, explain.LatestFilter{
+			Project: filter.Project, Service: filter.Service, Kind: filter.Kind,
+		})
+		if latestErr != nil {
+			return nil, latestErr
+		}
+		if !ok {
+			// No match under this filter -- an ordinary outcome (E2.7),
+			// not a failure: a structured not_found result, never an
+			// error envelope.
+			return &mcp.IssueContextResult{NotFound: true, Recovery: recoveryHintForLatestNoMatch(resolved)}, nil
+		}
+		resolvedID = latest.ID
+		resolvedFrom = &resolved
+	} else {
+		resolvedID, err = store.ResolveID(id)
+		if err != nil {
+			return nil, err
+		}
 	}
-	occurrences, err = store.Occurrences(id, occurrenceLimit)
-	return issue, occurrences, err
+
+	built, buildErr := explain.Build(ctx, store, resolvedID, explain.Options{
+		Budget: explain.BudgetBrief, Redact: true, ResolvedFrom: resolvedFrom,
+	})
+	if buildErr != nil {
+		// explain.Build failing (e.g. a store.Get race after the lookups
+		// above) degrades to the legacy fields alone rather than failing
+		// monitor_issue outright -- Build's OWN dependency failures
+		// (codemap/git/vecgrep) are never why this branch runs; those are
+		// already absorbed into Context.Degraded by Build itself.
+		built = nil
+	}
+
+	result = &mcp.IssueContextResult{Context: built}
+	if occurrenceLimit <= 0 {
+		// The bounded default: the brief Context above already answers
+		// "why did it fail", including its own small issue summary
+		// (short_id, status, ...) -- see explainContextFields. No store
+		// re-read, no unbounded raw text.
+		return result, nil
+	}
+
+	issue, err := store.Get(resolvedID)
+	if err != nil {
+		return nil, err
+	}
+	occurrences, err := store.Occurrences(resolvedID, occurrenceLimit)
+	if err != nil {
+		return nil, err
+	}
+	// Defense-in-depth scrub, same principle as explain.Options.Redact
+	// (E2.2 already scrubbed this text before it was ever persisted; this
+	// catches anything that could not have been -- and is the ONLY pass
+	// over the legacy issue/occurrences fields, which explain.Build's own
+	// Redact never touches since they are not part of its Context).
+	scrubbedIssue, scrubbedOccurrences, scrubbedCount := scrubIssueForResponse(issue, occurrences)
+	if built != nil {
+		built.Privacy.Scrubbed += scrubbedCount
+	}
+	result.Issue = scrubbedIssue
+	result.Occurrences = scrubbedOccurrences
+	result.OccurrencesTruncated = issue.OccurrenceCount > int64(len(occurrences))
+	result.IncludeLegacy = true
+	return result, nil
+}
+
+// recoveryHintForLatestNoMatch explains, in plain English, why "latest"
+// (optionally filtered) matched nothing and what to try next -- built here,
+// not in server.go's handler (the "zero logic in MCP handlers" rule), using
+// resolved's ALREADY-effective-defaulted Kind (explain.ResolveLatest fills
+// it in, so this never has to re-derive the "exception" default itself).
+func recoveryHintForLatestNoMatch(resolved explain.ResolvedFrom) string {
+	return fmt.Sprintf("no issue matches \"latest\" (project=%q service=%q kind=%q); call monitor_issues to see what is open, or widen kind to \"any\"",
+		resolved.Project, resolved.Service, resolved.Kind)
+}
+
+// scrubIssueForResponse runs a defense-in-depth scrub.Scrubber pass over
+// every free-text field the legacy issue/occurrences shape would otherwise
+// return verbatim (Title/Message/the exception Value, on both the issue and
+// each occurrence) -- mirrors internal/explain's own redactContext, which
+// only ever covers Context's fields, never these legacy ones. Returns
+// copies; the store's own records are never mutated.
+func scrubIssueForResponse(issue issues.Issue, occurrences []issues.Occurrence) (issues.Issue, []issues.Occurrence, int) {
+	s := scrub.New()
+	issue.Title = s.String(issue.Title)
+	issue.Message = s.String(issue.Message)
+	if issue.LatestException != nil {
+		ex := *issue.LatestException
+		ex.Value = s.String(ex.Value)
+		issue.LatestException = &ex
+	}
+	scrubbedOccurrences := make([]issues.Occurrence, len(occurrences))
+	for i, occ := range occurrences {
+		occ.Title = s.String(occ.Title)
+		occ.Message = s.String(occ.Message)
+		if occ.Exception != nil {
+			ex := *occ.Exception
+			ex.Value = s.String(ex.Value)
+			occ.Exception = &ex
+		}
+		scrubbedOccurrences[i] = occ
+	}
+	return issue, scrubbedOccurrences, s.Count()
 }
 
 // analyzeWindow drives collect once per sampleInterval for the duration of

@@ -666,6 +666,92 @@ func (s *Store) setStatus(id string, status Status) (Issue, error) {
 	return issue, nil
 }
 
+// AmbiguousIDError is returned by ResolveID when a short id/prefix matches
+// more than one issue. Matches lists every matching full ID, sorted.
+type AmbiguousIDError struct {
+	Prefix  string
+	Matches []string
+}
+
+func (e *AmbiguousIDError) Error() string {
+	return fmt.Sprintf("issue id %q is ambiguous: matches %s", e.Prefix, strings.Join(e.Matches, ", "))
+}
+
+// ResolveID resolves id to a single stored issue's full ID (e.g.
+// "ISS-A07E1234567890AB"), for `monitor issue <id|short-prefix|latest>` and
+// monitor_issue's id field (E2.5): "latest" itself is NOT handled here --
+// see ResolveLatest in internal/explain, since picking "the latest issue"
+// needs project/service/kind filters this method has no knowledge of.
+//
+// id may be:
+//   - the full ID, case-insensitively (an exact match always wins outright,
+//     even if id also happens to prefix-match some other, unrelated issue);
+//   - a prefix of the ID's hex portion (with or without the "ISS-" literal),
+//     e.g. "a07e", "A07E", or "iss-a07e" all resolve the issue whose short_id
+//     (see docs/contracts/issue-context-v1.md) is "A07E" -- unless more than
+//     one issue's ID shares that prefix, in which case ResolveID returns
+//     *AmbiguousIDError with every match, and the caller (the CLI exits 2;
+//     MCP reports a structured error) decides how to surface that.
+//
+// Every issue ID is exactly "ISS-" followed by uppercase hex ([0-9A-F]) --
+// see newIssue's idSuffix -- so uppercasing id for comparison is always
+// safe and never folds two DIFFERENT issues' ids together.
+func (s *Store) ResolveID(id string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requireOpen(); err != nil {
+		return "", err
+	}
+	raw := strings.ToUpper(strings.TrimSpace(id))
+	prefix := strings.TrimPrefix(raw, "ISS-")
+	if prefix == "" {
+		return "", errors.New("resolve issue id: id is required")
+	}
+	if !s.db.HasCollection(issuesCollection) {
+		return "", fmt.Errorf("%w: %s", ErrIssueNotFound, id)
+	}
+
+	// Fast path: an exact full-ID match, the common case of pasting an ID a
+	// previous `monitor issues` / `monitor issue` output printed.
+	if strings.HasPrefix(raw, "ISS-") {
+		record, err := s.db.Collection(issuesCollection).FindOne(veclite.Equal("id", raw))
+		if err == nil {
+			issue, err := decodeIssue(record)
+			if err != nil {
+				return "", err
+			}
+			return issue.ID, nil
+		}
+		if !errors.Is(err, veclite.ErrNotFound) {
+			return "", fmt.Errorf("resolve issue id: %w", err)
+		}
+	}
+
+	records, err := s.db.Collection(issuesCollection).Find()
+	if err != nil {
+		return "", fmt.Errorf("resolve issue id: %w", err)
+	}
+	var matches []string
+	for _, record := range records {
+		issue, err := decodeIssue(record)
+		if err != nil {
+			return "", err
+		}
+		if strings.HasPrefix(strings.TrimPrefix(issue.ID, "ISS-"), prefix) {
+			matches = append(matches, issue.ID)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("%w: %s", ErrIssueNotFound, id)
+	case 1:
+		return matches[0], nil
+	default:
+		sort.Strings(matches)
+		return "", &AmbiguousIDError{Prefix: id, Matches: matches}
+	}
+}
+
 // Close releases the underlying veclite handle.
 func (s *Store) Close() error {
 	s.mu.Lock()

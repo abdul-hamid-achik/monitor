@@ -1,0 +1,211 @@
+version: 1
+name: monitor_mcp_issue_latest
+
+intent: |
+  E2.7 (local-sentry roadmap): the MCP `monitor_issue` tool accepts
+  id:"latest" narrowed by project/service/kind (kind defaults to
+  "exception"), so a bare "why did it fail?" question answers with the most
+  recently active EXCEPTION -- ignoring a more recent watch alert
+  (kind monitor.alert.<rule>) -- and respects an explicit project filter.
+  The response carries resolved_from plus the additive monitor.issue_context.v1
+  fields (schema/budget/culprit/impact/...) alongside the pre-E2.7
+  {issue, occurrences, occurrences_truncated} shape. When nothing matches,
+  the tool returns not_found:true with a recovery hint, never a protocol
+  error.
+
+target:
+  cmd:
+    - "/bin/sh"
+    - "-lc"
+    - |
+      set -e
+      d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+      export MONITOR_ISSUES_STORE="$d/issues.veclite"
+
+      # Oldest: the exception "latest" must resolve to.
+      go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+        --project polyglot --service workload --root "$(pwd)" \
+        --file examples/polyglot/js/workload.js --line 49 --function detonate \
+        --type Error --value "node workload intentional uncaught failure" \
+        --level fatal --handled=false --observed-ago-seconds 120 >/dev/null
+      # More recent, but a watch alert -- must be ignored by default (kind=exception).
+      go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario alert \
+        --project polyglot --kind cpu_spike --value "cpu spike" --observed-ago-seconds 60 >/dev/null
+      # More recent still, but a different project -- must be excluded by --project.
+      go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+        --project other-project --service svc --root "$(pwd)" \
+        --file examples/polyglot/python/workload.py --line 45 --function detonate \
+        --type RuntimeError --value "elsewhere" --level fatal --handled=false \
+        --observed-ago-seconds 10 >/dev/null
+      echo seeded
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 80
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v go"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: |
+        python3 - <<'PY'
+        import os
+        from pathlib import Path
+        Path(os.environ.get('TMPDIR', '/tmp'), 'monitor-mcp-issue-latest-parse.py').write_text(r'''
+        import json, sys
+        lines = [line for line in sys.stdin if line.strip().startswith('{')]
+        response = json.loads(lines[-1])
+        print(json.dumps(json.loads(response['result']['content'][0]['text'])))
+        ''')
+        PY
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exited: true
+      timeoutMs: 15000
+
+outcomes:
+  - id: clean_exit
+    description: seeding the exception/alert/other-project fixtures exits 0
+    verify:
+      process:
+        exitCode: 0
+
+  - id: latest_ignores_watch_alerts_and_respects_project
+    description: monitor_issue {id:"latest", project:"polyglot"} resolves the exception, not the more recent alert or the other project's issue
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          tmpdir="$TMPDIR"; [ -n "$tmpdir" ] || tmpdir=/tmp
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          want=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 49 --function detonate \
+            --type Error --value "node workload intentional uncaught failure" \
+            --level fatal --handled=false --observed-ago-seconds 120)
+          go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario alert \
+            --project polyglot --kind cpu_spike --value "cpu spike" --observed-ago-seconds 60 >/dev/null
+          go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project other-project --service svc --root "$(pwd)" \
+            --file examples/polyglot/python/workload.py --line 45 --function detonate \
+            --type RuntimeError --value "elsewhere" --level fatal --handled=false \
+            --observed-ago-seconds 10 >/dev/null
+
+          { printf '%s\n%s\n%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}' \
+              '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+              "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_issue\",\"arguments\":{\"id\":\"latest\",\"project\":\"polyglot\"}}}";
+            sleep 1;
+          } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 "$tmpdir/monitor-mcp-issue-latest-parse.py" > "$d/out.json"
+
+          python3 -c '
+          import json
+          with open("'"$d"'/out.json") as f:
+              p = json.load(f)
+          assert p["issue"]["id"] == "'"$want"'", p["issue"]
+          assert p["resolved_from"]["project"] == "polyglot", p["resolved_from"]
+          assert p["resolved_from"]["kind"] == "exception", p["resolved_from"]
+          assert p["schema"] == "monitor.issue_context.v1", p.get("schema")
+          assert p["budget"] == "brief", p.get("budget")
+          # The DEFAULT response is the bounded brief only -- no
+          # occurrence_limit was passed, so the legacy occurrences shape
+          # must be ABSENT (the AC-6 size budget), not an empty array.
+          assert "occurrences" not in p, p.keys()
+          '
+
+          { printf '%s\n%s\n%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}' \
+              '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+              "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_issue\",\"arguments\":{\"id\":\"latest\",\"project\":\"polyglot\",\"occurrence_limit\":5}}}";
+            sleep 1;
+          } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 "$tmpdir/monitor-mcp-issue-latest-parse.py" > "$d/out-legacy.json"
+
+          python3 -c '
+          import json
+          with open("'"$d"'/out-legacy.json") as f:
+              p = json.load(f)
+          # occurrence_limit > 0 opts into the legacy issue/occurrences shape.
+          assert p["issue"]["id"] == "'"$want"'", p["issue"]
+          assert "occurrences" in p, p.keys()
+          '
+
+  - id: latest_kind_any_would_pick_the_alert
+    description: sanity check that kind:any DOES pick the more recent alert -- proving the default-kind test above actually distinguishes something
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          tmpdir="$TMPDIR"; [ -n "$tmpdir" ] || tmpdir=/tmp
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 49 --function detonate \
+            --type Error --value "node workload intentional uncaught failure" \
+            --level fatal --handled=false --observed-ago-seconds 120 >/dev/null
+          alert=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario alert \
+            --project polyglot --kind cpu_spike --value "cpu spike" --observed-ago-seconds 60)
+
+          { printf '%s\n%s\n%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}' \
+              '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+              "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"monitor_issue\",\"arguments\":{\"id\":\"latest\",\"project\":\"polyglot\",\"kind\":\"any\"}}}";
+            sleep 1;
+          } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 "$tmpdir/monitor-mcp-issue-latest-parse.py" > "$d/out.json"
+
+          python3 -c '
+          import json
+          with open("'"$d"'/out.json") as f:
+              p = json.load(f)
+          assert p["issue"]["id"] == "'"$alert"'", p["issue"]
+          '
+
+  - id: no_match_is_recovery_hint_not_error
+    description: an empty store returns not_found:true with a recovery hint, never a protocol error or an "error" field
+    verify:
+      command:
+        run: |
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          tmpdir="$TMPDIR"; [ -n "$tmpdir" ] || tmpdir=/tmp
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          { printf '%s\n%s\n%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}' \
+              '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"monitor_issue","arguments":{"id":"latest","project":"nothing-here"}}}';
+            sleep 1;
+          } | ./bin/monitor mcp serve 2>&1 | tail -2 | python3 "$tmpdir/monitor-mcp-issue-latest-parse.py" | python3 -c '
+          import json, sys
+          p = json.load(sys.stdin)
+          assert p["not_found"] is True, p
+          assert p.get("recovery"), p
+          assert "error" not in p, p
+          '
+
+  - id: missing_confirm_refusal_unchanged
+    description: monitor_issue itself has no confirm field, and a mutating tool (monitor_kill) still refuses without confirm -- E2.7 touches only monitor_issue's resolution/response shape
+    verify:
+      command:
+        run: |
+          { printf '%s\n%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0.0.1"}}}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/list"}';
+            sleep 1;
+          } | ./bin/monitor mcp serve 2>&1 | python3 -c '
+          import json, sys
+          lines = [l for l in sys.stdin if l.strip().startswith("{") and "monitor_issues" in l]
+          p = json.loads(lines[-1])
+          tools = {t["name"]: t for t in p["result"]["tools"]}
+          schema = tools["monitor_issue"]["inputSchema"]
+          assert "confirm" not in schema.get("properties", {}) and "confirm" not in schema.get("required", []), schema
+          assert "confirm" in tools["monitor_kill"]["inputSchema"].get("required", []), tools["monitor_kill"]["inputSchema"]
+          '
