@@ -1,0 +1,6 @@
+error: Uncaught (in promise) Error: ENOENT: no such file or directory, open 'does-not-exist.json'
+  return fs.readFileSync('does-not-exist.json', 'utf8');
+            ^
+    at Object.readFileSync (ext:deno_node/fs.ts:423:15)
+    at readConfig (file:///repo/app/src/scenarios.mjs:24:13)
+    at file:///repo/app/src/scenarios.mjs:75:5

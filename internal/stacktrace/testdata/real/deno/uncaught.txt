@@ -1,0 +1,14 @@
+error: Uncaught (in promise) Error: outer failure
+    throw new Error('outer failure', { cause: err });
+          ^
+    at outer (file:///repo/app/src/scenarios.mjs:19:11)
+    at file:///repo/app/src/scenarios.mjs:48:5
+Caused by: Error: middle failure
+    at middle (file:///repo/app/src/scenarios.mjs:12:11)
+    at outer (file:///repo/app/src/scenarios.mjs:17:5)
+    at file:///repo/app/src/scenarios.mjs:48:5
+Caused by: Error: root failure
+    at root (file:///repo/app/src/scenarios.mjs:6:9)
+    at middle (file:///repo/app/src/scenarios.mjs:10:5)
+    at outer (file:///repo/app/src/scenarios.mjs:17:5)
+    at file:///repo/app/src/scenarios.mjs:48:5

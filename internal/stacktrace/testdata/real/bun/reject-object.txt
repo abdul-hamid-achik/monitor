@@ -1,0 +1,6 @@
+error
+{
+  code: 42,
+}
+
+Bun v1.4.2 (macOS arm64)

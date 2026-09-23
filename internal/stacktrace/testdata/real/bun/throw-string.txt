@@ -1,0 +1,4 @@
+error: plain string failure
+plain string failure
+
+Bun v1.4.2 (macOS arm64)

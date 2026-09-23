@@ -1,0 +1,35 @@
+12 | }
+13 | function outer() {
+14 |   try {
+15 |     middle();
+16 |   } catch (err) {
+17 |     throw new Error('outer failure', { cause: err });
+                   ^
+error: outer failure
+      at outer (/repo/app/src/cjs.js:17:15)
+      at <anonymous> (/repo/app/src/cjs.js:22:5)
+
+ 5 | }
+ 6 | function middle() {
+ 7 |   try {
+ 8 |     root();
+ 9 |   } catch (err) {
+10 |     throw new Error('middle failure', { cause: err });
+                   ^
+error: middle failure
+      at middle (/repo/app/src/cjs.js:10:15)
+      at outer (/repo/app/src/cjs.js:15:5)
+      at <anonymous> (/repo/app/src/cjs.js:22:5)
+
+1 | 'use strict';
+2 | // CommonJS scenarios (node only). Usage: node cjs.js <name>
+3 | function root() {
+4 |   throw new Error('root failure');
+                ^
+error: root failure
+      at root (/repo/app/src/cjs.js:4:13)
+      at middle (/repo/app/src/cjs.js:8:5)
+      at outer (/repo/app/src/cjs.js:15:5)
+      at <anonymous> (/repo/app/src/cjs.js:22:5)
+
+Bun v1.4.2 (macOS arm64)

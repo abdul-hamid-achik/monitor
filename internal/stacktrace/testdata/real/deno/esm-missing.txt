@@ -1,0 +1,3 @@
+error: Import "no-such-pkg-xyz" not a dependency
+  hint: If you want to use the npm package, try running `deno add npm:no-such-pkg-xyz`
+    at file:///repo/app/src/missing.mjs:1:8

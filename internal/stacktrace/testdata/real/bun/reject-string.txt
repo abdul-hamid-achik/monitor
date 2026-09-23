@@ -1,0 +1,4 @@
+error: boom
+boom
+
+Bun v1.4.2 (macOS arm64)

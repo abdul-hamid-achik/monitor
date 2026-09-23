@@ -1,0 +1,9 @@
+  + Exception Group Traceback (most recent call last):
+  |   File "/repo/app/scenarios.py", line 90, in <module>
+  |     raise ExceptionGroup("batch failed", [ValueError("item 1"), TypeError("item 2")])
+  | ExceptionGroup: batch failed (2 sub-exceptions)
+  +-+---------------- 1 ----------------
+    | ValueError: item 1
+    +---------------- 2 ----------------
+    | TypeError: item 2
+    +------------------------------------

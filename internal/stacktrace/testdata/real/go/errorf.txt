@@ -1,0 +1,5 @@
+panic: bad input 7
+
+goroutine 1 [running]:
+main.main()
+	/repo/app/main.go:74 +0x1280

@@ -1,0 +1,11 @@
+2026-09-22 22:35:39,909 ERROR app: request failed
+Traceback (most recent call last):
+  File "/repo/app/scenarios.py", line 59, in handler
+    parse("x2")
+    ~~~~~^^^^^^
+  File "/repo/app/scenarios.py", line 8, in parse
+    return int(raw)
+ValueError: invalid literal for int() with base 10: 'x2'
+2026-09-22 22:35:39,909 ERROR app: plain error without traceback
+2026-09-22 22:35:39,909 WARNING app: disk almost full
+still running

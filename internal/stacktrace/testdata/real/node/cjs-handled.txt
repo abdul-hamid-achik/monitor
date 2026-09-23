@@ -1,0 +1,24 @@
+Error: outer failure
+    at outer (/repo/app/src/cjs.js:17:11)
+    at Object.<anonymous> (/repo/app/src/cjs.js:29:7)
+    ... 6 lines matching cause stack trace ...
+    at node:internal/main/run_main_module:33:47 {
+  [cause]: Error: middle failure
+      at middle (/repo/app/src/cjs.js:10:11)
+      at outer (/repo/app/src/cjs.js:15:5)
+      ... 6 lines matching cause stack trace ...
+      at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)
+      at node:internal/main/run_main_module:33:47 {
+    [cause]: Error: root failure
+        at root (/repo/app/src/cjs.js:4:9)
+        at middle (/repo/app/src/cjs.js:8:5)
+        at outer (/repo/app/src/cjs.js:15:5)
+        at Object.<anonymous> (/repo/app/src/cjs.js:29:7)
+        at Module._compile (node:internal/modules/cjs/loader:1934:14)
+        at Object..js (node:internal/modules/cjs/loader:2074:10)
+        at Module.load (node:internal/modules/cjs/loader:1656:32)
+        at Module._load (node:internal/modules/cjs/loader:1448:12)
+        at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)
+        at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)
+  }
+}

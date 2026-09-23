@@ -1,0 +1,6 @@
+error: Uncaught (in promise) TypeError: user payload is not an object
+  throw new TypeError('user payload is not an object');
+        ^
+    at fetchUser (file:///repo/app/src/scenarios.mjs:29:9)
+    at async Promise.all (index 0)
+    at async file:///repo/app/src/scenarios.mjs:81:5

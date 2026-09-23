@@ -1,0 +1,5 @@
+error: Uncaught (in promise) Error: first line of message
+second line of message
+    throw new Error('first line of message\nsecond line of message');
+          ^
+    at file:///repo/app/src/scenarios.mjs:95:11

@@ -1,0 +1,35 @@
+Traceback (most recent call last):
+  File "/repo/app/scenarios.py", line 13, in lookup
+    return table[key]
+           ~~~~~^^^^^
+KeyError: 7
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/repo/app/scenarios.py", line 20, in resolve
+    lookup({}, parse("7"))
+    ~~~~~~^^^^^^^^^^^^^^^^
+  File "/repo/app/scenarios.py", line 15, in lookup
+    raise LookupError(f"missing key {key!r}") from err
+LookupError: missing key 7
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/repo/app/scenarios.py", line 27, in chain3
+    resolve()
+    ~~~~~~~^^
+  File "/repo/app/scenarios.py", line 22, in resolve
+    raise RuntimeError("resolve failed")
+RuntimeError: resolve failed
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/repo/app/scenarios.py", line 68, in <module>
+    chain3()
+    ~~~~~~^^
+  File "/repo/app/scenarios.py", line 29, in chain3
+    raise SystemError("service unavailable") from err
+SystemError: service unavailable

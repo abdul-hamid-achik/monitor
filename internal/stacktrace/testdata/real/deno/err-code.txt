@@ -1,0 +1,6 @@
+error: Uncaught (in promise) TypeError: The "path" argument must be of type string or an instance of Buffer or URL. Received undefined
+    fs.readFileSync(undefined);
+       ^
+    at getValidatedPathToString (ext:deno_node/internal/fs/utils.mjs:917:16)
+    at Object.readFileSync (ext:deno_node/fs.ts:418:14)
+    at file:///repo/app/src/scenarios.mjs:42:8

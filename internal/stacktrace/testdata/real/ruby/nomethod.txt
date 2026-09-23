@@ -1,0 +1,6 @@
+scenarios.rb:5:in 'Foo#bar': undefined method 'baz' for nil (NoMethodError)
+
+    x.baz
+     ^^^^
+	from scenarios.rb:10:in 'Object#run_nomethod'
+	from scenarios.rb:35:in '<main>'

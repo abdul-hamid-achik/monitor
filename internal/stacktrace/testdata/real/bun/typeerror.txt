@@ -1,0 +1,12 @@
+29 |   throw new TypeError('user payload is not an object');
+30 | }
+31 | 
+32 | class Server {
+33 |   handle(req) {
+34 |     return req.body.length;
+                    ^
+TypeError: undefined is not an object (evaluating 'req.body.length')
+      at handle (/repo/app/src/scenarios.mjs:34:16)
+      at /repo/app/src/scenarios.mjs:84:18
+
+Bun v1.4.2 (macOS arm64)
