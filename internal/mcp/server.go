@@ -8,6 +8,10 @@
 //	monitor_processes       top processes
 //	monitor_doctor          ecosystem health
 //	monitor_analyze         sample a short window, run diagnosis rules, return findings
+//	monitor_issues          list recurring local issues (crashes/exceptions/alerts)
+//	monitor_issue           "why did it fail?" in one call: id, an unambiguous
+//	                        short_id/prefix, or "latest" (filtered by project/
+//	                        service/kind) -> monitor.issue_context.v1
 //
 // Mutating tools (require explicit `confirm: true` in the typed input):
 //
@@ -39,6 +43,7 @@ import (
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
+	"github.com/abdul-hamid-achik/monitor/internal/explain"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
@@ -78,8 +83,8 @@ type Service struct {
 	// Used by monitor_analyze. Optional; if nil the tool reports unavailable.
 	Analyze func(ctx context.Context, windowSeconds int, pid int32) (AnalyzeResult, error)
 
-	// IssuesList and IssueGet expose the durable local issue index. Both are
-	// read-only and should open a fresh shared-read snapshot per call.
+	// IssuesList and IssueContext expose the durable local issue index. Both
+	// are read-only and should open a fresh shared-read snapshot per call.
 	//
 	// IssuesList takes the monitor_issues filters exactly as the MCP caller
 	// supplied them (Since/Until unparsed strings) rather than a pre-built
@@ -89,7 +94,23 @@ type Service struct {
 	// not handleIssues'. This keeps the MCP handler a pure field copy with
 	// zero business logic, matching every other tool's handler/Service split.
 	IssuesList func(ctx context.Context, filter IssuesListFilter) ([]issues.Issue, error)
-	IssueGet   func(ctx context.Context, id string, occurrenceLimit int) (issues.Issue, []issues.Occurrence, error)
+
+	// IssueContext is monitor_issue's implementation (E2.7): id resolves an
+	// exact issue ID, an unambiguous short_id/prefix (issues.Store.
+	// ResolveID), or the sentinel "latest" -- narrowed by filter.Project/
+	// Service/Kind (kind defaults to "exception", so a watch alert or an
+	// investigate run never silently wins "latest" over a real crash; see
+	// internal/explain.LatestFilter's doc comment). occurrenceLimit bounds
+	// the legacy Occurrences slice exactly like the pre-E2.7 IssueGet did.
+	//
+	// A (nil, nil) result means id/filter matched nothing -- an ordinary
+	// outcome ("no exception open right now" for "latest", the same
+	// scenario `monitor issue latest` also treats as a real but well-
+	// explained CLI error), not a failure: handleIssue turns it into a
+	// recovery hint instead of an error envelope. A non-nil error means id
+	// was a concrete id/prefix that itself failed to resolve (not found, or
+	// *issues.AmbiguousIDError).
+	IssueContext func(ctx context.Context, id string, filter IssueContextFilter, occurrenceLimit int) (*IssueContextResult, error)
 
 	// Kill terminates the given PID and returns the verified Result (outcome
 	// terminated|still_running|unknown). force=true sends SIGKILL, otherwise
@@ -146,6 +167,34 @@ type IssuesListFilter struct {
 	Kind     string
 }
 
+// IssueContextFilter narrows Service.IssueContext's "latest" resolution
+// (E2.7). It is ignored when id is a concrete id/prefix rather than
+// "latest".
+type IssueContextFilter struct {
+	Project string
+	Service string
+	// Kind is exception (default) | alert | investigation | any -- see
+	// internal/explain.LatestFilter.Kind's doc comment.
+	Kind string
+}
+
+// IssueContextResult is Service.IssueContext's return: the legacy Issue/
+// Occurrences pair (unchanged from the pre-E2.7 IssueGet, so an existing
+// monitor_issue consumer reading .issue/.occurrences/.occurrences_truncated
+// keeps working) plus, additively, the full monitor.issue_context.v1 at
+// budget "brief".
+type IssueContextResult struct {
+	Issue                issues.Issue
+	Occurrences          []issues.Occurrence
+	OccurrencesTruncated bool
+	// Context is nil only when explain.Build itself failed in some way
+	// Build's own honest-degradation Degraded[] couldn't already absorb
+	// (e.g. the issue vanished between resolving id and building -- see
+	// internal/cli/mcp.go's issueContextForMCP); the legacy fields above
+	// are still populated whenever Issue was found, independent of this.
+	Context *explain.Context
+}
+
 // InvestigateOptions is the optional input for Service.Investigate beyond pid.
 type InvestigateOptions struct {
 	TTL          string
@@ -186,15 +235,17 @@ func NewServer(svc *Service, version string) *Server {
 	opts := &mcp.ServerOptions{
 		Instructions: "monitor is an agent-harnessable local observability tool. " +
 			"Call monitor_snapshot first to orient, then drill down with monitor_processes " +
-			"or monitor_doctor. Use monitor_issues to triage recurring local failures and " +
-			"monitor_issue to inspect occurrences and evidence. When the user reports slowness, a suspected leak, or a " +
-			"runaway process, call monitor_analyze (read-only, no confirm; it blocks for " +
-			"window_seconds while sampling). All tools return JSON. Mutating tools (monitor_kill, " +
-			"monitor_profile_capture, monitor_investigate, monitor_record) require the " +
-			"typed 'confirm: true' field in their input before they will run. " +
-			"confirm:true is necessary but not sufficient for monitor_kill: it still " +
-			"refuses protected or system-owned processes and returns " +
-			"{killed:false, refused:true, reason}.",
+			"or monitor_doctor. When the user says crash, exception, traceback, panic, error, " +
+			"\"which line\", \"why did it fail\", or asks about a stack trace, call monitor_issue " +
+			"{id:\"latest\"} (optionally with project/service/kind) FIRST -- it answers with the " +
+			"culprit file:line, causes, impact, and last-touched commit in one call; use " +
+			"monitor_issues only to list/triage several issues or find a specific id first. When the " +
+			"user reports slowness, a suspected leak, or a runaway process, call monitor_analyze " +
+			"(read-only, no confirm; it blocks for window_seconds while sampling). All tools return " +
+			"JSON. Mutating tools (monitor_kill, monitor_profile_capture, monitor_investigate, " +
+			"monitor_record) require the typed 'confirm: true' field in their input before they will " +
+			"run. confirm:true is necessary but not sufficient for monitor_kill: it still refuses " +
+			"protected or system-owned processes and returns {killed:false, refused:true, reason}.",
 	}
 	s.srv = mcp.NewServer(impl, opts)
 	s.register()
@@ -260,16 +311,29 @@ func (s *Server) register() {
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_issues",
 		Annotations: readOnlyAnnotations("List local issues"),
-		Description: "List recurring local issues, newest first. Read-only; no confirm field. " +
-			"Filter by statuses (open|resolved|ignored), project, service, since/until (RFC3339 or a duration " +
-			"like 10m/24h meaning that long ago), run_id, release, or kind (exception|alert|investigation|any); " +
-			"limit defaults to 50 and is capped at 200.",
+		Description: "List recurring local issues (crashes, exceptions, tracebacks, panics, watch alerts), " +
+			"newest first. Read-only; no confirm field. Filter by statuses (open|resolved|ignored), project, " +
+			"service, since/until (RFC3339 or a duration like 10m/24h meaning that long ago), run_id, release, " +
+			"or kind (exception|alert|investigation|any); limit defaults to 50 and is capped at 200. Each row's " +
+			"culprit (when known) names the file:line that actually broke. For \"why did it fail\" on ONE " +
+			"specific or the most recent failure, prefer monitor_issue over listing and picking a row by hand.",
 	}, s.handleIssues)
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_issue",
-		Annotations: readOnlyAnnotations("Inspect local issue"),
-		Description: "Get one local issue and its recent occurrence/evidence history. Read-only; no confirm field. " +
-			"occurrence_limit defaults to 20 and is capped at 200.",
+		Annotations: readOnlyAnnotations("Why did it fail?"),
+		Description: "Answer \"why did it fail / crash / throw / panic\", \"what line broke\", or \"which " +
+			"commit touched that\" in ONE call. id is an issue ID, an unambiguous short_id/prefix (as shown by " +
+			"monitor_issues), or the literal \"latest\" for the most recently active issue -- optionally narrowed " +
+			"by project/service/kind (kind defaults to \"exception\", so a watch alert like a cpu_spike, or an " +
+			"investigate run, never silently wins \"latest\" over a real crash; pass kind:\"any\" to widen it). " +
+			"When id/filter matches nothing, the response is not_found:true with a recovery hint (a normal, " +
+			"expected outcome for a healthy project between crashes), never an error. Read-only; no confirm " +
+			"field. Returns the legacy {issue, occurrences, occurrences_truncated} (occurrence_limit defaults to " +
+			"20, capped at 200) PLUS, additively, monitor.issue_context.v1's culprit (file:line, function, a " +
+			"snippet), causes (the exception chain), frames, impact (codemap blast radius/tests), last_touched " +
+			"(git blame -- \"last touched\", never a verdict of blame), degraded (which of the above were " +
+			"unavailable and why), and next (proposed follow-up commands) -- everything needed to explain a " +
+			"failure without a second call.",
 	}, s.handleIssue)
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_kill",
@@ -372,7 +436,12 @@ type issuesInput struct {
 }
 
 type issueInput struct {
-	ID              string `json:"id"                         jsonschema:"issue ID, for example ISS-..."`
+	ID string `json:"id" jsonschema:"issue ID, an unambiguous short_id/prefix, or \"latest\" for the most recently active issue"`
+	// Project/Service/Kind (E2.7) narrow "latest"; they are ignored when ID
+	// is a concrete id/prefix.
+	Project         string `json:"project,omitempty"         jsonschema:"restrict \"latest\" to this project (case-insensitive)"`
+	Service         string `json:"service,omitempty"         jsonschema:"restrict \"latest\" to this service (case-insensitive)"`
+	Kind            string `json:"kind,omitempty"            jsonschema:"restrict \"latest\" to this kind: exception (default), alert, investigation, or any"`
 	OccurrenceLimit int    `json:"occurrence_limit,omitempty" jsonschema:"recent occurrences to return (default 20, max 200)"`
 }
 
@@ -635,7 +704,7 @@ func (s *Server) handleIssue(ctx context.Context, _ *mcp.CallToolRequest, in *is
 	if in == nil || strings.TrimSpace(in.ID) == "" {
 		return result(map[string]any{"id": "", "not_found": false, "occurrences": []issues.Occurrence{}, "error": "issue id is required"})
 	}
-	if s.svc.IssueGet == nil {
+	if s.svc.IssueContext == nil {
 		return result(map[string]any{"id": in.ID, "not_found": false, "occurrences": []issues.Occurrence{}, "error": "issue service not configured"})
 	}
 	limit := in.OccurrenceLimit
@@ -645,20 +714,82 @@ func (s *Server) handleIssue(ctx context.Context, _ *mcp.CallToolRequest, in *is
 	if limit > maxIssuesLimit {
 		limit = maxIssuesLimit
 	}
-	issue, occurrences, err := s.svc.IssueGet(ctx, in.ID, limit)
+	filter := IssueContextFilter{Project: in.Project, Service: in.Service, Kind: in.Kind}
+	res, err := s.svc.IssueContext(ctx, in.ID, filter, limit)
 	if err != nil {
 		return result(map[string]any{
 			"id": in.ID, "not_found": errors.Is(err, issues.ErrIssueNotFound),
 			"occurrences": []issues.Occurrence{}, "error": err.Error(),
 		})
 	}
+	if res == nil {
+		// id/filter (most commonly "latest") matched nothing -- an
+		// ordinary outcome, not a failure (E2.7): give the agent a
+		// recovery hint instead of an error envelope.
+		return result(map[string]any{
+			"id": in.ID, "not_found": true, "occurrences": []issues.Occurrence{},
+			"recovery": recoveryHintForNoMatch(in.ID, filter),
+		})
+	}
+	occurrences := res.Occurrences
 	if occurrences == nil {
 		occurrences = []issues.Occurrence{}
 	}
-	return result(map[string]any{
-		"issue": issue, "occurrences": occurrences,
-		"occurrences_truncated": issue.OccurrenceCount > int64(len(occurrences)),
-	})
+	out := map[string]any{
+		"issue": res.Issue, "occurrences": occurrences,
+		"occurrences_truncated": res.OccurrencesTruncated,
+	}
+	// Additive (E2.7): the full monitor.issue_context.v1 (brief budget)
+	// alongside the legacy issue/occurrences fields above, so an existing
+	// consumer reading .issue/.occurrences is unaffected while a "why did
+	// it fail" caller gets culprit/causes/impact/last_touched/next in the
+	// SAME response instead of needing a second call. res.Context's own
+	// "issue" field (a smaller display summary) is deliberately NOT spread
+	// here -- it would silently shadow the legacy, richer "issue" key
+	// above; explainContextFields keeps every OTHER section.
+	if res.Context != nil {
+		for k, v := range explainContextFields(res.Context) {
+			out[k] = v
+		}
+	}
+	return result(out)
+}
+
+// recoveryHintForNoMatch explains, in plain English, why nothing matched
+// and what to try next -- monitor_issue's "latest matched nothing" case
+// (E2.7) is expected to happen routinely (a healthy project between
+// crashes) and must never read like a broken tool.
+func recoveryHintForNoMatch(id string, filter IssueContextFilter) string {
+	if !strings.EqualFold(strings.TrimSpace(id), "latest") {
+		return fmt.Sprintf("no issue matches %q; call monitor_issues to see what is open", id)
+	}
+	kind := filter.Kind
+	if kind == "" {
+		kind = "exception"
+	}
+	return fmt.Sprintf("no issue matches \"latest\" (project=%q service=%q kind=%q); call monitor_issues to see what is open, or widen kind to \"any\"",
+		filter.Project, filter.Service, kind)
+}
+
+// explainContextFields flattens c's sections into the map handleIssue
+// merges into monitor_issue's response, keyed exactly as
+// monitor.issue_context.v1 names them -- everything EXCEPT c.Issue, whose
+// key ("issue") is reserved by the legacy, richer issues.Issue field
+// handleIssue already sets. See IssueContextResult.Context's doc comment.
+func explainContextFields(c *explain.Context) map[string]any {
+	out := map[string]any{
+		"schema": c.Schema, "budget": c.Budget, "generated_at": c.GeneratedAt,
+		"timeline": c.Timeline, "causes": c.Causes, "frames": c.Frames,
+		"impact": c.Impact, "last_touched": c.LastTouched, "related_notes": c.RelatedNotes,
+		"degraded": c.Degraded, "next": c.Next, "truncated": c.Truncated, "privacy": c.Privacy,
+	}
+	if c.ResolvedFrom != nil {
+		out["resolved_from"] = c.ResolvedFrom
+	}
+	if c.Culprit != nil {
+		out["culprit"] = c.Culprit
+	}
+	return out
 }
 
 // requireConfirm returns an error when the agent forgot to confirm. Mirrors

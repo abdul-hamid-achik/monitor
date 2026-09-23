@@ -1216,14 +1216,17 @@ func TestHandleIssuesSurfacesServiceErrorAsStructuredPayload(t *testing.T) {
 
 func TestHandleIssueReturnsOccurrencesAndStructuredNotFound(t *testing.T) {
 	issue := issues.Issue{ID: "ISS-1", OccurrenceCount: 3}
-	s := newTestServer(t, &Service{IssueGet: func(_ context.Context, id string, limit int) (issues.Issue, []issues.Occurrence, error) {
+	s := newTestServer(t, &Service{IssueContext: func(_ context.Context, id string, _ IssueContextFilter, limit int) (*IssueContextResult, error) {
 		if id == "missing" {
-			return issues.Issue{}, nil, fmt.Errorf("%w: %s", issues.ErrIssueNotFound, id)
+			return nil, fmt.Errorf("%w: %s", issues.ErrIssueNotFound, id)
 		}
 		if limit != 20 {
 			t.Fatalf("default occurrence limit = %d, want 20", limit)
 		}
-		return issue, []issues.Occurrence{{ID: "OCC-1"}, {ID: "OCC-2"}}, nil
+		return &IssueContextResult{
+			Issue: issue, Occurrences: []issues.Occurrence{{ID: "OCC-1"}, {ID: "OCC-2"}},
+			OccurrencesTruncated: true,
+		}, nil
 	}})
 	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "ISS-1"})
 	if err != nil {
@@ -1243,15 +1246,41 @@ func TestHandleIssueReturnsOccurrencesAndStructuredNotFound(t *testing.T) {
 	}
 }
 
+// TestHandleIssueNoMatchIsRecoveryHintNotError covers E2.7's "latest
+// matches nothing is not an error" rule: a (nil, nil) Service result must
+// produce not_found:true with a recovery string, never populate "error".
+func TestHandleIssueNoMatchIsRecoveryHintNotError(t *testing.T) {
+	s := newTestServer(t, &Service{IssueContext: func(_ context.Context, id string, filter IssueContextFilter, _ int) (*IssueContextResult, error) {
+		return nil, nil
+	}})
+	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "latest", Project: "polyglot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := payload.(map[string]any)
+	if found, _ := m["not_found"].(bool); !found {
+		t.Fatalf("not_found = %v, want true", m["not_found"])
+	}
+	if recovery, _ := m["recovery"].(string); recovery == "" {
+		t.Fatalf("payload = %v, want a non-empty recovery hint", m)
+	}
+	if _, hasError := m["error"]; hasError {
+		t.Fatalf("payload = %v, a no-match \"latest\" must not be reported as an error", m)
+	}
+}
+
 func TestHandleIssueClampsOccurrenceLimitAndKeepsTypedEvidence(t *testing.T) {
 	var gotLimit int
 	wantRun := &issues.RunContext{ID: "run-1", Environment: "preview", StepID: "test"}
 	wantEvidence := []issues.EvidenceRef{{Kind: "monitor.incident", URI: "fcheap://stash/stash-1"}}
-	s := newTestServer(t, &Service{IssueGet: func(_ context.Context, id string, limit int) (issues.Issue, []issues.Occurrence, error) {
+	s := newTestServer(t, &Service{IssueContext: func(_ context.Context, id string, _ IssueContextFilter, limit int) (*IssueContextResult, error) {
 		gotLimit = limit
-		return issues.Issue{ID: id, OccurrenceCount: 1}, []issues.Occurrence{{
-			ID: "OCC-1", IssueID: id, Run: wantRun, Evidence: wantEvidence,
-		}}, nil
+		return &IssueContextResult{
+			Issue: issues.Issue{ID: id, OccurrenceCount: 1},
+			Occurrences: []issues.Occurrence{{
+				ID: "OCC-1", IssueID: id, Run: wantRun, Evidence: wantEvidence,
+			}},
+		}, nil
 	}})
 	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "ISS-1", OccurrenceLimit: 999})
 	if err != nil {
@@ -1270,6 +1299,25 @@ func TestHandleIssueClampsOccurrenceLimitAndKeepsTypedEvidence(t *testing.T) {
 	evidence := event["evidence"].([]any)
 	if run["id"] != "run-1" || len(evidence) != 1 || evidence[0].(map[string]any)["uri"] != "fcheap://stash/stash-1" {
 		t.Fatalf("typed event payload = %v", event)
+	}
+}
+
+// TestHandleIssuePassesFilterThrough pins IssueContextFilter's field
+// mapping from issueInput -- the one place handleIssue turns the typed
+// input's project/service/kind into the Service call, matching
+// IssueContextFilter's doc comment ("this handler stays a pure field
+// copy").
+func TestHandleIssuePassesFilterThrough(t *testing.T) {
+	var got IssueContextFilter
+	s := newTestServer(t, &Service{IssueContext: func(_ context.Context, id string, filter IssueContextFilter, _ int) (*IssueContextResult, error) {
+		got = filter
+		return &IssueContextResult{Issue: issues.Issue{ID: "ISS-1"}}, nil
+	}})
+	if _, _, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "latest", Project: "polyglot", Service: "workload", Kind: "any"}); err != nil {
+		t.Fatal(err)
+	}
+	if got.Project != "polyglot" || got.Service != "workload" || got.Kind != "any" {
+		t.Fatalf("filter = %+v", got)
 	}
 }
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/config"
 	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
+	"github.com/abdul-hamid-achik/monitor/internal/explain"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
 	"github.com/abdul-hamid-achik/monitor/internal/mcp"
@@ -75,8 +77,8 @@ func newMCPServeCmd() *cobra.Command {
 				Analyze: func(ctx context.Context, windowSeconds int, pid int32) (mcp.AnalyzeResult, error) {
 					return analyzeWindow(ctx, collect, time.Duration(windowSeconds)*time.Second, time.Second, pid)
 				},
-				IssuesList: listIssuesForMCP,
-				IssueGet:   getIssueForMCP,
+				IssuesList:   listIssuesForMCP,
+				IssueContext: issueContextForMCP,
 				// Mutating tools: thin wrappers over the CLI's existing logic.
 				Kill: kill.KillVerified,
 				// Profile is runtime-aware (E1.7): Node/Deno with --inspect
@@ -202,26 +204,78 @@ func listIssuesForMCP(_ context.Context, filter mcp.IssuesListFilter) (items []i
 	})
 }
 
-func getIssueForMCP(_ context.Context, id string, occurrenceLimit int) (issue issues.Issue, occurrences []issues.Occurrence, err error) {
+// issueContextForMCP is mcp.Service.IssueContext's implementation (E2.7):
+// the single place, alongside internal/cli/issues.go's `monitor issue`
+// command, that resolves "latest"+filter (via explain.ResolveLatest) or a
+// concrete id/prefix (via issues.Store.ResolveID) and builds
+// monitor.issue_context.v1 (explain.Build, budget "brief" -- see
+// docs/contracts/issue-context-v1.md: MCP defaults to brief so a "what's
+// the latest crash" question stays a small, cheap call).
+func issueContextForMCP(ctx context.Context, id string, filter mcp.IssueContextFilter, occurrenceLimit int) (result *mcp.IssueContextResult, err error) {
 	path, err := issues.ResolvePath("")
 	if err != nil {
-		return issue, nil, err
+		return nil, err
 	}
 	store, err := issues.OpenReadOnly(path)
 	if err != nil {
-		return issue, nil, err
+		return nil, err
 	}
 	defer func() {
 		if closeErr := store.Close(); err == nil && closeErr != nil {
 			err = closeErr
 		}
 	}()
-	issue, err = store.Get(id)
-	if err != nil {
-		return issue, nil, err
+
+	var resolvedID string
+	var resolvedFrom *explain.ResolvedFrom
+	if strings.EqualFold(strings.TrimSpace(id), "latest") {
+		latest, resolved, ok, latestErr := explain.ResolveLatest(store, explain.LatestFilter{
+			Project: filter.Project, Service: filter.Service, Kind: filter.Kind,
+		})
+		if latestErr != nil {
+			return nil, latestErr
+		}
+		if !ok {
+			// No match under this filter -- an ordinary outcome (E2.7),
+			// not a failure; handleIssue turns a nil result into a
+			// recovery hint instead of an error envelope.
+			return nil, nil
+		}
+		resolvedID = latest.ID
+		resolvedFrom = &resolved
+	} else {
+		resolvedID, err = store.ResolveID(id)
+		if err != nil {
+			return nil, err
+		}
 	}
-	occurrences, err = store.Occurrences(id, occurrenceLimit)
-	return issue, occurrences, err
+
+	issue, err := store.Get(resolvedID)
+	if err != nil {
+		return nil, err
+	}
+	occurrences, err := store.Occurrences(resolvedID, occurrenceLimit)
+	if err != nil {
+		return nil, err
+	}
+
+	built, buildErr := explain.Build(ctx, store, resolvedID, explain.Options{
+		Budget: explain.BudgetBrief, Redact: true, ResolvedFrom: resolvedFrom,
+	})
+	if buildErr != nil {
+		// explain.Build failing (e.g. a store.Get race after the lookups
+		// above) degrades to the legacy fields alone rather than failing
+		// monitor_issue outright -- Build's OWN dependency failures
+		// (codemap/git/vecgrep) are never why this branch runs; those are
+		// already absorbed into Context.Degraded by Build itself.
+		built = nil
+	}
+
+	return &mcp.IssueContextResult{
+		Issue: issue, Occurrences: occurrences,
+		OccurrencesTruncated: issue.OccurrenceCount > int64(len(occurrences)),
+		Context:              built,
+	}, nil
 }
 
 // analyzeWindow drives collect once per sampleInterval for the duration of
