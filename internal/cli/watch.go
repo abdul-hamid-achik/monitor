@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shirou/gopsutil/v4/process"
 	"github.com/spf13/cobra"
 
 	"github.com/abdul-hamid-achik/monitor/internal/analyzer"
@@ -384,16 +385,25 @@ durable issue index with their run context and evidence reference.`,
 // PID-less alert (a system-wide rule with no attached process) resolves to
 // project "host" instead of whatever directory monitor happened to be
 // launched from.
+//
+// Dir comes from the ALERTED process's own cwd (alertProcessCwd), never
+// monitor's own os.Getwd(): the earlier version read monitor's cwd, so
+// watch and investigate disagreed on the same PID whenever monitor was
+// launched from a different directory than the alerted process -- the
+// normal case (verified: a real child with cwd <tmp>/graphite/web-api,
+// monitor launched from an unrelated directory, gave watch
+// project=sleep/service=sleep while investigate gave
+// project=graphite/service=web-api for the SAME pid). project.Resolve
+// itself never falls back to monitor's cwd either (Hints.UseWorkingDir is
+// intentionally left unset here), so a process whose cwd can't be read
+// degrades to the service/process-name/"local" fallback instead of
+// misattributing the alert to monitor's own directory.
 func recordAlertOccurrence(ctx context.Context, path string, ev collector.Event, alert collector.Alert, diagnosis *incidents.Diagnosis, stash incidents.CaptureResult) (issues.Issue, issues.Occurrence, error) {
 	ids := contextids.FromEnv(contextids.IDs{})
-	var dir string
-	if cwd, err := os.Getwd(); err == nil {
-		dir = cwd
-	}
 	identity := project.Resolve(project.Hints{
 		ExplicitService: ids.Service,
 		ProcessName:     alert.Process,
-		Dir:             dir,
+		Dir:             alertProcessCwd(ctx, alert.PID),
 		PID:             alert.PID,
 	})
 	message := alert.Detail
@@ -448,6 +458,33 @@ func recordAlertOccurrence(ctx context.Context, path string, ev collector.Event,
 		return writeErr
 	})
 	return issue, occurrence, err
+}
+
+// alertProcessCwd reads the ALERTED process's own working directory,
+// bounded by a short timeout so a stuck or zombie process never delays
+// alert delivery. It deliberately does NOT fall back to monitor's own cwd
+// on any failure (unknown pid, permission denied, already exited): the
+// caller's project.Resolve Hints describe the alerted process, not the
+// watcher, and falling back here would silently reintroduce the same
+// misattribution bug 15's fix removed. Empty on any error or when pid <= 0
+// (a system-wide alert with no attached process); project.Resolve then
+// falls through its own precedence (marker/service/process/"local")
+// instead of misattributing the alert to monitor's cwd.
+func alertProcessCwd(ctx context.Context, pid int32) string {
+	if pid <= 0 {
+		return ""
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	proc, err := process.NewProcessWithContext(cctx, pid)
+	if err != nil {
+		return ""
+	}
+	cwd, err := proc.CwdWithContext(cctx)
+	if err != nil {
+		return ""
+	}
+	return cwd
 }
 
 func watchLoop(ctx context.Context, c *collector.Collector, engine *analyzer.Engine, interval time.Duration, gate *alertCooldownGate, handlers []watchAlertHandler) error {
