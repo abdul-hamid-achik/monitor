@@ -17,7 +17,8 @@ func newResolveCmd() *cobra.Command {
 			runtime := procbind.Runtime(runtimeName)
 			switch runtime {
 			case procbind.RuntimeUnknown, procbind.RuntimeNode, procbind.RuntimeBun,
-				procbind.RuntimeDeno, procbind.RuntimeGo, procbind.RuntimePython:
+				procbind.RuntimeDeno, procbind.RuntimeGo, procbind.RuntimePython,
+				procbind.RuntimeRuby:
 			default:
 				return fmt.Errorf("unsupported runtime %q", runtimeName)
 			}
@@ -38,7 +39,7 @@ func newResolveCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&runtimeName, "runtime", "unknown", "runtime selector: node, bun, deno, go, python")
+	cmd.Flags().StringVar(&runtimeName, "runtime", "unknown", "runtime selector: node, bun, deno, go, python, ruby")
 	cmd.Flags().StringVar(&codebaseRoot, "codebase-root", "", "exact detected codebase root")
 	cmd.Flags().StringVar(&mainScriptSuffix, "main-script-suffix", "", "required suffix of the runtime entry script")
 	cmd.Flags().Bool("json", false, "emit JSON output")
