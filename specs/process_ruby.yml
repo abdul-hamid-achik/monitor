@@ -1,0 +1,63 @@
+version: 1
+name: monitor_process_ruby
+
+intent: |
+  `monitor process <pid> --json` recognizes a live Ruby (MRI) interpreter:
+  the binding reports runtime "ruby" and resolves main_script to the
+  workload's real entry point (examples/polyglot/ruby/workload.rb), the same
+  way it already does for node/bun/deno/python.
+
+  This spec spawns examples/polyglot/ruby/workload.rb (which prints a
+  startup line, then sleeps in background threads before eventually raising)
+  as a detached process, inspects it, and kills it — it never waits for the
+  workload's own 40s sleep or its intentional crash.
+
+  Runtime note: this spec invokes the bare "ruby" from PATH, which the CI
+  infra group provisions. On a local machine where asdf/rbenv shims have no
+  default global version set, "ruby" alone may fail with "No version is set
+  for command ruby"; run `asdf shell ruby 3.4.8` (or otherwise put a real
+  ruby on PATH) before running this spec locally.
+
+target:
+  cmd: ["./bin/monitor", "--version"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v ruby >/dev/null 2>&1"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: runtime_ruby
+    description: process --json reports runtime "ruby" for a live MRI interpreter
+    verify:
+      command:
+        run: "P=$(sh -c 'nohup ruby examples/polyglot/ruby/workload.rb >/dev/null 2>&1 & echo $!'); sleep 1; OUT=$(./bin/monitor process \"$P\" --json 2>&1); kill \"$P\" 2>/dev/null || true; echo \"$OUT\" | grep -q '\"runtime\": \"ruby\"'"
+  - id: main_script_resolved
+    description: process --json resolves main_script to workload.rb, not the interpreter itself
+    verify:
+      command:
+        run: "P=$(sh -c 'nohup ruby examples/polyglot/ruby/workload.rb >/dev/null 2>&1 & echo $!'); sleep 1; OUT=$(./bin/monitor process \"$P\" --json 2>&1); kill \"$P\" 2>/dev/null || true; echo \"$OUT\" | grep -q '\"main_script\":.*workload.rb\"'"
+  - id: codebase_root_from_gemfile_or_git
+    description: process --json resolves a non-empty codebase_root by walking up from cwd
+    verify:
+      command:
+        run: "P=$(sh -c 'nohup ruby examples/polyglot/ruby/workload.rb >/dev/null 2>&1 & echo $!'); sleep 1; OUT=$(./bin/monitor process \"$P\" --json 2>&1); kill \"$P\" 2>/dev/null || true; echo \"$OUT\" | grep -q '\"codebase_root\"'"
+  - id: clean_exit
+    description: --version still exits cleanly (baseline sanity check for the target command)
+    verify:
+      process:
+        exitCode: 0
