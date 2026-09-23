@@ -246,6 +246,12 @@ func TestTslogFrameOrder(t *testing.T) {
 	if len(ex.Chained) != 1 || frameRef(ex.Chained[0].Frames[len(ex.Chained[0].Frames)-1]) != "doWork@workload.js:90" {
 		t.Errorf("cause = %+v, want crash frame doWork:90 last", ex.Chained)
 	}
+	// A printf-style logger line carrying err.stack: V8 frames under the
+	// same header.
+	assertSummaries(t, Detect("2026-09-22T10:05:00.000Z ERROR [api] TypeError: bad input\n"+
+		"    at validate (/repo/app/v.js:4:11)\n    at handler (/repo/app/h.js:9:3)\n"), []string{
+		`tslog/node error handled TypeError: bad input @validate@v.js:4(2) [2026-09-22T10:05:00.000Z]`,
+	})
 	// A tslog error line with no frames is a message-only event.
 	assertSummaries(t, Detect("2026-09-22T10:05:00.000Z ERROR [wf] activity task failed"), []string{
 		`message/node error handled "activity task failed" @-(0) [2026-09-22T10:05:00.000Z]`,

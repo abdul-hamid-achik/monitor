@@ -50,7 +50,10 @@ func (tslogGrammar) next(line string, boundary bool) verdict {
 	switch {
 	case boundary:
 		return vReject
-	case reTsLogFrame.MatchString(line), reTsLogCause.MatchString(line):
+	case reTsLogFrame.MatchString(line), reTsLogCause.MatchString(line),
+		reJSFrameLine.MatchString(line):
+		// A printf-style logger ("<ts> ERROR [api] ${err.stack}") puts
+		// ordinary V8 "at" frames under the same header.
 		return vAccept
 	case strings.TrimSpace(line) == "":
 		return vTentative
@@ -114,6 +117,10 @@ func parseTslog(block Block) *Exception {
 	for _, l := range lines[1:] {
 		if m := reTsLogFrame.FindStringSubmatch(l); m != nil {
 			frames = append(frames, tslogFrame(m))
+			continue
+		}
+		if f, ok := parseJSFrameLine(l); ok {
+			frames = append(frames, f)
 			continue
 		}
 		if m := reTsLogCause.FindStringSubmatch(l); m != nil {
