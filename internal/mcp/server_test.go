@@ -1108,6 +1108,7 @@ func TestHandleIssuesIsBoundedAndReadOnly(t *testing.T) {
 	}})
 	_, payload, err := s.handleIssues(context.Background(), nil, &issuesInput{
 		Statuses: []string{"OPEN"}, Project: "monitor", Service: "api", Limit: 999,
+		Since: "24h", RunID: "run-1", Release: "v1.2.3", Kind: "exception",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1119,8 +1120,28 @@ func TestHandleIssuesIsBoundedAndReadOnly(t *testing.T) {
 	if len(got.Statuses) != 1 || got.Statuses[0] != issues.StatusOpen || got.Project != "monitor" || got.Service != "api" {
 		t.Fatalf("filters = %+v", got)
 	}
+	// Since/RunID/Release/Kind (E2.6) must reach Service.IssuesList as the
+	// SAME issues.ListOptions the CLI builds -- Since parsed via the shared
+	// issues.ParseWindowBound (a relative duration here, "24h"), RunID/
+	// Release/Kind passed through unparsed for issues.Store.List itself to
+	// interpret.
+	if got.Since.IsZero() || time.Since(got.Since) < 23*time.Hour || time.Since(got.Since) > 25*time.Hour {
+		t.Fatalf("Since = %v, want ~24h ago", got.Since)
+	}
+	if got.RunID != "run-1" || got.Release != "v1.2.3" || got.Kind != "exception" {
+		t.Fatalf("RunID/Release/Kind = %q/%q/%q", got.RunID, got.Release, got.Kind)
+	}
 	if _, _, err := s.handleIssues(context.Background(), nil, &issuesInput{Statuses: []string{"bogus"}}); err != nil {
 		t.Fatalf("invalid status should be structured, got hard error: %v", err)
+	}
+	// An unparseable since/until is a structured error, not a hard Go error
+	// or a silently-ignored filter.
+	_, payload, err = s.handleIssues(context.Background(), nil, &issuesInput{Since: "not-a-time"})
+	if err != nil {
+		t.Fatalf("invalid since should be structured, got hard error: %v", err)
+	}
+	if errMsg, _ := payload.(map[string]any)["error"].(string); errMsg == "" {
+		t.Fatalf("invalid since payload = %v, want a non-empty error", payload)
 	}
 }
 

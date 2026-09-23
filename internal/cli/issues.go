@@ -76,6 +76,11 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 		statuses []string
 		project  string
 		service  string
+		since    string
+		until    string
+		runID    string
+		release  string
+		kind     string
 		limit    int
 	)
 	cmd := &cobra.Command{
@@ -90,6 +95,15 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			now := time.Now()
+			sinceBound, err := issues.ParseWindowBound(since, now)
+			if err != nil {
+				return &issueCommandError{action: "list", err: err}
+			}
+			untilBound, err := issues.ParseWindowBound(until, now)
+			if err != nil {
+				return &issueCommandError{action: "list", err: err}
+			}
 			path, err := resolveIssueStorePath(*storePath)
 			if err != nil {
 				return &issueCommandError{action: "list", err: err}
@@ -102,6 +116,11 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 				Statuses: parsedStatuses,
 				Project:  strings.TrimSpace(project),
 				Service:  strings.TrimSpace(service),
+				Since:    sinceBound,
+				Until:    untilBound,
+				RunID:    strings.TrimSpace(runID),
+				Release:  strings.TrimSpace(release),
+				Kind:     strings.TrimSpace(kind),
 				Limit:    limit,
 			})
 			closeErr := store.Close()
@@ -123,6 +142,11 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 	cmd.Flags().StringSliceVar(&statuses, "status", nil, "filter by status (open, resolved, ignored; repeatable)")
 	cmd.Flags().StringVar(&project, "project", "", "filter by project")
 	cmd.Flags().StringVar(&service, "service", "", "filter by service")
+	cmd.Flags().StringVar(&since, "since", "", "only issues active at/after this time (RFC3339 or a duration like 10m, 24h ago)")
+	cmd.Flags().StringVar(&until, "until", "", "only issues active at/before this time (RFC3339 or a duration like 10m, 24h ago)")
+	cmd.Flags().StringVar(&runID, "run-id", "", "filter by a run id the issue has seen")
+	cmd.Flags().StringVar(&release, "release", "", "filter by a release the issue has seen")
+	cmd.Flags().StringVar(&kind, "kind", "", "filter by kind: exception, alert, investigation, or any (default: any)")
 	cmd.Flags().IntVar(&limit, "limit", defaultIssueListLimit, "maximum issues to return (1-200)")
 	cmd.Flags().Bool("json", false, "emit JSON output")
 	return cmd

@@ -200,7 +200,9 @@ func (s *Server) register() {
 		Name:        "monitor_issues",
 		Annotations: readOnlyAnnotations("List local issues"),
 		Description: "List recurring local issues, newest first. Read-only; no confirm field. " +
-			"Filter by statuses (open|resolved|ignored), project, or service; limit defaults to 50 and is capped at 200.",
+			"Filter by statuses (open|resolved|ignored), project, service, since/until (RFC3339 or a duration " +
+			"like 10m/24h meaning that long ago), run_id, release, or kind (exception|alert|investigation|any); " +
+			"limit defaults to 50 and is capped at 200.",
 	}, s.handleIssues)
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_issue",
@@ -290,7 +292,17 @@ type issuesInput struct {
 	Statuses []string `json:"statuses,omitempty" jsonschema:"optional statuses: open, resolved, ignored"`
 	Project  string   `json:"project,omitempty"  jsonschema:"case-insensitive project filter"`
 	Service  string   `json:"service,omitempty"  jsonschema:"case-insensitive service filter"`
-	Limit    int      `json:"limit,omitempty"    jsonschema:"maximum issues to return (default 50, max 200)"`
+	// Since/Until/RunID/Release/Kind (E2.6) are passed through unparsed:
+	// issues.ParseWindowBound and issues.Store.List (the domain/service
+	// layer, not this handler) own interpreting them, so the CLI's
+	// --since/--until/--run-id/--release/--kind flags and this tool always
+	// mean exactly the same filter.
+	Since   string `json:"since,omitempty"   jsonschema:"only issues active at/after this time: RFC3339, or a duration like 10m/24h meaning that long ago"`
+	Until   string `json:"until,omitempty"   jsonschema:"only issues active at/before this time: RFC3339, or a duration like 10m/24h meaning that long ago"`
+	RunID   string `json:"run_id,omitempty"  jsonschema:"filter by a run id the issue has seen"`
+	Release string `json:"release,omitempty" jsonschema:"filter by a release the issue has seen"`
+	Kind    string `json:"kind,omitempty"    jsonschema:"filter by kind: exception, alert, investigation, or any (default: any)"`
+	Limit   int    `json:"limit,omitempty"    jsonschema:"maximum issues to return (default 50, max 200)"`
 }
 
 type issueInput struct {
@@ -521,7 +533,23 @@ func (s *Server) handleIssues(ctx context.Context, _ *mcp.CallToolRequest, in *i
 	if limit > maxIssuesLimit {
 		limit = maxIssuesLimit
 	}
-	items, err := s.svc.IssuesList(ctx, issues.ListOptions{Statuses: statuses, Project: in.Project, Service: in.Service})
+	// Since/Until: a mechanical string->time.Time conversion through the
+	// one shared parser (issues.ParseWindowBound) -- the actual filter
+	// matching (window overlap, RunID/Release aggregate lookup, Kind
+	// prefix rule) all happens in issues.Store.List, never here.
+	now := time.Now()
+	since, err := issues.ParseWindowBound(in.Since, now)
+	if err != nil {
+		return result(map[string]any{"issues": []issues.Issue{}, "total": 0, "truncated": false, "error": err.Error()})
+	}
+	until, err := issues.ParseWindowBound(in.Until, now)
+	if err != nil {
+		return result(map[string]any{"issues": []issues.Issue{}, "total": 0, "truncated": false, "error": err.Error()})
+	}
+	items, err := s.svc.IssuesList(ctx, issues.ListOptions{
+		Statuses: statuses, Project: in.Project, Service: in.Service,
+		Since: since, Until: until, RunID: in.RunID, Release: in.Release, Kind: in.Kind,
+	})
 	if err != nil {
 		return result(map[string]any{"issues": []issues.Issue{}, "total": 0, "truncated": false, "error": err.Error()})
 	}

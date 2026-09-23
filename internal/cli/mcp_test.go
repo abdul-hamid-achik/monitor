@@ -2,11 +2,13 @@ package cli
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/issues"
 )
 
 // leakyCollector returns a collect func for analyzeWindow tests: pid leak
@@ -158,5 +160,56 @@ func TestAnalyzeWindowContextCancelled(t *testing.T) {
 	}
 	if err != context.Canceled {
 		t.Errorf("err = %v, want context.Canceled", err)
+	}
+}
+
+// TestListIssuesForMCPForwardsWindowFiltersToStore verifies the
+// mcp.Service.IssuesList wiring (E2.6): listIssuesForMCP just opens the
+// resolved store read-only and forwards opts to Store.List -- the filters
+// it receives here are exactly what internal/mcp/server.go's handleIssues
+// built from the typed MCP input.
+func TestListIssuesForMCPForwardsWindowFiltersToStore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.veclite")
+	t.Setenv(issues.StorePathEnv, path)
+	store, err := issues.OpenStore(path)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	if _, _, err := store.UpsertOccurrence(issues.OccurrenceInput{
+		Project: "monitor", Kind: issues.KindException, Message: "boom", RunID: "run-a", Release: "rel-a",
+	}); err != nil {
+		t.Fatalf("seed exception issue: %v", err)
+	}
+	if _, _, err := store.UpsertOccurrence(issues.OccurrenceInput{
+		Project: "monitor", Kind: "monitor.alert.cpu_spike", Message: "cpu spike",
+	}); err != nil {
+		t.Fatalf("seed alert issue: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	got, err := listIssuesForMCP(context.Background(), issues.ListOptions{Kind: "exception"})
+	if err != nil {
+		t.Fatalf("listIssuesForMCP: %v", err)
+	}
+	if len(got) != 1 || got[0].Kind != issues.KindException {
+		t.Fatalf("Kind=exception results = %+v", got)
+	}
+
+	got, err = listIssuesForMCP(context.Background(), issues.ListOptions{RunID: "run-a"})
+	if err != nil {
+		t.Fatalf("listIssuesForMCP: %v", err)
+	}
+	if len(got) != 1 || got[0].Kind != issues.KindException {
+		t.Fatalf("RunID=run-a results = %+v", got)
+	}
+
+	all, err := listIssuesForMCP(context.Background(), issues.ListOptions{})
+	if err != nil {
+		t.Fatalf("listIssuesForMCP: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("unfiltered results = %+v, want 2", all)
 	}
 }
