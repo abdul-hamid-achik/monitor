@@ -313,6 +313,13 @@ func TestCodeFrameRendersIssueOverlay(t *testing.T) {
 	if !strings.Contains(out, "E = issues whose culprit is this line") {
 		t.Errorf("output missing the E legend:\n%s", out)
 	}
+	// The E3.4 marker must not push the marked line past the frame's own
+	// fixed Width — every OTHER line still fits inside it, and a marked
+	// line that overflows would wrap in a Width-column terminal (see the
+	// E3.1 golden-width review finding).
+	if got := len([]rune(hotLine)); got > f.Width {
+		t.Errorf("hot line width = %d runes, want <= %d (Width): %q", got, f.Width, hotLine)
+	}
 }
 
 // TestCodeFrameOmitsIssueLegendWithNoOverlay guards the "byte-for-byte
