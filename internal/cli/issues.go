@@ -164,9 +164,15 @@ func newIssuesShowCmd(storePath *string) *cobra.Command {
 				occurrences = []issues.Occurrence{}
 			}
 			out := issueDetailOutput{
-				Issue:                issue,
-				Occurrences:          occurrences,
-				OccurrencesTruncated: issue.OccurrenceCount > int64(len(occurrences)),
+				Issue:       issue,
+				Occurrences: occurrences,
+				// A coalesced burst (issues.OccurrenceInput.Count) makes one
+				// retained row stand for several raw events, so comparing
+				// against len(occurrences) reports "truncated" for any
+				// coalesced occurrence even when every row was retained.
+				// Compare against the sum of the retained rows' Count
+				// instead.
+				OccurrencesTruncated: issue.OccurrenceCount > sumOccurrenceCounts(occurrences),
 			}
 			if JSONOutput(cmd) {
 				return writeIssueJSON(cmd.OutOrStdout(), out)
@@ -233,6 +239,21 @@ func issueStatusShort(action string) string {
 	default:
 		return "Update an issue"
 	}
+}
+
+// sumOccurrenceCounts totals the Count of every retained occurrence, so a
+// coalesced burst (one row, Count > 1) is weighed the same as the raw
+// events it subsumes when deciding whether older occurrences were dropped.
+func sumOccurrenceCounts(occurrences []issues.Occurrence) int64 {
+	var total int64
+	for _, occurrence := range occurrences {
+		if occurrence.Count > 0 {
+			total += occurrence.Count
+		} else {
+			total++
+		}
+	}
+	return total
 }
 
 func resolveIssueStorePath(explicit string) (string, error) {
