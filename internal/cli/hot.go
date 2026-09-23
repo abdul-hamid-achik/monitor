@@ -262,9 +262,6 @@ func hottestBySelf(fns []profiler.HeatFunction) profiler.HeatFunction {
 	return best
 }
 
-// nextFuncSuggestion names the highest-ranked function other than the one
-// just shown, for the "next" line's --func suggestion — falling back to the
-// shown function's own name when it's the only one in the profile.
 // nextFuncSuggestion names another function worth a follow-up look, for the
 // "next" line's --func suggestion: it prefers a named function over one of
 // V8's anonymous-closure/module-scope placeholders ("(anonymous)", which
