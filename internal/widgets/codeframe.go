@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // CodeFrameLine is one source line inside a CodeFrame. Percent/CumPercent
@@ -120,7 +121,7 @@ func (f CodeFrame) Render() string {
 	lineNumWidth := f.lineNumWidth()
 	for _, l := range f.Lines {
 		b.WriteByte('\n')
-		b.WriteString(f.renderLine(l, l.Line == hotLine, lineNumWidth))
+		b.WriteString(f.renderLine(l, l.Line == hotLine, lineNumWidth, width))
 	}
 	if f.Footer != "" {
 		b.WriteByte('\n')
@@ -138,12 +139,26 @@ func (f CodeFrame) hasLine(line int) bool {
 	return false
 }
 
-// hottestLine returns the Line with the highest Percent (ties broken by
-// CumPercent, then by the first occurrence), the same "which row gets the
-// marker" rule a caller that omits HotLine gets for free.
+// hottestLine returns the Line CodeFrame marks '>' when the caller doesn't
+// set HotLine explicitly. In the dual-column (ShowCum) view, that's the
+// highest CumPercent (ties broken by Percent): a pprof wrapper's own loop
+// line routinely carries a little self time while the line beneath it (a
+// call into the real hot work) carries almost all the cumulative cost — see
+// mockup 7's json.Marshal line — so ranking by self (Percent) there would
+// mark the wrong row. In the self-only view, it's the highest Percent (ties
+// broken by CumPercent) — that view's Percent IS the only per-line weight
+// there is (see HeatLine's doc comment on why a CDP source has no separate
+// cum concept to break ties against otherwise). Either way, ties finally
+// fall back to the first occurrence.
 func (f CodeFrame) hottestLine() int {
 	best := f.Lines[0]
 	for _, l := range f.Lines[1:] {
+		if f.ShowCum {
+			if l.CumPercent > best.CumPercent || (l.CumPercent == best.CumPercent && l.Percent > best.Percent) {
+				best = l
+			}
+			continue
+		}
 		if l.Percent > best.Percent || (l.Percent == best.Percent && l.CumPercent > best.CumPercent) {
 			best = l
 		}
@@ -188,16 +203,35 @@ func (f CodeFrame) renderHeader(width int) string {
 	return f.style(frameHeaderStyle, prefix+strings.Repeat("-", pad))
 }
 
+// pctFieldWidth is the fixed width of one rendered "NNN.N%" percentage
+// field (SELF, CUM, or the self-only view's PCT) — always 7 runes ("%6.1f"
+// pads the numeric part to 6, plus the literal "%"), so the FLAT/CUM column
+// header can line its own labels up over the numbers without having to
+// duplicate the row format's own field widths.
+const pctFieldWidth = 7
+
+// dualColumnSep separates the two "%s %s" percentage fields, and again
+// separates the percentage block from "| " before the code column, in both
+// renderLine (ShowCum) and renderColumnHeader — kept as one named constant
+// so the two stay in lockstep.
+const dualColumnSep = " "
+
 func (f CodeFrame) renderColumnHeader() string {
 	lineNumWidth := f.lineNumWidth()
-	gutter := strings.Repeat(" ", lineNumWidth+4) // "  NN | " gutter width, minus the leading space renderLine's marker column adds
-	return f.style(frameDimStyle, gutter+"  FLAT     CUM")
+	// Mirrors renderLine's own ShowCum prefix exactly: marker(1) + " " +
+	// numStr(lineNumWidth) + " | " — so "FLAT"/"CUM" land directly over
+	// their own column's numbers on every row beneath this header.
+	gutter := strings.Repeat(" ", 1+1+lineNumWidth+3)
+	header := gutter + fmt.Sprintf("%*s%s%*s", pctFieldWidth, "FLAT", dualColumnSep, pctFieldWidth, "CUM")
+	return f.style(frameDimStyle, header)
 }
 
 // renderLine renders one source line: marker, line number, code (padded/
-// truncated to codeColumnWidth), and either one PCT|BAR column or two
-// (SELF, CUM) depending on ShowCum.
-func (f CodeFrame) renderLine(l CodeFrameLine, isHot bool, lineNumWidth int) string {
+// truncated to fill the width remaining after every fixed column), and
+// either one PCT|BAR column (self-only) or FLAT/CUM before the code, then a
+// CUM-sized bar (dual-column pprof view — see mockup 7 in the roadmap,
+// where the percentages read left of the code, not right of it).
+func (f CodeFrame) renderLine(l CodeFrameLine, isHot bool, lineNumWidth, width int) string {
 	marker := " "
 	if isHot {
 		marker = ">"
@@ -207,20 +241,40 @@ func (f CodeFrame) renderLine(l CodeFrameLine, isHot bool, lineNumWidth int) str
 		marker = f.style(frameHotStyle, marker)
 		numStr = f.style(frameHotStyle, numStr)
 	}
+
 	code := padCode(l.Code, codeColumnWidth)
 
 	if f.ShowCum {
-		// One trailing bar, sized by CUM: a pprof wrapper's SELF is
-		// routinely ~0 (see profiler_test.go's
-		// TestSymbolsFromPprofWrapperHasZeroFlatButFullCum), so a bar sized
-		// by SELF would be empty on exactly the rows CUM makes interesting.
+		// Fixed (non-bar) columns: marker(1) space num(lineNumWidth)
+		// " | "(3) FLAT(7) sep(1) CUM(7) " | "(3) code(codeColumnWidth)
+		// " "(1) — whatever's left of width goes to the bar.
+		fixed := 1 + 1 + lineNumWidth + 3 + pctFieldWidth + len(dualColumnSep) + pctFieldWidth + 3 + codeColumnWidth + 1
+		// A bar sized by SELF would be empty on exactly the rows CUM makes
+		// interesting: a pprof wrapper's SELF is routinely ~0 (see
+		// profiler_test.go's TestSymbolsFromPprofWrapperHasZeroFlatButFullCum).
 		// Both numbers are still printed, in FLAT-then-CUM column order.
-		cumBar := f.style(frameCumBarStyle, bar(l.CumPercent, 20))
-		return fmt.Sprintf("%s %s | %s %6.1f%% %6.1f%% | %s", marker, numStr, code, l.Percent, l.CumPercent, cumBar)
+		cumBar := f.style(frameCumBarStyle, bar(l.CumPercent, barWidth(width, fixed)))
+		return fmt.Sprintf("%s %s | %*.1f%%%s%*.1f%% | %s %s",
+			marker, numStr, pctFieldWidth-1, l.Percent, dualColumnSep, pctFieldWidth-1, l.CumPercent, code, cumBar)
 	}
+
+	// Fixed (non-bar) columns: marker(1) space num(lineNumWidth) " | "(3)
+	// code(codeColumnWidth) " "(1) pct(6) " |"(2).
+	fixed := 1 + 1 + lineNumWidth + 3 + codeColumnWidth + 1 + 6 + 2
 	pctStr := fmt.Sprintf("%5.1f%%", l.Percent)
-	barStr := f.style(frameBarStyle, bar(l.Percent, 26))
+	barStr := f.style(frameBarStyle, bar(l.Percent, barWidth(width, fixed)))
 	return fmt.Sprintf("%s %s | %s %s |%s", marker, numStr, code, pctStr, barStr)
+}
+
+// barWidth is however much of width the fixed (non-bar) columns leave over,
+// clamped to >=0 so a caller-chosen Width smaller than the fixed columns
+// alone degrades to "no bar" instead of a negative repeat count.
+func barWidth(width, fixed int) int {
+	w := width - fixed
+	if w < 0 {
+		return 0
+	}
+	return w
 }
 
 // bar renders a proportional bar of at most width runes for a 0-100 pct.
@@ -244,19 +298,56 @@ func bar(pct float64, width int) string {
 	return strings.Repeat("#", filled)
 }
 
-// padCode right-pads code to exactly width runes, or truncates it with a
-// trailing ellipsis when longer, so the PCT|BAR column that follows lines
-// up identically across every row regardless of source-line length.
+// codeTabWidth is the column stop codeColumn expands a literal tab
+// (indented Go source, tab-indented by convention) to before measuring or
+// truncating it — real terminals disagree on a raw tab's own width, so
+// leaving it unexpanded would make every column after it misalign.
+const codeTabWidth = 4
+
+// padCode right-pads code to exactly width CELLS (not runes: this must
+// count a wide CJK rune as 2 and an ANSI escape as 0, via
+// charmbracelet/x/ansi, the same width accounting the terminal itself
+// uses — a rune-counting pad silently misaligns the PCT|BAR column that
+// follows on any line with a tab or a wide character), or truncates it
+// with a trailing ellipsis when wider, after first expanding any literal
+// tabs to codeTabWidth-column stops.
 func padCode(code string, width int) string {
-	r := []rune(code)
-	if len(r) == width {
+	if width <= 0 {
+		return ""
+	}
+	code = expandTabs(code, codeTabWidth)
+	w := ansi.StringWidth(code)
+	if w == width {
 		return code
 	}
-	if len(r) < width {
-		return code + strings.Repeat(" ", width-len(r))
+	if w < width {
+		return code + strings.Repeat(" ", width-w)
 	}
 	if width <= 1 {
-		return string(r[:width])
+		return ansi.Truncate(code, width, "")
 	}
-	return string(r[:width-1]) + "…"
+	return ansi.Truncate(code, width, "…")
+}
+
+// expandTabs replaces every '\t' in s with spaces up to the next
+// tabWidth-column stop, measuring the columns consumed so far by display
+// width (via charmbracelet/x/ansi) rather than byte or rune count, so a
+// tab after a wide CJK character still lands on the right stop.
+func expandTabs(s string, tabWidth int) string {
+	if tabWidth <= 0 || !strings.ContainsRune(s, '\t') {
+		return s
+	}
+	var b strings.Builder
+	col := 0
+	for _, r := range s {
+		if r == '\t' {
+			n := tabWidth - (col % tabWidth)
+			b.WriteString(strings.Repeat(" ", n))
+			col += n
+			continue
+		}
+		b.WriteRune(r)
+		col += ansi.StringWidth(string(r))
+	}
+	return b.String()
 }

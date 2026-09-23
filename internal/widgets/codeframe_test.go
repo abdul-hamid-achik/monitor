@@ -133,6 +133,83 @@ func TestCodeFrameDualColumnShowsSelfAndCum(t *testing.T) {
 	}
 }
 
+// TestCodeFrameDualColumnMarksHotLineByCum reproduces the review's finding:
+// a wrapper line's own FLAT (self) can be nonzero while the line beneath it
+// — a call into the real hot work — carries almost all the CUM cost. The
+// '>' marker must land on the high-CUM line, matching mockup 7 (the
+// json.Marshal line), not the higher-FLAT one.
+func TestCodeFrameDualColumnMarksHotLineByCum(t *testing.T) {
+	f := CodeFrame{
+		FuncName: "main.heavyStringify", File: "main.go", ShowCum: true, Width: 100,
+		Lines: []CodeFrameLine{
+			{Line: 18, Code: "for i := 0; i < n; i++ {", Percent: 2.6, CumPercent: 2.6},
+			{Line: 19, Code: "b, _ := json.Marshal(rows[i])", Percent: 0.0, CumPercent: 97.4},
+		},
+	}
+	out := f.Render()
+	var hot string
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, ">") {
+			hot = l
+		}
+	}
+	if !strings.Contains(hot, "19") {
+		t.Errorf("hot row = %q, want the CUM-dominant line 19, not the FLAT-dominant line 18", hot)
+	}
+}
+
+// TestCodeFrameDualColumnFitsInWidthWithFullBar asserts the dual-column
+// layout's own "not wider than Width" contract holds even at a full 100%
+// CUM bar — the review found a real dual row rendering at 104 columns.
+func TestCodeFrameDualColumnFitsInWidthWithFullBar(t *testing.T) {
+	f := CodeFrame{
+		FuncName: "f", File: "a.go", ShowCum: true, Width: 100,
+		Lines: []CodeFrameLine{{Line: 1, Code: "work()", Percent: 100, CumPercent: 100}},
+	}
+	for _, row := range strings.Split(f.Render(), "\n") {
+		if w := runeWidth(row); w > f.Width {
+			t.Errorf("row %q is %d columns wide, want <=%d", row, w, f.Width)
+		}
+	}
+}
+
+// TestCodeFrameDualColumnGoldenAt100ColumnsNoColor is the dual-column
+// counterpart to TestCodeFrameGoldenAt100ColumnsNoColor: a tab-indented Go
+// source line (real gofmt output, not the self-only fixture's hand-spaced
+// JS), percentages before the code as mockup 7 specifies, and every row
+// within the 100-column budget.
+func TestCodeFrameDualColumnGoldenAt100ColumnsNoColor(t *testing.T) {
+	f := CodeFrame{
+		FuncName: "main.heavyStringify", File: "go-pprof/main.go", StartLine: 14, EndLine: 22,
+		SelfPct: 0.0, CumPct: 74.8, ShowCum: true, Width: 100, Color: false,
+		Lines: []CodeFrameLine{
+			{Line: 18, Code: "\tfor i := 0; i < n; i++ {", Percent: 0.0, CumPercent: 0.4},
+			{Line: 19, Code: "\t\tb, _ := json.Marshal(rows[i])", Percent: 0.0, CumPercent: 74.1},
+			{Line: 20, Code: "\t\ttotal += len(b)", Percent: 0.0, CumPercent: 0.3},
+		},
+		Footer: "method: pprof proto (inlining-aware; no go toolchain needed)",
+	}
+	got := f.Render()
+	want := "-- main.heavyStringify · go-pprof/main.go:14-22 · cum 74.8% · flat 0.0% ----------------------------\n" +
+		"          FLAT     CUM\n" +
+		"  18 |    0.0%    0.4% |     for i := 0; i < n; i++ {                               \n" +
+		"> 19 |    0.0%   74.1% |         b, _ := json.Marshal(rows[i])                      ############\n" +
+		"  20 |    0.0%    0.3% |         total += len(b)                                    \n" +
+		"     method: pprof proto (inlining-aware; no go toolchain needed)"
+	if got != want {
+		t.Errorf("golden mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	for _, row := range strings.Split(got, "\n") {
+		if w := runeWidth(row); w > f.Width {
+			t.Errorf("row %q is %d columns wide, want <=%d", row, w, f.Width)
+		}
+	}
+}
+
+func runeWidth(s string) int {
+	return len([]rune(s))
+}
+
 func TestCodeFrameEmptyLinesRendersPlaceholder(t *testing.T) {
 	f := CodeFrame{FuncName: "idle", File: "a.js"}
 	out := f.Render()
@@ -166,6 +243,30 @@ func TestPadCode(t *testing.T) {
 	}
 	if got := padCode("abcdefgh", 6); got != "abcde…" {
 		t.Errorf("padCode long = %q, want %q", got, "abcde…")
+	}
+}
+
+// TestPadCodeExpandsTabs asserts a literal tab is expanded to
+// codeTabWidth-column stops before padding, so a tab-indented Go source
+// line still lines up its trailing PCT|BAR column exactly like a
+// space-indented one at the same visual depth.
+func TestPadCodeExpandsTabs(t *testing.T) {
+	got := padCode("\tx", 6)
+	want := "    x " // one tab -> 4 columns (codeTabWidth), then "x", padded to 6
+	if got != want {
+		t.Errorf("padCode(%q, 6) = %q, want %q", "\tx", got, want)
+	}
+}
+
+// TestPadCodeUsesDisplayWidthNotRuneCount asserts a wide (2-cell) CJK rune
+// is padded/truncated by its actual terminal width, not counted as one
+// rune — a rune-counting pad would under-pad a CJK line by one column per
+// wide character and silently misalign every row after it.
+func TestPadCodeUsesDisplayWidthNotRuneCount(t *testing.T) {
+	// "汉字" is 2 runes but 4 terminal columns.
+	got := padCode("汉字", 6)
+	if got != "汉字  " {
+		t.Errorf("padCode(%q, 6) = %q, want %q (2 trailing spaces, not 4)", "汉字", got, "汉字  ")
 	}
 }
 
