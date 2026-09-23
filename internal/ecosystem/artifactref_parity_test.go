@@ -1,7 +1,11 @@
 package ecosystem
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -143,5 +147,106 @@ func TestNewLocalArtifactRefMatchesFileCheapShape(t *testing.T) {
 		if string(gotJSON) != string(wantJSON) {
 			t.Errorf("field %q = %s, want %s", k, gotJSON, wantJSON)
 		}
+	}
+}
+
+// artifactRefCorpusDir is the pinned file.cheap conformance corpus subset
+// (fcheap-local provider only); see testdata/artifact-ref/v1/README.md for
+// the pinned commit, checksums, and why cloud/link fixtures are excluded.
+const artifactRefCorpusDir = "testdata/artifact-ref/v1"
+
+// TestArtifactRefV1CorpusChecksumsMatch guards the copied fixtures against
+// silent drift: editing a fixture without updating CHECKSUMS.sha256 (in a
+// reviewed diff) fails the build instead of quietly changing what the
+// parity tests below actually exercise.
+func TestArtifactRefV1CorpusChecksumsMatch(t *testing.T) {
+	manifestPath := filepath.Join(artifactRefCorpusDir, "CHECKSUMS.sha256")
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(manifest)), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("%s is empty", manifestPath)
+	}
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			t.Fatalf("malformed line in %s: %q", manifestPath, line)
+		}
+		wantHash, rel := fields[0], fields[1]
+		data, err := os.ReadFile(filepath.Join(artifactRefCorpusDir, rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != wantHash {
+			t.Errorf("%s hash changed: got %s, want %s (update CHECKSUMS.sha256 deliberately if this fixture change is intentional)", rel, got, wantHash)
+		}
+	}
+}
+
+func artifactRefCorpusFiles(t *testing.T, sub string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(artifactRefCorpusDir, sub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) == 0 {
+		t.Fatalf("no fixtures found under %s/%s", artifactRefCorpusDir, sub)
+	}
+	return names
+}
+
+// TestArtifactRefV1CorpusAcceptsValidFcheapLocalFixtures runs every valid
+// fcheap-local fixture from file.cheap's own conformance corpus through
+// monitor's independently-duplicated decodeArtifactRef + Validate, per the
+// roadmap's done-when: a real parity test against that corpus, not just one
+// hand-generated fixture.
+func TestArtifactRefV1CorpusAcceptsValidFcheapLocalFixtures(t *testing.T) {
+	for _, name := range artifactRefCorpusFiles(t, "valid") {
+		t.Run(name, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(artifactRefCorpusDir, "valid", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref, err := decodeArtifactRef(data)
+			if err != nil {
+				t.Fatalf("decodeArtifactRef: %v", err)
+			}
+			if err := ref.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+		})
+	}
+}
+
+// TestArtifactRefV1CorpusRejectsInvalidFcheapLocalFixtures mirrors the
+// negative half of the same corpus: each fixture must be rejected either at
+// decode (e.g. an unknown field under DisallowUnknownFields) or at Validate.
+func TestArtifactRefV1CorpusRejectsInvalidFcheapLocalFixtures(t *testing.T) {
+	for _, name := range artifactRefCorpusFiles(t, "invalid") {
+		t.Run(name, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(artifactRefCorpusDir, "invalid", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref, decodeErr := decodeArtifactRef(data)
+			if decodeErr != nil {
+				return // rejected at decode: still a pass, just earlier
+			}
+			if err := ref.Validate(); err == nil {
+				t.Fatalf("expected rejection, got a validated ref %+v", ref)
+			}
+		})
 	}
 }
