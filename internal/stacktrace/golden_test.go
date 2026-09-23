@@ -58,7 +58,7 @@ var goldenCases = []struct {
 		`gopanic/go fatal unhandled panic: go-pprof workload: intentional uncaught failure at t=40.0s @main.main@main.go:90(1)`,
 	}},
 	{"dogfood/go-zap-stdout.stdout.txt", []string{
-		`zap/go error handled "request failed" @main.doWork@main.go:61(4) [2026-09-23T01:31:07.777Z]`,
+		`zap/go error handled "request failed" @main.(*worker).doWork@main.go:67(4) [2026-09-23T04:56:02.367Z]`,
 	}},
 	{"dogfood/node-inspect.stderr.txt", []string{
 		`js/node error handled Error: flakyParse: malformed payload near token "bad-payl" @flakyParse@workload.js:31(4)`,

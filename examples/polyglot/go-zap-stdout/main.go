@@ -1,13 +1,15 @@
 // Command go-zap-stdout emulates, with plain fmt (no zap or pkg/errors
-// dependency), the two things internal/stacktrace's zap.go parser needs to
-// recognize: a zap console-encoder error line ("<ts>\terror\t<msg>\t<json>")
-// and a pkg/errors-style "%+v" stack dump, both to stdout -- matching how
-// Graphite's own services are configured (ErrorOutputPaths: [stdout]).
+// dependency), what internal/stacktrace's zap.go parser needs to recognize
+// in a Go service whose logger writes everything to stdout
+// (ErrorOutputPaths: [stdout]): a zap development-console error entry
+// ("<ISO8601 ts>\tERROR\t<caller>\t<msg>\t<json fields>") followed by the
+// error's pkg/errors-style "%+v" stack dump.
 package main
 
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"runtime"
 	"time"
 )
@@ -57,15 +59,26 @@ func (e *tracedError) Format(s fmt.State, verb rune) {
 	io.WriteString(s, e.msg)
 }
 
-func doWork() error {
-	return newTracedError("root cause boom") // the call site the golden test expects as the top frame
+// worker has a pointer-receiver method so the trace carries a
+// "main.(*worker).doWork" frame, the shape real services print most.
+type worker struct{ name string }
+
+func (w *worker) doWork() error {
+	return newTracedError("root cause boom") // the call site the golden test expects as the crash frame
+}
+
+// caller renders zap's short caller column ("dir/file.go:line").
+func caller() string {
+	_, file, line, _ := runtime.Caller(1)
+	return fmt.Sprintf("%s/%s:%d", filepath.Base(filepath.Dir(file)), filepath.Base(file), line)
 }
 
 func main() {
 	fmt.Println("[go-zap-stdout] starting")
-	err := doWork()
+	w := &worker{name: "sync"}
+	err := w.doWork()
 
-	ts := time.Now().UTC().Format(time.RFC3339Nano)
-	fmt.Printf("%s\terror\trequest failed\t{\"error\":%q,\"request_id\":\"abc123\"}\n", ts, err.Error())
+	ts := time.Now().Format("2006-01-02T15:04:05.000Z0700")
+	fmt.Printf("%s\tERROR\t%s\trequest failed\t{\"error\": %q, \"request_id\": \"abc123\"}\n", ts, caller(), err.Error())
 	fmt.Printf("%+v\n", err)
 }
