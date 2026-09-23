@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -40,14 +41,57 @@ func ScanBinary(ctx context.Context, name string) BinaryInfo {
 		return info
 	}
 	info.Available = true
-	info.Path = info.AllPaths[0]
+	// Path comes from exec.LookPath, the same resolution an unqualified
+	// invocation of Name would actually use, so it agrees with the
+	// top-level ToolStatus.path other consumers already read — rather than
+	// just assuming AllPaths[0] (scanPathEntries walks $PATH directly and
+	// can diverge from LookPath's own rules, e.g. ErrDot on a relative PATH
+	// entry).
+	resolved, err := exec.LookPath(name)
+	if err != nil {
+		resolved = info.AllPaths[0]
+	}
+	info.Path = resolved
 	info.Version = shortBinaryVersion(ctx, info.Path)
-	if len(info.AllPaths) > 1 {
+	if others := distinctOtherFiles(info.Path, info.AllPaths); len(others) > 0 {
 		info.Shadowed = true
 		info.Warning = fmt.Sprintf("%s resolves to %s; also found on PATH at %s",
-			name, info.Path, strings.Join(info.AllPaths[1:], ", "))
+			name, info.Path, strings.Join(others, ", "))
 	}
 	return info
+}
+
+// distinctOtherFiles returns the entries of allPaths that refer to a
+// genuinely different underlying file than path — resolving symlinks on
+// both sides — deduplicated by that same file identity. Without this, the
+// same physical binary reached through a symlinked PATH directory (e.g.
+// ~/.local/bin -> ~/go/bin) or a symlinked binary is reported as a
+// "shadowing" duplicate, which tells a user to go remove a duplicate that
+// doesn't exist.
+func distinctOtherFiles(path string, allPaths []string) []string {
+	seen := map[string]bool{resolvedFileKey(path): true}
+	var others []string
+	for _, p := range allPaths {
+		key := resolvedFileKey(p)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		others = append(others, p)
+	}
+	return others
+}
+
+// resolvedFileKey is a best-effort identity for a file path: the
+// symlink-resolved absolute path when that succeeds, or the path itself
+// (compared as text) when it doesn't — e.g. the file no longer exists
+// between the scan and this check, which is harmless: it just falls back to
+// the same textual comparison scanPathEntries already used.
+func resolvedFileKey(path string) string {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		return real
+	}
+	return path
 }
 
 // scanPathEntries walks $PATH once (in order, de-duplicating repeated
