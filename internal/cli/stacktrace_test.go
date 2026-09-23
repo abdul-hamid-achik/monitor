@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/abdul-hamid-achik/monitor/internal/issues"
 )
 
 const cliPyTrace = "Traceback (most recent call last):\n" +
@@ -290,5 +292,191 @@ func TestStacktraceParseLiveStdinEmitsOnIdle(t *testing.T) {
 	}
 	if evs := decodeEvents(t, out.String()); len(evs) != 1 {
 		t.Fatalf("got %d events, want exactly 1 (no duplicate at EOF)", len(evs))
+	}
+}
+
+// recordEnv isolates one --record test: a fresh $XDG_STATE_HOME (so the
+// checkpoint never touches the real developer machine's state dir) and a
+// fresh MONITOR_ISSUES_STORE (so it never touches a real local issue
+// store), returning the store path for direct inspection with
+// issues.OpenReadOnly.
+func recordEnv(t *testing.T) string {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	store := filepath.Join(t.TempDir(), "issues.veclite")
+	t.Setenv("MONITOR_ISSUES_STORE", store)
+	return store
+}
+
+func runRecord(t *testing.T, args ...string) string {
+	t.Helper()
+	cmd := newStacktraceParseCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs(args)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute(%v): %v", args, err)
+	}
+	return out.String()
+}
+
+func openIssuesForTest(t *testing.T, storePath string) *issues.Store {
+	t.Helper()
+	store, err := issues.OpenReadOnly(storePath)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+func TestStacktraceRecordRequiresFile(t *testing.T) {
+	recordEnv(t)
+	cmd := newStacktraceParseCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--record"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--record requires --file") {
+		t.Fatalf("Execute: got %v, want an error naming --file", err)
+	}
+}
+
+func TestStacktraceRecordWritesOccurrenceAndSummary(t *testing.T) {
+	store := recordEnv(t)
+	path := filepath.Join(t.TempDir(), "app.log")
+	content := "Error: flakyParse: boom\n    at flakyParse (/repo/app/workload.js:31:11)\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	out := runRecord(t, "--record", "--file", path, "--project", "acme", "--root", "/repo")
+	if !strings.Contains(out, "1 new blocks") || !strings.Contains(out, "1 occurrences written") {
+		t.Fatalf("summary = %q, want 1 new block and 1 occurrence written", out)
+	}
+
+	db := openIssuesForTest(t, store)
+	list, err := db.List(issues.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("got %d issues, want 1: %+v", len(list), list)
+	}
+	if list[0].OccurrenceCount != 1 {
+		t.Errorf("occurrence_count = %d, want 1", list[0].OccurrenceCount)
+	}
+	if list[0].Project != "acme" {
+		t.Errorf("project = %q, want acme", list[0].Project)
+	}
+	if list[0].Culprit == nil || list[0].Culprit.File != "app/workload.js" || list[0].Culprit.Line != 31 {
+		t.Errorf("culprit = %+v, want app/workload.js:31", list[0].Culprit)
+	}
+}
+
+func TestStacktraceRecordSecondRunIsIdempotent(t *testing.T) {
+	store := recordEnv(t)
+	path := filepath.Join(t.TempDir(), "app.log")
+	content := "Error: flakyParse: boom\n    at flakyParse (/repo/app/workload.js:31:11)\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	first := runRecord(t, "--record", "--file", path, "--project", "acme")
+	if !strings.Contains(first, "1 occurrences written") {
+		t.Fatalf("first run summary = %q, want 1 occurrence written", first)
+	}
+
+	second := runRecord(t, "--record", "--file", path, "--project", "acme")
+	if !strings.Contains(second, "0 new blocks") || !strings.Contains(second, "0 occurrences written") {
+		t.Fatalf("second run summary = %q, want 0 new blocks and 0 occurrences written (checkpoint should skip already-read bytes)", second)
+	}
+
+	db := openIssuesForTest(t, store)
+	list, err := db.List(issues.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].OccurrenceCount != 1 {
+		t.Fatalf("issues = %+v, want exactly 1 issue with occurrence_count 1 (replay must not inflate counts)", list)
+	}
+}
+
+func TestStacktraceRecordFromStartDoesNotDuplicateViaDedupeKey(t *testing.T) {
+	store := recordEnv(t)
+	path := filepath.Join(t.TempDir(), "app.log")
+	content := "Error: flakyParse: boom\n    at flakyParse (/repo/app/workload.js:31:11)\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	runRecord(t, "--record", "--file", path, "--project", "acme")
+	// --from-start ignores the checkpoint and re-reads the identical bytes
+	// from 0; the reprocess DedupeKey (inode+path+offset+block hash) must
+	// still catch that this is the exact same raw event and dedupe it,
+	// rather than the checkpoint being the only thing keeping counts
+	// stable.
+	runRecord(t, "--record", "--file", path, "--project", "acme", "--from-start")
+
+	db := openIssuesForTest(t, store)
+	list, err := db.List(issues.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].OccurrenceCount != 1 {
+		t.Fatalf("issues = %+v, want exactly 1 issue with occurrence_count 1 (DedupeKey must catch the --from-start replay)", list)
+	}
+}
+
+func TestStacktraceRecordObservedAtFallsBackToFileMtimeNeverNow(t *testing.T) {
+	store := recordEnv(t)
+	path := filepath.Join(t.TempDir(), "app.log")
+	content := "Error: flakyParse: boom\n    at flakyParse (/repo/app/workload.js:31:11)\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	// Backdate the fixture's mtime well away from "now" so a bug that
+	// falls back to time.Now() instead of the file's mtime is caught by a
+	// wide margin rather than a flaky few-millisecond race.
+	old := time.Now().Add(-6 * time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	runRecord(t, "--record", "--file", path, "--project", "acme")
+
+	db := openIssuesForTest(t, store)
+	list, err := db.List(issues.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("got %d issues, want 1", len(list))
+	}
+	if diff := list[0].LastSeen.Sub(old); diff < -2*time.Second || diff > 2*time.Second {
+		t.Errorf("last_seen = %v, want close to the file mtime %v (not time.Now())", list[0].LastSeen, old)
+	}
+}
+
+func TestStacktraceRecordScrubsSecretEnvValues(t *testing.T) {
+	store := recordEnv(t)
+	t.Setenv("FAKE_API_TOKEN", "sekrit-value-1234")
+	path := filepath.Join(t.TempDir(), "app.log")
+	content := "Error: upstream rejected sekrit-value-1234 for /widgets\n    at flakyParse (/repo/app/workload.js:31:11)\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	runRecord(t, "--record", "--file", path, "--project", "acme")
+
+	db := openIssuesForTest(t, store)
+	list, err := db.List(issues.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("got %d issues, want 1", len(list))
+	}
+	if strings.Contains(list[0].Message, "sekrit-value-1234") {
+		t.Errorf("message = %q, secret env value must be redacted before persisting", list[0].Message)
 	}
 }

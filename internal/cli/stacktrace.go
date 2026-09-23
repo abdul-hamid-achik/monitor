@@ -2,6 +2,9 @@ package cli
 
 import (
 	"bufio"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +15,10 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/abdul-hamid-achik/monitor/internal/contextids"
+	"github.com/abdul-hamid-achik/monitor/internal/issues"
+	"github.com/abdul-hamid-achik/monitor/internal/project"
+	"github.com/abdul-hamid-achik/monitor/internal/scrub"
 	"github.com/abdul-hamid-achik/monitor/internal/stacktrace"
 )
 
@@ -48,11 +55,12 @@ func newStacktraceCmd() *cobra.Command {
 
 func newStacktraceParseCmd() *cobra.Command {
 	var (
-		file      string
-		project   string
-		service   string
-		root      string
-		fromStart bool
+		file        string
+		projectFlag string
+		service     string
+		root        string
+		fromStart   bool
+		record      bool
 	)
 	cmd := &cobra.Command{
 		Use:   "parse",
@@ -70,15 +78,54 @@ absolute path. Lines longer than 64 KiB are truncated, never fatal. On
 stdin, a trace is printed once its stream has been idle for 300ms, so
 a live pipe does not have to reach EOF.
 
-This is detection only: nothing is written to the issues store. That
-is --record, added once internal/issues carries the exception model
-(FingerprintV2Exception, ExceptionInfo, Culprit) this command's output
-is meant to feed.`,
+Detection only by default: nothing is written to the issues store. With
+--record, every detected exception is instead recorded into the issues
+store (FingerprintV2Exception, ExceptionInfo, Culprit -- the same
+pipeline internal/issues.RecordException uses), and reprocessing is
+idempotent: a per-file checkpoint at $XDG_STATE_HOME/monitor/parse/
+<sha256(abspath)>.json tracks {inode, size, offset} so re-running
+--record over a log that has not grown past its checkpoint replays
+nothing (--from-start ignores the checkpoint and replays the whole
+file; a DedupeKey derived from the file's inode, path, and each
+block's byte offset also protects a --from-start replay against
+double-counting). ObservedAt for a recorded occurrence is the log
+line's own timestamp when one could be read, else the file's mtime --
+never the current time, so replaying an old log never bumps an issue's
+last_seen to "now".`,
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			rootDir := "."
+			if file != "" {
+				rootDir = filepath.Dir(file)
+			}
+			gitRoot := root
+			if gitRoot == "" {
+				gitRoot, _ = findGitRoot(rootDir)
+			}
+			if gitRoot == "" && rootDir != "." {
+				gitRoot, _ = findGitRoot(".")
+			}
+
+			if record {
+				if file == "" {
+					return errors.New("--record requires --file")
+				}
+				storePath, err := issues.ResolvePath("")
+				if err != nil {
+					return err
+				}
+				return runStacktraceRecord(cmd.Context(), cmd.OutOrStdout(), stacktraceRecordOptions{
+					file:      file,
+					project:   projectFlag,
+					service:   service,
+					gitRoot:   gitRoot,
+					fromStart: fromStart,
+					storePath: storePath,
+				})
+			}
+
 			var r io.Reader = cmd.InOrStdin()
 			live := true
-			rootDir := "."
 			if file != "" {
 				f, err := os.Open(file)
 				if err != nil {
@@ -87,24 +134,9 @@ is meant to feed.`,
 				defer f.Close()
 				r = f
 				live = false
-				rootDir = filepath.Dir(file)
-			}
-			// --from-start is accepted for forward compatibility with
-			// --record's checkpoint resume (a file position saved under
-			// $XDG_STATE_HOME/monitor/parse/<sha(path)>.json); this build
-			// has no checkpoint to resume from, so parse always reads its
-			// input from the start regardless of this flag's value.
-			_ = fromStart
-
-			gitRoot := root
-			if gitRoot == "" {
-				gitRoot, _ = findGitRoot(rootDir)
-			}
-			if gitRoot == "" && rootDir != "." {
-				gitRoot, _ = findGitRoot(".")
 			}
 			return runStacktraceParse(r, cmd.OutOrStdout(), stacktraceParseOptions{
-				project: project,
+				project: projectFlag,
 				service: service,
 				gitRoot: gitRoot,
 				live:    live,
@@ -113,11 +145,13 @@ is meant to feed.`,
 		},
 	}
 	cmd.Flags().StringVar(&file, "file", "", "path to read (default: stdin)")
-	cmd.Flags().StringVar(&project, "project", "", "project tag to stamp on each emitted event")
+	cmd.Flags().StringVar(&projectFlag, "project", "", "project tag to stamp on each emitted event")
 	cmd.Flags().StringVar(&service, "service", "", "service tag to stamp on each emitted event")
 	cmd.Flags().StringVar(&root, "root", "", "git root for in_app and relative filenames (default: discovered)")
+	cmd.Flags().BoolVar(&record, "record", false,
+		"record detected exceptions into the issues store (idempotent via a per-file checkpoint; requires --file)")
 	cmd.Flags().BoolVar(&fromStart, "from-start", false,
-		"reserved for --record's checkpoint resume (not implemented in this build; parse always reads from the start)")
+		"with --record, ignore the saved checkpoint and replay the whole file from byte 0 (no effect without --record, which always reads from the start)")
 	return cmd
 }
 
@@ -282,5 +316,230 @@ func findGitRoot(start string) (string, bool) {
 			return "", false
 		}
 		dir = parent
+	}
+}
+
+// fileReplayPIDHint is a nonzero sentinel passed as project.Hints.PID for
+// `stacktrace parse --record`: Resolve treats PID<=0 as "a host-wide event
+// with no process attached" and skips the git-root/marker walk entirely in
+// favor of project "host" (see project.Hints.PID's doc comment) -- but a log
+// FILE always has a real directory to walk even though there is no live
+// process behind a replay. The value is never stored anywhere; Identity
+// carries no PID field, so this only steers Resolve's own precedence rules.
+const fileReplayPIDHint int32 = 1
+
+// stacktraceRecordOptions configures one `stacktrace parse --record` run.
+type stacktraceRecordOptions struct {
+	file, project, service, gitRoot string
+	fromStart                       bool
+	storePath                       string
+}
+
+// recordSummary is --record's one-line human summary (the roadmap's Act-1
+// demo mockup: "parsed 1,204 lines · 0 new blocks (checkpoint at offset
+// 88,412 · inode 4410) · 0 occurrences written").
+type recordSummary struct {
+	LinesParsed        int    `json:"lines_parsed"`
+	NewBlocks          int    `json:"new_blocks"`
+	OccurrencesWritten int    `json:"occurrences_written"`
+	CheckpointOffset   int64  `json:"checkpoint_offset"`
+	CheckpointInode    uint64 `json:"checkpoint_inode"`
+}
+
+func (s recordSummary) String() string {
+	return fmt.Sprintf("parsed %d lines · %d new blocks (checkpoint at offset %d · inode %d) · %d occurrences written",
+		s.LinesParsed, s.NewBlocks, s.CheckpointOffset, s.CheckpointInode, s.OccurrencesWritten)
+}
+
+// runStacktraceRecord reads opts.file from its checkpointed byte offset (or
+// from 0 with --from-start), detects exceptions exactly like the plain
+// parse path, and records each one via issues.RecordException. It always
+// advances and saves the checkpoint to wherever reading stopped -- even
+// when nothing new was found -- so a clean log's checkpoint still tracks
+// the file's growth.
+func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecordOptions) error {
+	absPath, err := filepath.Abs(opts.file)
+	if err != nil {
+		return fmt.Errorf("resolve %s: %w", opts.file, err)
+	}
+	f, err := os.Open(absPath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", opts.file, err)
+	}
+	defer f.Close()
+
+	inode, size, err := stacktrace.StatInode(f)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", opts.file, err)
+	}
+	mtime := time.Now()
+	if info, statErr := f.Stat(); statErr == nil {
+		mtime = info.ModTime()
+	}
+
+	start, cp := stacktrace.ResolveOffset(absPath, inode, size, opts.fromStart)
+	if start > 0 {
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			return fmt.Errorf("seek %s: %w", opts.file, err)
+		}
+	}
+
+	id := project.Resolve(project.Hints{
+		ExplicitProject: opts.project,
+		ExplicitService: opts.service,
+		Dir:             filepath.Dir(absPath),
+		PID:             fileReplayPIDHint,
+	})
+	if opts.gitRoot != "" {
+		id.GitRoot = opts.gitRoot
+		id.Root = opts.gitRoot
+	}
+	run := contextids.FromEnv(contextids.IDs{})
+	scrubber := scrub.New(scrub.WithValues(scrub.SecretEnvValues(os.Environ(), nil)))
+
+	j := stacktrace.NewJoiner()
+	lr := newCheckpointLineReader(f, stacktrace.DefaultMaxBytes)
+
+	offset := start
+	// lineOffsets[n] is the byte offset of the n-th line fed to j this run
+	// (1-based, matching Block.LineStart/LineEnd) -- index 0 is unused.
+	lineOffsets := []int64{0}
+	summary := recordSummary{CheckpointInode: inode}
+
+	process := func(blocks []stacktrace.Block) error {
+		for _, b := range blocks {
+			summary.NewBlocks++
+			ex := stacktrace.Parse(b)
+			if ex == nil {
+				continue
+			}
+			blockOffset := int64(0)
+			if b.LineStart > 0 && b.LineStart < len(lineOffsets) {
+				blockOffset = lineOffsets[b.LineStart]
+			}
+			if err := recordParsedException(ctx, opts.storePath, absPath, inode, blockOffset, b, ex, id, run, scrubber, mtime); err != nil {
+				return err
+			}
+			summary.OccurrencesWritten++
+		}
+		return nil
+	}
+
+	base := time.Unix(0, 0)
+	n := 0
+	for {
+		line, consumed, rerr := lr.next()
+		if rerr != nil {
+			if ferr := process(j.Flush()); ferr != nil {
+				return ferr
+			}
+			if rerr != io.EOF {
+				return fmt.Errorf("read %s: %w", opts.file, rerr)
+			}
+			break
+		}
+		n++
+		summary.LinesParsed++
+		lineOffsets = append(lineOffsets, offset)
+		offset += consumed
+		if err := process(j.Feed(line, base.Add(time.Duration(n)*time.Microsecond))); err != nil {
+			return err
+		}
+	}
+
+	cp.Offset = offset
+	if err := stacktrace.SaveCheckpoint(absPath, cp); err != nil {
+		return fmt.Errorf("save checkpoint: %w", err)
+	}
+	summary.CheckpointOffset = cp.Offset
+
+	fmt.Fprintln(w, summary.String())
+	return nil
+}
+
+// recordParsedException applies the git root, scrubs the exception's text,
+// derives ObservedAt and the reprocess DedupeKey (docs/contracts/
+// local-sentry-naming.md §4-5), and writes one occurrence via
+// issues.RecordException.
+func recordParsedException(ctx context.Context, storePath, absPath string, inode uint64, blockOffset int64, block stacktrace.Block, ex *stacktrace.Exception, id project.Identity, run contextids.IDs, scrubber *scrub.Scrubber, mtime time.Time) error {
+	stacktrace.ApplyGitRoot(ex, id.GitRoot)
+	scrubException(scrubber, ex)
+
+	observedAt := ex.ObservedAt
+	if observedAt.IsZero() {
+		observedAt = mtime
+	}
+
+	dedupeSeed := fmt.Sprintf("%d:%s:%d:%s", inode, absPath, blockOffset, stacktrace.HashBlock(block.Text()))
+	sum := sha256.Sum256([]byte(dedupeSeed))
+
+	_, err := issues.RecordException(ctx, storePath, issues.DefaultWriterWait, *ex, id, run, issues.RecordExceptionOptions{
+		ObservedAt: observedAt,
+		DedupeKey:  hex.EncodeToString(sum[:]),
+	})
+	return err
+}
+
+// scrubException redacts ex's Type/Value and every frame's Function text,
+// recursively through Chained, using scrubber -- the golden rule that error
+// text is untrusted data and must be redacted before it is persisted or
+// printed (docs/contracts/local-sentry-naming.md's "Scrub por defecto").
+// Filename/AbsPath are left alone: they are resolved, checked paths (see
+// stacktrace.ApplyGitRoot), not attacker- or user-controlled message text.
+func scrubException(scrubber *scrub.Scrubber, ex *stacktrace.Exception) {
+	if ex == nil {
+		return
+	}
+	ex.Type = scrubber.String(ex.Type)
+	ex.Value = scrubber.String(ex.Value)
+	for i := range ex.Frames {
+		ex.Frames[i].Function = scrubber.String(ex.Frames[i].Function)
+	}
+	for i := range ex.Chained {
+		scrubException(scrubber, &ex.Chained[i])
+	}
+}
+
+// checkpointLineReader is lineReader's --record sibling: it additionally
+// reports the exact number of raw bytes consumed from the underlying reader
+// for each line (including any line terminator), which --record needs to
+// advance the checkpoint's byte offset precisely. Using len(line)+1 instead
+// would silently drift on CRLF input and on a line long enough to be
+// truncated (the underlying reader still consumes the full raw chunk even
+// though the returned line is capped at max).
+type checkpointLineReader struct {
+	br  *bufio.Reader
+	max int
+	err error
+}
+
+func newCheckpointLineReader(r io.Reader, max int) *checkpointLineReader {
+	return &checkpointLineReader{br: bufio.NewReaderSize(r, 64*1024), max: max}
+}
+
+// next returns the next line (EOL stripped), the exact number of raw bytes
+// consumed for it, and any read error. A final line with no trailing
+// newline is returned (with its own byte count) before the reader's error.
+func (r *checkpointLineReader) next() (line string, consumed int64, err error) {
+	if r.err != nil {
+		return "", 0, r.err
+	}
+	var buf []byte
+	for {
+		chunk, rerr := r.br.ReadSlice('\n')
+		consumed += int64(len(chunk))
+		if room := r.max - len(buf); room > 0 {
+			buf = append(buf, chunk[:min(len(chunk), room)]...)
+		}
+		if errors.Is(rerr, bufio.ErrBufferFull) {
+			continue
+		}
+		if rerr != nil {
+			r.err = rerr
+			if len(chunk) == 0 && len(buf) == 0 {
+				return "", consumed, rerr
+			}
+		}
+		return string(trimEOL(buf)), consumed, nil
 	}
 }
