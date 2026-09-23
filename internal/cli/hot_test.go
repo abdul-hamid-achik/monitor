@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -573,27 +574,63 @@ func TestProfilerSourceFromCaptureCDPText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, err := profilerSourceFromCapture(profiler.Profile{Type: profiler.ProfileCPU, Method: "inspector_cpu", Text: string(raw)})
+	src, cleanup, err := profilerSourceFromCapture(profiler.Profile{Type: profiler.ProfileCPU, Method: "inspector_cpu", Text: string(raw)})
 	if err != nil {
 		t.Fatalf("profilerSourceFromCapture: %v", err)
 	}
+	defer cleanup()
 	if src.Kind != profiler.SourceCDP {
 		t.Errorf("Kind = %q, want cdp", src.Kind)
 	}
 }
 
-func TestProfilerSourceFromCapturePprofPath(t *testing.T) {
-	src, err := profilerSourceFromCapture(profiler.Profile{Type: profiler.ProfileHeap, Method: "pprof_heap", Path: writeFakePprofCPU(t)})
+// TestProfilerSourceFromCaptureCDPTextCleanupRunsAfterCallerIsDone is the
+// --export regression: the staged temp file backing a Text-sourced (CDP)
+// capture must still exist when the CALLER is done with src (e.g. having
+// just used src.Path for --export), and only actually disappear once the
+// caller itself invokes the returned cleanup func — not the instant
+// profilerSourceFromCapture itself returns.
+func TestProfilerSourceFromCaptureCDPTextCleanupRunsAfterCallerIsDone(t *testing.T) {
+	raw, err := os.ReadFile(v8HotFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, cleanup, err := profilerSourceFromCapture(profiler.Profile{Type: profiler.ProfileCPU, Method: "inspector_cpu", Text: string(raw)})
 	if err != nil {
 		t.Fatalf("profilerSourceFromCapture: %v", err)
 	}
+	if _, statErr := os.Stat(src.Path); statErr != nil {
+		t.Fatalf("staged temp file must still exist before cleanup runs: %v", statErr)
+	}
+	cleanup()
+	if _, statErr := os.Stat(src.Path); statErr == nil {
+		t.Errorf("staged temp file %s should be removed once cleanup runs", src.Path)
+	}
+}
+
+func TestProfilerSourceFromCapturePprofPath(t *testing.T) {
+	src, cleanup, err := profilerSourceFromCapture(profiler.Profile{Type: profiler.ProfileHeap, Method: "pprof_heap", Path: writeFakePprofCPU(t)})
+	if err != nil {
+		t.Fatalf("profilerSourceFromCapture: %v", err)
+	}
+	defer cleanup()
 	if src.Kind != profiler.SourcePprof {
 		t.Errorf("Kind = %q, want pprof", src.Kind)
+	}
+	// The Path branch's cleanup is a no-op: that file belongs to the
+	// caller's own discardTempProfilePath, not this function.
+	if _, statErr := os.Stat(src.Path); statErr != nil {
+		t.Fatalf("Path-sourced file should still exist: %v", statErr)
+	}
+	cleanup()
+	if _, statErr := os.Stat(src.Path); statErr != nil {
+		t.Errorf("Path-sourced file must survive profilerSourceFromCapture's own cleanup (a no-op): %v", statErr)
 	}
 }
 
 func TestProfilerSourceFromCaptureNoEvidenceErrors(t *testing.T) {
-	_, err := profilerSourceFromCapture(profiler.Profile{Type: profiler.ProfileSample, Method: "sample"})
+	_, cleanup, err := profilerSourceFromCapture(profiler.Profile{Type: profiler.ProfileSample, Method: "sample"})
+	cleanup()
 	if err == nil {
 		t.Fatal("expected an error for a capture with neither Path nor Text")
 	}
@@ -725,7 +762,7 @@ func TestApplyIssueOverlayMarksMatchingLine(t *testing.T) {
 		{Name: "processBatch", File: "/repo/examples/polyglot/js/workload.js", StartLine: 24, EndLine: 27,
 			Lines: []profiler.HeatLine{{Line: 25}}},
 	}}
-	if warn := applyIssueOverlay(hm); warn != "" {
+	if warn := applyIssueOverlay(hm, "polyglot"); warn != "" {
 		t.Fatalf("applyIssueOverlay returned an unexpected degradation: %q", warn)
 	}
 
@@ -764,8 +801,134 @@ func TestApplyIssueOverlayNoStoreYetIsNotADegradation(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(issues.StorePathEnv, filepath.Join(dir, "does-not-exist.veclite"))
 	hm := &profiler.Heatmap{Functions: []profiler.HeatFunction{{Name: "f", File: "a.go", Lines: []profiler.HeatLine{{Line: 1}}}}}
-	if warn := applyIssueOverlay(hm); warn != "" {
+	if warn := applyIssueOverlay(hm, "local"); warn != "" {
 		t.Errorf("applyIssueOverlay = %q, want \"\" when no store has ever been written", warn)
+	}
+}
+
+// TestApplyIssueOverlayIgnoresOtherProjectsCulprit is the E3.4
+// cross-project regression: a root-relative culprit path shape many
+// projects share (here "ov2.js:5") must not be stamped onto a DIFFERENT
+// project's identically-named file just because the issues store happens
+// to hold both.
+func TestApplyIssueOverlayIgnoresOtherProjectsCulprit(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "issues.veclite")
+	t.Setenv(issues.StorePathEnv, storePath)
+
+	store, err := issues.OpenStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertOccurrenceResult(issues.OccurrenceInput{
+		ObservedAt: time.Now(), Project: "otherproj", Kind: issues.KindException,
+		Title: "Error: boom", ExceptionType: "Error",
+		Culprit: &issues.Culprit{Function: "work", File: "ov2.js", Line: 5, Source: "stack"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if closeErr := store.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+
+	hm := &profiler.Heatmap{Functions: []profiler.HeatFunction{
+		{Name: "work", File: "/scratch/myproj/ov2.js", StartLine: 3, EndLine: 6,
+			Lines: []profiler.HeatLine{{Line: 5}}},
+	}}
+	if warn := applyIssueOverlay(hm, "myproj"); warn != "" {
+		t.Fatalf("applyIssueOverlay returned an unexpected degradation: %q", warn)
+	}
+	if got := hm.Functions[0].Lines[0].Issues; len(got) != 0 {
+		t.Errorf("expected no overlay for a different project's issue, got %+v", got)
+	}
+
+	// Sanity: the SAME store, filtered by the issue's OWN project, does
+	// overlay — proving the negative result above is the project filter at
+	// work, not some other bug hiding a real match.
+	hm2 := &profiler.Heatmap{Functions: []profiler.HeatFunction{
+		{Name: "work", File: "/scratch/otherproj/ov2.js", StartLine: 3, EndLine: 6,
+			Lines: []profiler.HeatLine{{Line: 5}}},
+	}}
+	if warn := applyIssueOverlay(hm2, "otherproj"); warn != "" {
+		t.Fatalf("applyIssueOverlay returned an unexpected degradation: %q", warn)
+	}
+	if got := hm2.Functions[0].Lines[0].Issues; len(got) != 1 {
+		t.Fatalf("expected exactly one overlay for the matching project, got %+v", got)
+	}
+}
+
+// TestApplyIssueOverlayInsertsZeroWeightLineForUnsampledCulprit is the E3.4
+// review regression: a throw/return culprit line inside a partially-sampled
+// function (RangeSource "observed", whose range is only the min/max of
+// whatever lines HAPPENED to be sampled) must still get an E marker even
+// when that exact line carries zero samples of its own — the roadmap's own
+// "6. Errores × calor" mockup shows exactly this (line 31, 0.4% self, still
+// marked).
+func TestApplyIssueOverlayInsertsZeroWeightLineForUnsampledCulprit(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "issues.veclite")
+	t.Setenv(issues.StorePathEnv, storePath)
+
+	src := filepath.Join(dir, "ov.js")
+	if err := os.WriteFile(src, []byte("function work(x) {\n  const y = x * 2;\n  loop(y);\n  return check(y) ? y : boom(y);\n}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := issues.OpenStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := store.UpsertOccurrenceResult(issues.OccurrenceInput{
+		ObservedAt: time.Now(), Project: "ovproj", Kind: issues.KindException,
+		Title: "Error: boom", ExceptionType: "Error",
+		Culprit: &issues.Culprit{Function: "work", File: "ov.js", Line: 4, Source: "stack"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closeErr := store.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+
+	// Only line 3 was ever sampled -- the observed range collapses to
+	// [3,3], well short of the real function body (lines 1-5) and short of
+	// the culprit at line 4.
+	hm := &profiler.Heatmap{Functions: []profiler.HeatFunction{
+		{Name: "work", File: src, StartLine: 3, EndLine: 3, RangeSource: "observed",
+			Lines: []profiler.HeatLine{{Line: 3, Self: 100, PctOfFunction: 100}}},
+	}}
+	if warn := applyIssueOverlay(hm, "ovproj"); warn != "" {
+		t.Fatalf("applyIssueOverlay returned an unexpected degradation: %q", warn)
+	}
+
+	f := hm.Functions[0]
+	var line4 *profiler.HeatLine
+	for i := range f.Lines {
+		if f.Lines[i].Line == 4 {
+			line4 = &f.Lines[i]
+		}
+	}
+	if line4 == nil {
+		t.Fatalf("expected a zero-weight HeatLine inserted at line 4, got %+v", f.Lines)
+	}
+	if len(line4.Issues) != 1 || line4.Issues[0].ShortID != issueShortID(res.Issue.ID) {
+		t.Errorf("line 4 Issues = %+v, want exactly the recorded issue", line4.Issues)
+	}
+	if line4.Self != 0 || line4.Cum != 0 {
+		t.Errorf("inserted line must carry zero weight, got Self=%d Cum=%d", line4.Self, line4.Cum)
+	}
+	if line4.Code == "" {
+		t.Errorf("inserted line should still carry its source snippet, got empty Code")
+	}
+	if f.EndLine < 4 {
+		t.Errorf("EndLine should widen to include the culprit line, got %d", f.EndLine)
+	}
+	// Lines must stay sorted ascending -- every other Heatmap consumer
+	// (CodeFrame, --json) assumes this.
+	for i := 1; i < len(f.Lines); i++ {
+		if f.Lines[i].Line < f.Lines[i-1].Line {
+			t.Errorf("Lines out of order: %+v", f.Lines)
+		}
 	}
 }
 
@@ -829,7 +992,11 @@ func TestRunHotPIDLiveNodeInspectorNamesHotLine(t *testing.T) {
 		t.Fatalf("monitor hot %d: %v", pid, err)
 	}
 	text := out.String()
-	if !strings.HasPrefix(text, "monitor > node pid") {
+	// The header may or may not carry the optional "<name> = " clause
+	// (hotLiveTargetName, from binding.MainScript) ahead of "node pid" —
+	// either way it must start with "monitor > " and name the runtime+pid.
+	firstLine := strings.SplitN(text, "\n", 2)[0]
+	if !strings.HasPrefix(firstLine, "monitor > ") || !strings.Contains(firstLine, "node pid") {
 		t.Errorf("output missing the live header line:\n%s", text)
 	}
 	if !strings.Contains(text, "> 17 |") && !strings.Contains(text, ">  17 |") {
@@ -958,5 +1125,178 @@ func attemptHotGoHeap(t *testing.T, goBin, dir string) (string, error) {
 			return "", fmt.Errorf("monitor hot %d --type heap: %w", root, runErr)
 		}
 		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// TestRunHotPIDRefusesHeapForJSRuntime is the review regression for
+// `monitor hot <node pid> --type heap`: it must refuse BEFORE ever
+// attempting a CDP capture (never pausing the isolate for a heap snapshot
+// `hot` can't render anyway), with an error naming a command that can
+// actually work.
+func TestRunHotPIDRefusesHeapForJSRuntime(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH")
+	}
+	workload, err := filepath.Abs(filepath.Join("..", "..", "examples", "polyglot", "js", "workload.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(workload); statErr != nil {
+		t.Skipf("workload fixture not found at %s", workload)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a free port: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	cmd := exec.Command(nodeBin, "--jitless", "--inspect="+addr, workload)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start node: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+	pid := cmd.Process.Pid
+
+	deadline := time.Now().Add(10 * time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		if conn, dialErr := net.DialTimeout("tcp", addr, 200*time.Millisecond); dialErr == nil {
+			_ = conn.Close()
+			ready = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatalf("node inspector never came up on %s", addr)
+	}
+
+	start := time.Now()
+	hotCmd := newHotCmd()
+	hotCmd.SetOut(&bytes.Buffer{})
+	hotCmd.SetErr(&bytes.Buffer{})
+	hotCmd.SetArgs([]string{fmt.Sprintf("%d", pid), "--type", "heap"})
+	runErr := hotCmd.Execute()
+	elapsed := time.Since(start)
+
+	if runErr == nil {
+		t.Fatal("expected monitor hot <node pid> --type heap to refuse, got nil error")
+	}
+	if !strings.Contains(runErr.Error(), "needs a Go pprof target") {
+		t.Errorf("error = %q, want it to explain heap needs a Go pprof target", runErr.Error())
+	}
+	if !strings.Contains(runErr.Error(), "monitor profile") {
+		t.Errorf("error = %q, want a recovery naming `monitor profile <pid> -t heap`", runErr.Error())
+	}
+	// The whole point of refusing BEFORE capture: this must return almost
+	// immediately, never block for anywhere near defaultInspectorHeapTimeout
+	// (20s) taking a CDP heap snapshot it would just throw away.
+	if elapsed > 5*time.Second {
+		t.Errorf("refusal took %s, want well under defaultInspectorHeapTimeout (20s) — it must never attempt the capture", elapsed)
+	}
+}
+
+// testPython3Bin resolves a REAL python3 interpreter for a live test to
+// spawn, skipping the test when none is found. `python3` resolved via
+// exec.LookPath alone can land on an asdf shim that exits immediately with
+// "No version is set" rather than a real interpreter (verified on this
+// dev machine) — a version-manager quirk unrelated to anything this test
+// exercises — so an asdf-installed interpreter is tried first when
+// present, falling back to plain PATH resolution (the shape a provisioned
+// CI runner, with no asdf shim in play, actually has).
+func testPython3Bin(t *testing.T) string {
+	t.Helper()
+	if home, err := os.UserHomeDir(); err == nil {
+		matches, _ := filepath.Glob(filepath.Join(home, ".asdf", "installs", "python", "*", "bin", "python3"))
+		for _, m := range matches {
+			if fi, statErr := os.Stat(m); statErr == nil && !fi.IsDir() {
+				return m
+			}
+		}
+	}
+	bin, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not on PATH")
+	}
+	return bin
+}
+
+// TestRunHotPIDDarwinSampleFallbackForNonJSTarget is E3.2/AC-1's own
+// "darwin sample fallback" regression: a target with no working CDP or
+// pprof capture path at all — a plain Python process, exactly the "no
+// probe, no pprof endpoint" case the review reproduced live — still gets a
+// real, honestly function-level-only answer on macOS instead of the
+// pprof-endpoint dead end. procbind.ResolveLeaf only ever resolves a
+// RECOGNIZED runtime leaf (node/bun/deno/go/python/ruby — see
+// isSupportedLeafRuntime), so this uses a real `python3` process rather
+// than an arbitrary unrecognized binary, which ResolveLeaf would refuse
+// before `hot` ever got a chance to fall back.
+func TestRunHotPIDDarwinSampleFallbackForNonJSTarget(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin sample fallback only applies on macOS")
+	}
+	if _, err := exec.LookPath("sample"); err != nil {
+		t.Skip("sample not on PATH")
+	}
+	pythonBin := testPython3Bin(t)
+	// A tight busy loop, not time.sleep: `sample` only ever captures ACTIVE
+	// (non-idle) frames from whatever the target is doing DURING its
+	// roughly 1s window (see internal/profiler/sample_parse.go's own idle
+	// bucketing) — a genuinely sleeping process legitimately produces zero
+	// active samples, which would make BuildHeatmapFromSample refuse for a
+	// real reason unrelated to what this test is actually checking.
+	cmd := exec.Command(pythonBin, "-c", "x = 0\nwhile True:\n    x += 1\n")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start python3: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+	pid := cmd.Process.Pid
+
+	hotCmd := newHotCmd()
+	hotCmd.SetErr(&bytes.Buffer{})
+	hotCmd.SetArgs([]string{fmt.Sprintf("%d", pid), "--json"})
+
+	// --json always writes via WriteJSON, straight to os.Stdout (not
+	// cmd.OutOrStdout()) — the same convention TestHotFileJSONOutputIsLineHeatmapV1
+	// already captures this way.
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	runErr := hotCmd.Execute()
+	_ = w.Close()
+	raw, _ := io.ReadAll(r)
+	os.Stdout = oldStdout
+	if runErr != nil {
+		t.Fatalf("monitor hot %d: %v", pid, runErr)
+	}
+
+	var hm profiler.Heatmap
+	if err := json.Unmarshal(raw, &hm); err != nil {
+		t.Fatalf("output is not valid line_heatmap JSON: %v\n%s", err, raw)
+	}
+	if hm.Method != profiler.MethodDarwinSample {
+		t.Errorf("Method = %q, want %q", hm.Method, profiler.MethodDarwinSample)
+	}
+	found := false
+	for _, w := range hm.Warnings {
+		if strings.Contains(w, "function-level only") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Warnings = %v, want the function-level-only disclosure", hm.Warnings)
 	}
 }

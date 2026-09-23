@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/procbind"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
+	"github.com/abdul-hamid-achik/monitor/internal/project"
 	"github.com/abdul-hamid-achik/monitor/internal/widgets"
 )
 
@@ -92,7 +95,8 @@ resolving the real runtime leaf process under it (skipping a shell/yarn/npm/
 			if funcName != "" && !hasHeatFunction(hm, funcName) {
 				return fmt.Errorf("function %q not found in %s", funcName, file)
 			}
-			if warn := applyIssueOverlay(hm); warn != "" {
+			projectSlug := resolveHeatProjectSlug(filepath.Dir(file), "")
+			if warn := applyIssueOverlay(hm, projectSlug); warn != "" {
 				hm.Warnings = append(hm.Warnings, warn)
 			}
 
@@ -152,36 +156,90 @@ func runHotPID(cmd *cobra.Command, pid int32, funcName, ptypeFlag, export, pprof
 		return fmt.Errorf("monitor hot %d: %w", pid, err)
 	}
 
+	// heap/heap-alloc/goroutine need per-line detail only a Go pprof proto
+	// carries. A Node/Deno/Bun leaf would otherwise reach
+	// captureRuntimeAwareProfile's allowInspectorHeap=true branch, which
+	// pauses the ISOLATE for up to defaultInspectorHeapTimeout taking a full
+	// CDP heap snapshot `hot` can never render anyway (its wire shape has no
+	// file:line at all — see profilerSourceFromCapture) — a guaranteed-
+	// useless pause, which the roadmap's golden rules ("no pausar isolates",
+	// "ningún proceso monitoreado se frena") forbid outright. Refusing
+	// BEFORE any capture is attempted, with a recovery that names a command
+	// that actually works, is both faster and honest.
+	if heatType != profiler.HeatCPU && isJSRuntime(binding.Runtime) {
+		return fmt.Errorf("monitor hot %d: --type %s needs a Go pprof target; %s has no per-line heap/goroutine detail here — "+
+			"use `monitor profile %d -t heap` (function-level only) instead", pid, ptypeFlag, binding.Runtime, pid)
+	}
+
 	addrExplicit := cmd.Flags().Changed("pprof-addr")
-	prof, method, step := captureRuntimeAwareProfile(ctx, binding.PID, &binding, heatTypeToProfileType(heatType), pprofAddr, "", addrExplicit, duration, true)
+	// allowInspectorHeap is always false: the guard above already refused
+	// every case that flag exists for (an explicit heap/goroutine request
+	// against a JS runtime), so `hot` itself never needs a CDP heap
+	// snapshot — only monitor_profile_capture type:heap (an explicit,
+	// caller-requested capture with its OWN function-level rendering) does.
+	prof, method, step := captureRuntimeAwareProfile(ctx, binding.PID, &binding, heatTypeToProfileType(heatType), pprofAddr, "", addrExplicit, duration, false)
+	sampleFallback := false
 	if step.Status != stepOK {
-		msg := step.Limitation
-		if step.Recovery != "" {
-			msg = fmt.Sprintf("%s (%s)", msg, step.Recovery)
+		// E3.2/AC-1's darwin `sample` fallback: any non-JS leaf (Python,
+		// Ruby, an unlinked Go binary, or any target whose pprof endpoint
+		// isn't owned/explicit) with no working CPU capture path still gets
+		// a real, honestly function-level-only answer on macOS instead of a
+		// dead end that recommends a --type value `hot` doesn't accept.
+		// Never attempted for --type heap/heap-alloc/goroutine (sample has
+		// no such columns) or for a JS runtime (already handled, with its
+		// own clear recovery, above).
+		if heatType == profiler.HeatCPU && runtime.GOOS == "darwin" && !isJSRuntime(binding.Runtime) {
+			if sampleProf, _, sampleStep := captureRuntimeAwareProfile(ctx, binding.PID, &binding, profiler.ProfileSample, pprofAddr, "", addrExplicit, duration, false); sampleStep.Status == stepOK {
+				prof, method, step = sampleProf, "sample", sampleStep
+				sampleFallback = true
+			}
 		}
-		return fmt.Errorf("%s", msg)
+		if step.Status != stepOK {
+			msg := step.Limitation
+			if step.Recovery != "" {
+				msg = fmt.Sprintf("%s (%s)", msg, step.Recovery)
+			}
+			return fmt.Errorf("%s", msg)
+		}
 	}
 	defer discardTempProfilePath(&prof)
 
-	src, err := profilerSourceFromCapture(prof)
-	if err != nil {
-		return fmt.Errorf("monitor hot %d: %w", pid, err)
-	}
+	var hm *profiler.Heatmap
+	var src *profiler.Source
+	if sampleFallback {
+		hm, err = profiler.BuildHeatmapFromSample(ctx, prof, profiler.HeatOptions{
+			Func: funcName, Top: top, Runtime: string(binding.Runtime),
+		})
+		if err != nil {
+			return fmt.Errorf("monitor hot %d: %w", pid, err)
+		}
+	} else {
+		var cleanup func()
+		src, cleanup, err = profilerSourceFromCapture(prof)
+		if err != nil {
+			return fmt.Errorf("monitor hot %d: %w", pid, err)
+		}
+		defer cleanup()
 
-	hm, err := profiler.BuildHeatmap(ctx, src, profiler.HeatOptions{
-		Func: funcName, Top: top, ProfileType: heatType, Runtime: string(binding.Runtime),
-	})
-	if err != nil {
-		return err
+		hm, err = profiler.BuildHeatmap(ctx, src, profiler.HeatOptions{
+			Func: funcName, Top: top, ProfileType: heatType, Runtime: string(binding.Runtime),
+		})
+		if err != nil {
+			return err
+		}
 	}
 	if funcName != "" && !hasHeatFunction(hm, funcName) {
 		return fmt.Errorf("function %q not found in pid %d", funcName, pid)
 	}
-	if warn := applyIssueOverlay(hm); warn != "" {
+	projectSlug := resolveHeatProjectSlug(firstNonEmpty(binding.CodebaseRoot, binding.Cwd), binding.Name)
+	if warn := applyIssueOverlay(hm, projectSlug); warn != "" {
 		hm.Warnings = append(hm.Warnings, warn)
 	}
 
 	if export != "" {
+		if src == nil && !strings.HasSuffix(strings.ToLower(export), ".json") {
+			return fmt.Errorf("--export %s is not available for a macOS sample capture (function-level only; no raw profile bytes to save) — export the JSON heatmap instead (--export out.json)", export)
+		}
 		if err := exportHot(src, hm, export); err != nil {
 			return err
 		}
@@ -193,8 +251,53 @@ func runHotPID(cmd *cobra.Command, pid int32, funcName, ptypeFlag, export, pprof
 	}
 
 	header := hotLiveHeaderLine(ctx, pid, binding, method, pprofAddr, heatType, duration)
-	next := fmt.Sprintf("monitor hot %d", pid)
+	next := hotLiveNextHint(pid, ptypeFlag, pprofAddr, duration, addrExplicit, cmd.Flags().Changed("duration"))
 	return renderHotLiveHuman(cmd.OutOrStdout(), header, hm, funcName, next)
+}
+
+// isJSRuntime reports whether r is one of the runtimes captureRuntimeAwareProfile
+// routes through the CDP inspector (Node/Deno) or refuses honestly (Bun) —
+// the runtimes `hot`'s heap/goroutine guard and its darwin `sample` fallback
+// both need to recognize, so neither path applies to a plain pprof/Go
+// target.
+func isJSRuntime(r procbind.Runtime) bool {
+	return r == procbind.RuntimeNode || r == procbind.RuntimeBun || r == procbind.RuntimeDeno
+}
+
+// resolveHeatProjectSlug resolves the project identity E3.4's issues
+// overlay scopes its store lookup to (see applyIssueOverlay), from
+// whatever directory hint is on hand: a live pid's own resolved codebase
+// root/cwd (runHotPID), or a --file target's containing directory (newHotCmd's
+// RunE). PID is passed as 1, never the real subject pid: project.Resolve's
+// PID field only ever gates its own "PID<=0 means a host-wide event with no
+// process attached" short-circuit (see internal/project's doc comment) — a
+// real value here would ask Resolve to skip straight to project "host",
+// which is wrong for both callers (a live process and a saved profile file
+// both describe real, on-disk code, never a PID-less system alert).
+func resolveHeatProjectSlug(dir, processName string) string {
+	return project.Resolve(project.Hints{Dir: dir, ProcessName: processName, PID: 1}).Slug
+}
+
+// hotLiveNextHint builds the pid-mode "next" line's base command: the
+// non-default flags this exact invocation actually used (--pprof-addr only
+// when the caller passed it explicitly, --type/--duration only when they
+// differ from hot's own defaults), so a person copy-pasting it gets a
+// command that can succeed again instead of silently reverting to cpu/5s/
+// localhost:6060 — which fails outright for a Go target profiled through an
+// explicit --pprof-addr, and silently changes type for a heap/goroutine
+// capture.
+func hotLiveNextHint(pid int32, ptypeFlag, pprofAddr string, duration time.Duration, pprofAddrExplicit, durationExplicit bool) string {
+	next := fmt.Sprintf("monitor hot %d", pid)
+	if pprofAddrExplicit && pprofAddr != "" {
+		next += " --pprof-addr " + pprofAddr
+	}
+	if ptypeFlag != "" && ptypeFlag != "cpu" {
+		next += " --type " + ptypeFlag
+	}
+	if durationExplicit {
+		next += " --duration " + duration.String()
+	}
+	return next
 }
 
 // heatTypeToProfileType maps monitor hot's own --type (HeatProfileType,
@@ -227,47 +330,66 @@ func heatTypeToProfileType(t profiler.HeatProfileType) profiler.ProfileType {
 // different wire shape LoadFile was never built to parse) — has no
 // line-level detail to build a heatmap from, and this returns an error
 // naming why rather than fabricating an empty heatmap.
-func profilerSourceFromCapture(prof profiler.Profile) (*profiler.Source, error) {
+// profilerSourceFromCapture also returns a cleanup func the caller must
+// defer AFTER it is done reading src — including any --export, which needs
+// src.Path to still exist. The Path branch's cleanup is a no-op (that file
+// is captureRuntimeAwareProfile's own temp artifact, already owned by the
+// caller's separate discardTempProfilePath); the Text branch's cleanup
+// removes the private temp file this function itself staged. Returning it
+// instead of removing the file internally (this function's previous shape)
+// fixes a real bug: a caller that reads src AFTER this function returns —
+// exportHot, for a live CDP capture — used to find the staged file already
+// gone, because the removal ran the moment THIS function returned rather
+// than when the caller was actually done with it.
+func profilerSourceFromCapture(prof profiler.Profile) (*profiler.Source, func(), error) {
+	noop := func() {}
 	if prof.Path != "" {
 		src, err := profiler.LoadFile(prof.Path)
 		if err != nil {
-			return nil, fmt.Errorf("this %s capture (method %s) has no line-level detail to build a heatmap from: %w", prof.Type, prof.Method, err)
+			return nil, noop, fmt.Errorf("this %s capture (method %s) has no line-level detail to build a heatmap from: %w", prof.Type, prof.Method, err)
 		}
-		return src, nil
+		return src, noop, nil
 	}
 	if prof.Text != "" {
 		f, err := os.CreateTemp("", "monitor-hot-live-*.cpuprofile")
 		if err != nil {
-			return nil, fmt.Errorf("stage captured profile: %w", err)
+			return nil, noop, fmt.Errorf("stage captured profile: %w", err)
 		}
 		path := f.Name()
-		defer os.Remove(path)
+		cleanup := func() { _ = os.Remove(path) }
 		if _, werr := f.WriteString(prof.Text); werr != nil {
 			_ = f.Close()
-			return nil, fmt.Errorf("stage captured profile: %w", werr)
+			cleanup()
+			return nil, noop, fmt.Errorf("stage captured profile: %w", werr)
 		}
 		if cerr := f.Close(); cerr != nil {
-			return nil, fmt.Errorf("stage captured profile: %w", cerr)
+			cleanup()
+			return nil, noop, fmt.Errorf("stage captured profile: %w", cerr)
 		}
 		src, err := profiler.LoadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("this %s capture (method %s) has no line-level detail to build a heatmap from: %w", prof.Type, prof.Method, err)
+			cleanup()
+			return nil, noop, fmt.Errorf("this %s capture (method %s) has no line-level detail to build a heatmap from: %w", prof.Type, prof.Method, err)
 		}
-		return src, nil
+		return src, cleanup, nil
 	}
-	return nil, fmt.Errorf("this %s capture (method %s) carries no file:line detail to build a heatmap from", prof.Type, prof.Method)
+	return nil, noop, fmt.Errorf("this %s capture (method %s) carries no file:line detail to build a heatmap from", prof.Type, prof.Method)
 }
 
 // hotLiveHeaderLine renders monitor hot's live-capture banner — the roadmap
 // mockup's "monitor > <name> = <runtime> pid <N> (child of <wrapper> <M>) ·
 // inspector <addr> · sampling <duration>" (section 5), minus the launch
-// registry's own --name (service mode, a later wave): the leaf's own
-// runtime+pid stands in for <name>. When the resolved leaf differs from the
-// requested pid (a wrapper was skipped), the original process is looked up
-// ONCE more (a single Inspect call, not a full process-table walk) purely
-// for its name; any failure there just omits the name rather than the whole
-// clause, since ResolveLeaf itself already proved a real wrapper was
-// skipped.
+// registry's own --name (service mode, a later wave): when the leaf's
+// MainScript is known, its basename stands in for <name> (the "workload"
+// in "workload = node pid ..."), matching a person's own mental model of
+// "which script" better than repeating the runtime+pid that already follow
+// the "="; omitted entirely (no "<name> = ") when MainScript is unknown,
+// which also keeps every pre-existing caller/test that never set it
+// unchanged. When the resolved leaf differs from the requested pid (a
+// wrapper was skipped), the original process is looked up ONCE more (a
+// single Inspect call, not a full process-table walk) purely for its name;
+// any failure there just omits the name rather than the whole clause, since
+// ResolveLeaf itself already proved a real wrapper was skipped.
 func hotLiveHeaderLine(ctx context.Context, requestedPID int32, binding procbind.Binding, method, pprofAddr string, heatType profiler.HeatProfileType, duration time.Duration) string {
 	who := fmt.Sprintf("%s pid %d", binding.Runtime, binding.PID)
 	if requestedPID != binding.PID {
@@ -276,6 +398,9 @@ func hotLiveHeaderLine(ctx context.Context, requestedPID int32, binding procbind
 			label = root.Name
 		}
 		who += fmt.Sprintf(" (child of %s %d)", label, requestedPID)
+	}
+	if name := hotLiveTargetName(binding); name != "" {
+		who = name + " = " + who
 	}
 	parts := []string{"monitor > " + who}
 	switch {
@@ -289,13 +414,37 @@ func hotLiveHeaderLine(ctx context.Context, requestedPID int32, binding procbind
 			addr = profiler.DefaultPprofAddr
 		}
 		parts = append(parts, "pprof "+addr)
+	case method == "sample":
+		parts = append(parts, "macOS sample")
 	}
-	if heatType == profiler.HeatCPU {
+	switch {
+	case method == "sample":
+		// captureSample always runs a fixed `sample <pid> 1`, ignoring the
+		// caller's own --duration entirely (see internal/profiler/sample_darwin.go)
+		// — showing the REQUESTED duration here would be honestly wrong.
+		parts = append(parts, "sampling 1s")
+	case heatType == profiler.HeatCPU:
 		parts = append(parts, "sampling "+duration.String())
-	} else {
+	default:
 		parts = append(parts, "instant snapshot")
 	}
 	return strings.Join(parts, " · ")
+}
+
+// hotLiveTargetName derives the roadmap mockup's "<name>" element from
+// binding.MainScript (e.g. "workload.js" -> "workload") — the closest
+// stand-in this wave has for a real launch-registry --name (a later wave;
+// see runHotPID's own doc comment): the interpreter name (binding.Name,
+// e.g. "node") is already shown via "<runtime> pid <N>" and would only
+// repeat itself. "" when MainScript is unknown (a Go binary, or a leaf
+// procbind couldn't resolve a main script for), so the caller can omit the
+// whole "<name> = " clause rather than print an empty one.
+func hotLiveTargetName(binding procbind.Binding) string {
+	if binding.MainScript == "" {
+		return ""
+	}
+	base := filepath.Base(binding.MainScript)
+	return strings.TrimSuffix(base, filepath.Ext(base))
 }
 
 // parseHotType maps --type to a HeatProfileType. "heap" (the common case:
@@ -385,11 +534,55 @@ func renderHotHuman(w io.Writer, path string, hm *profiler.Heatmap, wantFunc str
 
 // renderHotLiveHuman is runHotPID's (E3.2) renderer: header already carries
 // the roadmap's "monitor > <name> = ..." live-capture banner (see
-// hotLiveHeaderLine), everything after it is the same renderHeatBody
-// --file mode uses.
+// hotLiveHeaderLine); this adds the mockup's own SECOND line — "CPU 5.0s ·
+// 4,871 samples · active 64% (idle 36% excluded) ... method: ..." — the
+// same samples/duration/active-idle-gc/method summary --file mode's
+// hotHeaderLine prints, so a thin, 2-sample live capture doesn't look
+// identical to a solid one just because it's read from a live pid instead
+// of a saved file. Everything after that is the same renderHeatBody --file
+// mode uses.
 func renderHotLiveHuman(w io.Writer, header string, hm *profiler.Heatmap, wantFunc, next string) error {
 	fmt.Fprintln(w, header)
+	fmt.Fprintf(w, "%s      method: %s\n", hotLiveSummaryLine(hm), humanMethodLabel(hm.Method))
 	return renderHeatBody(w, hm, wantFunc, next)
+}
+
+// hotLiveSummaryLine mirrors hotHeaderLine's own shape (duration, sample
+// quantity, active/idle clause) for the live <pid> banner's second line —
+// the roadmap mockup's "CPU 5.0s · 4,871 samples · active 64% (idle 36%
+// excluded) ...". It does NOT delegate to hotHeaderLine: that function
+// always follows its lead with a separate "<profile_type>" clause (right
+// for --file mode's "loaded <path> · cpu · ..."), which would just repeat
+// itself here ("CPU · cpu · ..." — the profile-type label IS the lead for
+// a live capture, there is no separate "loaded" clause to attach it to).
+func hotLiveSummaryLine(hm *profiler.Heatmap) string {
+	parts := []string{hotProfileTypeLabel(hm.ProfileType)}
+	if hm.CaptureDurationNanos > 0 && hm.Unit != "nanoseconds" {
+		parts = append(parts, time.Duration(hm.CaptureDurationNanos).String())
+	}
+	parts = append(parts, formatHeatQuantity(hm.Samples, hm.Unit))
+	if clause := hotActiveClause(hm); clause != "" {
+		parts = append(parts, clause)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// hotProfileTypeLabel renders a HeatProfileType the way a person reads it
+// at the head of hotHeaderLine's summary line, mirroring humanMethodLabel's
+// own human-facing (not raw-enum) style.
+func hotProfileTypeLabel(t profiler.HeatProfileType) string {
+	switch t {
+	case profiler.HeatCPU:
+		return "CPU"
+	case profiler.HeatHeapInuse:
+		return "HEAP (inuse)"
+	case profiler.HeatHeapAlloc:
+		return "HEAP (alloc)"
+	case profiler.HeatGoroutine:
+		return "GOROUTINE"
+	default:
+		return strings.ToUpper(string(t))
+	}
 }
 
 // renderHeatBody prints the shared part of `monitor hot`'s human output —
@@ -406,11 +599,16 @@ func renderHotLiveHuman(w io.Writer, header string, hm *profiler.Heatmap, wantFu
 // for any runtime) right after the warning that explains why.
 func renderHeatBody(w io.Writer, hm *profiler.Heatmap, wantFunc, next string) error {
 	for _, warn := range hm.Warnings {
-		fmt.Fprintf(w, "! %s\n", warn)
 		if warn == "mostly idle: slowness is off-CPU" {
-			fmt.Fprintln(w, "  this process is mostly idle, so its slowness is off-CPU (I/O, locks, awaits).")
+			// The mockup's own single combined line ("7. Go: CPU y heap
+			// desde el proto de pprof"), not the raw hm.Warnings string
+			// followed by a near-duplicate restatement of the same
+			// sentence — see the E3.5 review evidence.
+			fmt.Fprintln(w, "! CPU heat only: this process is mostly idle, so its slowness is off-CPU (I/O, locks, awaits).")
 			fmt.Fprintln(w, "  Go: monitor hot <pid> --type goroutine   ·   any runtime: monitor issues --since 10m (timeouts?)")
+			continue
 		}
+		fmt.Fprintf(w, "! %s\n", warn)
 	}
 
 	if len(hm.Functions) == 0 {
@@ -537,6 +735,8 @@ func humanMethodLabel(m profiler.HeatMethod) string {
 		return "v8 (no positionTicks; declaration-line fallback)"
 	case profiler.MethodPprofProto:
 		return "pprof proto (inlining-aware; no go toolchain needed)"
+	case profiler.MethodDarwinSample:
+		return "macOS sample (function-level only; no per-line detail)"
 	default:
 		return string(m)
 	}
@@ -574,10 +774,14 @@ func shellQuote(s string) string {
 // a V8/Bun .cpuprofile — never the same hint for both formats, which a
 // person can't actually open a pprof proto in.
 func exportViewerHint(m profiler.HeatMethod) string {
-	if m == profiler.MethodPprofProto {
+	switch m {
+	case profiler.MethodPprofProto:
 		return "go tool pprof"
+	case profiler.MethodDarwinSample:
+		return "jq / a text editor"
+	default:
+		return "Chrome DevTools / VS Code"
 	}
-	return "Chrome DevTools / VS Code"
 }
 
 // formatHeatQuantity renders Heatmap.Samples in a unit-appropriate,
@@ -648,10 +852,17 @@ func nextFuncSuggestion(fns []profiler.HeatFunction, shown string) string {
 }
 
 func hotExportExt(method profiler.HeatMethod) string {
-	if method == profiler.MethodPprofProto {
+	switch method {
+	case profiler.MethodPprofProto:
 		return ".pb.gz"
+	case profiler.MethodDarwinSample:
+		// The only --export format a sample-fallback capture actually
+		// supports (see runHotPID's own src==nil guard): there is no raw
+		// .cpuprofile/pprof proto to save, only the built heatmap document.
+		return ".json"
+	default:
+		return ".cpuprofile"
 	}
-	return ".cpuprofile"
 }
 
 // codeFrameForFunction adapts one profiler.HeatFunction into a rendered
@@ -715,18 +926,40 @@ func wantColor(w *os.File) bool {
 // local issues store read-only (issues.OpenReadOnly — never blocking, and
 // never blocked by, a writer such as `watch --stash`) and fills each
 // function's HeatLine.Issues with every exception issue whose Culprit lands
-// on that exact line, matched by file (root-relative or absolute; see
-// heatFileMatchesCulprit) and by line falling inside the function's own
-// [StartLine,EndLine] range. heat.Build itself never computes this (see
-// HeatLine.Issues' doc comment in internal/profiler/heat.go) — it lives
-// here, applied once after BuildHeatmap returns, so a heatmap and the
-// issues store never disagree about an issue's current status.
+// on that line, matched by file (root-relative or absolute; see
+// heatFileMatchesCulprit) and scoped to projectSlug (a store commonly holds
+// more than one project's issues; without this, a root-relative culprit
+// like "main.go" or "index.js" — a path shape many unrelated projects
+// share — could get stamped onto the wrong one's identically-named file;
+// see the E3.4 cross-project review finding). heat.Build itself never
+// computes this (see HeatLine.Issues' doc comment in
+// internal/profiler/heat.go) — it lives here, applied once after
+// BuildHeatmap returns, so a heatmap and the issues store never disagree
+// about an issue's current status.
+//
+// A culprit line already sampled (an existing HeatLine at that exact Line)
+// just gets its Issues field appended to. A culprit line that falls inside
+// the function's range but was NEVER sampled (a throw/return statement is
+// rarely CPU-hot even when the function around it is — see the roadmap's
+// own "6. Errores × calor" mockup, whose line 31 carries an E marker with
+// 0.4% self, not zero) gets a new, explicit zero-weight HeatLine inserted
+// (re-sorted back into Line order) instead of silently having nowhere to
+// attach the marker to.
+//
+// The range check itself is widened for a RangeSource "observed" function
+// (no codemap; the range is only the min/max of whatever lines happened to
+// get sampled, almost always narrower than the function's REAL body): a
+// culprit whose own Function name matches this HeatFunction's Name is
+// still accepted even outside [StartLine,EndLine], and — for that specific
+// case only — widens StartLine/EndLine to include it, so the CodeFrame and
+// table both render a coherent range instead of a line that falls
+// "outside" a range that was only ever a lower bound.
 //
 // Returns a Warnings-shaped string describing a REAL degradation (the store
 // exists but couldn't be opened/read); a store that simply doesn't exist
 // yet — the common case before any issue has ever been recorded — is not a
 // degradation and returns "".
-func applyIssueOverlay(hm *profiler.Heatmap) string {
+func applyIssueOverlay(hm *profiler.Heatmap, projectSlug string) string {
 	if hm == nil || len(hm.Functions) == 0 {
 		return ""
 	}
@@ -743,7 +976,7 @@ func applyIssueOverlay(hm *profiler.Heatmap) string {
 	}
 	defer func() { _ = store.Close() }()
 
-	list, err := store.List(issues.ListOptions{Kind: issues.KindException})
+	list, err := store.List(issues.ListOptions{Kind: issues.KindException, Project: projectSlug})
 	if err != nil {
 		return fmt.Sprintf("issues overlay skipped: %s", err.Error())
 	}
@@ -760,22 +993,75 @@ func applyIssueOverlay(hm *profiler.Heatmap) string {
 			if !heatFileMatchesCulprit(f.File, iss.Culprit.File) {
 				continue
 			}
-			if f.StartLine > 0 && (iss.Culprit.Line < f.StartLine || iss.Culprit.Line > f.EndLine) {
+			inRange := f.StartLine > 0 && iss.Culprit.Line >= f.StartLine && iss.Culprit.Line <= f.EndLine
+			sameFuncObservedRange := f.RangeSource == "observed" && f.Name != "" && iss.Culprit.Function == f.Name
+			if !inRange && !sameFuncObservedRange {
 				continue
 			}
+			if sameFuncObservedRange && !inRange {
+				if f.StartLine == 0 || iss.Culprit.Line < f.StartLine {
+					f.StartLine = iss.Culprit.Line
+				}
+				if iss.Culprit.Line > f.EndLine {
+					f.EndLine = iss.Culprit.Line
+				}
+			}
+			entry := profiler.HeatLineIssue{
+				ShortID: issueShortID(iss.ID),
+				Count:   int(iss.OccurrenceCount),
+				Status:  string(iss.Status),
+			}
+			found := false
 			for li := range f.Lines {
 				if f.Lines[li].Line != iss.Culprit.Line {
 					continue
 				}
-				f.Lines[li].Issues = append(f.Lines[li].Issues, profiler.HeatLineIssue{
-					ShortID: issueShortID(iss.ID),
-					Count:   int(iss.OccurrenceCount),
-					Status:  string(iss.Status),
-				})
+				f.Lines[li].Issues = append(f.Lines[li].Issues, entry)
+				found = true
+				break
+			}
+			if !found {
+				newLine := profiler.HeatLine{Line: iss.Culprit.Line, Issues: []profiler.HeatLineIssue{entry}}
+				newLine.Code = readOverlaySourceLine(f.File, iss.Culprit.Line)
+				f.Lines = append(f.Lines, newLine)
+				sort.Slice(f.Lines, func(a, b int) bool { return f.Lines[a].Line < f.Lines[b].Line })
 			}
 		}
 	}
 	return ""
+}
+
+// maxOverlayCodeRunes mirrors internal/profiler/heat.go's own
+// maxHeatLineCodeRunes: a HeatLine this overlay inserts (never read by
+// heat.Build's own readCode, since the line wasn't sampled) still needs the
+// same size cap a sampled line's Code gets, so one pathological source
+// line can't blow past the E3.6 MCP payload budget just because it also
+// happens to be a culprit line.
+const maxOverlayCodeRunes = 240
+
+// readOverlaySourceLine reads exactly one 1-based line from file for a
+// zero-weight HeatLine this overlay inserts (a culprit line heat.Build
+// never sampled, so its own readCode pass never populated Code for it). ""
+// on any read error or out-of-range line — the same honest-degradation
+// rule heat.go's own readCode follows, never a fabricated snippet.
+func readOverlaySourceLine(file string, line int) string {
+	if line <= 0 {
+		return ""
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(data), "\n")
+	if line > len(lines) {
+		return ""
+	}
+	text := lines[line-1]
+	r := []rune(text)
+	if len(r) > maxOverlayCodeRunes {
+		return string(r[:maxOverlayCodeRunes]) + "…"
+	}
+	return text
 }
 
 // heatFileMatchesCulprit reports whether a heatmap function's own File and
