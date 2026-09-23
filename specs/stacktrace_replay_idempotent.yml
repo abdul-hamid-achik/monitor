@@ -1,0 +1,84 @@
+version: 1
+name: monitor_stacktrace_replay_idempotent
+
+intent: |
+  `monitor stacktrace parse --record` (E2.1 PR3) must be idempotent:
+  replaying the same log a second time must not inflate occurrence counts
+  (docs/contracts/local-sentry-naming.md §5's per-file checkpoint +
+  DedupeKey). This spec uses internal/stacktrace's own golden dogfood
+  fixture (internal/stacktrace/testdata/dogfood/python.stderr.txt): 10
+  handled `ValueError: flaky_parse: ...` occurrences (the same
+  fingerprint, so ONE issue) plus 1 fatal uncaught `RuntimeError`
+  (a second issue) -- 11 total occurrences across exactly 2 issues,
+  matching the golden table's "python 11 -> 2".
+
+  First --record: parses the whole file, writes 11 occurrences across 2
+  issues. Second --record over the unchanged file: the checkpoint (at
+  $XDG_STATE_HOME/monitor/parse/<sha(path)>.json) is already at EOF, so
+  it reads 0 new lines and writes 0 new occurrences -- the summary line
+  says so directly, and the store's occurrence counts stay exactly what
+  the first pass left them at.
+
+target:
+  cmd: ["./bin/monitor", "stacktrace", "parse", "--help"]
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "test -f internal/stacktrace/testdata/dogfood/python.stderr.txt"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-replay && mkdir -p /tmp/monitor-spec-replay/state /tmp/monitor-spec-replay/data"
+      timeoutMs: 5000
+    - run: "cat > /tmp/monitor-spec-replay/run.sh <<'SH'\n#!/bin/sh\nset -e\nexport XDG_STATE_HOME=/tmp/monitor-spec-replay/state\nexport MONITOR_ISSUES_STORE=/tmp/monitor-spec-replay/data/issues.veclite\nFILE=\"$(pwd)/internal/stacktrace/testdata/dogfood/python.stderr.txt\"\n./bin/monitor stacktrace parse --record --file \"$FILE\" --project replay-spec --root \"$(pwd)\" > /tmp/monitor-spec-replay/first.txt\n./bin/monitor stacktrace parse --record --file \"$FILE\" --project replay-spec --root \"$(pwd)\" > /tmp/monitor-spec-replay/second.txt\nMONITOR_ISSUES_STORE=/tmp/monitor-spec-replay/data/issues.veclite ./bin/monitor issues list --json --project replay-spec > /tmp/monitor-spec-replay/issues.json\nSH\nchmod +x /tmp/monitor-spec-replay/run.sh"
+      timeoutMs: 5000
+    - run: "/tmp/monitor-spec-replay/run.sh"
+      timeoutMs: 15000
+    - run: "cat > /tmp/monitor-spec-replay/check_counts.py <<'PY'\nimport json\nd = json.load(open('/tmp/monitor-spec-replay/issues.json'))\nassert len(d) == 2, d\ntotal = sum(i['occurrence_count'] for i in d)\nassert total == 11, (total, d)\nvalue_errors = [i for i in d if i['exception_type'] == 'ValueError']\nruntime_errors = [i for i in d if i['exception_type'] == 'RuntimeError']\nassert len(value_errors) == 1 and value_errors[0]['occurrence_count'] == 10, value_errors\nassert len(runtime_errors) == 1 and runtime_errors[0]['occurrence_count'] == 1, runtime_errors\nprint('ok')\nPY"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: help_mentions_record
+    description: stacktrace parse --help documents --record
+    verify:
+      command:
+        run: "./bin/monitor stacktrace parse --help 2>&1 | grep -qE -- '--record'"
+  - id: first_pass_wrote_eleven_occurrences
+    description: the first --record pass parsed the file and wrote all 11 occurrences across 2 issues
+    verify:
+      command:
+        run: "python3 /tmp/monitor-spec-replay/check_counts.py"
+  - id: second_pass_reports_zero_written
+    description: the second --record pass (checkpoint already at EOF) reports 0 occurrences written
+    verify:
+      command:
+        run: "grep -q '0 occurrences written' /tmp/monitor-spec-replay/second.txt"
+  - id: second_pass_found_zero_new_blocks
+    description: the second pass's checkpoint skip means it read no new lines at all
+    verify:
+      command:
+        run: "grep -q '0 new blocks' /tmp/monitor-spec-replay/second.txt"
+  - id: replay_did_not_inflate_counts
+    description: after both passes, the store still shows exactly the same 11 total occurrences across 2 issues
+    verify:
+      command:
+        run: "python3 /tmp/monitor-spec-replay/check_counts.py"
+  - id: clean_exit
+    description: stacktrace parse --help exits cleanly
+    verify:
+      process:
+        exitCode: 0

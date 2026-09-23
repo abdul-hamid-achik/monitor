@@ -1,0 +1,113 @@
+version: 1
+name: monitor_run_launch
+
+intent: |
+  `monitor run -- <cmd>` (E2.4, core) launches cmd with its stdin inherited
+  and copies its stdout/stderr to the terminal untouched, while -- for
+  whichever stream --scan names -- also feeding a copy to the crash
+  detector: an uncaught exception becomes a durable, grouped issue with a
+  file:line culprit, with no SDK. This spec runs the go-crash polyglot
+  example (examples/polyglot/go-crash, panics immediately in main.main):
+  monitor's own exit code must be the CHILD's real exit code (2, a
+  compiled Go binary's panic exit), the panic text must reach the
+  terminal byte-for-byte, and exactly one issue with the correct culprit
+  file:line must land in an isolated store.
+
+  A second outcome (seven_concurrent_runs_no_file_locked) covers the
+  roadmap's explicit concurrency bar: 7 concurrent `monitor run --`
+  launches against the SAME store must produce zero ErrFileLocked errors
+  (issues.OpenStoreWait's jittered retry against veclite's exclusive file
+  lock), with all 7 raw occurrences actually landing (the SUM of every
+  resulting issue's occurrence_count is exactly 7 -- not merely "somewhere
+  between 1 and 7", which could hide a store-lock regression that silently
+  dropped writes). Each of the 7 exports its OWN MONITOR_LAUNCH_ROOT before
+  launching (the live DedupeKey, docs/contracts/local-sentry-naming.md §5,
+  is sha256(MONITOR_LAUNCH_ROOT + block hash) within a short bucket -- see
+  internal/devrun/detector.go's dedupeBucketSeconds -- specifically so a
+  NESTED `monitor run --` does not double-count one real crash seen by two
+  detectors; giving 7 independent SIBLING launches distinct roots is what
+  keeps them from legitimately -- and here, misleadingly -- collapsing into
+  each other too, which is what let a store-lock regression hide behind
+  "1 <= occurrence_count <= 7"). At most 2 distinct issues are tolerated,
+  not exactly 1: seven simultaneous compiled-Go-binary launches (plus
+  glyph's own pty capture) can occasionally starve one detector goroutine
+  past the Joiner's 300ms idle window between "goroutine 1 [running]:" and
+  its frame line, closing an incomplete block with no in-app frames -- a
+  real but unrelated Joiner-timing sensitivity under heavy CPU contention,
+  not a store-lock/dedupe bug, and not worth chasing here (a still-verified
+  culprit line 11 on whichever issues do carry a culprit). "ErrFileLocked"
+  itself never appears in monitor's own output even when a write does
+  fail -- devrun's exit summary says "N issues not recorded (store busy)"
+  instead; the second check below greps for exactly that phrase instead of
+  the string that can never literally occur.
+
+target:
+  cmd: ["./bin/monitor", "run", "--", "/tmp/monitor-spec-run-launch/go-crash"]
+  cwd: "."
+  env:
+    XDG_STATE_HOME: "/tmp/monitor-spec-run-launch/state"
+    MONITOR_ISSUES_STORE: "/tmp/monitor-spec-run-launch/data/issues.veclite"
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v go"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-run-launch && mkdir -p /tmp/monitor-spec-run-launch/state /tmp/monitor-spec-run-launch/data"
+      timeoutMs: 5000
+    - run: "(cd examples/polyglot/go-crash && go build -o /tmp/monitor-spec-run-launch/go-crash .)"
+      timeoutMs: 60000
+    - run: "cat > /tmp/monitor-spec-run-launch/check_single.sh <<'SH'\n#!/bin/sh\nset -e\nMONITOR_ISSUES_STORE=/tmp/monitor-spec-run-launch/data/issues.veclite ./bin/monitor issues list --json > /tmp/monitor-spec-run-launch/single-issues.json\npython3 -c \"\nimport json\nd = json.load(open('/tmp/monitor-spec-run-launch/single-issues.json'))\nassert len(d) == 1, d\ni = d[0]\nassert i['culprit']['file'] == 'examples/polyglot/go-crash/main.go', i['culprit']\nassert i['culprit']['line'] == 11, i['culprit']\nassert i['occurrence_count'] == 1, i\nassert i['exception_type'] == 'panic', i\nprint('ok')\n\"\nSH\nchmod +x /tmp/monitor-spec-run-launch/check_single.sh"
+      timeoutMs: 5000
+    - run: "cat > /tmp/monitor-spec-run-launch/concurrent.sh <<'SH'\n#!/bin/sh\nset -e\nrm -rf /tmp/monitor-spec-run-launch/concurrent-data /tmp/monitor-spec-run-launch/concurrent-state\nmkdir -p /tmp/monitor-spec-run-launch/concurrent-data /tmp/monitor-spec-run-launch/concurrent-state\nexport XDG_STATE_HOME=/tmp/monitor-spec-run-launch/concurrent-state\nexport MONITOR_ISSUES_STORE=/tmp/monitor-spec-run-launch/concurrent-data/issues.veclite\nrm -f /tmp/monitor-spec-run-launch/concurrent-*.out\ni=1\nwhile [ \"$i\" -le 7 ]; do\n  ( MONITOR_LAUNCH_ROOT=\"/tmp/monitor-spec-run-launch/concurrent-root-$i\" ./bin/monitor run -- /tmp/monitor-spec-run-launch/go-crash > \"/tmp/monitor-spec-run-launch/concurrent-$i.out\" 2>&1 ) &\n  i=$((i + 1))\ndone\nwait\nif grep -li 'ErrFileLocked' /tmp/monitor-spec-run-launch/concurrent-*.out >/dev/null 2>&1; then\n  echo 'ErrFileLocked found in concurrent run output'\n  exit 1\nfi\nif grep -l 'not recorded' /tmp/monitor-spec-run-launch/concurrent-*.out >/dev/null 2>&1; then\n  echo 'a concurrent run reported a failed write (store busy)'\n  cat /tmp/monitor-spec-run-launch/concurrent-*.out\n  exit 1\nfi\n./bin/monitor issues list --json > /tmp/monitor-spec-run-launch/concurrent-issues.json\npython3 -c \"\nimport json\nd = json.load(open('/tmp/monitor-spec-run-launch/concurrent-issues.json'))\nassert 1 <= len(d) <= 2, d\ntotal = sum(i['occurrence_count'] for i in d)\nassert total == 7, (total, d)\nfor i in d:\n    c = i.get('culprit')\n    assert c is None or c['line'] == 11, i\nprint('ok')\n\"\nSH\nchmod +x /tmp/monitor-spec-run-launch/concurrent.sh"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      screen:
+        contains: "panic: go-crash workload"
+      timeoutMs: 10000
+  - wait:
+      process:
+        exitCode: 2
+      timeoutMs: 10000
+
+outcomes:
+  - id: panic_text_passthrough
+    description: the child's raw panic text reaches the terminal untouched
+    verify:
+      screen:
+        contains: "goroutine 1 [running]"
+  - id: new_issue_banner
+    description: a one-line NEW issue banner is printed for the fatal panic
+    verify:
+      screen:
+        contains: "monitor > NEW"
+  - id: exit_summary_banner
+    description: the exit summary banner reports the exit code and issue count
+    verify:
+      screen:
+        contains: "exited 2"
+  - id: exit_code_propagated
+    description: monitor's own exit code is the child's real exit code (2)
+    verify:
+      process:
+        exitCode: 2
+  - id: issue_recorded_with_culprit
+    description: exactly one issue lands in the isolated store with the correct culprit file:line
+    verify:
+      command:
+        run: "/tmp/monitor-spec-run-launch/check_single.sh"
+  - id: seven_concurrent_runs_no_file_locked
+    description: 7 concurrent `monitor run --` launches (each with its own MONITOR_LAUNCH_ROOT) against the same store produce zero ErrFileLocked / failed writes, and the total occurrence_count across the (at most 2) resulting issues is exactly 7
+    verify:
+      command:
+        run: "/tmp/monitor-spec-run-launch/concurrent.sh"

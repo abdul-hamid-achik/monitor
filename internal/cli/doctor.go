@@ -242,23 +242,6 @@ func missingRequiredTools(status ecosystem.Status, required []string) []string {
 	return missing
 }
 
-func newRunCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "run <glyphrun-spec>",
-		Short: "Run a glyphrun behavioral spec against monitored services",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			out, err := ecosystem.RunGlyphrun(context.Background(), args[0])
-			if err != nil {
-				return err
-			}
-			fmt.Println(string(out))
-			return nil
-		},
-	}
-	return cmd
-}
-
 // openLogStore opens the writer used by `logs capture`. Search must use
 // logger.OpenReadOnly so it neither creates a database nor contends for the
 // writer lock held by Studio or another capture process.
