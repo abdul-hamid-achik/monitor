@@ -1,0 +1,106 @@
+version: 1
+name: monitor_mcp_profile_capture
+
+intent: |
+  `monitor_profile_capture` over MCP is runtime-aware and, by default,
+  cleans up after itself (E1.7 / bug 10): a `type: cpu` capture against a
+  real Go net/http/pprof target returns `captured:true` with `method:
+  pprof_cpu` and real symbols (`main.heavyStringify`), and the accepted
+  `pprof_addr` input (new in E1.7) lets an agent point the scrape at a
+  non-default port and assert ownership on its own behalf, exactly like the
+  CLI's `--pprof-addr`.
+
+  Payload diet + temp-file cleanup: a `type: heap` capture with no
+  `keep: true` comes back with `profile.text` and `profile.path` BOTH
+  absent, and the on-disk `.pb.gz` file `captureProfilePprof` wrote is
+  deleted (verified via $TMPDIR, since os.CreateTemp on macOS resolves
+  there, not literally /tmp) -- so an agent that calls this tool repeatedly
+  without `keep:true` never accumulates temp files. Passing `keep: true`
+  keeps both the raw `text` and the on-disk `path` around for a human who
+  wants to inspect the capture with `go tool pprof`.
+
+  Uses examples/polyglot/go-pprof (the same fixture profile_go_pprof.yml
+  builds), which self-terminates ~40s after start (see that fixture's
+  main.go) -- every outcome below launches its OWN fresh copy and finishes
+  well inside that window. Assertions on the response are done with
+  python3 -c against the captured JSON-RPC response file (not grep): the
+  MCP envelope's own {"type":"text","text":"..."} content block ALSO has a
+  field literally named "text", so a substring grep for "text" can't tell
+  that apart from profile.text -- only parsing the JSON and checking
+  result.structuredContent.profile can.
+
+target:
+  # preconditions already build /tmp/monitor-spec-mcp-profile/go-pprof; this
+  # just launches it, runs one real monitor_profile_capture round trip over
+  # MCP, and tears the target back down.
+  cmd:
+    [
+      "sh",
+      "-c",
+      "/tmp/monitor-spec-mcp-profile/go-pprof >/tmp/monitor-spec-mcp-profile/target.stderr.log 2>&1 & P=$!; sleep 1; { printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"method\\\":\\\"tools/call\\\",\\\"params\\\":{\\\"name\\\":\\\"monitor_profile_capture\\\",\\\"arguments\\\":{\\\"pid\\\":$P,\\\"type\\\":\\\"cpu\\\",\\\"pprof_addr\\\":\\\"127.0.0.1:6069\\\",\\\"confirm\\\":true}}}\"; sleep 4; } | ./bin/monitor mcp serve 2>&1 | tail -1 > /tmp/monitor-spec-mcp-profile/target.json; kill \"$P\" 2>/dev/null; exit 0",
+    ]
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 80
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v go"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "mkdir -p /tmp/monitor-spec-mcp-profile && (cd examples/polyglot/go-pprof && go build -o /tmp/monitor-spec-mcp-profile/go-pprof .)"
+      timeoutMs: 60000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 20000
+
+outcomes:
+  - id: cpu_capture_returns_real_symbols_via_pprof_addr
+    description: |
+      type:cpu with an explicit pprof_addr (a non-default port) returns
+      captured:true, method pprof_cpu, and main.heavyStringify among the
+      symbols -- the runtime-aware dispatch shared with `monitor profile`
+      and investigate (E1.7).
+    verify:
+      command:
+        timeoutMs: 20000
+        run: "/tmp/monitor-spec-mcp-profile/go-pprof >/tmp/monitor-spec-mcp-profile/cpu.stderr.log 2>&1 & P=$!; sleep 1; { printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"method\\\":\\\"tools/call\\\",\\\"params\\\":{\\\"name\\\":\\\"monitor_profile_capture\\\",\\\"arguments\\\":{\\\"pid\\\":$P,\\\"type\\\":\\\"cpu\\\",\\\"pprof_addr\\\":\\\"127.0.0.1:6069\\\",\\\"confirm\\\":true}}}\"; sleep 4; } | ./bin/monitor mcp serve 2>&1 | tail -1 > /tmp/monitor-spec-mcp-profile/cpu.json; kill \"$P\" 2>/dev/null; python3 -c \"import json;d=json.load(open('/tmp/monitor-spec-mcp-profile/cpu.json'));sc=d['result']['structuredContent'];assert sc.get('captured') is True, sc;p=sc['profile'];assert p.get('method')=='pprof_cpu', p;assert any(s.get('func')=='main.heavyStringify' for s in p.get('symbols',[])), p['symbols']\""
+  - id: heap_capture_default_omits_text_and_path
+    description: |
+      type:heap with no keep field: profile.text and profile.path are both
+      absent from the response (payload diet -- a pprof heap capture's Text
+      is otherwise a human-readable top-N summary, which this omits by
+      default same as CDP/pprof-cpu's raw payload).
+    verify:
+      command:
+        timeoutMs: 20000
+        run: "/tmp/monitor-spec-mcp-profile/go-pprof >/tmp/monitor-spec-mcp-profile/heap1.stderr.log 2>&1 & P=$!; sleep 1; { printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"method\\\":\\\"tools/call\\\",\\\"params\\\":{\\\"name\\\":\\\"monitor_profile_capture\\\",\\\"arguments\\\":{\\\"pid\\\":$P,\\\"type\\\":\\\"heap\\\",\\\"pprof_addr\\\":\\\"127.0.0.1:6069\\\",\\\"confirm\\\":true}}}\"; sleep 4; } | ./bin/monitor mcp serve 2>&1 | tail -1 > /tmp/monitor-spec-mcp-profile/heap1.json; kill \"$P\" 2>/dev/null; python3 -c \"import json;d=json.load(open('/tmp/monitor-spec-mcp-profile/heap1.json'));sc=d['result']['structuredContent'];assert sc.get('captured') is True, sc;p=sc['profile'];assert 'text' not in p, p;assert 'path' not in p, p\""
+  - id: heap_capture_default_leaves_no_temp_file
+    description: |
+      type:heap with no keep field deletes the on-disk .pb.gz
+      captureProfilePprof wrote (checked in the real TMPDIR os.CreateTemp
+      resolves to on macOS, not literally /tmp) -- E1.7's "10 captures leave
+      no temp files" AC, exercised end to end through the real MCP wire.
+    verify:
+      command:
+        timeoutMs: 20000
+        run: "find \"$TMPDIR\" -maxdepth 1 -name \"monitor-heap-*.pb.gz\" -delete 2>/dev/null; /tmp/monitor-spec-mcp-profile/go-pprof >/tmp/monitor-spec-mcp-profile/heap2.stderr.log 2>&1 & P=$!; sleep 1; { printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"method\\\":\\\"tools/call\\\",\\\"params\\\":{\\\"name\\\":\\\"monitor_profile_capture\\\",\\\"arguments\\\":{\\\"pid\\\":$P,\\\"type\\\":\\\"heap\\\",\\\"pprof_addr\\\":\\\"127.0.0.1:6069\\\",\\\"confirm\\\":true}}}\"; sleep 4; } | ./bin/monitor mcp serve 2>&1 | tail -1 > /tmp/monitor-spec-mcp-profile/heap2.json; kill \"$P\" 2>/dev/null; find \"$TMPDIR\" -maxdepth 1 -name \"monitor-heap-*.pb.gz\" > /tmp/monitor-spec-mcp-profile/heap2.leftover.txt; [ ! -s /tmp/monitor-spec-mcp-profile/heap2.leftover.txt ]"
+  - id: heap_capture_keep_true_retains_text_and_path
+    description: |
+      type:heap with keep:true is the opt-out: profile.text AND
+      profile.path both stay populated, and the on-disk file is NOT
+      deleted -- a human explicitly asking to keep the raw artifact still
+      can.
+    verify:
+      command:
+        timeoutMs: 20000
+        run: "find \"$TMPDIR\" -maxdepth 1 -name \"monitor-heap-*.pb.gz\" -delete 2>/dev/null; /tmp/monitor-spec-mcp-profile/go-pprof >/tmp/monitor-spec-mcp-profile/heap3.stderr.log 2>&1 & P=$!; sleep 1; { printf '%s\\n%s\\n%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"probe\",\"version\":\"0.0.1\"}}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}' \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"method\\\":\\\"tools/call\\\",\\\"params\\\":{\\\"name\\\":\\\"monitor_profile_capture\\\",\\\"arguments\\\":{\\\"pid\\\":$P,\\\"type\\\":\\\"heap\\\",\\\"pprof_addr\\\":\\\"127.0.0.1:6069\\\",\\\"keep\\\":true,\\\"confirm\\\":true}}}\"; sleep 4; } | ./bin/monitor mcp serve 2>&1 | tail -1 > /tmp/monitor-spec-mcp-profile/heap3.json; kill \"$P\" 2>/dev/null; python3 -c \"import json;d=json.load(open('/tmp/monitor-spec-mcp-profile/heap3.json'));sc=d['result']['structuredContent'];assert sc.get('captured') is True, sc;p=sc['profile'];assert p.get('text'), p;assert p.get('path'), p\" && [ -n \"$(find \"$TMPDIR\" -maxdepth 1 -name \"monitor-heap-*.pb.gz\" 2>/dev/null)\" ]"
