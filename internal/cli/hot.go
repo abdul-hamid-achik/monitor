@@ -30,9 +30,10 @@ import (
 // saved .cpuprofile or pprof proto); E3.2 adds a numeric <pid> target,
 // resolved to its real runtime leaf process (skipping a shell/yarn/npm/
 // `go run` wrapper) and captured live via the same runtime-aware dispatch
-// `monitor profile` uses. A symbolic <service> name needs the launch
-// registry (a later wave), so it still gets a clear "not yet" error instead
-// of silently doing nothing.
+// `monitor profile` uses. A symbolic <service> name (also E3.2) is looked
+// up in the launch registry a `monitor run --name <service>` invocation
+// wrote and dispatched to runHotService (hot_service.go), which resolves
+// and captures through that same shared pipeline.
 func newHotCmd() *cobra.Command {
 	var file, funcName, ptype, export, pprofAddr, hotProject string
 	var top int
