@@ -344,11 +344,21 @@ type recordSummary struct {
 	OccurrencesWritten int    `json:"occurrences_written"`
 	CheckpointOffset   int64  `json:"checkpoint_offset"`
 	CheckpointInode    uint64 `json:"checkpoint_inode"`
+	// Deduped is how many detected blocks matched an already-retained
+	// DedupeKey (UpsertResult.Deduped) and so were NOT counted in
+	// OccurrencesWritten -- e.g. a --from-start replay of already-seen
+	// bytes. Not part of the roadmap's fixed mockup text, so it is only
+	// appended when non-zero, keeping the common-case line unchanged.
+	Deduped int `json:"deduped,omitempty"`
 }
 
 func (s recordSummary) String() string {
-	return fmt.Sprintf("parsed %d lines · %d new blocks (checkpoint at offset %d · inode %d) · %d occurrences written",
+	line := fmt.Sprintf("parsed %d lines · %d new blocks (checkpoint at offset %d · inode %d) · %d occurrences written",
 		s.LinesParsed, s.NewBlocks, s.CheckpointOffset, s.CheckpointInode, s.OccurrencesWritten)
+	if s.Deduped > 0 {
+		line += fmt.Sprintf(" · %d deduped", s.Deduped)
+	}
+	return line
 }
 
 // runStacktraceRecord reads opts.file from its checkpointed byte offset (or
@@ -357,6 +367,25 @@ func (s recordSummary) String() string {
 // advances and saves the checkpoint to wherever reading stopped -- even
 // when nothing new was found -- so a clean log's checkpoint still tracks
 // the file's growth.
+//
+// EOF is NOT automatically treated as a block boundary the way the plain
+// (non --record) parse path treats it: hitting EOF while a writer is still
+// mid-trace looks identical, from here, to a log that is genuinely done.
+// Force-closing (Flush) and recording whatever is left open in the FIRST
+// case fabricates a wrongly-shaped issue from a truncated fragment, and
+// then the checkpoint permanently skips past the very bytes that would
+// have completed it correctly on a later run (see stacktrace.SettleWindow's
+// doc comment). So: every block the Joiner closes STRUCTURALLY during this
+// run (a later boundary line arriving, e.g. the next trace starting) is
+// safe to record and checkpoint past immediately -- nothing can retroactively
+// un-close it. Only the very LAST block, if the file's own content ends
+// while it is still open, is held back: it is force-closed and recorded
+// (and the checkpoint advances past it) only when the file's mtime is
+// already older than SettleWindow, i.e. nothing has touched it recently
+// enough to still be mid-write. Otherwise the checkpoint stops at the last
+// SAFE (structurally closed) point, and the next --record run re-reads the
+// open fragment from scratch, into a fresh Joiner, alongside whatever got
+// appended since.
 func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecordOptions) error {
 	absPath, err := filepath.Abs(opts.file)
 	if err != nil {
@@ -401,6 +430,13 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 	lr := newCheckpointLineReader(f, stacktrace.DefaultMaxBytes)
 
 	offset := start
+	// safeOffset is the byte offset up to which every block the Joiner has
+	// produced so far is the result of a STRUCTURAL close (a later
+	// boundary line arriving), never an EOF-forced one -- see the func
+	// doc comment. It only ever advances to the start of a line that
+	// itself triggered an earlier block's closure, which is exactly what
+	// "safe to checkpoint past" means here.
+	safeOffset := start
 	// lineOffsets[n] is the byte offset of the n-th line fed to j this run
 	// (1-based, matching Block.LineStart/LineEnd) -- index 0 is unused.
 	lineOffsets := []int64{0}
@@ -417,37 +453,58 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 			if b.LineStart > 0 && b.LineStart < len(lineOffsets) {
 				blockOffset = lineOffsets[b.LineStart]
 			}
-			if err := recordParsedException(ctx, opts.storePath, absPath, inode, blockOffset, b, ex, id, run, scrubber, mtime); err != nil {
+			deduped, err := recordParsedException(ctx, opts.storePath, absPath, inode, blockOffset, b, ex, id, run, scrubber, mtime)
+			if err != nil {
 				return err
 			}
-			summary.OccurrencesWritten++
+			if deduped {
+				summary.Deduped++
+			} else {
+				summary.OccurrencesWritten++
+			}
 		}
 		return nil
 	}
 
 	base := time.Unix(0, 0)
 	n := 0
+	var readErr error
 	for {
 		line, consumed, rerr := lr.next()
 		if rerr != nil {
-			if ferr := process(j.Flush()); ferr != nil {
-				return ferr
-			}
-			if rerr != io.EOF {
-				return fmt.Errorf("read %s: %w", opts.file, rerr)
-			}
+			readErr = rerr
 			break
 		}
 		n++
 		summary.LinesParsed++
 		lineOffsets = append(lineOffsets, offset)
 		offset += consumed
-		if err := process(j.Feed(line, base.Add(time.Duration(n)*time.Microsecond))); err != nil {
-			return err
+		blocks := j.Feed(line, base.Add(time.Duration(n)*time.Microsecond))
+		if len(blocks) > 0 {
+			if err := process(blocks); err != nil {
+				return err
+			}
+			// Every block just closed did so structurally (Feed only
+			// force-closes a block on its own idle timeout, which cannot
+			// fire on this synthetic, monotonically-microsecond clock);
+			// the line that triggered it (this one) starts the new safe
+			// boundary.
+			safeOffset = lineOffsets[n]
 		}
 	}
+	if readErr != io.EOF {
+		return fmt.Errorf("read %s: %w", opts.file, readErr)
+	}
 
-	cp.Offset = offset
+	finalOffset := safeOffset
+	if fileSettled(f, mtime) {
+		if err := process(j.Flush()); err != nil {
+			return err
+		}
+		finalOffset = offset
+	}
+
+	cp.Offset = finalOffset
 	if err := stacktrace.SaveCheckpoint(absPath, cp); err != nil {
 		return fmt.Errorf("save checkpoint: %w", err)
 	}
@@ -457,11 +514,31 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 	return nil
 }
 
+// fileSettled reports whether f's CURRENT mtime (re-stat'd here, not the
+// snapshot taken before reading -- a writer that appended WHILE this run
+// was reading must still be caught) already predates stacktrace.
+// SettleWindow, i.e. nothing has written to it recently enough to still be
+// mid-trace. A Stat failure fails OPEN (returns true, the pre-existing
+// always-flush behavior) rather than silently never finishing a
+// legitimately complete log because of an unrelated stat error.
+func fileSettled(f *os.File, fallback time.Time) bool {
+	info, err := f.Stat()
+	mtime := fallback
+	if err == nil {
+		mtime = info.ModTime()
+	}
+	return err != nil || time.Since(mtime) >= stacktrace.SettleWindow
+}
+
 // recordParsedException applies the git root, scrubs the exception's text,
 // derives ObservedAt and the reprocess DedupeKey (docs/contracts/
 // local-sentry-naming.md §4-5), and writes one occurrence via
-// issues.RecordException.
-func recordParsedException(ctx context.Context, storePath, absPath string, inode uint64, blockOffset int64, block stacktrace.Block, ex *stacktrace.Exception, id project.Identity, run contextids.IDs, scrubber *scrub.Scrubber, mtime time.Time) error {
+// issues.RecordException. The returned bool is UpsertResult.Deduped: the
+// caller only counts a write toward "occurrences written" when it is
+// false, so a --from-start replay (or any other reprocess that lands on an
+// already-retained DedupeKey) reports the truth instead of claiming N
+// occurrences written when the store actually deduped every one of them.
+func recordParsedException(ctx context.Context, storePath, absPath string, inode uint64, blockOffset int64, block stacktrace.Block, ex *stacktrace.Exception, id project.Identity, run contextids.IDs, scrubber *scrub.Scrubber, mtime time.Time) (deduped bool, err error) {
 	stacktrace.ApplyGitRoot(ex, id.GitRoot)
 	scrubException(scrubber, ex)
 
@@ -473,11 +550,11 @@ func recordParsedException(ctx context.Context, storePath, absPath string, inode
 	dedupeSeed := fmt.Sprintf("%d:%s:%d:%s", inode, absPath, blockOffset, stacktrace.HashBlock(block.Text()))
 	sum := sha256.Sum256([]byte(dedupeSeed))
 
-	_, err := issues.RecordException(ctx, storePath, issues.DefaultWriterWait, *ex, id, run, issues.RecordExceptionOptions{
+	result, err := issues.RecordException(ctx, storePath, issues.DefaultWriterWait, *ex, id, run, issues.RecordExceptionOptions{
 		ObservedAt: observedAt,
 		DedupeKey:  hex.EncodeToString(sum[:]),
 	})
-	return err
+	return result.Deduped, err
 }
 
 // scrubException redacts ex's Type/Value and every frame's Function text,

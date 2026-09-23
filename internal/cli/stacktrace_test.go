@@ -320,6 +320,25 @@ func runRecord(t *testing.T, args ...string) string {
 	return out.String()
 }
 
+// writeSettledFixture writes content to path and backdates its mtime well
+// outside stacktrace.SettleWindow, simulating a log a writer is genuinely
+// done with (as opposed to one caught mid-write) -- runStacktraceRecord
+// only force-closes and records a still-open trailing block, and
+// checkpoints past it, once the file looks settled this way. Every
+// --record test below that expects the file's LAST block to be recorded
+// immediately (not held back for a follow-up run) uses this instead of a
+// plain os.WriteFile.
+func writeSettledFixture(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	old := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+}
+
 func openIssuesForTest(t *testing.T, storePath string) *issues.Store {
 	t.Helper()
 	store, err := issues.OpenReadOnly(storePath)
@@ -345,9 +364,7 @@ func TestStacktraceRecordWritesOccurrenceAndSummary(t *testing.T) {
 	store := recordEnv(t)
 	path := filepath.Join(t.TempDir(), "app.log")
 	content := "Error: flakyParse: boom\n    at flakyParse (/repo/app/workload.js:31:11)\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
+	writeSettledFixture(t, path, content)
 
 	out := runRecord(t, "--record", "--file", path, "--project", "acme", "--root", "/repo")
 	if !strings.Contains(out, "1 new blocks") || !strings.Contains(out, "1 occurrences written") {
@@ -377,9 +394,7 @@ func TestStacktraceRecordSecondRunIsIdempotent(t *testing.T) {
 	store := recordEnv(t)
 	path := filepath.Join(t.TempDir(), "app.log")
 	content := "Error: flakyParse: boom\n    at flakyParse (/repo/app/workload.js:31:11)\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
+	writeSettledFixture(t, path, content)
 
 	first := runRecord(t, "--record", "--file", path, "--project", "acme")
 	if !strings.Contains(first, "1 occurrences written") {
@@ -405,9 +420,7 @@ func TestStacktraceRecordFromStartDoesNotDuplicateViaDedupeKey(t *testing.T) {
 	store := recordEnv(t)
 	path := filepath.Join(t.TempDir(), "app.log")
 	content := "Error: flakyParse: boom\n    at flakyParse (/repo/app/workload.js:31:11)\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
+	writeSettledFixture(t, path, content)
 
 	runRecord(t, "--record", "--file", path, "--project", "acme")
 	// --from-start ignores the checkpoint and re-reads the identical bytes
@@ -415,7 +428,13 @@ func TestStacktraceRecordFromStartDoesNotDuplicateViaDedupeKey(t *testing.T) {
 	// still catch that this is the exact same raw event and dedupe it,
 	// rather than the checkpoint being the only thing keeping counts
 	// stable.
-	runRecord(t, "--record", "--file", path, "--project", "acme", "--from-start")
+	replay := runRecord(t, "--record", "--file", path, "--project", "acme", "--from-start")
+	if !strings.Contains(replay, "0 occurrences written") {
+		t.Errorf("--from-start replay summary = %q, want 0 occurrences written (the DedupeKey caught it)", replay)
+	}
+	if !strings.Contains(replay, "1 deduped") {
+		t.Errorf("--from-start replay summary = %q, want it to report the deduped block, not silently omit it", replay)
+	}
 
 	db := openIssuesForTest(t, store)
 	list, err := db.List(issues.ListOptions{})
@@ -462,9 +481,7 @@ func TestStacktraceRecordScrubsSecretEnvValues(t *testing.T) {
 	t.Setenv("FAKE_API_TOKEN", "sekrit-value-1234")
 	path := filepath.Join(t.TempDir(), "app.log")
 	content := "Error: upstream rejected sekrit-value-1234 for /widgets\n    at flakyParse (/repo/app/workload.js:31:11)\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
+	writeSettledFixture(t, path, content)
 
 	runRecord(t, "--record", "--file", path, "--project", "acme")
 
@@ -478,5 +495,60 @@ func TestStacktraceRecordScrubsSecretEnvValues(t *testing.T) {
 	}
 	if strings.Contains(list[0].Message, "sekrit-value-1234") {
 		t.Errorf("message = %q, secret env value must be redacted before persisting", list[0].Message)
+	}
+}
+
+// TestStacktraceRecordDoesNotFabricateAPartialTraceCaughtMidWrite is the
+// EOF-is-not-a-block-boundary fix: --record catching a log mid-write (a
+// truncated, still-open trace at EOF, with a FRESH mtime -- nothing yet
+// signals the writer is done) must record NOTHING from that fragment and
+// must NOT advance the checkpoint past it, so a later pass -- once the
+// writer has actually finished and the file has settled -- sees the
+// complete trace and records it correctly instead of starting mid-trace
+// (which previously could never re-open the earlier, already-skipped
+// lines).
+func TestStacktraceRecordDoesNotFabricateAPartialTraceCaughtMidWrite(t *testing.T) {
+	store := recordEnv(t)
+	path := filepath.Join(t.TempDir(), "app.log")
+
+	partial := "Traceback (most recent call last):\n" +
+		"  File \"/repo/app/main.py\", line 3, in <module>\n" +
+		"    run()\n"
+	if err := os.WriteFile(path, []byte(partial), 0o644); err != nil {
+		t.Fatalf("write partial fixture: %v", err)
+	}
+	// Deliberately NOT backdated: a fresh mtime simulates --record catching
+	// a writer still mid-trace.
+
+	first := runRecord(t, "--record", "--file", path, "--project", "acme", "--root", "/repo")
+	if !strings.Contains(first, "0 occurrences written") {
+		t.Fatalf("mid-write pass summary = %q, want 0 occurrences written", first)
+	}
+	if list, err := openIssuesForTest(t, store).List(issues.ListOptions{}); err != nil {
+		t.Fatalf("List: %v", err)
+	} else if len(list) != 0 {
+		t.Fatalf("issues after the mid-write pass = %+v, want none (no bogus fragment issue)", list)
+	}
+
+	// The writer finishes the trace; the file is now genuinely done.
+	writeSettledFixture(t, path, cliPyTrace)
+
+	second := runRecord(t, "--record", "--file", path, "--project", "acme", "--root", "/repo")
+	if !strings.Contains(second, "1 occurrences written") {
+		t.Fatalf("completed pass summary = %q, want 1 occurrences written", second)
+	}
+
+	list, err := openIssuesForTest(t, store).List(issues.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("issues = %+v, want exactly 1 (the completed trace, not the earlier discarded fragment)", list)
+	}
+	if list[0].ExceptionType != "ValueError" {
+		t.Errorf("exception_type = %q, want ValueError (the fragment's own bogus, empty type must never have been recorded)", list[0].ExceptionType)
+	}
+	if list[0].Culprit == nil || list[0].Culprit.File != "app/main.py" || list[0].Culprit.Line != 3 {
+		t.Errorf("culprit = %+v, want app/main.py:3", list[0].Culprit)
 	}
 }

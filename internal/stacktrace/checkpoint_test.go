@@ -217,6 +217,15 @@ func TestStatInodeReportsSizeAndNonZeroInode(t *testing.T) {
 	}
 }
 
+func TestSettleWindowMatchesDefaultIdle(t *testing.T) {
+	// Not an arbitrary duplicate constant: SettleWindow's whole rationale
+	// (see its doc comment) is that a settled writer stays quiet for at
+	// least one Joiner idle window, so the two must track each other.
+	if SettleWindow != DefaultIdle {
+		t.Errorf("SettleWindow = %v, want it to equal DefaultIdle (%v)", SettleWindow, DefaultIdle)
+	}
+}
+
 func TestHashBlockDeterministicAndDistinct(t *testing.T) {
 	h1 := HashBlock("panic: boom\nmain.main()\n")
 	h2 := HashBlock("panic: boom\nmain.main()\n")

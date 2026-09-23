@@ -148,6 +148,20 @@ func ResolveOffset(absPath string, inode uint64, size int64, fromStart bool) (st
 	return prev.Offset, cp
 }
 
+// SettleWindow is how long a file's mtime must predate "now" before
+// `stacktrace parse --record` trusts hitting EOF as a genuine end-of-trace
+// rather than the moment it caught an active writer mid-block. It mirrors
+// the Joiner's own DefaultIdle: a writer that is really done printing an
+// exception's lines will typically not touch the file again within one
+// idle window either, the same signal the Joiner itself uses to decide a
+// live stream has gone quiet. See internal/cli/stacktrace.go's
+// runStacktraceRecord, which is the only caller: EOF on an unsettled file
+// must NOT force-close (and therefore parse and record) whatever block is
+// still open, or a trace caught mid-write gets recorded as a bogus,
+// wrongly-typed issue and its checkpoint then skips past the very bytes
+// that would have completed it correctly on the next run.
+const SettleWindow = DefaultIdle
+
 // HashBlock returns a stable hex-encoded sha256 of a detected block's raw
 // text, the "hash(exception block)" component both live (monitor run --)
 // and reprocessed (stacktrace parse --record) DedupeKeys are built from
