@@ -94,9 +94,22 @@ type Service struct {
 	// blind pprof scrape. pprofAddr, when non-empty, is the target's
 	// net/http/pprof host:port AND asserts on the caller's behalf that it
 	// belongs to pid, skipping the ownership proof — same escape hatch as
-	// the CLI's --pprof-addr. Used by monitor_profile_capture. Optional;
-	// if nil the tool reports unavailable.
-	Profile func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string) (profiler.Profile, error)
+	// the CLI's --pprof-addr. keep mirrors the typed input's keep:true: the
+	// implementation verifies the capture and, when keep is false, discards
+	// its raw text/on-disk temp file BEFORE returning — that keep/discard
+	// policy lives here (in the Service), not in handleProfileCapture,
+	// matching how Investigate's own include_raw redaction lives in the
+	// Service rather than the handler. The returned Receipt already
+	// reflects the pre-discard artifact, so it stays a true report of what
+	// was actually captured even after cleanup. Used by
+	// monitor_profile_capture. Optional; if nil the tool reports
+	// unavailable.
+	//
+	// An error satisfying errors.As(err, *UnavailableError) marks a capture
+	// that will never succeed for a known reason (Bun's JSC inspector, not
+	// V8 CDP) rather than an unexpected failure; handleProfileCapture
+	// surfaces those as status:"unavailable" instead of a bare "error".
+	Profile func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep bool) (profiler.Profile, profiler.Receipt, error)
 
 	// Investigate runs the diagnostic pipeline for the given PID. Used by
 	// monitor_investigate. Optional; if nil the tool reports a stub result
@@ -167,6 +180,17 @@ func NewServer(svc *Service, version string) *Server {
 // Run starts the server on stdio.
 func (s *Server) Run(ctx context.Context) error {
 	return s.srv.Run(ctx, &mcp.StdioTransport{})
+}
+
+// Connect wires the server onto an arbitrary MCP transport instead of the
+// stdio one Run uses — an in-memory transport (mcp.NewInMemoryTransports),
+// notably, so a caller that builds a REAL *Service the same way `monitor mcp
+// serve` does (cli/mcp.go) can drive it with a real CallTool round trip in
+// tests, without spawning the binary or duplicating that wiring as a stub.
+// Mirrors the SDK's own Server.Connect signature; Run(ctx) (stdio) remains
+// the production entry point cmd/monitor's `mcp serve` uses.
+func (s *Server) Connect(ctx context.Context, t mcp.Transport) (*mcp.ServerSession, error) {
+	return s.srv.Connect(ctx, t, nil)
 }
 
 func (s *Server) register() {
@@ -365,7 +389,7 @@ type killInput struct {
 type profileInput struct {
 	PID       int32  `json:"pid"                  jsonschema:"the PID to profile"`
 	Type      string `json:"type,omitempty"       jsonschema:"profile type: heap, cpu, goroutine, sample (default heap)"`
-	PprofAddr string `json:"pprof_addr,omitempty" jsonschema:"host:port of the target's net/http/pprof server (Go heap/cpu/goroutine only); setting this asserts the endpoint belongs to pid and skips the ownership check, like the CLI's --pprof-addr"`
+	PprofAddr string `json:"pprof_addr,omitempty" jsonschema:"loopback host:port (localhost/127.0.0.1 only) of the target's net/http/pprof server (Go heap/cpu/goroutine only); setting this asserts the endpoint belongs to pid and skips the ownership check, like the CLI's --pprof-addr — a non-loopback host is refused"`
 	Keep      bool   `json:"keep,omitempty"       jsonschema:"keep the captured profile's raw text and on-disk temp file; default false discards both after the call so repeated captures don't leak /tmp/monitor-<type>-* files or bloat the response"`
 	Confirm   bool   `json:"confirm"              jsonschema:"must be true; confirms intent to capture a profile"`
 }
@@ -385,7 +409,7 @@ type investigateInput struct {
 	Service      string `json:"service,omitempty"       jsonschema:"correlation service name"`
 	GitSHA       string `json:"git_sha,omitempty"       jsonschema:"correlation git sha"`
 	TTL          string `json:"ttl,omitempty"           jsonschema:"fcheap stash TTL (default 7d)"`
-	NoSave       bool   `json:"no_save,omitempty"      jsonschema:"skip fcheap stash; return profile inline"`
+	NoSave       bool   `json:"no_save,omitempty"      jsonschema:"skip fcheap stash; return the profile's symbols/stats inline (pass include_raw:true for the raw capture text too)"`
 	IncludeRaw   bool   `json:"include_raw,omitempty"  jsonschema:"keep the captured profile's raw text (CDP JSON / pprof dump) in the response; default false keeps the payload small"`
 }
 
@@ -639,6 +663,26 @@ func (s *Server) handleKill(ctx context.Context, _ *mcp.CallToolRequest, in *kil
 	return result(payload)
 }
 
+// UnavailableError marks a profile capture that failed for a known,
+// non-retryable reason — Bun speaking the WebKit/JSC inspector protocol
+// instead of V8 CDP is the only producer today — rather than an unexpected
+// failure. handleProfileCapture surfaces these as a distinguishable
+// status:"unavailable" payload (limitation + recovery as their own fields)
+// instead of the bare "error" string an ordinary failure gets, so an agent
+// can tell "this will never work as asked, do something else" apart from
+// "an attempt failed, retrying or adjusting might help".
+type UnavailableError struct {
+	Limitation string
+	Recovery   string
+}
+
+func (e *UnavailableError) Error() string {
+	if e.Recovery == "" {
+		return e.Limitation
+	}
+	return e.Limitation + " (" + e.Recovery + ")"
+}
+
 // handleProfileCapture implements monitor_profile_capture. Defaults to
 // "heap" if the agent omits the type. Returns a structured refusal when
 // the profile service is not wired.
@@ -655,11 +699,31 @@ func (s *Server) handleProfileCapture(ctx context.Context, _ *mcp.CallToolReques
 	if s.svc.Profile == nil {
 		return result(map[string]any{"captured": false, "refused": true, "reason": "profile service not configured", "pid": in.PID})
 	}
-	prof, err := s.svc.Profile(ctx, in.PID, profiler.ProfileType(in.Type), in.PprofAddr)
+	// E1.7 payload diet + temp-file cleanup: the Service itself verifies
+	// the capture and, unless in.Keep, discards the raw text (a CDP CPU
+	// profile's full JSON, or a pprof text dump) AND deletes the on-disk
+	// temp file a pprof/CDP-heap capture left behind, so repeated
+	// monitor_profile_capture calls don't leak /tmp/monitor-<type>-* files
+	// or bloat every response with a payload that can run into tens of KB.
+	// That policy decision lives in the Service (cli/mcp.go), not here —
+	// this handler stays free of capture-specific business logic, matching
+	// how monitor_investigate's include_raw redaction also lives in the
+	// Service rather than being reimplemented per handler.
+	prof, receipt, err := s.svc.Profile(ctx, in.PID, profiler.ProfileType(in.Type), in.PprofAddr, in.Keep)
 	if err != nil {
+		var unavail *UnavailableError
+		if errors.As(err, &unavail) {
+			return result(map[string]any{
+				"captured":   false,
+				"status":     "unavailable",
+				"pid":        in.PID,
+				"type":       in.Type,
+				"limitation": unavail.Limitation,
+				"recovery":   unavail.Recovery,
+			})
+		}
 		return result(map[string]any{"captured": false, "error": err.Error(), "pid": in.PID})
 	}
-	receipt := prof.VerifyArtifact()
 	if !receipt.Verified {
 		return result(map[string]any{
 			"captured":   false,
@@ -672,36 +736,12 @@ func (s *Server) handleProfileCapture(ctx context.Context, _ *mcp.CallToolReques
 			},
 		})
 	}
-	// E1.7 payload diet + temp-file cleanup: unless the caller asked to
-	// keep it, drop the raw text (a CDP CPU profile's full JSON, or a
-	// pprof text dump) AND delete the on-disk temp file a pprof capture
-	// left behind, so repeated monitor_profile_capture calls don't leak
-	// /tmp/monitor-<type>-<pid>-*.pb.gz or bloat every response with a
-	// payload that can run into tens of KB. receipt was already computed
-	// above from the un-discarded profile, so it stays a true report of
-	// what was actually captured.
-	if !in.Keep {
-		if err := prof.DiscardRawArtifact(); err != nil {
-			receipt.Limitation = joinNonEmpty(receipt.Limitation, "cleanup: "+err.Error())
-		}
-	}
 	return result(map[string]any{
 		"captured": true,
 		"pid":      in.PID,
 		"profile":  prof,
 		"artifact": receipt, // {"verified":true,"size_bytes":N}
 	})
-}
-
-func joinNonEmpty(a, b string) string {
-	switch {
-	case a == "":
-		return b
-	case b == "":
-		return a
-	default:
-		return a + "; " + b
-	}
 }
 
 // handleInvestigate implements monitor_investigate. If the service has

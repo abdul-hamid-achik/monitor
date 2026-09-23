@@ -454,9 +454,9 @@ func TestHandleKillStillRunningSurfacesNextAction(t *testing.T) {
 // TestHandleProfileCaptureRefusesWithoutConfirm mirrors TestHandleKill.
 func TestHandleProfileCaptureRefusesWithoutConfirm(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Profile: func(context.Context, int32, profiler.ProfileType, string) (profiler.Profile, error) {
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool) (profiler.Profile, profiler.Receipt, error) {
 			t.Fatalf("Profile must not be called without confirm")
-			return profiler.Profile{}, nil
+			return profiler.Profile{}, profiler.Receipt{}, nil
 		},
 	})
 	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 1234, Type: "heap"})
@@ -477,9 +477,14 @@ func TestHandleProfileCaptureRefusesWithoutConfirm(t *testing.T) {
 func TestHandleProfileCaptureDefaultsType(t *testing.T) {
 	got := profiler.ProfileType("")
 	s := newTestServer(t, &Service{
-		Profile: func(_ context.Context, pid int32, ptype profiler.ProfileType, _ string) (profiler.Profile, error) {
+		Profile: func(_ context.Context, pid int32, ptype profiler.ProfileType, _ string, keep bool) (profiler.Profile, profiler.Receipt, error) {
 			got = ptype
-			return profiler.Profile{PID: pid, Type: ptype, Taken: time.Now(), Text: "heap profile: 1"}, nil
+			prof := profiler.Profile{PID: pid, Type: ptype, Taken: time.Now(), Text: "heap profile: 1"}
+			receipt := prof.VerifyArtifact()
+			if !keep {
+				_ = prof.DiscardRawArtifact()
+			}
+			return prof, receipt, nil
 		},
 	})
 	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Confirm: true})
@@ -503,8 +508,9 @@ func TestHandleProfileCaptureDefaultsType(t *testing.T) {
 // a limitation, never as a blind success.
 func TestHandleProfileCaptureRefusesEmptyArtifact(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Profile: func(context.Context, int32, profiler.ProfileType, string) (profiler.Profile, error) {
-			return profiler.Profile{PID: 7, Type: "heap"}, nil
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool) (profiler.Profile, profiler.Receipt, error) {
+			prof := profiler.Profile{PID: 7, Type: "heap"}
+			return prof, prof.VerifyArtifact(), nil
 		},
 	})
 	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Confirm: true})
@@ -530,8 +536,9 @@ func TestHandleProfileCaptureRefusesEmptyArtifact(t *testing.T) {
 // is reported as captured=true with a verified artifact receipt.
 func TestHandleProfileCaptureVerifiedArtifact(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Profile: func(context.Context, int32, profiler.ProfileType, string) (profiler.Profile, error) {
-			return profiler.Profile{PID: 7, Type: "heap", Text: "heap profile: 1"}, nil
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool) (profiler.Profile, profiler.Receipt, error) {
+			prof := profiler.Profile{PID: 7, Type: "heap", Text: "heap profile: 1"}
+			return prof, prof.VerifyArtifact(), nil
 		},
 	})
 	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Confirm: true})
@@ -551,6 +558,47 @@ func TestHandleProfileCaptureVerifiedArtifact(t *testing.T) {
 	}
 	if verified, _ := artifact["verified"].(bool); !verified {
 		t.Errorf("artifact.verified should be true; got %v", artifact)
+	}
+}
+
+// TestHandleProfileCaptureUnavailableStatus verifies a Service.Profile
+// error satisfying errors.As(err, *UnavailableError) (Bun's "speaks JSC,
+// not CDP" case being the only producer today) surfaces as a distinguishable
+// status:"unavailable" payload with its own limitation/recovery fields,
+// never the bare "error" string an ordinary failure gets — an agent must be
+// able to tell "this will never work as asked" apart from "an attempt
+// failed, retry might help".
+func TestHandleProfileCaptureUnavailableStatus(t *testing.T) {
+	s := newTestServer(t, &Service{
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool) (profiler.Profile, profiler.Receipt, error) {
+			return profiler.Profile{}, profiler.Receipt{}, &UnavailableError{
+				Limitation: "Bun speaks the WebKit/JSC inspector protocol, not V8 CDP",
+				Recovery:   "run the app with `bun --cpu-prof`",
+			}
+		},
+	})
+	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Type: "cpu", Confirm: true})
+	if err != nil {
+		t.Fatalf("handleProfileCapture returned hard error: %v", err)
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", payload)
+	}
+	if captured, _ := m["captured"].(bool); captured {
+		t.Fatalf("captured should be false for unavailable; got %v", m)
+	}
+	if status, _ := m["status"].(string); status != "unavailable" {
+		t.Fatalf("status = %q, want \"unavailable\"; payload=%v", m["status"], m)
+	}
+	if lim, _ := m["limitation"].(string); !strings.Contains(lim, "JSC") {
+		t.Errorf("limitation = %q, want it to carry the Bun-specific message; payload=%v", lim, m)
+	}
+	if rec, _ := m["recovery"].(string); rec == "" {
+		t.Errorf("recovery should be non-empty; payload=%v", m)
+	}
+	if _, hasError := m["error"]; hasError {
+		t.Errorf("an unavailable capture should not also set the bare \"error\" field; payload=%v", m)
 	}
 }
 
@@ -1256,9 +1304,9 @@ func TestCallToolMutatingToolsRefuseWithoutConfirmOnWire(t *testing.T) {
 			t.Fatal("Kill must not be called without confirm")
 			return kill.Result{}, nil
 		},
-		Profile: func(context.Context, int32, profiler.ProfileType, string) (profiler.Profile, error) {
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool) (profiler.Profile, profiler.Receipt, error) {
 			t.Fatal("Profile must not be called without confirm")
-			return profiler.Profile{}, nil
+			return profiler.Profile{}, profiler.Receipt{}, nil
 		},
 		Investigate: func(context.Context, int32, InvestigateOptions) map[string]any {
 			t.Fatal("Investigate must not be called without confirm")
@@ -1370,14 +1418,34 @@ func TestCallToolProfileCaptureLiveNodeInspectorReturnsCPULines(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	svc := &Service{
-		Profile: func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string) (profiler.Profile, error) {
+		// NOTE: this stub deliberately mirrors ONLY the CDP capture
+		// mechanics (VerifyInspectorOwnership + ProfileInspector), not the
+		// production runtime-aware dispatch (procbind.Inspect +
+		// captureRuntimeAwareProfile's Bun/pprof/sample fallback logic),
+		// which lives in the cli package and would be an import cycle to
+		// call from here. cli/mcp_test.go's
+		// TestProfileServiceLiveNodeInspectorViaRealDispatch exercises that
+		// real dispatch (via the same buildProfileService the production
+		// `monitor mcp serve` wires in) over its own in-memory transport;
+		// this test's job is narrower — the MCP wire/schema round trip
+		// (tool registration, typed input, structuredContent shape) against
+		// a REAL node --inspect process, not a synthetic Profile.
+		Profile: func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep bool) (profiler.Profile, profiler.Receipt, error) {
 			if ptype != profiler.ProfileCPU {
-				return profiler.Profile{}, fmt.Errorf("unexpected profile type %q", ptype)
+				return profiler.Profile{}, profiler.Receipt{}, fmt.Errorf("unexpected profile type %q", ptype)
 			}
 			if own, detail := profiler.VerifyInspectorOwnership(ctx, pid, addr); own != profiler.OwnershipOwned {
-				return profiler.Profile{}, fmt.Errorf("inspector %s not proven to belong to pid %d: %s", addr, pid, detail)
+				return profiler.Profile{}, profiler.Receipt{}, fmt.Errorf("inspector %s not proven to belong to pid %d: %s", addr, pid, detail)
 			}
-			return profiler.ProfileInspector(ctx, pid, addr, 2*time.Second)
+			prof, err := profiler.ProfileInspector(ctx, pid, addr, 2*time.Second)
+			if err != nil {
+				return profiler.Profile{}, profiler.Receipt{}, err
+			}
+			receipt := prof.VerifyArtifact()
+			if !keep {
+				_ = prof.DiscardRawArtifact()
+			}
+			return prof, receipt, nil
 		},
 	}
 	s := NewServer(svc, "test")
