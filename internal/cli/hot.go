@@ -93,7 +93,15 @@ resolving the real runtime leaf process under it (skipping a shell/yarn/npm/
 			// same way, and --export must never write a file for a
 			// request that's about to fail anyway.
 			if funcName != "" && !hasHeatFunction(hm, funcName) {
-				return fmt.Errorf("function %q not found in %s", funcName, file)
+				// hm itself was already built WITH the --func filter (target
+				// resolution, not this file's business), so its own
+				// Functions is empty here by construction -- rebuild once
+				// more, unfiltered, purely to list what the profile actually
+				// sampled in the error below. This never changes which
+				// function `hot` targets; it only recovers a name list for
+				// a better error message on the failure path.
+				unfiltered, _ := profiler.BuildHeatmap(ctx, src, profiler.HeatOptions{Top: top, ProfileType: heatType})
+				return funcNotFoundError(heatmapFunctionNames(unfiltered), funcName, file, "")
 			}
 			projectSlug := resolveHeatProjectSlug(filepath.Dir(file), "")
 			if warn := applyIssueOverlay(hm, projectSlug); warn != "" {
@@ -113,6 +121,17 @@ resolving the real runtime leaf process under it (skipping a shell/yarn/npm/
 			return renderHotHuman(cmd.OutOrStdout(), file, hm, funcName)
 		},
 	}
+	// SilenceErrors on THIS command only (root.go's own SilenceErrors stays
+	// false — every other command keeps cobra's default printing): without
+	// it, a hot RunE error printed TWICE — once from cobra's own
+	// ExecuteC (Command.SilenceErrors false on both this command and root)
+	// and once more from cli.Execute()'s own "Error: %v" — see the polish
+	// review's "errors are printed twice" finding. Setting it here relies
+	// on cobra's own rule that an error is only printed when NEITHER the
+	// resolved subcommand NOR root has SilenceErrors set (see
+	// spf13/cobra's Command.ExecuteC), so this is a hot-only opt-out, not a
+	// global behavior change.
+	cmd.SilenceErrors = true
 	cmd.Flags().StringVar(&file, "file", "", "path to a .cpuprofile (V8/Bun) or a pprof .pb/.pb.gz")
 	cmd.Flags().StringVar(&funcName, "func", "", "show this function's CodeFrame instead of the hottest one")
 	cmd.Flags().IntVar(&top, "top", 0, fmt.Sprintf("functions to keep in the table/JSON (default %d)", profiler.DefaultTopFunctions))
@@ -229,7 +248,22 @@ func runHotPID(cmd *cobra.Command, pid int32, funcName, ptypeFlag, export, pprof
 		}
 	}
 	if funcName != "" && !hasHeatFunction(hm, funcName) {
-		return fmt.Errorf("function %q not found in pid %d", funcName, pid)
+		// Same reasoning as newHotCmd's own --func-miss branch: hm was built
+		// WITH the --func filter (target resolution stays untouched here),
+		// so recover the sampled-names list for the error with one more,
+		// unfiltered rebuild from the SAME already-captured data (prof/src),
+		// never a second live capture.
+		var names []string
+		if sampleFallback {
+			if full, ferr := profiler.BuildHeatmapFromSample(ctx, prof, profiler.HeatOptions{Top: top, Runtime: string(binding.Runtime)}); ferr == nil {
+				names = heatmapFunctionNames(full)
+			}
+		} else if src != nil {
+			if full, ferr := profiler.BuildHeatmap(ctx, src, profiler.HeatOptions{Top: top, ProfileType: heatType, Runtime: string(binding.Runtime)}); ferr == nil {
+				names = heatmapFunctionNames(full)
+			}
+		}
+		return funcNotFoundError(names, funcName, fmt.Sprintf("pid %d", pid), "try a longer --duration")
 	}
 	projectSlug := resolveHeatProjectSlug(firstNonEmpty(binding.CodebaseRoot, binding.Cwd), binding.Name)
 	if warn := applyIssueOverlay(hm, projectSlug); warn != "" {
@@ -478,6 +512,57 @@ func hasHeatFunction(hm *profiler.Heatmap, name string) bool {
 	return false
 }
 
+// maxFuncNotFoundSuggestions caps how many of the profile's own sampled
+// function names a --func miss lists in its error, so a large profile
+// (monitor hot --top's own default is 25) doesn't turn one short error
+// message into a wall of names.
+const maxFuncNotFoundSuggestions = 8
+
+// heatmapFunctionNames extracts every function name from hm's own
+// Functions list, in whatever order hm already sorted them (BuildHeatmap/
+// BuildHeatmapFromSample: cum%-desc, then self%-desc, then name) — used
+// only to list "the top functions actually sampled" inside
+// funcNotFoundError. nil for a nil hm (an unfiltered rebuild that itself
+// failed), which funcNotFoundError already renders honestly.
+func heatmapFunctionNames(hm *profiler.Heatmap) []string {
+	if hm == nil {
+		return nil
+	}
+	names := make([]string, 0, len(hm.Functions))
+	for _, f := range hm.Functions {
+		names = append(names, f.Name)
+	}
+	return names
+}
+
+// funcNotFoundError builds monitor hot's own --func-miss error: which name
+// was requested, where it was looked for, and the TOP functions the profile
+// actually sampled (names is already sorted cum%-desc — see
+// heatmapFunctionNames — so this genuinely is "the top functions
+// available", not an arbitrary subset) — plus the honest possibility that
+// the requested function simply never ran during the sample window, since
+// a short CPU sample can easily miss a real function that just didn't
+// happen to fire. retryHint is appended verbatim in parens (e.g. "try a
+// longer --duration") when the caller has an actual retry knob to suggest;
+// "" (--file mode, no duration to retry with) omits that clause instead of
+// suggesting a flag that doesn't exist for this invocation.
+func funcNotFoundError(names []string, name, where, retryHint string) error {
+	avail := "(no functions were sampled at all)"
+	if len(names) > 0 {
+		shown := names
+		if len(shown) > maxFuncNotFoundSuggestions {
+			shown = shown[:maxFuncNotFoundSuggestions]
+		}
+		avail = strings.Join(shown, ", ")
+	}
+	msg := fmt.Sprintf("function %q not found in %s; top functions sampled: %s -- it may simply not have run during the sample window",
+		name, where, avail)
+	if retryHint != "" {
+		msg += " (" + retryHint + ")"
+	}
+	return errors.New(msg)
+}
+
 // exportHot saves either the ORIGINAL loaded profile bytes (a .cpuprofile
 // or pprof proto, openable in Chrome DevTools / `go tool pprof`) or the
 // built heatmap document, chosen by out's extension. It refuses a
@@ -608,6 +693,13 @@ func renderHeatBody(w io.Writer, hm *profiler.Heatmap, wantFunc, next string) er
 			fmt.Fprintln(w, "  Go: monitor hot <pid> --type goroutine   ·   any runtime: monitor issues --since 10m (timeouts?)")
 			continue
 		}
+		if strings.HasPrefix(warn, profiler.InlineWarningPrefix) {
+			// Rendered under the CodeFrame instead (see below), next to the
+			// specific function it's actually about, and — when readable —
+			// its inlined callee's own source: printing it here too, ahead
+			// of the table, would say the same thing twice.
+			continue
+		}
 		fmt.Fprintf(w, "! %s\n", warn)
 	}
 
@@ -654,6 +746,23 @@ func renderHeatBody(w io.Writer, hm *profiler.Heatmap, wantFunc, next string) er
 
 	cf := codeFrameForFunction(hm, target)
 	fmt.Fprintln(w, cf.Render())
+	// The JIT-inlining heuristic's own finding(s) for THIS specific target,
+	// printed right under its CodeFrame (per the polish note) rather than
+	// in the generic warnings block above — a person is already looking at
+	// this exact function's hot line, which is precisely what the warning
+	// is about. Read from the structured InlinedCallees, not re-parsed out
+	// of hm.Warnings' free text, so the message and the optional secondary
+	// frame always agree.
+	for _, ic := range hm.InlinedCallees {
+		if ic.Caller != target.Name {
+			continue
+		}
+		fmt.Fprintf(w, "! likely JIT-inlined: %s() was inlined into %s; the time on line %d is spent inside %s\n",
+			ic.Callee, ic.Caller, ic.Line, ic.Callee)
+		if len(ic.Body) > 0 {
+			fmt.Fprintln(w, renderInlinedCalleeFrame(ic))
+		}
+	}
 	if len(target.Callees) > 0 {
 		fmt.Fprintln(w, formatCallees(hm, target))
 	}
@@ -804,13 +913,40 @@ func formatHeatQuantity(n int, unit string) string {
 }
 
 func heatLocation(f profiler.HeatFunction) string {
+	file := displayHeatPath(f.File)
 	if f.StartLine <= 0 {
-		return f.File
+		return file
 	}
 	if f.EndLine > 0 && f.EndLine != f.StartLine {
-		return fmt.Sprintf("%s:%d-%d", f.File, f.StartLine, f.EndLine)
+		return fmt.Sprintf("%s:%d-%d", file, f.StartLine, f.EndLine)
 	}
-	return fmt.Sprintf("%s:%d", f.File, f.StartLine)
+	return fmt.Sprintf("%s:%d", file, f.StartLine)
+}
+
+// displayHeatPath shortens an absolute file path to one relative to its
+// enclosing git root, for DISPLAY ONLY — every --json/--md consumer keeps
+// whatever path BuildHeatmap itself resolved, byte for byte; only the
+// human table/CodeFrame renders the shortened form. A live <pid> capture's
+// own file paths come straight from the profiled process's real, absolute
+// source paths (V8's file:// URLs, a Go binary's own build-time absolute
+// path), which routinely blow well past monitor hot's 100-column table and
+// CodeFrame header on a deeply nested project — see the polish review's
+// "long absolute paths" finding. "" (already-relative source, an already-
+// short path, or one outside any discoverable git root) returns path
+// unchanged rather than guessing.
+func displayHeatPath(path string) string {
+	if path == "" || !filepath.IsAbs(path) {
+		return path
+	}
+	root, ok := findGitRoot(filepath.Dir(path))
+	if !ok {
+		return path
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return path
+	}
+	return rel
 }
 
 // hottestBySelf returns the function with the highest SelfPct — "which
@@ -877,7 +1013,7 @@ func hotExportExt(method profiler.HeatMethod) string {
 func codeFrameForFunction(hm *profiler.Heatmap, f profiler.HeatFunction) widgets.CodeFrame {
 	showCum := hm.Method == profiler.MethodPprofProto
 	cf := widgets.CodeFrame{
-		FuncName: f.Name, File: f.File, StartLine: f.StartLine, EndLine: f.EndLine,
+		FuncName: f.Name, File: displayHeatPath(f.File), StartLine: f.StartLine, EndLine: f.EndLine,
 		SelfPct: f.SelfPct, CumPct: f.CumPct, ShowCum: showCum,
 		Color: wantColor(os.Stdout),
 		Width: widgets.DefaultCodeFrameWidth,
@@ -905,6 +1041,29 @@ func codeFrameForFunction(hm *profiler.Heatmap, f profiler.HeatFunction) widgets
 		cf.Footer = "% = share of this function's self samples"
 	}
 	return cf
+}
+
+// renderInlinedCalleeFrame renders addInliningWarnings' OPTIONAL secondary
+// frame (profiler.InlinedCallee.Body): the located callee's own source,
+// via the same widgets.CodeFrame widget the primary CodeFrame above it
+// uses, but with every line left at 0% — there IS no per-line sample data
+// for a fully-inlined callee, which is the whole point of the finding — and
+// Footer naming that fact explicitly instead of a CodeFrame that looks like
+// it has real percentages when it doesn't.
+func renderInlinedCalleeFrame(ic profiler.InlinedCallee) string {
+	cf := widgets.CodeFrame{
+		FuncName:  ic.Callee,
+		File:      displayHeatPath(ic.File),
+		StartLine: ic.BodyStart,
+		EndLine:   ic.BodyStart + len(ic.Body) - 1,
+		Color:     wantColor(os.Stdout),
+		Width:     widgets.DefaultCodeFrameWidth,
+		Footer:    "inlined callee (no per-line data)",
+	}
+	for i, code := range ic.Body {
+		cf.Lines = append(cf.Lines, widgets.CodeFrameLine{Line: ic.BodyStart + i, Code: code})
+	}
+	return cf.Render()
 }
 
 // wantColor reports whether w is a real terminal and NO_COLOR isn't set —

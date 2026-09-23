@@ -185,6 +185,138 @@ func TestHotUnknownFuncDoesNotWriteExport(t *testing.T) {
 	}
 }
 
+// TestHotCommandSilencesOwnErrors is the regression for the polish review's
+// "errors are printed twice" finding: cobra's own ExecuteC prints "Error:
+// ..." when NEITHER the resolved subcommand NOR root has SilenceErrors set
+// (see spf13/cobra's Command.ExecuteC), and cli.Execute() (root.go) always
+// prints its own "Error: ..." on top of that — so hot's own RunE errors
+// must silence cobra's copy, leaving exactly the one from cli.Execute().
+func TestHotCommandSilencesOwnErrors(t *testing.T) {
+	if !newHotCmd().SilenceErrors {
+		t.Fatal("newHotCmd().SilenceErrors must be true, or a hot RunE failure prints \"Error: ...\" twice end-to-end")
+	}
+}
+
+// TestHotUnknownFuncListsAvailableFunctionNames is the CLI-level regression
+// for the polish review's "--func not found" wording finding: the error
+// must name the top functions the profile actually sampled (so a person
+// can immediately see what IS available) and note that the function may
+// simply not have run during the sample window, not just "not found".
+func TestHotUnknownFuncListsAvailableFunctionNames(t *testing.T) {
+	cmd := newHotCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--file", v8HotFixture, "--func", "flakyParse"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected an error for an unknown --func")
+	}
+	msg := err.Error()
+	for _, want := range []string{`function "flakyParse" not found`, "heavyStringify", "may simply not have run during the sample window"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error = %q, missing %q", msg, want)
+		}
+	}
+	// --file mode has no --duration to retry with -- must not suggest one.
+	if strings.Contains(msg, "--duration") {
+		t.Errorf("error = %q, --file mode must not suggest --duration", msg)
+	}
+}
+
+// TestFuncNotFoundErrorPidModeSuggestsDuration is funcNotFoundError's own
+// unit-level check for the pid-mode retry hint and the suggestion cap.
+func TestFuncNotFoundErrorPidModeSuggestsDuration(t *testing.T) {
+	err := funcNotFoundError([]string{"a", "b"}, "missing", "pid 123", "try a longer --duration")
+	msg := err.Error()
+	for _, want := range []string{`function "missing" not found in pid 123`, "a, b", "try a longer --duration"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error = %q, missing %q", msg, want)
+		}
+	}
+}
+
+func TestFuncNotFoundErrorCapsSuggestions(t *testing.T) {
+	names := make([]string, 0, maxFuncNotFoundSuggestions+5)
+	for i := 0; i < maxFuncNotFoundSuggestions+5; i++ {
+		names = append(names, fmt.Sprintf("f%d", i))
+	}
+	msg := funcNotFoundError(names, "x", "file", "").Error()
+	if strings.Contains(msg, fmt.Sprintf("f%d", maxFuncNotFoundSuggestions+4)) {
+		t.Errorf("error = %q, want the suggestion list capped at %d names", msg, maxFuncNotFoundSuggestions)
+	}
+}
+
+func TestFuncNotFoundErrorNoFunctionsSampled(t *testing.T) {
+	msg := funcNotFoundError(nil, "x", "file", "").Error()
+	if !strings.Contains(msg, "no functions were sampled at all") {
+		t.Errorf("error = %q, want the honest empty-profile phrasing", msg)
+	}
+}
+
+// TestHotFileInlinedFixtureWarnsUnderCodeFrame is the CLI-level regression
+// for the "JIT inlining honesty" polish note: a profile shaped like the
+// dogfood evidence (one function whose only sampled line is a bare call to
+// a completely unsampled function) must print its "likely JIT-inlined"
+// warning AFTER the table and the CodeFrame -- not in the generic top-of-
+// output warnings block, where it would read like every other, unrelated
+// honesty warning (idle/diffuse) instead of being anchored to the specific
+// function it's actually about — with the callee's own body shown as a
+// secondary frame right underneath, labelled "no per-line data" (the
+// heuristic's own OPTIONAL half, verified here because it needs
+// buildInlinedCallee to actually read the caller's file, which specs/
+// hot_inlined.yml's own committed fixture can't portably do inside `go
+// test` — see internal/profiler/testdata/inlined-caller.cpuprofile's own
+// doc comment on the /repo-vs-real-cwd mismatch). Built as a real,
+// t.TempDir()-rooted .cpuprofile — the same technique
+// internal/profiler/heat_test.go's own disk-reading tests use — so both
+// the caller's hot line and the callee's declaration resolve regardless of
+// which directory `go test` happens to run from.
+func TestHotFileInlinedFixtureWarnsUnderCodeFrame(t *testing.T) {
+	dir := t.TempDir()
+	jsPath := filepath.Join(dir, "workload.js")
+	src := "function heavyStringify(items) {\n  return items.length;\n}\n\nfunction processBatch(n) {\n  const items = [];\n  return heavyStringify(items);\n}\n"
+	if err := os.WriteFile(jsPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cpPath := filepath.Join(dir, "inlined.cpuprofile")
+	raw := `{
+		"nodes": [
+			{"id":1,"callFrame":{"functionName":"(root)","url":"","lineNumber":-1,"columnNumber":-1},"hitCount":0,"children":[2,3]},
+			{"id":2,"callFrame":{"functionName":"(idle)","url":"","lineNumber":-1,"columnNumber":-1},"hitCount":1},
+			{"id":3,"callFrame":{"functionName":"processBatch","url":"file://` + jsPath + `","lineNumber":4,"columnNumber":9},"hitCount":99,"positionTicks":[{"line":7,"ticks":99}]}
+		],
+		"samples": [2],
+		"startTime": 0, "endTime": 1000000
+	}`
+	if err := os.WriteFile(cpPath, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newHotCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--file", cpPath})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	text := out.String()
+	tableIdx := strings.Index(text, "TOTAL")
+	codeFrameIdx := strings.Index(text, "-- processBatch")
+	warnIdx := strings.Index(text, "likely JIT-inlined: heavyStringify() was inlined into processBatch; the time on line 7 is spent inside heavyStringify")
+	secondaryIdx := strings.Index(text, "inlined callee (no per-line data)")
+	if tableIdx < 0 || codeFrameIdx < 0 || warnIdx < 0 || secondaryIdx < 0 {
+		t.Fatalf("missing an expected section in:\n%s", text)
+	}
+	if !(tableIdx < codeFrameIdx && codeFrameIdx < warnIdx && warnIdx < secondaryIdx) {
+		t.Errorf("expected order TABLE < CodeFrame < warning < secondary frame, got positions %d/%d/%d/%d:\n%s",
+			tableIdx, codeFrameIdx, warnIdx, secondaryIdx, text)
+	}
+	if !strings.Contains(text, "function heavyStringify(items)") {
+		t.Errorf("secondary frame missing heavyStringify's own body:\n%s", text)
+	}
+}
+
 func TestHumanMethodLabel(t *testing.T) {
 	cases := map[profiler.HeatMethod]string{
 		profiler.MethodV8PositionTicks: "v8 positionTicks",
@@ -498,6 +630,42 @@ func TestHeatLocation(t *testing.T) {
 		if got := heatLocation(c.f); got != c.want {
 			t.Errorf("heatLocation(%+v) = %q, want %q", c.f, got, c.want)
 		}
+	}
+}
+
+// TestDisplayHeatPathShortensAbsolutePathsInsideGitRoot is the regression
+// for the polish review's "long absolute paths" finding: a live <pid>
+// capture's file paths come straight from the profiled process's own
+// absolute source paths (V8's file:// URLs), which routinely blow well
+// past the 100-column table/CodeFrame width on a deeply nested project.
+// Display-only — --json is untouched (heatLocation/codeFrameForFunction
+// are the only two call sites, both purely human-rendering).
+func TestDisplayHeatPathShortensAbsolutePathsInsideGitRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.Join(root, "src", "workload.js")
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := displayHeatPath(abs), filepath.Join("src", "workload.js"); got != want {
+		t.Errorf("displayHeatPath(%q) = %q, want %q", abs, got, want)
+	}
+	// Already-relative and empty paths pass through unchanged.
+	if got := displayHeatPath("src/workload.js"); got != "src/workload.js" {
+		t.Errorf("displayHeatPath(relative) = %q, want it unchanged", got)
+	}
+	if got := displayHeatPath(""); got != "" {
+		t.Errorf("displayHeatPath(\"\") = %q, want \"\"", got)
+	}
+	// Outside any git root: returned unchanged rather than guessing.
+	outside := filepath.Join(t.TempDir(), "elsewhere.js")
+	if got := displayHeatPath(outside); got != outside {
+		t.Errorf("displayHeatPath(outside any git root) = %q, want it unchanged (%q)", got, outside)
 	}
 }
 
