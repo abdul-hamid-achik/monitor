@@ -1,0 +1,109 @@
+version: 1
+name: monitor_profile_node_lines
+
+intent: |
+  `monitor profile <pid> --type cpu --inspect-addr <addr> --json` captures a
+  Node CDP CPU profile and reports the real hot *line* inside a function via
+  V8's positionTicks, not the function's declaration line (AC-1 in
+  ~/notes/projects/monitor/2026-09-22-local-sentry-goal.md; the flattening
+  logic is internal/profiler/inspector.go's flattenCDPProfile, exercised
+  against a synthetic fixture in inspector_test.go — this spec exercises the
+  same code path against a REAL, live V8 CPU profile end to end).
+
+  examples/polyglot/js/workload.js plants a hot statement at line 17
+  (`s += JSON.stringify(...)` inside heavyStringify, called every 40ms from
+  a setInterval). Node is launched with --jitless: with any JIT tier enabled
+  (Sparkplug/Maglev/TurboFan), V8 attributes this workload's samples to the
+  *for loop's own line* (16) instead of the statement actually doing the
+  work (verified empirically against this exact fixture across --no-opt,
+  --no-turbo-inlining and --no-maglev-inlining — all still misattribute to
+  line 16); pure Ignition interpretation (--jitless) is the only mode that
+  reliably attributes samples to line 17, matching what the interpreter is
+  actually spending time on rather than a JIT tier's loop-level bookkeeping.
+
+target:
+  cmd:
+    [
+      "sh",
+      "-c",
+      "node --jitless --inspect=127.0.0.1:9344 examples/polyglot/js/workload.js >/tmp/monitor-spec-node-lines-stderr.log 2>&1 & P=$!; sleep 1; ./bin/monitor profile \"$P\" --type cpu --inspect-addr 127.0.0.1:9344 --duration 2s --json; R=$?; kill \"$P\" 2>/dev/null; exit $R",
+    ]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v node"
+      timeoutMs: 5000
+    - run: "test -f examples/polyglot/js/workload.js"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 15000
+
+outcomes:
+  - id: type_cpu
+    description: stdout marks the profile type as cpu
+    verify:
+      command:
+        run: >-
+          node --jitless --inspect=127.0.0.1:9344 examples/polyglot/js/workload.js >/tmp/monitor-spec-node-lines-stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor profile "$P" --type cpu --inspect-addr 127.0.0.1:9344 --duration 2s --json > /tmp/monitor-spec-node-lines-profile.json 2>&1;
+          kill "$P" 2>/dev/null;
+          grep -q '"type":[[:space:]]*"cpu"' /tmp/monitor-spec-node-lines-profile.json
+  - id: method_inspector_cpu
+    description: the method is inspector_cpu (the CDP path, not a pprof scrape)
+    verify:
+      command:
+        run: >-
+          node --jitless --inspect=127.0.0.1:9344 examples/polyglot/js/workload.js >/tmp/monitor-spec-node-lines-stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor profile "$P" --type cpu --inspect-addr 127.0.0.1:9344 --duration 2s --json > /tmp/monitor-spec-node-lines-profile.json 2>&1;
+          kill "$P" 2>/dev/null;
+          grep -q '"method":[[:space:]]*"inspector_cpu"' /tmp/monitor-spec-node-lines-profile.json
+  - id: heavy_stringify_top_line_17
+    description: |
+      the top-weighted heavyStringify symbol is line 17 (the planted hot
+      statement), not line 11/16 (its declaration or the enclosing for-loop
+      header) — the AC-1 regression this whole slice exists for. Symbols are
+      already weight-sorted descending (flattenCDPProfile), and Symbol's
+      JSON field order is func,file,line — so the first "line" following the
+      first "heavyStringify" match is the highest-weighted one; no JSON
+      parser needed.
+    verify:
+      command:
+        run: >-
+          node --jitless --inspect=127.0.0.1:9344 examples/polyglot/js/workload.js >/tmp/monitor-spec-node-lines-stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor profile "$P" --type cpu --inspect-addr 127.0.0.1:9344 --duration 2s --json > /tmp/monitor-spec-node-lines-profile.json 2>&1;
+          kill "$P" 2>/dev/null;
+          awk '/"func":[[:space:]]*"heavyStringify"/{f=1} f && /"line":/{print; exit}' /tmp/monitor-spec-node-lines-profile.json | grep -q '"line":[[:space:]]*17'
+  - id: no_idle_pseudo_frame_in_symbols
+    description: (idle)/(program)/(garbage collector) never leak into the symbol list
+    verify:
+      command:
+        run: >-
+          node --jitless --inspect=127.0.0.1:9344 examples/polyglot/js/workload.js >/tmp/monitor-spec-node-lines-stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor profile "$P" --type cpu --inspect-addr 127.0.0.1:9344 --duration 2s --json > /tmp/monitor-spec-node-lines-profile.json 2>&1;
+          kill "$P" 2>/dev/null;
+          ! grep -q '"func":[[:space:]]*"(idle)"' /tmp/monitor-spec-node-lines-profile.json
+  - id: clean_exit
+    description: the binary exits cleanly
+    verify:
+      command:
+        run: >-
+          node --jitless --inspect=127.0.0.1:9344 examples/polyglot/js/workload.js >/tmp/monitor-spec-node-lines-stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor profile "$P" --type cpu --inspect-addr 127.0.0.1:9344 --duration 2s --json >/dev/null 2>&1;
+          R=$?; kill "$P" 2>/dev/null; [ $R -eq 0 ]

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/pprof"
+	"os"
 	"strings"
 	"testing"
 
@@ -12,8 +13,11 @@ import (
 )
 
 // TestCaptureHeapOverHTTP exercises the real scrape path: Capture builds the
-// /debug/pprof/heap?debug=1 URL, fetches it over HTTP, and parses frames. We
-// serve a live pprof endpoint from this test process so the data is real.
+// /debug/pprof/heap and /debug/pprof/goroutine URLs (proto, not ?debug=1
+// text — the net/http/pprof mux serves runtime/pprof's real gzipped
+// protobuf by default), fetches them over HTTP, and parses them in-process
+// with github.com/google/pprof/profile. We serve a live pprof endpoint from
+// this test process so the profile describes this process's real heap.
 func TestCaptureHeapOverHTTP(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/pprof/", pprof.Index) // dispatches /debug/pprof/heap etc.
@@ -29,15 +33,34 @@ func TestCaptureHeapOverHTTP(t *testing.T) {
 		if p.PID != 4321 || p.Type != pt {
 			t.Errorf("%s: meta = %+v", pt, p)
 		}
-		if p.Text == "" {
-			t.Errorf("%s: expected profile text", pt)
+		if p.Path == "" {
+			t.Errorf("%s: expected the raw proto to be saved to Path", pt)
+		} else {
+			defer os.Remove(p.Path)
+			if info, statErr := os.Stat(p.Path); statErr != nil || info.Size() == 0 {
+				t.Errorf("%s: saved profile missing/empty (stat=%v err=%v)", pt, info, statErr)
+			}
 		}
 	}
 
-	// The debug=1 heap profile carries a recognizable header.
-	p, _ := Capture(context.Background(), 1, ProfileHeap, addr)
-	if !strings.Contains(p.Text, "heap profile") {
-		t.Errorf("heap text missing 'heap profile' header:\n%.200s", p.Text)
+	// A real, currently-running Go test process always has some heap
+	// allocations and at least one goroutine, so real symbols (not just an
+	// empty capture) must come back — this is the regression for the
+	// removed HasSuffix(fn,"s") bug corrupting/dropping real symbols.
+	p, err := Capture(context.Background(), 1, ProfileHeap, addr)
+	if err != nil {
+		t.Fatalf("Capture(heap): %v", err)
+	}
+	if len(p.Symbols) == 0 {
+		t.Fatal("expected non-empty symbols from a real heap profile")
+	}
+	if p.Text == "" {
+		t.Error("expected Profile.Text to hold a readable top-N summary now that heap has no ?debug=1 text dump")
+	}
+	for _, s := range p.Symbols {
+		if s.Func == "unknown" {
+			t.Errorf("real heap profile produced an unknown symbol: %+v", s)
+		}
 	}
 }
 
@@ -83,70 +106,11 @@ func TestValidateCaptureWithInjectedCapabilities(t *testing.T) {
 	}
 }
 
-func TestParsePprofExtractsFrames(t *testing.T) {
-	text := `File: foo.go
-Build ID: abc123
-Type: cpu
-Time: now
-Duration: 1s
-
-     100ms  40%  main.runLoop  foo.go:42  0x1234
-      50ms  20%  main.handler  bar.go:99  0x2345
-`
-	syms := parsePprof(text)
-	if len(syms) < 2 {
-		t.Fatalf("parsePprof returned %d symbols, want >= 2", len(syms))
-	}
-	if syms[0].Func != "main.runLoop" || syms[0].Line != 42 {
-		t.Errorf("first symbol = %+v", syms[0])
-	}
-}
-
-// TestParsePprofParsesDebug1Heap feeds real /debug/pprof/heap?debug=1 text
-// (tab-separated "# 0xADDR func+0xOFF /path/file.go:LINE" frames). The old
-// parser only saw protobuf on the wire and returned nothing.
-func TestParsePprofParsesDebug1Heap(t *testing.T) {
-	text := "heap profile: 3: 4128 [3: 4129] @ heap/1048576\n" +
-		"1: 32 [1: 32] @ 0x10461a9cc 0x10461b688\n" +
-		"#\t0x10461a9cb\tsyscall.anyToSockaddr+0x9b\t/go/src/syscall/syscall_bsd.go:257\n" +
-		"#\t0x10461b687\tsyscall.Getpeername+0x77\t/go/src/syscall/syscall_unix.go:309\n"
-	syms := parsePprof(text)
-	if len(syms) < 2 {
-		t.Fatalf("parsePprof returned %d symbols, want >= 2", len(syms))
-	}
-	if syms[0].Func != "syscall.anyToSockaddr" {
-		t.Errorf("func = %q, want syscall.anyToSockaddr (the +0x offset should be stripped)", syms[0].Func)
-	}
-	if syms[0].Line != 257 {
-		t.Errorf("line = %d, want 257", syms[0].Line)
-	}
-}
-
-// TestParsePprofTopExtractsFrames uses real `go tool pprof -top -lines`
-// output (the CPU-profile symbolication path).
-func TestParsePprofTopExtractsFrames(t *testing.T) {
-	text := `File: cpuprof
-Type: cpu
-Duration: 1.11s, Total samples = 2990ms (268.25%)
-Showing nodes accounting for 2990ms, 100% of 2990ms total
-      flat  flat%   sum%        cum   cum%
-    2630ms 87.96% 87.96%     2990ms   100%  main.burn /tmp/cpuprof.go:11
-     360ms 12.04%   100%      360ms 12.04%  runtime.asyncPreempt /go/src/runtime/preempt_arm64.s:7
-`
-	syms := parsePprofTop(text)
-	if len(syms) != 2 {
-		t.Fatalf("parsePprofTop returned %d symbols, want 2; %+v", len(syms), syms)
-	}
-	if syms[0].Func != "main.burn" || syms[0].Line != 11 {
-		t.Errorf("first symbol = %+v, want main.burn :11", syms[0])
-	}
-	if syms[0].Weight != 87.96 {
-		t.Errorf("first symbol weight = %v, want 87.96 (the flat%%)", syms[0].Weight)
-	}
-	if syms[1].Func != "runtime.asyncPreempt" {
-		t.Errorf("second symbol = %+v, want runtime.asyncPreempt", syms[1])
-	}
-}
+// parsePprof/parsePprofTop/goToolPprofTop (text-scraping `go tool pprof`
+// output, requiring the go toolchain on PATH) were removed in favor of
+// symbolsFromPprof (pprof.go / pprof_test.go), which parses the real
+// protobuf in-process. See pprof_test.go for their regression coverage,
+// including the removed HasSuffix(fn,"s") → "unknown" bug.
 
 // parseSample (a single-line regex parser with no tree/self-time semantics)
 // was replaced by parseSampleTree (see sample_parse_test.go): the regex
@@ -156,13 +120,15 @@ Showing nodes accounting for 2990ms, 100% of 2990ms total
 
 // TestPprofURLMapsCPUToProfile is a regression for the bug where
 // ProfileCPU built /debug/pprof/cpu (a 404 — net/http/pprof has no "cpu"
-// handler) instead of /debug/pprof/profile.
+// handler) instead of /debug/pprof/profile. It also pins heap/goroutine to
+// the plain proto endpoint (no ?debug=1): the old text dump can't carry
+// per-line flat/cum with inlining, only the wire proto can.
 func TestPprofURLMapsCPUToProfile(t *testing.T) {
 	// "" defaults to localhost:6060.
 	cases := map[ProfileType]string{
 		ProfileCPU:       "http://localhost:6060/debug/pprof/profile?seconds=1",
-		ProfileHeap:      "http://localhost:6060/debug/pprof/heap?debug=1",
-		ProfileGoroutine: "http://localhost:6060/debug/pprof/goroutine?debug=1",
+		ProfileHeap:      "http://localhost:6060/debug/pprof/heap",
+		ProfileGoroutine: "http://localhost:6060/debug/pprof/goroutine",
 	}
 	for pt, want := range cases {
 		if got := pprofURL("", pt); got != want {
@@ -170,7 +136,7 @@ func TestPprofURLMapsCPUToProfile(t *testing.T) {
 		}
 	}
 	// A custom address is honored.
-	if got := pprofURL("10.0.0.5:7070", ProfileHeap); got != "http://10.0.0.5:7070/debug/pprof/heap?debug=1" {
+	if got := pprofURL("10.0.0.5:7070", ProfileHeap); got != "http://10.0.0.5:7070/debug/pprof/heap" {
 		t.Errorf("custom addr pprofURL = %q", got)
 	}
 }

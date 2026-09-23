@@ -4,7 +4,7 @@
 package profiler
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,9 +12,9 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
-	"strings"
 	"time"
+
+	"github.com/google/pprof/profile"
 
 	"github.com/abdul-hamid-achik/monitor/internal/capability"
 	"github.com/abdul-hamid-achik/monitor/internal/contextids"
@@ -36,10 +36,17 @@ type Symbol struct {
 	File   string `json:"file"`
 	Line   int    `json:"line"`
 	Source string `json:"source,omitempty"`
-	// Weight is the frame's share of the profile as a percentage (the pprof
-	// "flat%"), when available (CPU profiles). 0 for formats without a
-	// per-frame cost (e.g. the heap ?debug=1 dump).
+	// Weight is the frame's flat (self) share of the profile as a
+	// percentage, when available. 0 for formats without a per-frame cost.
 	Weight float64 `json:"weight,omitempty"`
+	// Cum is the frame's cumulative share of the profile as a percentage:
+	// this line's own weight plus everything sampled underneath it on the
+	// stack (e.g. a wrapper that only ever calls into a hot function has
+	// Weight ~0 but Cum close to that callee's total). Additive; only pprof
+	// proto captures (cpu/heap/goroutine) populate it today. When present,
+	// correlation scoring prefers it over Weight (a wrapper's hot *line* —
+	// the call site — is exactly what Cum surfaces and Weight alone can't).
+	Cum float64 `json:"cum,omitempty"`
 }
 
 // Profile is the result of a capture.
@@ -103,33 +110,8 @@ func Capture(ctx context.Context, pid int32, t ProfileType, addr string) (Profil
 		return p, fmt.Errorf("invalid pid %d", pid)
 	}
 	switch t {
-	case ProfileHeap, ProfileGoroutine:
-		p.Method = "pprof_" + string(t)
-		endpoint := pprofURL(addr, t)
-		text, err := httpGet(ctx, endpoint)
-		if err != nil {
-			return p, fmt.Errorf("scrape %s: %w", endpoint, err)
-		}
-		p.Text = text
-		p.Symbols = parsePprof(text)
-		return p, nil
-	case ProfileCPU:
-		p.Method = "pprof_cpu"
-		// The CPU endpoint returns gzipped protobuf, not text. Save it so
-		// it's never lost and is analyzable with `go tool pprof`, then
-		// best-effort symbolicate it via the go toolchain.
-		endpoint := pprofURL(addr, t)
-		body, err := httpGet(ctx, endpoint)
-		if err != nil {
-			return p, fmt.Errorf("scrape %s: %w", endpoint, err)
-		}
-		path, werr := writeTempProfile(pid, []byte(body))
-		if werr != nil {
-			return p, fmt.Errorf("save cpu profile: %w", werr)
-		}
-		p.Path = path
-		p.Symbols = goToolPprofTop(ctx, path)
-		return p, nil
+	case ProfileHeap, ProfileGoroutine, ProfileCPU:
+		return captureProfilePprof(ctx, p, addr, t)
 	case ProfileSample:
 		return captureSample(ctx, pid)
 	default:
@@ -137,17 +119,79 @@ func Capture(ctx context.Context, pid int32, t ProfileType, addr string) (Profil
 	}
 }
 
+// pprofPreferredValue picks which of a pprof profile's (possibly several)
+// sample-value columns symbolsFromPprof weights by, per profile type. Heap
+// profiles from net/http/pprof always carry all four
+// alloc/inuse x objects/space columns regardless of ?gc=1; inuse_space
+// answers "what's using memory right now" rather than "what has ever been
+// allocated", which is what a human reaches for `hot`/`profile -t heap` to
+// find. CPU prefers the "cpu" (nanoseconds) column over the parallel
+// "samples" (count) column so profiles taken at different durations/rates
+// stay comparable; goroutine profiles carry a single unnamed count column,
+// so pprofValueIndex's fallback (the last column) is exactly right without
+// a preferred name.
+func pprofPreferredValue(t ProfileType) []string {
+	switch t {
+	case ProfileHeap:
+		return []string{"inuse_space", "alloc_space", "inuse_objects", "alloc_objects"}
+	case ProfileCPU:
+		return []string{"cpu", "samples"}
+	default:
+		return nil
+	}
+}
+
+// captureProfilePprof fetches a pprof proto (heap/goroutine: the raw
+// protobuf, never ?debug=1 text; cpu: /debug/pprof/profile, always proto)
+// and parses it in-process with github.com/google/pprof/profile —
+// monitor no longer shells out to `go tool pprof`, so profiling works on a
+// host with no go toolchain installed. The proto is always saved to Path so
+// the raw evidence survives even when in-process symbolication finds
+// nothing (a profile with zero samples of the selected type isn't an
+// error).
+func captureProfilePprof(ctx context.Context, p Profile, addr string, t ProfileType) (Profile, error) {
+	p.Method = "pprof_" + string(t)
+	endpoint := pprofURL(addr, t)
+	body, err := httpGet(ctx, endpoint)
+	if err != nil {
+		return p, fmt.Errorf("scrape %s: %w", endpoint, err)
+	}
+	path, werr := writeTempProfile(p.PID, t, body)
+	if werr != nil {
+		return p, fmt.Errorf("save %s profile: %w", t, werr)
+	}
+	p.Path = path
+
+	prof, perr := profile.Parse(bytes.NewReader(body))
+	if perr != nil {
+		// The raw proto is still saved and still analyzable externally
+		// (`go tool pprof` on Path); a parse failure degrades to "no
+		// symbols found" rather than failing the whole capture.
+		return p, nil
+	}
+	valueIdx := pprofValueIndex(prof, pprofPreferredValue(t)...)
+	syms := symbolsFromPprof(prof, valueIdx)
+	p.Symbols = syms
+	if t != ProfileCPU {
+		// CPU's saved .pb.gz IS the primary artifact `go tool pprof` reads;
+		// heap/goroutine no longer have a ?debug=1 text dump at all now
+		// that both are fetched as proto, so Text becomes the human-
+		// readable top-N summary instead of going empty.
+		p.Text = summarizeSymbols(syms, 25)
+	}
+	return p, nil
+}
+
 // DefaultPprofAddr is the host:port scraped when Capture is given no address.
 const DefaultPprofAddr = "localhost:6060"
 
-// pprofURL maps a ProfileType to its net/http/pprof endpoint at addr (host:port,
-// defaulting to localhost:6060 when empty).
-//   - CPU is served at /debug/pprof/profile (there is no /cpu handler),
-//     bounded with ?seconds=1 so the scrape can't block indefinitely. It
-//     returns protobuf, so parsePprof extracts no symbols from it.
-//   - heap/goroutine use ?debug=1 to get a TEXT dump (addr / func+off /
-//     file.go:line frames) that parsePprof can read; without it the body
-//     is gzipped protobuf and no symbols are recoverable.
+// pprofURL maps a ProfileType to its net/http/pprof endpoint at addr
+// (host:port, defaulting to localhost:6060 when empty). Every type is
+// fetched as the raw protobuf now (never ?debug=1 text): CPU always was
+// (there is no /cpu handler; /profile bounded with ?seconds=1 so the scrape
+// can't block indefinitely), and heap/goroutine moved off ?debug=1 so
+// symbolsFromPprof can compute real flat/cum per line with inlining instead
+// of text-scraping a human-oriented dump.
 func pprofURL(addr string, t ProfileType) string {
 	if addr == "" {
 		addr = DefaultPprofAddr
@@ -156,8 +200,6 @@ func pprofURL(addr string, t ProfileType) string {
 	switch t {
 	case ProfileCPU:
 		return base + "profile?seconds=1"
-	case ProfileHeap, ProfileGoroutine:
-		return base + string(t) + "?debug=1"
 	default:
 		return base + string(t)
 	}
@@ -170,10 +212,12 @@ var pprofClient = &http.Client{Timeout: 30 * time.Second}
 
 const maxRawProfileBytes int64 = 128 << 20
 
-// writeTempProfile saves raw profile bytes (a CPU protobuf) to a temp file
-// and returns its path so the profile is preserved for `go tool pprof`.
-func writeTempProfile(pid int32, body []byte) (string, error) {
-	f, err := os.CreateTemp("", fmt.Sprintf("monitor-cpu-%d-*.pb.gz", pid))
+// writeTempProfile saves a raw pprof protobuf to a private temp file and
+// returns its path, so the profile is preserved (and analyzable with
+// `go tool pprof` if the caller wants a second opinion) even when in-process
+// symbolication finds nothing.
+func writeTempProfile(pid int32, t ProfileType, body []byte) (string, error) {
+	f, err := os.CreateTemp("", fmt.Sprintf("monitor-%s-%d-*.pb.gz", t, pid))
 	if err != nil {
 		return "", err
 	}
@@ -189,133 +233,27 @@ func writeTempProfile(pid int32, body []byte) (string, error) {
 	return path, nil
 }
 
-// goToolPprofTop best-effort symbolicates a saved profile via the go
-// toolchain (`go tool pprof -top -lines`). Returns nil when `go` isn't on
-// PATH or the command fails, so the caller still gets the saved profile path.
-func goToolPprofTop(ctx context.Context, path string) []Symbol {
-	if _, err := exec.LookPath("go"); err != nil {
-		return nil
-	}
-	out, err := exec.CommandContext(ctx, "go", "tool", "pprof",
-		"-top", "-lines", "-nodecount=25", path).Output()
-	if err != nil {
-		return nil
-	}
-	return parsePprofTop(string(out))
-}
-
-// parsePprofTop parses `go tool pprof -top -lines` output. Each data row is
-//
-//	<flat> <flat%> <sum%> <cum> <cum%>  <func>  <file>:<line>
-//
-// — the func and file:line are the last two whitespace fields, and the
-// leading column is a sample magnitude (starts with a digit), which lets us
-// skip the header/prose lines.
-func parsePprofTop(text string) []Symbol {
-	sc := bufio.NewScanner(strings.NewReader(text))
-	var syms []Symbol
-	seen := map[string]bool{}
-	for sc.Scan() {
-		parts := strings.Fields(sc.Text())
-		if len(parts) < 7 || parts[0] == "" || parts[0][0] < '0' || parts[0][0] > '9' {
-			continue
-		}
-		fileLine := parts[len(parts)-1]
-		fn := parts[len(parts)-2]
-		colon := strings.LastIndexByte(fileLine, ':')
-		if colon < 0 {
-			continue
-		}
-		var ln int
-		if _, err := fmt.Sscanf(fileLine[colon+1:], "%d", &ln); err != nil {
-			continue
-		}
-		if seen[fn] {
-			continue
-		}
-		seen[fn] = true
-		// flat% is the 2nd column, e.g. "87.96%".
-		var weight float64
-		if _, err := fmt.Sscanf(strings.TrimSuffix(parts[1], "%"), "%g", &weight); err != nil {
-			weight = 0
-		}
-		syms = append(syms, Symbol{Func: fn, File: fileLine[:colon], Line: ln, Weight: weight})
-		if len(syms) >= 25 {
-			break
-		}
-	}
-	return syms
-}
-
-func httpGet(ctx context.Context, url string) (string, error) {
+func httpGet(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	resp, err := pprofClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return "", errors.Join(fmt.Errorf("status %d", resp.StatusCode), resp.Body.Close())
+		return nil, errors.Join(fmt.Errorf("status %d", resp.StatusCode), resp.Body.Close())
 	}
 	b, readErr := io.ReadAll(io.LimitReader(resp.Body, maxRawProfileBytes+1))
 	closeErr := resp.Body.Close()
 	if readErr == nil && int64(len(b)) > maxRawProfileBytes {
 		readErr = fmt.Errorf("profile response exceeds %d bytes", maxRawProfileBytes)
 	}
-	return string(b), errors.Join(readErr, closeErr)
-}
-
-// parsePprof extracts the top frames from a pprof text dump.
-func parsePprof(text string) []Symbol {
-	sc := bufio.NewScanner(strings.NewReader(text))
-	var syms []Symbol
-	seen := map[string]bool{}
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "File:") || strings.HasPrefix(line, "Build") || strings.HasPrefix(line, "Type:") {
-			continue
-		}
-		// lines like `     100ms  40%  main.runLoop  foo.go:42  0x1234`
-		parts := strings.Fields(line)
-		// walk from the end; func name is the field before file.go:line
-		for i := len(parts) - 1; i >= 0; i-- {
-			p := parts[i]
-			colon := strings.LastIndexByte(p, ':')
-			if colon < 0 || !strings.Contains(p, ".go:") {
-				continue
-			}
-			path := p[:colon]
-			var lineNum int
-			if _, err := fmt.Sscanf(p[colon+1:], "%d", &lineNum); err != nil {
-				break
-			}
-			if i == 0 {
-				break
-			}
-			fn := parts[i-1]
-			// strip a trailing program-counter offset like "+0x9b" that the
-			// pprof ?debug=1 text format appends to the function name.
-			if plus := strings.LastIndexByte(fn, '+'); plus > 0 && strings.HasPrefix(fn[plus+1:], "0x") {
-				fn = fn[:plus]
-			}
-			// skip percentage tokens like "40%" or "100ms"
-			if strings.HasSuffix(fn, "%") || strings.HasSuffix(fn, "ms") || strings.HasSuffix(fn, "s") {
-				fn = "unknown"
-			}
-			if seen[fn+path] {
-				break
-			}
-			seen[fn+path] = true
-			syms = append(syms, Symbol{Func: fn, File: path, Line: lineNum})
-			if len(syms) >= 25 {
-				return syms
-			}
-			break
-		}
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return nil, err
 	}
-	return syms
+	return b, nil
 }
 
 // ToJSON is a convenience for CLI --json output.
