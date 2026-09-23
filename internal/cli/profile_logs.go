@@ -642,6 +642,9 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase stri
 		if s.Weight > 0 {
 			entry["weight_pct"] = s.Weight
 		}
+		if s.Cum > 0 {
+			entry["cum_pct"] = s.Cum
+		}
 		if cs.symErr == nil {
 			sym := cs.sym
 			entry["resolution"] = sym.Resolution
@@ -673,9 +676,19 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase stri
 						entry["blast"] = blast
 						entry["tests"] = len(imp.Tests)
 						entry["untested"] = imp.Untested
-						if s.Weight > 0 {
+						// Prefer Cum (cumulative: this line plus everything
+						// sampled underneath it) over Weight (flat/self only)
+						// when the pprof proto path populated it — a wrapper
+						// whose own flat time is ~0 but whose call site is
+						// the hot line (Cum near 100%) must still outrank a
+						// low-blast leaf by its real cost, which flat alone
+						// can't represent.
+						switch {
+						case s.Cum > 0:
+							entry["score"] = s.Cum * float64(blast)
+						case s.Weight > 0:
 							entry["score"] = s.Weight * float64(blast)
-						} else {
+						default:
 							entry["score"] = float64(blast)
 						}
 					}

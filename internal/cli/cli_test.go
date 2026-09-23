@@ -89,6 +89,48 @@ esac
 	}
 }
 
+// TestCorrelateProfileScoresByCumWhenPresent: correlate's ranking score used
+// to be Weight (flat/self) x blast radius. A pprof-proto symbol whose Cum
+// (cumulative) is high but Weight (flat) is near-zero — exactly the
+// "wrapper whose hot line is a call site" shape symbolsFromPprof now
+// surfaces — must still score by its real cumulative cost, not its flat
+// time, or it would rank behind a low-blast, high-flat leaf despite being
+// the actual bottleneck.
+func TestCorrelateProfileScoresByCumWhenPresent(t *testing.T) {
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+case " $* " in
+  *" symbol-at "*) printf '%s' '{"fqn":"main.wrapper","kind":"function","resolution":"enclosing","indexed":true}' ;;
+  *" impact "*) printf '%s' '{"symbol":"main.wrapper","found":true,"call_graph":"resolved","direct_callers":[],"blast_radius":["a","b","c","d"],"tests":[]}' ;;
+  *) exit 9 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "codemap"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	syms := []profiler.Symbol{
+		{Func: "main.wrapper", File: "main.go", Line: 19, Weight: 0.5, Cum: 95},
+	}
+	got := correlateProfile(context.Background(), syms, "")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 correlated row, got %d: %+v", len(got), got)
+	}
+	row := got[0]
+	if row["cum_pct"] != 95.0 {
+		t.Errorf("row[cum_pct] = %v, want 95", row["cum_pct"])
+	}
+	score, ok := row["score"].(float64)
+	if !ok {
+		t.Fatalf("row[score] = %v (%T), want float64", row["score"], row["score"])
+	}
+	// blast=4; Cum(95) x 4 = 380, not Weight(0.5) x 4 = 2.
+	if score < 379 || score > 381 {
+		t.Errorf("score = %v, want ~380 (Cum x blast, not Weight x blast)", score)
+	}
+}
+
 func TestWriteJSON(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
