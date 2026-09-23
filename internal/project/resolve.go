@@ -70,7 +70,7 @@ type Hints struct {
 // Identity is the single resolved project/service identity every occurrence
 // writer (watch --stash, investigate, and the MCP investigate path) uses.
 type Identity struct {
-	// Slug is the resolved project ("graphite", "host", "local", ...).
+	// Slug is the resolved project ("acme", "host", "local", ...).
 	Slug string
 	// Service is the resolved service within Slug ("web-api", ...). Empty
 	// when nothing resolved it.

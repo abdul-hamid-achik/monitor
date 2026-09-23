@@ -387,10 +387,10 @@ durable issue index with their run context and evidence reference.`,
 // monitor's own os.Getwd(): the earlier version read monitor's cwd, so
 // watch and investigate disagreed on the same PID whenever monitor was
 // launched from a different directory than the alerted process -- the
-// normal case (verified: a real child with cwd <tmp>/graphite/web-api,
+// normal case (verified: a real child with cwd <tmp>/acme/web-api,
 // monitor launched from an unrelated directory, gave watch
 // project=sleep/service=sleep while investigate gave
-// project=graphite/service=web-api for the SAME pid). project.Resolve
+// project=acme/service=web-api for the SAME pid). project.Resolve
 // itself never falls back to monitor's cwd either (Hints.UseWorkingDir is
 // intentionally left unset here), so a process whose cwd can't be read
 // degrades to the service/process-name/"local" fallback instead of

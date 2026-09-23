@@ -28,14 +28,14 @@ func mkMarker(t *testing.T, dir, marker string) {
 
 func TestResolveMonorepoGitRootVsNearestMarker(t *testing.T) {
 	root := t.TempDir()
-	repoRoot := filepath.Join(root, "graphite")
+	repoRoot := filepath.Join(root, "acme")
 	serviceDir := filepath.Join(repoRoot, "web-api")
 	mkGitRoot(t, repoRoot)
 	mkMarker(t, serviceDir, "package.json")
 
 	got := Resolve(Hints{Dir: serviceDir, PID: 4242})
-	if got.Slug != "graphite" {
-		t.Errorf("Slug = %q, want %q", got.Slug, "graphite")
+	if got.Slug != "acme" {
+		t.Errorf("Slug = %q, want %q", got.Slug, "acme")
 	}
 	if got.Service != "web-api" {
 		t.Errorf("Service = %q, want %q", got.Service, "web-api")
@@ -53,7 +53,7 @@ func TestResolveMonorepoGitRootVsNearestMarker(t *testing.T) {
 
 func TestResolveExplicitFlagBeatsEverything(t *testing.T) {
 	root := t.TempDir()
-	repoRoot := filepath.Join(root, "graphite")
+	repoRoot := filepath.Join(root, "acme")
 	serviceDir := filepath.Join(repoRoot, "web-api")
 	mkGitRoot(t, repoRoot)
 	mkMarker(t, serviceDir, "package.json")
@@ -70,7 +70,7 @@ func TestResolveExplicitFlagBeatsEverything(t *testing.T) {
 
 func TestResolveEnvBeatsGitRootAndMarker(t *testing.T) {
 	root := t.TempDir()
-	repoRoot := filepath.Join(root, "graphite")
+	repoRoot := filepath.Join(root, "acme")
 	serviceDir := filepath.Join(repoRoot, "web-api")
 	mkGitRoot(t, repoRoot)
 	mkMarker(t, serviceDir, "package.json")
@@ -88,7 +88,7 @@ func TestResolveEnvBeatsGitRootAndMarker(t *testing.T) {
 
 func TestResolveHostForPIDLessAlert(t *testing.T) {
 	root := t.TempDir()
-	repoRoot := filepath.Join(root, "graphite")
+	repoRoot := filepath.Join(root, "acme")
 	mkGitRoot(t, repoRoot)
 
 	// Even sitting inside a real git repo, a PID-less (host-wide) event
