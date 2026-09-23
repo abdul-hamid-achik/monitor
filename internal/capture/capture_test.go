@@ -206,6 +206,54 @@ func TestIngestStopsOnContextCancel(t *testing.T) {
 	}
 }
 
+// TestRunCommandReturnsPromptlyWhenGrandchildOutlivesKilledChild is a
+// regression for a hang found while testing SIGINT durability: `sh -c 'echo
+// ...; sleep N'` forks `sleep` as sh's OWN child. Killing sh (what ctx
+// cancellation does via exec.CommandContext) does not touch that
+// grandchild, which keeps the inherited stdout/stderr pipe write-end open
+// until it exits on its own — without closing our own read-end directly,
+// ingest's blocking Scan() never sees EOF and Run hangs for as long as the
+// grandchild keeps running, well past ctx cancellation.
+func TestRunCommandReturnsPromptlyWhenGrandchildOutlivesKilledChild(t *testing.T) {
+	dir := t.TempDir()
+	store, err := logger.OpenStore(dbPathFor(t, dir))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	closeTestStore(t, store)
+
+	src := Source{
+		Command: "sh",
+		Args:    []string{"sh", "-c", "echo INFO: quick_line; sleep 5"},
+		Name:    "grandchild",
+	}
+	r := NewRunner(store)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan Result, 1)
+	go func() { done <- r.Run(ctx, src) }()
+
+	// Give the child time to print its line and reach the sleep before we
+	// cancel, so the grandchild is definitely alive and still holding the
+	// pipe when cancellation happens.
+	time.Sleep(300 * time.Millisecond)
+	start := time.Now()
+	cancel()
+
+	select {
+	case res := <-done:
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("Run took %s to return after cancel, want well under the grandchild's 5s sleep", elapsed)
+		}
+		if res.Lines != 1 {
+			t.Errorf("Lines = %d, want 1 (the line printed before sleep)", res.Lines)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("Run did not return within 4s of ctx cancellation — hung on the orphaned grandchild's pipe")
+	}
+}
+
 // TestTailFileFollowsNewLines writes to a temp file, opens a tail
 // against it, and verifies new appends are picked up.
 func TestTailFileFollowsNewLines(t *testing.T) {

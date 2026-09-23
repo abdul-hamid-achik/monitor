@@ -171,6 +171,22 @@ func (r *Runner) runCommand(ctx context.Context, src Source) Result {
 	// `logs search --pid` filters are useful in both capture modes.
 	src.PID = int32(cmd.Process.Pid)
 
+	// Killing src.Command on cancellation (via exec.CommandContext) only
+	// signals that ONE process. A shell wrapper like `sh -c 'foo; sleep 30'`
+	// forks `sleep` as ITS OWN child; killing `sh` does not touch `sleep`,
+	// which keeps the inherited pipe write-end open until it exits on its
+	// own. Without this, ingest's blocking Scan() below would never see EOF
+	// on ctx cancellation (SIGINT/SIGTERM, or a MaxLines/MaxBytes cap), and
+	// `monitor logs capture` would hang — sometimes for as long as the
+	// orphaned grandchild keeps running — before it could ever reach
+	// store.Close(). Closing our own end of the pipes directly unblocks the
+	// scanners immediately regardless of what the child's children do.
+	go func() {
+		<-ctx.Done()
+		_ = stdout.Close()
+		_ = stderr.Close()
+	}()
+
 	var wg sync.WaitGroup
 	ingestErrs := make(chan error, 2)
 	wg.Add(2)
