@@ -470,13 +470,35 @@ func TestIssueContextForMCPWireLatestIgnoresAlertsAndRespectsProject(t *testing.
 	if !ok || resolvedFrom["project"] != "polyglot" || resolvedFrom["kind"] != "exception" {
 		t.Fatalf("resolved_from = %v", m["resolved_from"])
 	}
-	// Additive: the brief monitor.issue_context.v1 fields ride along with
-	// the legacy issue/occurrences shape in the SAME response.
+	// The DEFAULT response is the bounded monitor.issue_context.v1 brief --
+	// no legacy occurrences (AC-6's size budget applies to what a caller
+	// gets without asking for more).
 	if m["schema"] != "monitor.issue_context.v1" || m["budget"] != "brief" {
-		t.Fatalf("schema/budget = %v/%v, want the brief issue_context.v1 alongside legacy fields", m["schema"], m["budget"])
+		t.Fatalf("schema/budget = %v/%v, want the brief issue_context.v1", m["schema"], m["budget"])
 	}
-	if _, ok := m["occurrences"]; !ok {
-		t.Fatalf("legacy occurrences field missing from an additive response: %v", m)
+	if _, ok := m["occurrences"]; ok {
+		t.Fatalf("legacy occurrences field present by default: %v, want it opt-in via occurrence_limit", m)
+	}
+
+	// occurrence_limit > 0 opts into the legacy {issue, occurrences,
+	// occurrences_truncated} shape, in the SAME response.
+	resLegacy, err := cs.CallTool(ctx, &sdkmcp.CallToolParams{
+		Name:      "monitor_issue",
+		Arguments: map[string]any{"id": "latest", "project": "polyglot", "occurrence_limit": 5},
+	})
+	if err != nil {
+		t.Fatalf("CallTool (occurrence_limit): %v", err)
+	}
+	mLegacy, ok := resLegacy.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("StructuredContent type = %T", resLegacy.StructuredContent)
+	}
+	if _, ok := mLegacy["occurrences"]; !ok {
+		t.Fatalf("legacy occurrences field missing when occurrence_limit was set: %v", mLegacy)
+	}
+	legacyIssue, ok := mLegacy["issue"].(map[string]any)
+	if !ok || legacyIssue["id"] != wantIssue.ID {
+		t.Fatalf("legacy issue = %v, want the full issue for %s", mLegacy["issue"], wantIssue.ID)
 	}
 
 	// The same query without a project filter would resolve the alert
@@ -494,6 +516,48 @@ func TestIssueContextForMCPWireLatestIgnoresAlertsAndRespectsProject(t *testing.
 	issueAny := mAny["issue"].(map[string]any)
 	if issueAny["id"] == wantIssue.ID {
 		t.Fatalf("kind=any resolved %v, want the more recent alert to win once alerts are no longer excluded (precondition check)", issueAny["id"])
+	}
+}
+
+// TestIssueContextForMCPScrubsLegacyFreeText covers the review's exact
+// repro: a raw secret embedded in the exception message must never reach
+// the wire, even in the legacy issue/occurrences fields (which explain.
+// Build's own Options.Redact pass never touches, since they are not part of
+// its Context) -- see scrubIssueForResponse. The fake token is built by
+// concatenation (never a single literal) so it cannot trip GitHub push
+// protection on this test file itself.
+func TestIssueContextForMCPScrubsLegacyFreeText(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	fakeToken := "ghp_" + strings.Repeat("a", 36)
+	res, err := issues.RecordException(context.Background(), storePath, issues.DefaultWriterWait,
+		stacktrace.Exception{Runtime: "go", Type: "panic", Value: "auth failed with token " + fakeToken, Level: "fatal"},
+		project.Identity{Slug: "polyglot"}, contextids.IDs{},
+		issues.RecordExceptionOptions{ObservedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	t.Setenv(issues.StorePathEnv, storePath)
+	result, err := issueContextForMCP(context.Background(), res.Issue.ID, monitormcp.IssueContextFilter{}, 5)
+	if err != nil {
+		t.Fatalf("issueContextForMCP: %v", err)
+	}
+	if !result.IncludeLegacy {
+		t.Fatal("IncludeLegacy = false, want true (occurrence_limit was set)")
+	}
+	if strings.Contains(result.Issue.Title, fakeToken) || strings.Contains(result.Issue.Message, fakeToken) {
+		t.Fatalf("legacy issue leaked the raw token: title=%q message=%q", result.Issue.Title, result.Issue.Message)
+	}
+	if result.Issue.LatestException != nil && strings.Contains(result.Issue.LatestException.Value, fakeToken) {
+		t.Fatalf("legacy issue.latest_exception.value leaked the raw token: %q", result.Issue.LatestException.Value)
+	}
+	for _, occ := range result.Occurrences {
+		if strings.Contains(occ.Title, fakeToken) || strings.Contains(occ.Message, fakeToken) {
+			t.Fatalf("legacy occurrence leaked the raw token: title=%q message=%q", occ.Title, occ.Message)
+		}
+	}
+	if !strings.Contains(result.Issue.Title, "[token]") && !strings.Contains(result.Issue.Message, "[token]") {
+		t.Errorf("issue = %+v, want the redaction marker somewhere in title/message", result.Issue)
 	}
 }
 

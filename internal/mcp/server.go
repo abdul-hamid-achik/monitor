@@ -178,21 +178,39 @@ type IssueContextFilter struct {
 	Kind string
 }
 
-// IssueContextResult is Service.IssueContext's return: the legacy Issue/
-// Occurrences pair (unchanged from the pre-E2.7 IssueGet, so an existing
-// monitor_issue consumer reading .issue/.occurrences/.occurrences_truncated
-// keeps working) plus, additively, the full monitor.issue_context.v1 at
-// budget "brief".
+// IssueContextResult is Service.IssueContext's return: the bounded
+// monitor.issue_context.v1 (brief budget), plus OPT-IN access to the legacy
+// {issue, occurrences, occurrences_truncated} shape (the pre-E2.7 IssueGet)
+// when the caller explicitly asked for occurrences. handleIssue is a pure
+// field copy of this struct into the wire response -- every decision about
+// WHAT to include lives here (the Service), never in the handler.
 type IssueContextResult struct {
+	// NotFound, when true, means id/filter (almost always "latest" under a
+	// filter) matched nothing -- an ordinary outcome (E2.7: a healthy
+	// project between crashes), not a failure. Recovery is the plain-
+	// English hint handleIssue surfaces alongside it. Every other field is
+	// zero when this is true.
+	NotFound bool
+	Recovery string
+
+	// Context is the bounded monitor.issue_context.v1 at budget "brief"
+	// (docs/contracts/issue-context-v1.md: MCP defaults to brief so a
+	// "what's the latest crash" question stays a small, cheap call). Nil
+	// only when explain.Build itself failed in some way Build's own
+	// honest-degradation Degraded[] couldn't already absorb (e.g. the issue
+	// vanished between resolving id and building).
+	Context *explain.Context
+
+	// IncludeLegacy, when true, means Issue/Occurrences/OccurrencesTruncated
+	// below should be merged into the wire response (overwriting Context's
+	// own small "issue" summary with the full issues.Issue) -- set only
+	// when the caller explicitly requested occurrences (occurrence_limit >
+	// 0), since neither the full Issue nor N raw Occurrences carry any size
+	// bound of their own. false is the default, bounded response.
+	IncludeLegacy        bool
 	Issue                issues.Issue
 	Occurrences          []issues.Occurrence
 	OccurrencesTruncated bool
-	// Context is nil only when explain.Build itself failed in some way
-	// Build's own honest-degradation Degraded[] couldn't already absorb
-	// (e.g. the issue vanished between resolving id and building -- see
-	// internal/cli/mcp.go's issueContextForMCP); the legacy fields above
-	// are still populated whenever Issue was found, independent of this.
-	Context *explain.Context
 }
 
 // InvestigateOptions is the optional input for Service.Investigate beyond pid.
@@ -328,12 +346,12 @@ func (s *Server) register() {
 			"investigate run, never silently wins \"latest\" over a real crash; pass kind:\"any\" to widen it). " +
 			"When id/filter matches nothing, the response is not_found:true with a recovery hint (a normal, " +
 			"expected outcome for a healthy project between crashes), never an error. Read-only; no confirm " +
-			"field. Returns the legacy {issue, occurrences, occurrences_truncated} (occurrence_limit defaults to " +
-			"20, capped at 200) PLUS, additively, monitor.issue_context.v1's culprit (file:line, function, a " +
-			"snippet), causes (the exception chain), frames, impact (codemap blast radius/tests), last_touched " +
-			"(git blame -- \"last touched\", never a verdict of blame), degraded (which of the above were " +
-			"unavailable and why), and next (proposed follow-up commands) -- everything needed to explain a " +
-			"failure without a second call.",
+			"field. Returns monitor.issue_context.v1 at the small, bounded \"brief\" budget (its own issue " +
+			"summary, culprit with file:line/function/a snippet, causes, frames, impact, last_touched -- \"last " +
+			"touched\", never a verdict of blame -- degraded, and next) as a single cheap call, usually under " +
+			"4KB. Pass occurrence_limit > 0 (max 200) to ALSO get the full legacy {issue, occurrences, " +
+			"occurrences_truncated} shape (overwriting the small issue summary with the richer one) when you " +
+			"specifically need the raw occurrence history.",
 	}, s.handleIssue)
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_kill",
@@ -442,7 +460,7 @@ type issueInput struct {
 	Project         string `json:"project,omitempty"         jsonschema:"restrict \"latest\" to this project (case-insensitive)"`
 	Service         string `json:"service,omitempty"         jsonschema:"restrict \"latest\" to this service (case-insensitive)"`
 	Kind            string `json:"kind,omitempty"            jsonschema:"restrict \"latest\" to this kind: exception (default), alert, investigation, or any"`
-	OccurrenceLimit int    `json:"occurrence_limit,omitempty" jsonschema:"recent occurrences to return (default 20, max 200)"`
+	OccurrenceLimit int    `json:"occurrence_limit,omitempty" jsonschema:"opt in to the legacy issue+occurrences shape by setting this > 0 (max 200); 0 (the default) omits it, keeping the response the small bounded brief"`
 }
 
 // processesOutput is the structured payload of monitor_processes.
@@ -478,7 +496,6 @@ const (
 	minAnalyzeWindowSeconds     = 4 // analyzer's diagMinSamples: fewer aligned samples -> no diagnosis
 	maxAnalyzeWindowSeconds     = 60
 	defaultIssuesLimit          = 50
-	defaultOccurrencesLimit     = 20
 	maxIssuesLimit              = 200
 )
 
@@ -700,6 +717,11 @@ func (s *Server) handleIssues(ctx context.Context, _ *mcp.CallToolRequest, in *i
 	return result(map[string]any{"issues": items, "total": total, "truncated": total > len(items)})
 }
 
+// handleIssue is a pure field copy of Service.IssueContext's result into
+// the wire response -- every decision about what the response CONTAINS
+// (bounded brief vs. the legacy issue/occurrences shape, the not_found
+// recovery hint's wording) is made by the Service (internal/cli/mcp.go's
+// issueContextForMCP), never here.
 func (s *Server) handleIssue(ctx context.Context, _ *mcp.CallToolRequest, in *issueInput) (*mcp.CallToolResult, any, error) {
 	if in == nil || strings.TrimSpace(in.ID) == "" {
 		return result(map[string]any{"id": "", "not_found": false, "occurrences": []issues.Occurrence{}, "error": "issue id is required"})
@@ -708,8 +730,8 @@ func (s *Server) handleIssue(ctx context.Context, _ *mcp.CallToolRequest, in *is
 		return result(map[string]any{"id": in.ID, "not_found": false, "occurrences": []issues.Occurrence{}, "error": "issue service not configured"})
 	}
 	limit := in.OccurrenceLimit
-	if limit <= 0 {
-		limit = defaultOccurrencesLimit
+	if limit < 0 {
+		limit = 0
 	}
 	if limit > maxIssuesLimit {
 		limit = maxIssuesLimit
@@ -723,63 +745,60 @@ func (s *Server) handleIssue(ctx context.Context, _ *mcp.CallToolRequest, in *is
 		})
 	}
 	if res == nil {
-		// id/filter (most commonly "latest") matched nothing -- an
-		// ordinary outcome, not a failure (E2.7): give the agent a
-		// recovery hint instead of an error envelope.
+		// A Service implementation that still uses the pre-refactor (nil,
+		// nil) sentinel instead of IssueContextResult.NotFound -- a
+		// generic, non-field-specific fallback (real production code,
+		// issueContextForMCP, always returns a populated NotFound/Recovery
+		// pair instead; see its own doc comment for why that logic lives
+		// there and not here).
 		return result(map[string]any{
 			"id": in.ID, "not_found": true, "occurrences": []issues.Occurrence{},
-			"recovery": recoveryHintForNoMatch(in.ID, filter),
+			"recovery": fmt.Sprintf("no issue matches %q; call monitor_issues to see what is open", in.ID),
 		})
 	}
-	occurrences := res.Occurrences
-	if occurrences == nil {
-		occurrences = []issues.Occurrence{}
+	if res.NotFound {
+		// id/filter (most commonly "latest" under a filter) matched
+		// nothing -- an ordinary outcome, not a failure (E2.7): a recovery
+		// hint, never an error envelope.
+		return result(map[string]any{
+			"id": in.ID, "not_found": true, "occurrences": []issues.Occurrence{},
+			"recovery": res.Recovery,
+		})
 	}
-	out := map[string]any{
-		"issue": res.Issue, "occurrences": occurrences,
-		"occurrences_truncated": res.OccurrencesTruncated,
-	}
-	// Additive (E2.7): the full monitor.issue_context.v1 (brief budget)
-	// alongside the legacy issue/occurrences fields above, so an existing
-	// consumer reading .issue/.occurrences is unaffected while a "why did
-	// it fail" caller gets culprit/causes/impact/last_touched/next in the
-	// SAME response instead of needing a second call. res.Context's own
-	// "issue" field (a smaller display summary) is deliberately NOT spread
-	// here -- it would silently shadow the legacy, richer "issue" key
-	// above; explainContextFields keeps every OTHER section.
+
+	out := map[string]any{}
 	if res.Context != nil {
 		for k, v := range explainContextFields(res.Context) {
 			out[k] = v
 		}
 	}
+	if res.IncludeLegacy {
+		// Opt-in (occurrence_limit > 0 on the request): the full legacy
+		// {issue, occurrences, occurrences_truncated} shape (the pre-E2.7
+		// IssueGet), overwriting Context's own small "issue" summary above
+		// with the richer issues.Issue -- see IssueContextResult.
+		occurrences := res.Occurrences
+		if occurrences == nil {
+			occurrences = []issues.Occurrence{}
+		}
+		out["issue"] = res.Issue
+		out["occurrences"] = occurrences
+		out["occurrences_truncated"] = res.OccurrencesTruncated
+	}
 	return result(out)
-}
-
-// recoveryHintForNoMatch explains, in plain English, why nothing matched
-// and what to try next -- monitor_issue's "latest matched nothing" case
-// (E2.7) is expected to happen routinely (a healthy project between
-// crashes) and must never read like a broken tool.
-func recoveryHintForNoMatch(id string, filter IssueContextFilter) string {
-	if !strings.EqualFold(strings.TrimSpace(id), "latest") {
-		return fmt.Sprintf("no issue matches %q; call monitor_issues to see what is open", id)
-	}
-	kind := filter.Kind
-	if kind == "" {
-		kind = "exception"
-	}
-	return fmt.Sprintf("no issue matches \"latest\" (project=%q service=%q kind=%q); call monitor_issues to see what is open, or widen kind to \"any\"",
-		filter.Project, filter.Service, kind)
 }
 
 // explainContextFields flattens c's sections into the map handleIssue
 // merges into monitor_issue's response, keyed exactly as
-// monitor.issue_context.v1 names them -- everything EXCEPT c.Issue, whose
-// key ("issue") is reserved by the legacy, richer issues.Issue field
-// handleIssue already sets. See IssueContextResult.Context's doc comment.
+// monitor.issue_context.v1 names them, INCLUDING c.Issue (the small, bounded
+// {id, short_id, status, kind, title, ...} summary) under "issue" -- the
+// response's default, bounded identity block. handleIssue overwrites this
+// key with the full legacy issues.Issue only when IssueContextResult.
+// IncludeLegacy is true.
 func explainContextFields(c *explain.Context) map[string]any {
 	out := map[string]any{
 		"schema": c.Schema, "budget": c.Budget, "generated_at": c.GeneratedAt,
-		"timeline": c.Timeline, "causes": c.Causes, "frames": c.Frames,
+		"issue": c.Issue, "timeline": c.Timeline, "causes": c.Causes, "frames": c.Frames,
 		"impact": c.Impact, "last_touched": c.LastTouched, "related_notes": c.RelatedNotes,
 		"degraded": c.Degraded, "next": c.Next, "truncated": c.Truncated, "privacy": c.Privacy,
 	}

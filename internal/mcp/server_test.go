@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/explain"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
@@ -1221,14 +1222,15 @@ func TestHandleIssueReturnsOccurrencesAndStructuredNotFound(t *testing.T) {
 			return nil, fmt.Errorf("%w: %s", issues.ErrIssueNotFound, id)
 		}
 		if limit != 20 {
-			t.Fatalf("default occurrence limit = %d, want 20", limit)
+			t.Fatalf("occurrence limit = %d, want the caller's explicit 20", limit)
 		}
 		return &IssueContextResult{
-			Issue: issue, Occurrences: []issues.Occurrence{{ID: "OCC-1"}, {ID: "OCC-2"}},
+			IncludeLegacy: true,
+			Issue:         issue, Occurrences: []issues.Occurrence{{ID: "OCC-1"}, {ID: "OCC-2"}},
 			OccurrencesTruncated: true,
 		}, nil
 	}})
-	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "ISS-1"})
+	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "ISS-1", OccurrenceLimit: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1243,6 +1245,65 @@ func TestHandleIssueReturnsOccurrencesAndStructuredNotFound(t *testing.T) {
 	m = payload.(map[string]any)
 	if found, _ := m["not_found"].(bool); !found {
 		t.Fatalf("not-found payload = %v", m)
+	}
+}
+
+// TestHandleIssueDefaultOmitsLegacyIssueAndOccurrences is AC-6's own size
+// budget, at the handler level: with no occurrence_limit (IncludeLegacy
+// false), the response carries Context's OWN small issue summary and no
+// occurrences/occurrences_truncated keys at all -- not an empty array, an
+// ABSENT key, since a caller checking for the legacy shape's presence
+// (as internal/cli/mcp_test.go's wire test does) must be able to tell
+// "opted out" from "opted in but empty".
+func TestHandleIssueDefaultOmitsLegacyIssueAndOccurrences(t *testing.T) {
+	var gotLimit int
+	s := newTestServer(t, &Service{IssueContext: func(_ context.Context, _ string, _ IssueContextFilter, limit int) (*IssueContextResult, error) {
+		gotLimit = limit
+		return &IssueContextResult{Context: &explain.Context{
+			Schema: explain.Schema, Budget: "brief",
+			Issue: explain.IssueSummary{ID: "ISS-1", ShortID: "0001"},
+		}}, nil
+	}})
+	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "ISS-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLimit != 0 {
+		t.Fatalf("occurrence limit = %d, want 0 (no default substitution)", gotLimit)
+	}
+	m := payload.(map[string]any)
+	if _, ok := m["occurrences"]; ok {
+		t.Fatalf("payload = %v, occurrences must be ABSENT by default, not an empty array", m)
+	}
+	if _, ok := m["occurrences_truncated"]; ok {
+		t.Fatalf("payload = %v, occurrences_truncated must be absent by default", m)
+	}
+	issueField, ok := m["issue"].(map[string]any)
+	if !ok || issueField["short_id"] != "0001" {
+		t.Fatalf("issue = %v, want Context's own small summary (short_id 0001)", m["issue"])
+	}
+}
+
+// TestHandleIssueStructuredNotFoundFromResult covers the (real production)
+// path: IssueContextResult.NotFound/Recovery, not the legacy (nil, nil)
+// sentinel -- see issueContextForMCP.
+func TestHandleIssueStructuredNotFoundFromResult(t *testing.T) {
+	s := newTestServer(t, &Service{IssueContext: func(_ context.Context, _ string, _ IssueContextFilter, _ int) (*IssueContextResult, error) {
+		return &IssueContextResult{NotFound: true, Recovery: "try widening the filter"}, nil
+	}})
+	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "latest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := payload.(map[string]any)
+	if found, _ := m["not_found"].(bool); !found {
+		t.Fatalf("not_found = %v, want true", m["not_found"])
+	}
+	if m["recovery"] != "try widening the filter" {
+		t.Fatalf("recovery = %v, want the Service-provided hint verbatim", m["recovery"])
+	}
+	if _, hasError := m["error"]; hasError {
+		t.Fatalf("payload = %v, structured not_found must not populate error", m)
 	}
 }
 
@@ -1276,7 +1337,8 @@ func TestHandleIssueClampsOccurrenceLimitAndKeepsTypedEvidence(t *testing.T) {
 	s := newTestServer(t, &Service{IssueContext: func(_ context.Context, id string, _ IssueContextFilter, limit int) (*IssueContextResult, error) {
 		gotLimit = limit
 		return &IssueContextResult{
-			Issue: issues.Issue{ID: id, OccurrenceCount: 1},
+			IncludeLegacy: true,
+			Issue:         issues.Issue{ID: id, OccurrenceCount: 1},
 			Occurrences: []issues.Occurrence{{
 				ID: "OCC-1", IssueID: id, Run: wantRun, Evidence: wantEvidence,
 			}},
