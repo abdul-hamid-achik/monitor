@@ -9,6 +9,7 @@ import (
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
+	"github.com/abdul-hamid-achik/monitor/internal/mcp"
 )
 
 // leakyCollector returns a collect func for analyzeWindow tests: pid leak
@@ -189,7 +190,7 @@ func TestListIssuesForMCPForwardsWindowFiltersToStore(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	got, err := listIssuesForMCP(context.Background(), issues.ListOptions{Kind: "exception"})
+	got, err := listIssuesForMCP(context.Background(), mcp.IssuesListFilter{Kind: "exception"})
 	if err != nil {
 		t.Fatalf("listIssuesForMCP: %v", err)
 	}
@@ -197,7 +198,7 @@ func TestListIssuesForMCPForwardsWindowFiltersToStore(t *testing.T) {
 		t.Fatalf("Kind=exception results = %+v", got)
 	}
 
-	got, err = listIssuesForMCP(context.Background(), issues.ListOptions{RunID: "run-a"})
+	got, err = listIssuesForMCP(context.Background(), mcp.IssuesListFilter{RunID: "run-a"})
 	if err != nil {
 		t.Fatalf("listIssuesForMCP: %v", err)
 	}
@@ -205,11 +206,31 @@ func TestListIssuesForMCPForwardsWindowFiltersToStore(t *testing.T) {
 		t.Fatalf("RunID=run-a results = %+v", got)
 	}
 
-	all, err := listIssuesForMCP(context.Background(), issues.ListOptions{})
+	all, err := listIssuesForMCP(context.Background(), mcp.IssuesListFilter{})
 	if err != nil {
 		t.Fatalf("listIssuesForMCP: %v", err)
 	}
 	if len(all) != 2 {
 		t.Fatalf("unfiltered results = %+v, want 2", all)
+	}
+
+	// Since/Until (E2.6): listIssuesForMCP is the one place that turns the
+	// MCP tool's raw since/until strings into time.Time via the shared
+	// issues.ParseWindowBound, matching handleIssues' pure-field-copy
+	// contract (see mcp.IssuesListFilter's doc comment). A relative
+	// duration reaches the seeded issue; an unparseable value is a
+	// structured error, not a panic or a silently-ignored filter.
+	sinceMatch, err := listIssuesForMCP(context.Background(), mcp.IssuesListFilter{Since: "24h"})
+	if err != nil {
+		t.Fatalf("listIssuesForMCP Since=24h: %v", err)
+	}
+	if len(sinceMatch) != 2 {
+		t.Fatalf("Since=24h results = %+v, want both issues", sinceMatch)
+	}
+	if _, err := listIssuesForMCP(context.Background(), mcp.IssuesListFilter{Since: "not-a-time"}); err == nil {
+		t.Fatal("listIssuesForMCP Since=not-a-time did not return an error")
+	}
+	if _, err := listIssuesForMCP(context.Background(), mcp.IssuesListFilter{Until: "not-a-time"}); err == nil {
+		t.Fatal("listIssuesForMCP Until=not-a-time did not return an error")
 	}
 }

@@ -80,7 +80,15 @@ type Service struct {
 
 	// IssuesList and IssueGet expose the durable local issue index. Both are
 	// read-only and should open a fresh shared-read snapshot per call.
-	IssuesList func(ctx context.Context, opts issues.ListOptions) ([]issues.Issue, error)
+	//
+	// IssuesList takes the monitor_issues filters exactly as the MCP caller
+	// supplied them (Since/Until unparsed strings) rather than a pre-built
+	// issues.ListOptions: interpreting them -- issues.ParseWindowBound, the
+	// same shared parser the CLI's --since/--until flags use -- is the
+	// Service implementation's job (internal/cli/mcp.go's listIssuesForMCP),
+	// not handleIssues'. This keeps the MCP handler a pure field copy with
+	// zero business logic, matching every other tool's handler/Service split.
+	IssuesList func(ctx context.Context, filter IssuesListFilter) ([]issues.Issue, error)
 	IssueGet   func(ctx context.Context, id string, occurrenceLimit int) (issues.Issue, []issues.Occurrence, error)
 
 	// Kill terminates the given PID and returns the verified Result (outcome
@@ -101,6 +109,22 @@ type Service struct {
 	// Record starts a vidtrace recording for the given PID. Used by
 	// monitor_record. Optional; if nil the tool reports vidtrace missing.
 	Record func(ctx context.Context, pid int32, durationSeconds int) (string, error)
+}
+
+// IssuesListFilter carries monitor_issues' filters exactly as the MCP
+// caller supplied them: Since/Until stay unparsed strings so handleIssues
+// can be a pure field copy, and the Service implementation
+// (internal/cli/mcp.go's listIssuesForMCP) is the single place -- alongside
+// the CLI's --since/--until flags -- that calls issues.ParseWindowBound.
+type IssuesListFilter struct {
+	Statuses []issues.Status
+	Project  string
+	Service  string
+	Since    string
+	Until    string
+	RunID    string
+	Release  string
+	Kind     string
 }
 
 // InvestigateOptions is the optional input for Service.Investigate beyond pid.
@@ -533,28 +557,27 @@ func (s *Server) handleIssues(ctx context.Context, _ *mcp.CallToolRequest, in *i
 	if limit > maxIssuesLimit {
 		limit = maxIssuesLimit
 	}
-	// Since/Until: a mechanical string->time.Time conversion through the
-	// one shared parser (issues.ParseWindowBound) -- the actual filter
-	// matching (window overlap, RunID/Release aggregate lookup, Kind
-	// prefix rule) all happens in issues.Store.List, never here.
-	now := time.Now()
-	since, err := issues.ParseWindowBound(in.Since, now)
-	if err != nil {
-		return result(map[string]any{"issues": []issues.Issue{}, "total": 0, "truncated": false, "error": err.Error()})
-	}
-	until, err := issues.ParseWindowBound(in.Until, now)
-	if err != nil {
-		return result(map[string]any{"issues": []issues.Issue{}, "total": 0, "truncated": false, "error": err.Error()})
-	}
-	items, err := s.svc.IssuesList(ctx, issues.ListOptions{
+	// Since/Until are passed through unparsed: interpreting them
+	// (issues.ParseWindowBound) is the Service implementation's job (see
+	// IssuesListFilter's doc comment), not this handler's -- the actual
+	// filter matching (window overlap, RunID/Release aggregate lookup, Kind
+	// prefix rule) all happens in issues.Store.List either way.
+	items, err := s.svc.IssuesList(ctx, IssuesListFilter{
 		Statuses: statuses, Project: in.Project, Service: in.Service,
-		Since: since, Until: until, RunID: in.RunID, Release: in.Release, Kind: in.Kind,
+		Since: in.Since, Until: in.Until, RunID: in.RunID, Release: in.Release, Kind: in.Kind,
 	})
 	if err != nil {
 		return result(map[string]any{"issues": []issues.Issue{}, "total": 0, "truncated": false, "error": err.Error()})
 	}
 	if items == nil {
 		items = []issues.Issue{}
+	}
+	// Payload diet (AC-6): a list row carries only a trimmed
+	// LatestException summary, never the full frame/cause detail -- see
+	// issues.SummarizeForList. monitor_issue (Store.Get, one issue) keeps
+	// the untrimmed detail.
+	for i := range items {
+		items[i] = issues.SummarizeForList(items[i])
 	}
 	total := len(items)
 	if len(items) > limit {

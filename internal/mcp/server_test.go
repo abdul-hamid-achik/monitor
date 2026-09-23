@@ -1101,9 +1101,9 @@ func TestHandleIssuesIsBoundedAndReadOnly(t *testing.T) {
 	for i := range items {
 		items[i] = issues.Issue{ID: fmt.Sprintf("ISS-%03d", i), Status: issues.StatusOpen}
 	}
-	var got issues.ListOptions
-	s := newTestServer(t, &Service{IssuesList: func(_ context.Context, opts issues.ListOptions) ([]issues.Issue, error) {
-		got = opts
+	var got IssuesListFilter
+	s := newTestServer(t, &Service{IssuesList: func(_ context.Context, filter IssuesListFilter) ([]issues.Issue, error) {
+		got = filter
 		return items, nil
 	}})
 	_, payload, err := s.handleIssues(context.Background(), nil, &issuesInput{
@@ -1120,13 +1120,14 @@ func TestHandleIssuesIsBoundedAndReadOnly(t *testing.T) {
 	if len(got.Statuses) != 1 || got.Statuses[0] != issues.StatusOpen || got.Project != "monitor" || got.Service != "api" {
 		t.Fatalf("filters = %+v", got)
 	}
-	// Since/RunID/Release/Kind (E2.6) must reach Service.IssuesList as the
-	// SAME issues.ListOptions the CLI builds -- Since parsed via the shared
-	// issues.ParseWindowBound (a relative duration here, "24h"), RunID/
-	// Release/Kind passed through unparsed for issues.Store.List itself to
-	// interpret.
-	if got.Since.IsZero() || time.Since(got.Since) < 23*time.Hour || time.Since(got.Since) > 25*time.Hour {
-		t.Fatalf("Since = %v, want ~24h ago", got.Since)
+	// Since/RunID/Release/Kind (E2.6) must reach Service.IssuesList exactly
+	// as the MCP caller supplied them -- handleIssues is a pure field copy;
+	// interpreting Since/Until (issues.ParseWindowBound) is the Service
+	// implementation's job (internal/cli/mcp.go's listIssuesForMCP), not
+	// this handler's -- see IssuesListFilter's doc comment and
+	// TestListIssuesForMCPForwardsWindowFiltersToStore in internal/cli.
+	if got.Since != "24h" {
+		t.Fatalf("Since = %q, want the raw \"24h\" passed straight through", got.Since)
 	}
 	if got.RunID != "run-1" || got.Release != "v1.2.3" || got.Kind != "exception" {
 		t.Fatalf("RunID/Release/Kind = %q/%q/%q", got.RunID, got.Release, got.Kind)
@@ -1134,14 +1135,31 @@ func TestHandleIssuesIsBoundedAndReadOnly(t *testing.T) {
 	if _, _, err := s.handleIssues(context.Background(), nil, &issuesInput{Statuses: []string{"bogus"}}); err != nil {
 		t.Fatalf("invalid status should be structured, got hard error: %v", err)
 	}
-	// An unparseable since/until is a structured error, not a hard Go error
-	// or a silently-ignored filter.
-	_, payload, err = s.handleIssues(context.Background(), nil, &issuesInput{Since: "not-a-time"})
+}
+
+// TestHandleIssuesSurfacesServiceErrorAsStructuredPayload verifies a Service
+// error (e.g. from the Service's own issues.ParseWindowBound call, once
+// since/until leave this handler unparsed) becomes the same structured
+// {error: ...} payload as any other IssuesList failure, not a hard Go error
+// or a silently-ignored filter -- handleIssues itself does no since/until
+// parsing (or validation) of its own; see IssuesListFilter's doc comment.
+func TestHandleIssuesSurfacesServiceErrorAsStructuredPayload(t *testing.T) {
+	s := newTestServer(t, &Service{IssuesList: func(_ context.Context, filter IssuesListFilter) ([]issues.Issue, error) {
+		if filter.Since == "not-a-time" {
+			return nil, fmt.Errorf("invalid time %q", filter.Since)
+		}
+		return nil, nil
+	}})
+	_, payload, err := s.handleIssues(context.Background(), nil, &issuesInput{Since: "not-a-time"})
 	if err != nil {
-		t.Fatalf("invalid since should be structured, got hard error: %v", err)
+		t.Fatalf("a Service error should be structured, got hard error: %v", err)
 	}
-	if errMsg, _ := payload.(map[string]any)["error"].(string); errMsg == "" {
-		t.Fatalf("invalid since payload = %v, want a non-empty error", payload)
+	m := payload.(map[string]any)
+	if errMsg, _ := m["error"].(string); errMsg == "" {
+		t.Fatalf("payload = %v, want a non-empty error", payload)
+	}
+	if issuesVal, ok := m["issues"].([]any); !ok || len(issuesVal) != 0 {
+		t.Fatalf("payload issues = %v, want an empty array", m["issues"])
 	}
 }
 
