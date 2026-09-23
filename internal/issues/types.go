@@ -78,9 +78,12 @@ type Issue struct {
 	// can shift line numbers, and a chain's shape can change slightly
 	// between occurrences of the same issue.
 	LatestException *ExceptionInfo `json:"latest_exception,omitempty"`
-	// FirstGitSHA is the local git HEAD (contextids.IDs.GitSHA) at the time
-	// this issue was FIRST observed -- set once, at creation, never touched
-	// by a later occurrence.
+	// FirstGitSHA is contextids.IDs.GitSHA (MONITOR_GIT_SHA, GIT_SHA, or
+	// GITHUB_SHA -- whichever is set; see internal/contextids.FromEnv) at
+	// the time this issue was FIRST observed -- set once, at creation,
+	// never touched by a later occurrence. It is NOT resolved from the
+	// local git HEAD: an ordinary local dev session with none of those
+	// environment variables set leaves it empty.
 	FirstGitSHA string `json:"first_git_sha,omitempty"`
 	// Level classifies an exception in the stacktrace vocabulary ("fatal",
 	// "error", "warning"; see stacktrace.Exception.Level) -- a closed set,
@@ -290,11 +293,28 @@ type ListOptions struct {
 	// Since and Until (E2.6) bound an issue's activity window: an issue
 	// matches when [FirstSeen, LastSeen] overlaps [Since, Until]. A zero
 	// time.Time on either side leaves that side unbounded.
+	//
+	// This is a window-SPAN overlap test, not "did an occurrence actually
+	// land inside [Since, Until]": an issue whose occurrences sit at
+	// FirstSeen and LastSeen ten hours apart, with nothing in between,
+	// still matches a [Since, Until] that falls entirely inside that gap.
+	// List only reads the issues collection (never occurrences) to stay
+	// fast over a large store -- see Issue.Runs's doc comment for the same
+	// tradeoff applied to RunID/Release below -- so a caller correlating
+	// against a precise time window (e.g. joining with cairntrace) should
+	// still expect an occasional false positive and confirm against the
+	// issue's own Occurrences when precision matters.
 	Since time.Time
 	Until time.Time
 	// RunID and Release (E2.6) match against an issue's Runs/Releases
 	// aggregate sets (case-insensitive) -- see Issue.Runs's doc comment for
-	// why this stays fast even over a large occurrences collection.
+	// why this stays fast even over a large occurrences collection. Because
+	// that aggregate is bounded to the most recently seen maxIssueRunsReleases
+	// (25) distinct values, a RunID/Release seen only on an issue's OLDER
+	// occurrences (evicted from the aggregate by newer ones) will not match
+	// even though the occurrence itself is still retained; an issue written
+	// before this aggregate existed has an empty Runs/Releases and never
+	// matches a RunID/Release filter at all.
 	RunID   string
 	Release string
 	// Kind filters by Issue.Kind: "" or "any" matches every kind,
