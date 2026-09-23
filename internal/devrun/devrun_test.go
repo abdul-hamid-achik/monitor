@@ -439,3 +439,27 @@ func TestRunBurstNeverSlowsTheChildEvenWithStoreLocked(t *testing.T) {
 		t.Error("stderr passthrough is empty, want the burst text to still reach the terminal")
 	}
 }
+
+// TestRunFastExitingChildNeverLosesScannedOutput is the regression test for
+// the CI-only run_scan_stdout failure: with exec's StdoutPipe, cmd.Wait
+// closed the read end as soon as the child exited, so a child that printed
+// and exited immediately could lose its whole output (and the crash in it).
+// With pipes devrun owns, every run must copy all of it.
+func TestRunFastExitingChildNeverLosesScannedOutput(t *testing.T) {
+	for i := 0; i < 60; i++ {
+		opts := baseOptions(t, []string{"sh", "-c", "printf 'ready\\nrequest failed\\n'; printf 'on stderr\\n' >&2"})
+		opts.Scan = ScanBoth
+		opts.NoIssues = true
+		var stdout, stderr, banner bytes.Buffer
+		opts.Stdout, opts.Stderr, opts.Banner = &stdout, &stderr, &banner
+		if _, err := Run(context.Background(), opts); err != nil {
+			t.Fatalf("run %d: Run: %v", i, err)
+		}
+		if !strings.Contains(stdout.String(), "request failed") {
+			t.Fatalf("run %d: stdout lost the child's output: %q", i, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "on stderr") {
+			t.Fatalf("run %d: stderr lost the child's output: %q", i, stderr.String())
+		}
+	}
+}

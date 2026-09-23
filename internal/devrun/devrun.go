@@ -126,6 +126,42 @@ type Result struct {
 // the child), which was itself the direct cause of that hang.
 const childIOGrace = 2 * time.Second
 
+// drainFloor is the minimum time drainPipes waits for EOF after the child
+// exits, even when cmd.Wait already used up childIOGrace: bytes the child
+// wrote before exiting sit in the kernel pipe buffer and are lost if the
+// read end is closed before the pumps read them.
+const drainFloor = 250 * time.Millisecond
+
+// drainPipes waits for the pump goroutines to reach EOF on the scanned
+// pipes after the child has exited. EOF normally arrives at once (the
+// kernel closes an exiting process's descriptors), but a grandchild that
+// inherited a write end and outlives the child would hold it open forever;
+// after grace the read ends are closed to unblock the pumps, so monitor
+// never hangs behind an orphan while still copying everything the child
+// itself wrote.
+func drainPipes(pumps *sync.WaitGroup, grace time.Duration, readEnds ...*os.File) {
+	done := make(chan struct{})
+	go func() {
+		pumps.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(grace):
+		for _, f := range readEnds {
+			if f != nil {
+				_ = f.Close()
+			}
+		}
+		<-done
+	}
+	for _, f := range readEnds {
+		if f != nil {
+			_ = f.Close()
+		}
+	}
+}
+
 // Run launches Options.Argv, wires the copy/detect pipeline per Options.Scan,
 // waits for it to exit, and returns its outcome. The returned error is only
 // ever a launch/setup failure (e.g. the command could not be found); an
@@ -221,26 +257,57 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	configureProcessGroup(cmd, ttyShared)
 
-	var stdoutPipe, stderrPipe io.ReadCloser
-	if scanStdout {
-		stdoutPipe, err = cmd.StdoutPipe()
-		if err != nil {
-			return Result{}, fmt.Errorf("devrun: stdout pipe: %w", err)
+	// Scanned streams use pipes this package owns (os.Pipe), never
+	// cmd.StdoutPipe/StderrPipe: exec closes those read ends as soon as
+	// cmd.Wait observes the child's exit ("it is incorrect to call Wait
+	// before all reads from the pipe have completed"), so a child that
+	// prints and exits immediately lost its tail — and the crash it
+	// printed — on a fast runner. With our own *os.File write ends, exec
+	// hands them straight to the child, Wait never touches the read ends,
+	// and the pumps read until real EOF (bounded by drainPipes below).
+	var stdoutPipe, stderrPipe *os.File
+	var childWriteEnds []*os.File
+	closeAll := func() {
+		for _, f := range []*os.File{stdoutPipe, stderrPipe} {
+			if f != nil {
+				_ = f.Close()
+			}
 		}
+		for _, f := range childWriteEnds {
+			_ = f.Close()
+		}
+	}
+	if scanStdout {
+		r, w, perr := os.Pipe()
+		if perr != nil {
+			return Result{}, fmt.Errorf("devrun: stdout pipe: %w", perr)
+		}
+		stdoutPipe, cmd.Stdout = r, w
+		childWriteEnds = append(childWriteEnds, w)
 	} else {
 		cmd.Stdout = stdout
 	}
 	if scanStderr {
-		stderrPipe, err = cmd.StderrPipe()
-		if err != nil {
-			return Result{}, fmt.Errorf("devrun: stderr pipe: %w", err)
+		r, w, perr := os.Pipe()
+		if perr != nil {
+			closeAll()
+			return Result{}, fmt.Errorf("devrun: stderr pipe: %w", perr)
 		}
+		stderrPipe, cmd.Stderr = r, w
+		childWriteEnds = append(childWriteEnds, w)
 	} else {
 		cmd.Stderr = stderr
 	}
 
 	if err := cmd.Start(); err != nil {
+		closeAll()
 		return Result{}, fmt.Errorf("devrun: start %s: %w", opts.Argv[0], err)
+	}
+	// The child holds its own copies of the write ends now; drop ours so
+	// the pumps see EOF once the child (and any grandchild that inherited
+	// them) is done writing.
+	for _, f := range childWriteEnds {
+		_ = f.Close()
 	}
 	start := time.Now()
 
@@ -309,24 +376,20 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		}()
 	}
 
-	// Reap the child BEFORE waiting on the pipes to drain, not after: with
-	// cmd.WaitDelay set above, cmd.Wait() itself waits for the process to
-	// exit and THEN bounds how long it waits for the StdoutPipe/StderrPipe
-	// read ends to close, forcing them shut once childIOGrace elapses if a
-	// surviving grandchild is still holding them open. Calling it here
-	// (concurrently with the pump goroutines still parked in Read(), not
-	// strictly after pumpWG.Wait() the way this package used to) is what
-	// makes that bound effective: waiting for pipe EOF first -- this
-	// package's previous order -- could never observe an orphan at all,
-	// since EOF specifically requires every holder of the write end to
-	// close it. A plain (non-orphaned) child's pipes are already closed by
-	// the time cmd.Wait() returns anyway (the kernel releases a process's
-	// file descriptors as part of exiting, before/alongside the parent's
-	// wait4 returning), so pumpWG.Wait() right below finishes essentially
-	// immediately in the common case.
+	// Reap the child first, then drain: Wait never touches the scanned
+	// pipes (they are ours, not exec's), so everything the child wrote is
+	// still readable after it exits. drainPipes then waits for EOF, bounded
+	// by childIOGrace in case an orphaned grandchild still holds a write
+	// end open (the case that used to hang monitor indefinitely).
+	waitStart := time.Now()
 	waitErr := cmd.Wait()
 	close(sigDone)
-	pumpWG.Wait()
+	// One shared grace window: cmd.Wait may already have spent up to
+	// childIOGrace (via WaitDelay) on an exec-managed passthrough pipe that
+	// an orphan holds, so only the remainder is spent here -- but never less
+	// than drainFloor, enough to read what the child already wrote into the
+	// kernel pipe buffer before its exit.
+	drainPipes(&pumpWG, max(childIOGrace-time.Since(waitStart), drainFloor), stdoutPipe, stderrPipe)
 	close(lines)
 	<-detDone
 
