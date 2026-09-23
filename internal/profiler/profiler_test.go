@@ -219,3 +219,44 @@ func TestProfileJSON(t *testing.T) {
 		t.Error("JSON empty")
 	}
 }
+
+// TestDiscardRawArtifactRemovesFileAndClearsFields verifies E1.7's cleanup
+// helper: it deletes the on-disk temp file (only a pprof capture ever sets
+// one) and clears both Path and Text.
+func TestDiscardRawArtifactRemovesFileAndClearsFields(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "monitor-cpu-*.pb.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("raw profile bytes"); err != nil {
+		t.Fatal(err)
+	}
+	path := f.Name()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	p := Profile{PID: 1, Type: ProfileCPU, Path: path, Text: "should be dropped too"}
+	if err := p.DiscardRawArtifact(); err != nil {
+		t.Fatalf("DiscardRawArtifact: %v", err)
+	}
+	if p.Path != "" || p.Text != "" {
+		t.Errorf("Path/Text not cleared: %+v", p)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Errorf("temp file still exists at %s: %v", path, statErr)
+	}
+}
+
+// TestDiscardRawArtifactNoPathIsNoop verifies a CDP/sample capture (Text
+// only, no Path) is left with Text cleared and no error, even with nothing
+// on disk to remove.
+func TestDiscardRawArtifactNoPathIsNoop(t *testing.T) {
+	p := Profile{PID: 1, Type: ProfileSample, Text: "Sampling process 1\n"}
+	if err := p.DiscardRawArtifact(); err != nil {
+		t.Fatalf("DiscardRawArtifact: %v", err)
+	}
+	if p.Text != "" {
+		t.Errorf("Text = %q, want cleared", p.Text)
+	}
+}

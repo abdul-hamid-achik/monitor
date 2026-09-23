@@ -15,6 +15,7 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
 	"github.com/abdul-hamid-achik/monitor/internal/mcp"
+	"github.com/abdul-hamid-achik/monitor/internal/procbind"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 )
 
@@ -78,16 +79,16 @@ func newMCPServeCmd() *cobra.Command {
 				IssueGet:   getIssueForMCP,
 				// Mutating tools: thin wrappers over the CLI's existing logic.
 				Kill: kill.KillVerified,
-				Profile: func(ctx context.Context, pid int32, ptype profiler.ProfileType) (profiler.Profile, error) {
-					// MCP always scrapes the default pprof address, so prove the
-					// port belongs to the pid first; type:sample needs no endpoint.
-					if ptype != profiler.ProfileSample {
-						if own, detail := profiler.VerifyListenerOwnership(ctx, pid, ""); own != profiler.OwnershipOwned {
-							return profiler.Profile{}, fmt.Errorf("pprof endpoint %s not proven to belong to pid %d: %s; use type:sample instead", profiler.DefaultPprofAddr, pid, detail)
-						}
-					}
-					return profiler.Capture(ctx, pid, ptype, "")
-				},
+				// Profile is runtime-aware (E1.7): Node/Deno with --inspect
+				// get a real CDP capture (file:line frames), Bun gets an
+				// honest "unavailable" instead of the 404 a real /json/list
+				// probe against its JSC inspector would produce, and
+				// everything else falls through to the same ownership-gated
+				// pprof/sample path monitor_profile_capture always used.
+				// Built by buildProfileService so tests can exercise the
+				// EXACT same production dispatch over an in-memory MCP
+				// transport instead of a hand-rolled stub (see mcp_test.go).
+				Profile: buildProfileService(),
 				// Investigate runs the same real pipeline the CLI does
 				// (snapshot + profile + correlate + stash).
 				Investigate: func(ctx context.Context, pid int32, opts mcp.InvestigateOptions) map[string]any {
@@ -104,7 +105,8 @@ func newMCPServeCmd() *cobra.Command {
 						Release:      opts.Release,
 						Service:      opts.Service,
 						GitSHA:       opts.GitSHA,
-					}).toMap()
+						IncludeRaw:   opts.IncludeRaw,
+					}).redactRaw(opts.IncludeRaw).toMap()
 				},
 				// Record captures a short screen recording via the platform
 				// recorder (screencapture / ffmpeg). Returns an error — turned
@@ -122,6 +124,48 @@ func newMCPServeCmd() *cobra.Command {
 		},
 	}
 	return cmd
+}
+
+// buildProfileService returns the mcp.Service.Profile implementation wired
+// into `monitor mcp serve` (newMCPServeCmd, above). Pulled out into its own
+// function — rather than an inline closure — so a test can build and call
+// the EXACT same production runtime-aware dispatch (procbind.Inspect +
+// captureRuntimeAwareProfile with allowInspectorHeap:true, since an
+// explicit type:heap request is exactly the caller-asked-for-it case that
+// flag exists for) over a real in-memory MCP transport, instead of
+// re-implementing a parallel stub that could silently drift from what
+// production actually calls (see mcp_test.go's
+// TestProfileServiceLiveNodeInspectorViaRealDispatch).
+//
+// keep/discard and the receipt live here, not in server.go's
+// handleProfileCapture: the same principle that keeps monitor_investigate's
+// include_raw redaction in the Service instead of the handler.
+func buildProfileService() func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep bool) (profiler.Profile, profiler.Receipt, error) {
+	return func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep bool) (profiler.Profile, profiler.Receipt, error) {
+		binding, inspectErr := procbind.Inspect(ctx, pid, "")
+		var bindingPtr *procbind.Binding
+		if inspectErr == nil {
+			bindingPtr = &binding
+		}
+		prof, _, step := captureRuntimeAwareProfile(ctx, pid, bindingPtr, ptype, pprofAddr, "", pprofAddr != "", 0, true)
+		if step.Status == stepUnavailable {
+			return profiler.Profile{}, profiler.Receipt{}, &mcp.UnavailableError{Limitation: step.Limitation, Recovery: step.Recovery}
+		}
+		if step.Status != stepOK {
+			msg := step.Limitation
+			if step.Recovery != "" {
+				msg = fmt.Sprintf("%s (%s)", msg, step.Recovery)
+			}
+			return profiler.Profile{}, profiler.Receipt{}, fmt.Errorf("%s", msg)
+		}
+		receipt := prof.VerifyArtifact()
+		if receipt.Verified && !keep {
+			if err := prof.DiscardRawArtifact(); err != nil {
+				receipt.Limitation = joinLimitation(receipt.Limitation, "cleanup: "+err.Error())
+			}
+		}
+		return prof, receipt, nil
+	}
 }
 
 // listIssuesForMCP is mcp.Service.IssuesList's implementation: the one place

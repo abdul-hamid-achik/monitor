@@ -334,3 +334,37 @@ func httpGet(ctx context.Context, client *http.Client, url string) ([]byte, erro
 
 // ToJSON is a convenience for CLI --json output.
 func (p Profile) ToJSON() ([]byte, error) { return json.MarshalIndent(p, "", "  ") }
+
+// DiscardRawArtifact removes the profile's on-disk temp file, if any — a
+// pprof capture (heap/cpu/goroutine, via writeTempProfile) or a CDP heap
+// snapshot (ProfileInspectorHeap's own .heapsnapshot file) can set Path; a
+// CDP CPU profile and macOS `sample` never write one — and clears both
+// Path and Text so neither the file nor its bytes linger in a caller's
+// response.
+//
+// A caller that wants to keep the raw capture — a human inspecting a CPU
+// profile with `go tool pprof`, an agent that explicitly asked to keep the
+// raw payload — must copy Path/Text out (or request --output / keep:true /
+// --include-raw at its own layer) BEFORE calling this; it is destructive
+// and offers no undo. It exists so MCP's monitor_profile_capture (repeated
+// calls without keep:true) and investigate's pipeline don't leave a
+// /tmp/monitor-<type>-<pid>-*.pb.gz behind on every capture (E1.7).
+//
+// Safe to call on a Profile with no Path (a CDP/sample capture, or one
+// already discarded); the returned error is only a failed os.Remove of an
+// existing Path (a permission issue, say) — Path/Text are still cleared to
+// keep the fields internally consistent (Path never points at a file that
+// might not exist) even when that Remove fails, and IsNotExist is treated
+// as success (the file is already gone, which is the caller's goal).
+func (p *Profile) DiscardRawArtifact() error {
+	p.Text = ""
+	if p.Path == "" {
+		return nil
+	}
+	path := p.Path
+	p.Path = ""
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}

@@ -2,14 +2,20 @@ package cli
 
 import (
 	"context"
+	"net"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
-	"github.com/abdul-hamid-achik/monitor/internal/mcp"
+	monitormcp "github.com/abdul-hamid-achik/monitor/internal/mcp"
+	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 )
 
 // leakyCollector returns a collect func for analyzeWindow tests: pid leak
@@ -190,7 +196,7 @@ func TestListIssuesForMCPForwardsWindowFiltersToStore(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	got, err := listIssuesForMCP(context.Background(), mcp.IssuesListFilter{Kind: "exception"})
+	got, err := listIssuesForMCP(context.Background(), monitormcp.IssuesListFilter{Kind: "exception"})
 	if err != nil {
 		t.Fatalf("listIssuesForMCP: %v", err)
 	}
@@ -198,7 +204,7 @@ func TestListIssuesForMCPForwardsWindowFiltersToStore(t *testing.T) {
 		t.Fatalf("Kind=exception results = %+v", got)
 	}
 
-	got, err = listIssuesForMCP(context.Background(), mcp.IssuesListFilter{RunID: "run-a"})
+	got, err = listIssuesForMCP(context.Background(), monitormcp.IssuesListFilter{RunID: "run-a"})
 	if err != nil {
 		t.Fatalf("listIssuesForMCP: %v", err)
 	}
@@ -206,7 +212,7 @@ func TestListIssuesForMCPForwardsWindowFiltersToStore(t *testing.T) {
 		t.Fatalf("RunID=run-a results = %+v", got)
 	}
 
-	all, err := listIssuesForMCP(context.Background(), mcp.IssuesListFilter{})
+	all, err := listIssuesForMCP(context.Background(), monitormcp.IssuesListFilter{})
 	if err != nil {
 		t.Fatalf("listIssuesForMCP: %v", err)
 	}
@@ -217,20 +223,187 @@ func TestListIssuesForMCPForwardsWindowFiltersToStore(t *testing.T) {
 	// Since/Until (E2.6): listIssuesForMCP is the one place that turns the
 	// MCP tool's raw since/until strings into time.Time via the shared
 	// issues.ParseWindowBound, matching handleIssues' pure-field-copy
-	// contract (see mcp.IssuesListFilter's doc comment). A relative
+	// contract (see monitormcp.IssuesListFilter's doc comment). A relative
 	// duration reaches the seeded issue; an unparseable value is a
 	// structured error, not a panic or a silently-ignored filter.
-	sinceMatch, err := listIssuesForMCP(context.Background(), mcp.IssuesListFilter{Since: "24h"})
+	sinceMatch, err := listIssuesForMCP(context.Background(), monitormcp.IssuesListFilter{Since: "24h"})
 	if err != nil {
 		t.Fatalf("listIssuesForMCP Since=24h: %v", err)
 	}
 	if len(sinceMatch) != 2 {
 		t.Fatalf("Since=24h results = %+v, want both issues", sinceMatch)
 	}
-	if _, err := listIssuesForMCP(context.Background(), mcp.IssuesListFilter{Since: "not-a-time"}); err == nil {
+	if _, err := listIssuesForMCP(context.Background(), monitormcp.IssuesListFilter{Since: "not-a-time"}); err == nil {
 		t.Fatal("listIssuesForMCP Since=not-a-time did not return an error")
 	}
-	if _, err := listIssuesForMCP(context.Background(), mcp.IssuesListFilter{Until: "not-a-time"}); err == nil {
+	if _, err := listIssuesForMCP(context.Background(), monitormcp.IssuesListFilter{Until: "not-a-time"}); err == nil {
 		t.Fatal("listIssuesForMCP Until=not-a-time did not return an error")
+	}
+}
+
+// TestBuildProfileServiceKeepPassthrough verifies the keep parameter
+// buildProfileService receives from monitor_profile_capture's typed
+// keep:true/false input reaches the verify-then-discard decision the
+// Service now owns (E1.7's keep/discard policy — see server.go's
+// Service.Profile doc comment): keep:false discards Path/Text after
+// verifying, keep:true leaves both in place.
+func TestBuildProfileServiceKeepPassthrough(t *testing.T) {
+	defer restoreStubs()()
+	verifyOwnership = func(context.Context, int32, string) (profiler.PortOwnership, string) {
+		return profiler.OwnershipOwned, ""
+	}
+	tmpDir := t.TempDir()
+	captureProfile = func(_ context.Context, pid int32, ptype profiler.ProfileType, _ string) (profiler.Profile, error) {
+		f, err := os.CreateTemp(tmpDir, "monitor-heap-*.pb.gz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString("raw bytes"); err != nil {
+			t.Fatal(err)
+		}
+		_ = f.Close()
+		return profiler.Profile{PID: pid, Type: ptype, Path: f.Name(), Text: "heap profile: 1"}, nil
+	}
+	svc := buildProfileService()
+
+	discarded, receipt, err := svc(context.Background(), 1, profiler.ProfileHeap, "", false)
+	if err != nil {
+		t.Fatalf("keep:false: %v", err)
+	}
+	if !receipt.Verified {
+		t.Fatalf("keep:false: receipt = %+v, want Verified", receipt)
+	}
+	if discarded.Path != "" || discarded.Text != "" {
+		t.Errorf("keep:false: profile = %+v, want Path and Text both discarded", discarded)
+	}
+
+	kept, receipt2, err := svc(context.Background(), 2, profiler.ProfileHeap, "", true)
+	if err != nil {
+		t.Fatalf("keep:true: %v", err)
+	}
+	if !receipt2.Verified {
+		t.Fatalf("keep:true: receipt = %+v, want Verified", receipt2)
+	}
+	if kept.Path == "" || kept.Text == "" {
+		t.Errorf("keep:true: profile = %+v, want Path and Text both retained", kept)
+	}
+	if _, statErr := os.Stat(kept.Path); statErr != nil {
+		t.Errorf("keep:true: on-disk file gone: %v", statErr)
+	}
+}
+
+// TestProfileServiceLiveNodeInspectorViaRealDispatch is the in-memory MCP
+// CallTool test the review flagged as missing: it drives monitor_profile_capture
+// through buildProfileService() — the EXACT closure newMCPServeCmd wires
+// into mcp.Service.Profile for the real `monitor mcp serve` binary — over a
+// real SDK in-memory transport, against a REAL node --inspect process. This
+// is what would actually fail if the production runtime-aware dispatch
+// (procbind.Inspect + captureRuntimeAwareProfile) were reverted or broken;
+// server_test.go's own live-node test only exercises a hand-rolled CDP
+// stub, not this wiring, and stays scoped to the MCP wire/schema round trip.
+func TestProfileServiceLiveNodeInspectorViaRealDispatch(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH")
+	}
+	workload, err := filepath.Abs(filepath.Join("..", "..", "examples", "polyglot", "js", "workload.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(workload); statErr != nil {
+		t.Skipf("workload fixture not found at %s", workload)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a free port: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	// --jitless (interpreter only, no JIT inlining) matches
+	// specs/profile_node_lines.yml's own documented workaround for stable
+	// per-line attribution against this exact fixture.
+	cmd := exec.Command(nodeBin, "--jitless", "--inspect="+addr, workload)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start node: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+	pid := int32(cmd.Process.Pid)
+
+	deadline := time.Now().Add(10 * time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		if conn, dialErr := net.DialTimeout("tcp", addr, 200*time.Millisecond); dialErr == nil {
+			_ = conn.Close()
+			ready = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatalf("node inspector never came up on %s", addr)
+	}
+	// Let the workload's setInterval hot loop accumulate real samples
+	// before the profiler window starts.
+	time.Sleep(300 * time.Millisecond)
+
+	svc := &monitormcp.Service{Profile: buildProfileService()}
+	s := monitormcp.NewServer(svc, "test")
+
+	ctx := context.Background()
+	clientTr, serverTr := sdkmcp.NewInMemoryTransports()
+	ss, err := s.Connect(ctx, serverTr)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer func() { _ = ss.Close() }()
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-client", Version: "0.0.0"}, nil)
+	cs, err := client.Connect(ctx, clientTr, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	res, err := cs.CallTool(ctx, &sdkmcp.CallToolParams{
+		Name:      "monitor_profile_capture",
+		Arguments: map[string]any{"pid": pid, "type": "cpu", "confirm": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	m, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("StructuredContent type = %T, want map[string]any (content=%+v)", res.StructuredContent, res.Content)
+	}
+	if captured, _ := m["captured"].(bool); !captured {
+		t.Fatalf("captured = %v, want true; payload=%v", m["captured"], m)
+	}
+	profileMap, ok := m["profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("profile field missing or wrong type (%T); payload=%v", m["profile"], m)
+	}
+	if profileMap["method"] != "inspector_cpu" {
+		t.Fatalf("profile.method = %v, want inspector_cpu; payload=%v", profileMap["method"], m)
+	}
+	symbols, ok := profileMap["symbols"].([]any)
+	if !ok || len(symbols) == 0 {
+		t.Fatalf("profile.symbols = %v, want at least one CDP symbol", profileMap["symbols"])
+	}
+	first, ok := symbols[0].(map[string]any)
+	if !ok {
+		t.Fatalf("symbols[0] type = %T, want map[string]any", symbols[0])
+	}
+	line, ok := first["line"].(float64)
+	if !ok || line <= 0 {
+		t.Errorf("symbols[0].line = %v, want a positive line number (file:line, not just a function name): %+v", first["line"], first)
+	}
+	if _, ok := first["func"]; !ok {
+		t.Errorf("symbols[0] missing a 'func' field: %+v", first)
 	}
 }
