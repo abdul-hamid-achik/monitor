@@ -320,6 +320,72 @@ func TestInvestigateReportToMapSnakeCase(t *testing.T) {
 	}
 }
 
+// TestInvestigateReportJSONShapeStableForDownstreamConsumers is a snapshot
+// test of investigate --json's top-level shape: Chalupa's runtime/ci-engine
+// (chalupa-ci.py) reads stash.artifact_ref, and cairntrace reads it too.
+// E1.7's payload diet only ever touches profile.text; this locks down that
+// none of the other top-level fields (including the nested stash shape)
+// moved, and that redactRaw's own field addition/removal is limited to
+// profile.text exactly as documented.
+func TestInvestigateReportJSONShapeStableForDownstreamConsumers(t *testing.T) {
+	report := investigateReport{
+		PID: 7, StartedAt: "2026-01-01T00:00:00Z", Verdict: "complete",
+		ProfileMethod: "inspector_cpu",
+		Steps:         []investigateStep{{Step: "profile", Status: stepOK}},
+		Profile:       &profiler.Profile{PID: 7, Type: profiler.ProfileCPU, Text: "raw CDP JSON"},
+		Stash: &incidents.CaptureResult{
+			TreeHash:    strings.Repeat("a", 64),
+			ArtifactRef: map[string]any{"uri": "fcheap://stash/stash-1"},
+		},
+	}
+
+	// Downstream consumers read the FULL report (not the redacted one) via
+	// toMap() today; the top-level shape they depend on must not move.
+	m := report.toMap()
+	for _, key := range []string{"pid", "started_at", "verdict", "steps", "profile_method", "profile", "stash"} {
+		if _, ok := m[key]; !ok {
+			t.Errorf("toMap() missing top-level key %q: %v", key, m)
+		}
+	}
+	stash, ok := m["stash"].(map[string]any)
+	if !ok {
+		t.Fatalf("stash type = %T, want map[string]any", m["stash"])
+	}
+	artifactRef, ok := stash["artifact_ref"].(map[string]any)
+	if !ok || artifactRef["uri"] != "fcheap://stash/stash-1" {
+		t.Fatalf("stash.artifact_ref = %v, want the ArtifactRef map (Chalupa's chalupa-ci.py and cairntrace both read this path)", stash["artifact_ref"])
+	}
+
+	// redactRaw(false) (the default: --include-raw / include_raw not set)
+	// removes ONLY profile.text; everything else, including stash, is
+	// untouched.
+	redacted := report.redactRaw(false).toMap()
+	for _, key := range []string{"pid", "started_at", "verdict", "steps", "profile_method", "profile", "stash"} {
+		if _, ok := redacted[key]; !ok {
+			t.Errorf("redactRaw(false).toMap() missing top-level key %q: %v", key, redacted)
+		}
+	}
+	redactedStash, ok := redacted["stash"].(map[string]any)
+	if !ok || redactedStash["artifact_ref"] == nil {
+		t.Fatalf("redactRaw(false) disturbed stash: %v", redacted["stash"])
+	}
+	redactedProfile, ok := redacted["profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("redacted profile type = %T", redacted["profile"])
+	}
+	if _, hasText := redactedProfile["text"]; hasText {
+		t.Errorf("redactRaw(false) should omit profile.text; got %v", redactedProfile)
+	}
+
+	// redactRaw(true) (--include-raw / include_raw:true) restores text and
+	// changes nothing else.
+	raw := report.redactRaw(true).toMap()
+	rawProfile, ok := raw["profile"].(map[string]any)
+	if !ok || rawProfile["text"] != "raw CDP JSON" {
+		t.Fatalf("redactRaw(true) should keep profile.text; got %v", rawProfile)
+	}
+}
+
 func TestRecordInvestigateOccurrenceGroupsRunsAndKeepsEvidence(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "issues.veclite")
 	t.Setenv(issues.StorePathEnv, storePath)
