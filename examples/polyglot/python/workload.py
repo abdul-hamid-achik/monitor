@@ -47,6 +47,19 @@ def detonate():
 
 print(f"[python] pid={PID} workload starting", file=sys.stderr)
 
+# WORKLOAD_SECONDS shortens the run for CI/spec use (monitor run --'s
+# mvp_errors_* specs); default 40s is unchanged when unset or invalid.
+try:
+    SECONDS = float(os.environ.get("WORKLOAD_SECONDS") or 40)
+    if SECONDS <= 0:
+        SECONDS = 40
+except ValueError:
+    SECONDS = 40
+# Scales with SECONDS so a shortened run still produces several handled
+# errors before the fatal one: at the default 40s this is exactly the
+# original fixed 4s interval.
+ERR_INTERVAL = max(0.05, SECONDS / 10)
+
 stop = threading.Event()
 
 
@@ -59,7 +72,7 @@ def hot_loop():
 def err_loop():
     while not stop.is_set():
         tick_errors()
-        time.sleep(4)
+        time.sleep(ERR_INTERVAL)
 
 
 t1 = threading.Thread(target=hot_loop, daemon=True)
@@ -67,6 +80,6 @@ t2 = threading.Thread(target=err_loop, daemon=True)
 t1.start()
 t2.start()
 
-time.sleep(40)
+time.sleep(SECONDS)
 stop.set()
 detonate()

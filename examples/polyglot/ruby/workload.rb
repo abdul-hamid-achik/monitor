@@ -44,6 +44,15 @@ end
 
 warn "[ruby] pid=#{PID} workload starting"
 
+# WORKLOAD_SECONDS shortens the run for CI/spec use (monitor run --'s
+# mvp_errors_* specs); default 40s is unchanged when unset or invalid.
+seconds = Float(ENV["WORKLOAD_SECONDS"]) rescue 40
+seconds = 40 if seconds.nil? || seconds <= 0
+# Scales with seconds so a shortened run still produces several handled
+# errors before the fatal one: at the default 40s this is exactly the
+# original fixed 4s interval.
+err_interval = [seconds / 10, 0.05].max
+
 hot_thread = Thread.new do
   loop do
     process_batch(40)
@@ -54,11 +63,11 @@ end
 err_thread = Thread.new do
   loop do
     tick_errors
-    sleep 4
+    sleep err_interval
   end
 end
 
-sleep 40
+sleep seconds
 hot_thread.kill
 err_thread.kill
 detonate
