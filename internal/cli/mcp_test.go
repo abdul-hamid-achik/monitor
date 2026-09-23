@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	gpprof "github.com/google/pprof/profile"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
@@ -266,28 +268,28 @@ func TestBuildProfileServiceKeepPassthrough(t *testing.T) {
 	}
 	svc := buildProfileService()
 
-	discarded, receipt, err := svc(context.Background(), 1, profiler.ProfileHeap, "", false)
+	res1, err := svc(context.Background(), 1, profiler.ProfileHeap, "", false, false)
 	if err != nil {
 		t.Fatalf("keep:false: %v", err)
 	}
-	if !receipt.Verified {
-		t.Fatalf("keep:false: receipt = %+v, want Verified", receipt)
+	if !res1.Receipt.Verified {
+		t.Fatalf("keep:false: receipt = %+v, want Verified", res1.Receipt)
 	}
-	if discarded.Path != "" || discarded.Text != "" {
-		t.Errorf("keep:false: profile = %+v, want Path and Text both discarded", discarded)
+	if res1.Profile.Path != "" || res1.Profile.Text != "" {
+		t.Errorf("keep:false: profile = %+v, want Path and Text both discarded", res1.Profile)
 	}
 
-	kept, receipt2, err := svc(context.Background(), 2, profiler.ProfileHeap, "", true)
+	res2, err := svc(context.Background(), 2, profiler.ProfileHeap, "", true, false)
 	if err != nil {
 		t.Fatalf("keep:true: %v", err)
 	}
-	if !receipt2.Verified {
-		t.Fatalf("keep:true: receipt = %+v, want Verified", receipt2)
+	if !res2.Receipt.Verified {
+		t.Fatalf("keep:true: receipt = %+v, want Verified", res2.Receipt)
 	}
-	if kept.Path == "" || kept.Text == "" {
-		t.Errorf("keep:true: profile = %+v, want Path and Text both retained", kept)
+	if res2.Profile.Path == "" || res2.Profile.Text == "" {
+		t.Errorf("keep:true: profile = %+v, want Path and Text both retained", res2.Profile)
 	}
-	if _, statErr := os.Stat(kept.Path); statErr != nil {
+	if _, statErr := os.Stat(res2.Profile.Path); statErr != nil {
 		t.Errorf("keep:true: on-disk file gone: %v", statErr)
 	}
 }
@@ -405,5 +407,261 @@ func TestProfileServiceLiveNodeInspectorViaRealDispatch(t *testing.T) {
 	}
 	if _, ok := first["func"]; !ok {
 		t.Errorf("symbols[0] missing a 'func' field: %+v", first)
+	}
+}
+
+// TestProfileServiceLiveNodeInspectorLinesTrueNamesHotLine is E3.6's own
+// "wire test": monitor_profile_capture's lines:true, over a real in-memory
+// MCP CallTool, against a REAL node --inspect process (the same rig
+// TestProfileServiceLiveNodeInspectorViaRealDispatch uses) — the response
+// must name examples/polyglot/js/workload.js's planted hot line (17, `s +=
+// JSON.stringify(...)` inside heavyStringify — see workload.js's own "HOT
+// LINE" comment), stay under a small size budget, and never mention a
+// ws:// inspector URL anywhere in the payload.
+func TestProfileServiceLiveNodeInspectorLinesTrueNamesHotLine(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH")
+	}
+	workload, err := filepath.Abs(filepath.Join("..", "..", "examples", "polyglot", "js", "workload.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(workload); statErr != nil {
+		t.Skipf("workload fixture not found at %s", workload)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a free port: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	cmd := exec.Command(nodeBin, "--jitless", "--inspect="+addr, workload)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start node: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+	pid := int32(cmd.Process.Pid)
+
+	deadline := time.Now().Add(10 * time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		if conn, dialErr := net.DialTimeout("tcp", addr, 200*time.Millisecond); dialErr == nil {
+			_ = conn.Close()
+			ready = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatalf("node inspector never came up on %s", addr)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	svc := &monitormcp.Service{Profile: buildProfileService()}
+	s := monitormcp.NewServer(svc, "test")
+
+	ctx := context.Background()
+	clientTr, serverTr := sdkmcp.NewInMemoryTransports()
+	ss, err := s.Connect(ctx, serverTr)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	defer func() { _ = ss.Close() }()
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "test-client", Version: "0.0.0"}, nil)
+	cs, err := client.Connect(ctx, clientTr, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	defer func() { _ = cs.Close() }()
+
+	res, err := cs.CallTool(ctx, &sdkmcp.CallToolParams{
+		Name:      "monitor_profile_capture",
+		Arguments: map[string]any{"pid": pid, "type": "cpu", "lines": true, "confirm": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	m, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("StructuredContent type = %T, want map[string]any (content=%+v)", res.StructuredContent, res.Content)
+	}
+	if captured, _ := m["captured"].(bool); !captured {
+		t.Fatalf("captured = %v, want true; payload=%v", m["captured"], m)
+	}
+	lh, ok := m["line_heatmap"].(map[string]any)
+	if !ok {
+		t.Fatalf("line_heatmap missing or wrong type (%T); payload=%v", m["line_heatmap"], m)
+	}
+	if lh["schema"] != "monitor.line_heatmap.v1" {
+		t.Fatalf("line_heatmap.schema = %v, want monitor.line_heatmap.v1 (payload may have degraded to a skip): %v", lh["schema"], lh)
+	}
+	functions, ok := lh["functions"].([]any)
+	if !ok || len(functions) == 0 {
+		t.Fatalf("line_heatmap.functions = %v, want at least one function", lh["functions"])
+	}
+	var sawLine17 bool
+	for _, fv := range functions {
+		f, ok := fv.(map[string]any)
+		if !ok {
+			continue
+		}
+		lines, _ := f["lines"].([]any)
+		for _, lv := range lines {
+			l, ok := lv.(map[string]any)
+			if !ok {
+				continue
+			}
+			if line, ok := l["line"].(float64); ok && int(line) == 17 {
+				sawLine17 = true
+			}
+		}
+	}
+	if !sawLine17 {
+		t.Errorf("line_heatmap never names the planted hot line 17: %+v", lh)
+	}
+
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal payload for size/content checks: %v", err)
+	}
+	if strings.Contains(string(raw), "ws://") {
+		t.Errorf("payload must never carry a ws:// inspector URL: %s", raw)
+	}
+}
+
+// writeFakePprofCPU builds a minimal, valid CPU pprof proto (>3 functions,
+// one with >8 distinct lines) and saves it gzip-compressed to a temp file —
+// the same on-disk shape profiler.LoadFile / BuildHeatmap consume — so
+// E3.6's payload-bounding (top 3 functions, top 8 lines each) can be
+// exercised deterministically, without a real subprocess capture.
+func writeFakePprofCPU(t *testing.T) string {
+	t.Helper()
+	fn := func(id uint64, name, file string) *gpprof.Function {
+		return &gpprof.Function{ID: id, Name: name, Filename: file}
+	}
+	loc := func(id uint64, f *gpprof.Function, line int64) *gpprof.Location {
+		return &gpprof.Location{ID: id, Line: []gpprof.Line{{Function: f, Line: line}}}
+	}
+
+	prof := &gpprof.Profile{
+		SampleType:    []*gpprof.ValueType{{Type: "cpu", Unit: "nanoseconds"}},
+		PeriodType:    &gpprof.ValueType{Type: "cpu", Unit: "nanoseconds"},
+		Period:        1000000,
+		DurationNanos: 5 * int64(time.Second),
+	}
+
+	var locID uint64
+	addFuncSamples := func(name string, weights []int64) {
+		f := fn(uint64(len(prof.Function)+1), name, "go-pprof/main.go")
+		prof.Function = append(prof.Function, f)
+		for i, w := range weights {
+			locID++
+			l := loc(locID, f, int64(10+i))
+			prof.Location = append(prof.Location, l)
+			prof.Sample = append(prof.Sample, &gpprof.Sample{Location: []*gpprof.Location{l}, Value: []int64{w}})
+		}
+	}
+
+	// 4 functions (only the top 3 by weight should survive --top 3): 10
+	// distinct lines on the hottest one (only 8 should survive per-function
+	// trimming).
+	addFuncSamples("main.heavyStringify", []int64{100, 90, 80, 70, 60, 50, 40, 30, 20, 500})
+	addFuncSamples("main.processBatch", []int64{15})
+	addFuncSamples("main.flakyParse", []int64{10})
+	addFuncSamples("main.coldFunc", []int64{1})
+
+	path := filepath.Join(t.TempDir(), "fake-cpu.pb.gz")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := prof.Write(f); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestBuildProfileServiceLinesTrueBoundsHeatmap is the E3.6 Service-level
+// regression: lines:true builds a real monitor.line_heatmap.v1 from the
+// SAME capture, bounded to the top 3 functions and top 8 lines each —
+// verified against a synthetic proto that deliberately carries more than
+// both caps so the trimming itself is exercised, not just its absence.
+func TestBuildProfileServiceLinesTrueBoundsHeatmap(t *testing.T) {
+	defer restoreStubs()()
+	verifyOwnership = func(context.Context, int32, string) (profiler.PortOwnership, string) {
+		return profiler.OwnershipOwned, ""
+	}
+	path := writeFakePprofCPU(t)
+	captureProfile = func(_ context.Context, pid int32, ptype profiler.ProfileType, _ string) (profiler.Profile, error) {
+		return profiler.Profile{PID: pid, Type: ptype, Method: "pprof_cpu", Path: path}, nil
+	}
+
+	svc := buildProfileService()
+	res, err := svc(context.Background(), 1, profiler.ProfileCPU, "", false, true)
+	if err != nil {
+		t.Fatalf("lines:true: %v", err)
+	}
+	if res.HeatmapSkip != nil {
+		t.Fatalf("expected a heatmap, got a skip: %+v", res.HeatmapSkip)
+	}
+	if res.Heatmap == nil {
+		t.Fatal("expected a non-nil Heatmap")
+	}
+	if got := len(res.Heatmap.Functions); got > mcpHeatmapMaxFunctions {
+		t.Errorf("len(Functions) = %d, want <= %d", got, mcpHeatmapMaxFunctions)
+	}
+	for _, f := range res.Heatmap.Functions {
+		if got := len(f.Lines); got > mcpHeatmapMaxLines {
+			t.Errorf("function %s: len(Lines) = %d, want <= %d", f.Name, got, mcpHeatmapMaxLines)
+		}
+		// boundHeatmapLines must leave lines in ascending order, the same
+		// reading order every other Heatmap consumer expects.
+		for i := 1; i < len(f.Lines); i++ {
+			if f.Lines[i].Line < f.Lines[i-1].Line {
+				t.Errorf("function %s: lines out of order: %+v", f.Name, f.Lines)
+			}
+		}
+	}
+	// The synthetic proto's hottest, highest-weight line (500 at line 19,
+	// the last weight in the heavyStringify series above) must have
+	// survived the top-8 trim, not an arbitrary line-number-ordered prefix.
+	var sawHotLine bool
+	for _, f := range res.Heatmap.Functions {
+		if f.Name != "main.heavyStringify" {
+			continue
+		}
+		for _, l := range f.Lines {
+			if l.Line == 19 {
+				sawHotLine = true
+			}
+		}
+	}
+	if !sawHotLine {
+		t.Errorf("expected the hottest line (19) to survive the top-%d-by-weight trim: %+v", mcpHeatmapMaxLines, res.Heatmap.Functions)
+	}
+}
+
+// TestBuildMCPLineHeatmapSkipsForSampleCapture is lines:true's honest
+// degradation regression: a macOS `sample` capture (no Path, no Text — see
+// profilerSourceFromCapture) has no file:line detail to build a heatmap
+// from at all, and must degrade to a HeatmapSkip rather than an empty or
+// fabricated one.
+func TestBuildMCPLineHeatmapSkipsForSampleCapture(t *testing.T) {
+	prof := profiler.Profile{PID: 1, Type: profiler.ProfileSample, Method: "sample"}
+	hm, skip := buildMCPLineHeatmap(context.Background(), prof, nil)
+	if hm != nil {
+		t.Errorf("expected a nil Heatmap for a sample capture, got %+v", hm)
+	}
+	if skip == nil || skip.Detail == "" {
+		t.Fatalf("expected a non-empty HeatmapSkip, got %+v", skip)
 	}
 }
