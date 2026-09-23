@@ -292,14 +292,24 @@ const (
 // --stash`). It prints exactly one line ("OK <issue-id>", "LOCKED", or
 // "ERROR <message>") and always exits 0, so the parent can distinguish a
 // genuine WithWriter outcome from a helper crash via cmd.Output()'s error.
+// crossProcessHelperWait is the per-helper lock wait budget in
+// TestConcurrentCrossProcessWritersNeverSeeFileLocked (see the comment at its
+// use site).
+const crossProcessHelperWait = 90 * time.Second
+
 func TestCrossProcessWriterHelperProcess(t *testing.T) {
 	if os.Getenv(crossProcessWriterHelperEnv) != "1" {
 		return
 	}
 	path := os.Getenv(crossProcessWriterHelperPath)
 	index := os.Getenv(crossProcessWriterHelperIndex)
+	// 100 helpers serialize on one flock; each holds it for a full-snapshot
+	// Save (plus fsync), which on a 2-vCPU CI runner under -race adds up to
+	// well over DefaultWriterWait. This test verifies that the retry loop
+	// absorbs contention given a sufficient budget, not the default budget
+	// for a 100-way burst, so it waits generously.
 	var issueID string
-	err := WithWriter(context.Background(), path, DefaultWriterWait, func(store *Store) error {
+	err := WithWriter(context.Background(), path, crossProcessHelperWait, func(store *Store) error {
 		issue, _, err := store.UpsertOccurrence(OccurrenceInput{
 			// The same normalized message for every helper (digits fold to
 			// <n>) so every successful write groups into one issue.
