@@ -11,6 +11,17 @@ intent: |
   go-crash panics immediately (see examples/polyglot/go-crash/main.go's
   doc comment), so it needs no WORKLOAD_SECONDS short knob.
 
+  A second outcome (scan_both_catches_stdout_zap_error) covers E2.9's
+  explicit requirement that the Go golden-table spec "incluye --scan
+  both": it runs the go-zap-stdout polyglot example, whose zap console
+  entry and pkg/errors "%+v" dump print to STDOUT, via `monitor run
+  --scan both --` in a second, fully isolated store, and asserts (a) the
+  readiness text still reached stdout untouched and (b) exactly one
+  issue landed with the correct stdout-only culprit -- the same property
+  specs/run_scan_stdout.yml verifies in full, exercised here too because
+  it is what the golden table itself asks for, not merely `--scan
+  both`'s general behavior.
+
 target:
   cmd: ["./bin/monitor", "run", "--", "/tmp/monitor-spec-mvp-go/go-crash"]
   cwd: "."
@@ -36,6 +47,10 @@ preconditions:
     - run: "(cd examples/polyglot/go-crash && go build -o /tmp/monitor-spec-mvp-go/go-crash .)"
       timeoutMs: 60000
     - run: "cat > /tmp/monitor-spec-mvp-go/check.sh <<'SH'\n#!/bin/sh\nset -e\nMONITOR_ISSUES_STORE=/tmp/monitor-spec-mvp-go/data/issues.veclite ./bin/monitor issues list --json > /tmp/monitor-spec-mvp-go/issues.json\npython3 -c \"\nimport json\nd = json.load(open('/tmp/monitor-spec-mvp-go/issues.json'))\nassert len(d) == 1, d\ni = d[0]\nassert i['exception_type'] == 'panic', i\nassert i['occurrence_count'] == 1, i\nassert i['culprit']['function'] == 'main.main', i['culprit']\nassert i['culprit']['file'] == 'examples/polyglot/go-crash/main.go', i['culprit']\nassert i['culprit']['line'] == 11, i['culprit']\nprint('ok')\n\"\nSH\nchmod +x /tmp/monitor-spec-mvp-go/check.sh"
+      timeoutMs: 5000
+    - run: "(cd examples/polyglot/go-zap-stdout && go build -o /tmp/monitor-spec-mvp-go/go-zap-stdout .)"
+      timeoutMs: 60000
+    - run: "cat > /tmp/monitor-spec-mvp-go/scan_both.sh <<'SH'\n#!/bin/sh\nset -e\nrm -rf /tmp/monitor-spec-mvp-go/scan-both-state /tmp/monitor-spec-mvp-go/scan-both-data\nmkdir -p /tmp/monitor-spec-mvp-go/scan-both-state /tmp/monitor-spec-mvp-go/scan-both-data\nexport XDG_STATE_HOME=/tmp/monitor-spec-mvp-go/scan-both-state\nexport MONITOR_ISSUES_STORE=/tmp/monitor-spec-mvp-go/scan-both-data/issues.veclite\n./bin/monitor run --scan both -- /tmp/monitor-spec-mvp-go/go-zap-stdout > /tmp/monitor-spec-mvp-go/scan-both.out 2>&1\ngrep -q '\\[go-zap-stdout\\] starting' /tmp/monitor-spec-mvp-go/scan-both.out\n./bin/monitor issues list --json > /tmp/monitor-spec-mvp-go/scan-both-issues.json\npython3 -c \"\nimport json\nd = json.load(open('/tmp/monitor-spec-mvp-go/scan-both-issues.json'))\nassert len(d) == 1, d\ni = d[0]\nassert i['culprit']['file'] == 'examples/polyglot/go-zap-stdout/main.go', i['culprit']\nassert i['culprit']['line'] == 67, i['culprit']\nassert i['occurrence_count'] == 1, i\nprint('ok')\n\"\nSH\nchmod +x /tmp/monitor-spec-mvp-go/scan_both.sh"
       timeoutMs: 5000
 
 steps:
@@ -64,3 +79,8 @@ outcomes:
     verify:
       command:
         run: "/tmp/monitor-spec-mvp-go/check.sh"
+  - id: scan_both_catches_stdout_zap_error
+    description: "--scan both on go-zap-stdout (stdout-only zap+pkg/errors output) still passes readiness text through and records the correct issue (E2.9's explicit Go --scan both requirement)"
+    verify:
+      command:
+        run: "/tmp/monitor-spec-mvp-go/scan_both.sh"
