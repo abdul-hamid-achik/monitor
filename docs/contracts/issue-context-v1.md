@@ -9,30 +9,45 @@
 
 ## Why this exists
 
-`monitor issue <id>` currently returns whatever the `issues` store holds
-verbatim (see [Local Issues](/guide/issues)). Once exceptions carry frames,
-causes, and a culprit (§6 of the naming ADR), the issue page needs one
-producer that reads the store once, enriches it with codemap/git/vecgrep, and
-degrades honestly when any of those are unavailable — instead of every
-renderer (CLI, `--md`, MCP) re-implementing that enrichment. `explain.Build`
-is that producer. It always opens the store read-only
-(`issues.OpenReadOnly`), so it never blocks on — or is blocked by — a writer
-such as `watch --stash`.
+`monitor issues show <id>` currently returns whatever the `issues` store
+holds verbatim (see [Local Issues](/guide/issues)). The one-argument
+`monitor issue <id>` this schema targets does not exist yet as a command —
+`internal/cli/issues.go` currently registers `issue` only as a cobra
+**alias** of `issues`, so today `monitor issue <anything>` just prints the
+`issues` command's help. E2.5 has to make `monitor issue <id>` its own
+command, taking over that alias rather than adding a second, conflicting
+meaning for it (see the naming ADR's `issue`/`issues` collision row); that is
+a user-visible CLI change and belongs in the CHANGELOG, not something this
+schema doc can silently assume away. Once exceptions carry frames, causes,
+and a culprit (§6 of the naming ADR), the issue page needs one producer that
+reads the store once, enriches it with codemap/git/vecgrep, and degrades
+honestly when any of those are unavailable — instead of every renderer (CLI,
+`--md`, MCP) re-implementing that enrichment. `explain.Build` is that
+producer. It always opens the store read-only (`issues.OpenReadOnly`), so it
+never blocks on — or is blocked by — a writer such as `watch --stash`.
 
 ## Budgets
 
 `explain.Build(id, budget)` takes a budget so a caller can ask for less than
-the full page:
+the full page. The budget does **not** gate which top-level sections show up
+— every section `explain.Build` knows how to fill is present at every
+budget, because a "why did it fail" answer that silently drops `impact` or
+`last_touched` to hit a size target is worse than a shorter version of the
+same answer (see the roadmap's own `monitor_issue {id:"latest"}` brief
+example, which carries `culprit.snippet`, `causes`, `impact`, `last_touched`,
+`degraded[]`, and `next[]` in under 4 KB). The budget instead gates how much
+**detail** each section carries:
 
-| Budget | Target size | Includes |
+| Budget | Target size | Every section is present; budget controls detail |
 |---|---|---|
-| `brief` | ≤ 4 KB | `issue`, `culprit` (no snippet body), `timeline` summary, `degraded[]`. No author emails, no `related_notes` body, no `frames`. |
-| `standard` | ≤ 16 KB | Everything in `brief`, plus `snippet`, `causes`, `frames`, `impact`, `last_touched`, `next[]`. |
-| `full` | unbounded | Everything in `standard`, plus anything a future `--include-raw` opts into (e.g. uncapped frame list). |
+| `brief` | ≤ 4 KB | `culprit.snippet` capped to a few lines around the crash line; `frames` collapsed to in-app frames only (the rest folded into a count); `causes` capped to what fits. Left out entirely: author emails (`last_touched.author_email`) and any `related_notes` item body (a later-epic field — the items themselves, `{title, path}`, are small enough to keep). |
+| `standard` | ≤ 16 KB | The same sections as `brief`, with fuller detail: a wider snippet window, the complete in-app frame list, and the full `causes` chain. |
+| `full` | unbounded | Everything in `standard`, plus anything a future `--include-raw` opts into (e.g. an uncapped frame list, raw profiler payloads). |
 
 MCP's `monitor_issue` defaults to `brief` so a "what's the latest crash"
-question costs one small, cheap call; the CLI's `monitor issue <id>` defaults
-to `standard`.
+question costs one small, cheap call and still gets a real culprit, causes,
+impact, and last-touched answer, rather than a stub that needs a second call
+to be useful. The CLI's `monitor issue <id>` defaults to `standard`.
 
 ## Shape
 
@@ -46,21 +61,29 @@ to `standard`.
   // than a specific short_id
   "resolved_from": {
     "id": "latest",
-    "project": "graphite",
-    "service": "web-api",
+    "project": "polyglot",
+    "service": "workload",
     "kind": "exception"
   },
 
   "issue": {
-    "id": "ISS-0123456789ABCDEF",
-    "short_id": "GRA-42",
+    "id": "ISS-A07E1234567890AB",
+    // uppercase first 4 hex chars of the id's hex portion (store.go builds
+    // `id` as "ISS-" + strings.ToUpper(fingerprint[:16])). This is a new,
+    // purely-display field: today's `issues.Store.Get` only matches the
+    // full `id` exactly, so E2.5 also has to teach issue lookup to accept
+    // an unambiguous short_id/id prefix, not just the value itself.
+    "short_id": "A07E",
     "status": "open", // open | resolved | ignored
-    "kind": "exception", // exception | alert (existing FingerprintV1 issues)
+    // Issue.Kind is an open string; producers write "exception" (this
+    // schema, new), "investigation" (internal/cli/investigate.go), or
+    // "monitor.alert.<rule>" (internal/cli/watch.go) — never "alert" bare.
+    "kind": "exception",
     "title": "TypeError: Cannot read properties of undefined (reading 'id')",
     "exception_type": "TypeError",
     "handled": false,
-    "project": "graphite",
-    "service": "web-api"
+    "project": "polyglot",
+    "service": "workload"
   },
 
   "timeline": {
@@ -75,7 +98,7 @@ to `standard`.
 
   "culprit": {
     "function": "loadUser",
-    "fqn": "web-api/src/users.ts:loadUser",
+    "fqn": "workload/src/users.ts:loadUser",
     "file": "src/users.ts",
     "line": 42,
     "source": "stack", // "stack" | "message_search" — see naming ADR §7
@@ -104,7 +127,8 @@ to `standard`.
     "status": "ok", // "ok" | "skipped"
     "callers": 3,
     "blast_radius": 12,
-    "tests": ["src/users.test.ts"],
+    "tests": 1, // count of tests exercising the culprit line, from codemap's `impact --batch`
+    "test_files": ["src/users.test.ts"], // standard/full only: the additive, human-readable list `tests` counts
     "untested": false,
     "call_graph": "confirmed" // codemap's confidence enum
   },
@@ -132,11 +156,13 @@ to `standard`.
   ],
 
   "next": [
-    { "cli": "monitor issue GRA-42 --md", "mcp": null, "why": "share this issue as markdown" }
+    { "cli": "monitor issue a07e --md", "mcp": null, "why": "share this issue as markdown" }
   ],
 
   "truncated": {},
-  "privacy": { "scrubbed": true, "text_is_untrusted": true }
+  // scrubbed: a count of redacted values (scrub.WithValues, E2.2), never
+  // the values themselves
+  "privacy": { "scrubbed": 0, "text_is_untrusted": true }
 }
 ```
 
