@@ -379,3 +379,221 @@ func TestInvestigateIssuePersistenceFailureMakesVerdictPartial(t *testing.T) {
 		t.Fatalf("issue step = %+v", got)
 	}
 }
+
+// gitCodebase creates a fresh temp directory with a .git marker so
+// project.Resolve (and stacktrace.InApp, which needs a real gitRoot) treat
+// it as a real project root, and returns it alongside a file path nested
+// under it.
+func gitCodebase(t *testing.T) (root, hotFile string) {
+	t.Helper()
+	root = filepath.Join(t.TempDir(), "app")
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return root, filepath.Join(root, "src", "hot.js")
+}
+
+// TestInvestigateFingerprintStableAcrossSampling verifies bug 11: sampling
+// noise reshuffling the low-weight tail of a CPU profile between
+// consecutive investigate runs over the SAME process must not open a new
+// issue each time, as long as the dominant in-app function stays the same.
+func TestInvestigateFingerprintStableAcrossSampling(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	t.Setenv(issues.StorePathEnv, storePath)
+	codebaseRoot, hotFile := gitCodebase(t)
+
+	// Three sampled profiles of the same live process: the dominant
+	// function (processRow, well over the 15% threshold once its two hot
+	// lines are aggregated) is stable, but the low-weight tail — which
+	// functions appear at all, their order, even a near-zero symbol
+	// appearing in one run and not another — is exactly the kind of
+	// sampling jitter that used to open a new issue on almost every run
+	// when the old fingerprint hashed the whole top-10.
+	runs := [][]profiler.Symbol{
+		{
+			{Func: "processRow", File: hotFile, Line: 12, Weight: 42.1},
+			{Func: "processRow", File: hotFile, Line: 14, Weight: 5.0},
+			{Func: "parseHeader", File: hotFile, Line: 3, Weight: 4.0},
+			{Func: "(garbage collector)", File: "", Line: 0, Weight: 3.0},
+		},
+		{
+			{Func: "processRow", File: hotFile, Line: 12, Weight: 39.7},
+			{Func: "processRow", File: hotFile, Line: 14, Weight: 6.3},
+			{Func: "otherHelper", File: hotFile, Line: 50, Weight: 2.1},
+		},
+		{
+			{Func: "processRow", File: hotFile, Line: 12, Weight: 45.0},
+			{Func: "parseHeader", File: hotFile, Line: 3, Weight: 9.9},
+			{Func: "processRow", File: hotFile, Line: 14, Weight: 4.4},
+			{Func: "rareThing", File: hotFile, Line: 99, Weight: 0.4},
+		},
+	}
+
+	var firstID string
+	var lastIssue issues.Issue
+	for i, syms := range runs {
+		report := &investigateReport{
+			PID: int32(100 + i), StartedAt: "2026-01-01T00:00:00Z",
+			Process: &procbind.Binding{Name: "api", Runtime: procbind.RuntimeNode, CodebaseRoot: codebaseRoot, Cwd: codebaseRoot},
+			Profile: &profiler.Profile{Symbols: syms},
+		}
+		issue, occurrence, err := recordInvestigateOccurrence(report)
+		if err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+		if len(issue.Symbols) != 1 || issue.Symbols[0] != "processRow" {
+			t.Fatalf("run %d: issue.Symbols = %v, want [processRow] (dominant symbol only)", i, issue.Symbols)
+		}
+		if len(occurrence.Symbols) != 1 || occurrence.Symbols[0] != "processRow" {
+			t.Fatalf("run %d: occurrence.Symbols = %v, want [processRow]", i, occurrence.Symbols)
+		}
+		if firstID == "" {
+			firstID = issue.ID
+		} else if issue.ID != firstID {
+			t.Fatalf("run %d opened a new issue: got %s, want %s", i, issue.ID, firstID)
+		}
+		lastIssue = issue
+	}
+	if lastIssue.OccurrenceCount != int64(len(runs)) {
+		t.Fatalf("OccurrenceCount = %d, want %d (all %d runs grouped into one issue)", lastIssue.OccurrenceCount, len(runs), len(runs))
+	}
+}
+
+// TestInvestigateFingerprintIgnoresPseudoFrames verifies that even a
+// pseudo/synthetic frame name that (hypothetically) carries the highest
+// weight in a profile can never become the fingerprinted "dominant"
+// symbol — defense in depth alongside the profiler's own pseudo-frame
+// filtering (E1.1's flattenCDPProfile already excludes these).
+func TestInvestigateFingerprintIgnoresPseudoFrames(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	t.Setenv(issues.StorePathEnv, storePath)
+	codebaseRoot, hotFile := gitCodebase(t)
+
+	report := &investigateReport{
+		PID: 42, StartedAt: "2026-01-01T00:00:00Z",
+		Process: &procbind.Binding{Name: "api", Runtime: procbind.RuntimeNode, CodebaseRoot: codebaseRoot, Cwd: codebaseRoot},
+		Profile: &profiler.Profile{Symbols: []profiler.Symbol{
+			{Func: "(garbage collector)", File: hotFile, Line: 1, Weight: 80},
+			{Func: "parseHeader", File: hotFile, Line: 3, Weight: 20},
+		}},
+	}
+	issue, occurrence, err := recordInvestigateOccurrence(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(occurrence.Symbols) != 1 || occurrence.Symbols[0] != "parseHeader" {
+		t.Fatalf("Symbols = %v, want [parseHeader] (the pseudo frame must never dominate despite its higher weight)", occurrence.Symbols)
+	}
+	if issue.Message != "manual process investigation" {
+		t.Fatalf("Message = %q, want the non-diffuse default", issue.Message)
+	}
+}
+
+// TestInvestigateFingerprintDiffuseProfile verifies that when no single
+// in-app function clears the 15% dominance threshold, Symbols is left
+// empty and Message becomes "diffuse cpu profile" instead of an arbitrary
+// pick — and that the full ranked list still lands in Metadata for a human
+// or agent reading the issue, just never in the hash.
+func TestInvestigateFingerprintDiffuseProfile(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	t.Setenv(issues.StorePathEnv, storePath)
+	codebaseRoot, hotFile := gitCodebase(t)
+
+	report := &investigateReport{
+		PID: 42, StartedAt: "2026-01-01T00:00:00Z",
+		Process: &procbind.Binding{Name: "api", Runtime: procbind.RuntimeNode, CodebaseRoot: codebaseRoot, Cwd: codebaseRoot},
+		Profile: &profiler.Profile{Symbols: []profiler.Symbol{
+			{Func: "fnA", File: hotFile, Line: 1, Weight: 8},
+			{Func: "fnB", File: hotFile, Line: 2, Weight: 7},
+			{Func: "fnC", File: hotFile, Line: 3, Weight: 6},
+			{Func: "fnD", File: hotFile, Line: 4, Weight: 5},
+		}},
+	}
+	issue, occurrence, err := recordInvestigateOccurrence(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(occurrence.Symbols) != 0 {
+		t.Fatalf("Symbols = %v, want empty for a diffuse profile", occurrence.Symbols)
+	}
+	if issue.Message != "diffuse cpu profile" {
+		t.Fatalf("Message = %q, want %q", issue.Message, "diffuse cpu profile")
+	}
+	if !strings.Contains(occurrence.Metadata["profile_symbols"], "fnA@") {
+		t.Fatalf("Metadata[profile_symbols] = %q, want it to include the full ranked list", occurrence.Metadata["profile_symbols"])
+	}
+}
+
+// TestDominantInAppSymbolSkipsFramesWithNoFile verifies macOS `sample`
+// frames (which carry no file:line at all — see profiler's own doc
+// comments) can never be picked as "dominant": InApp requires a file.
+func TestDominantInAppSymbolSkipsFramesWithNoFile(t *testing.T) {
+	_, gitRoot := gitCodebase(t)
+	dominant, all := dominantInAppSymbol([]profiler.Symbol{
+		{Func: "mystery", File: "", Line: 0, Weight: 99},
+	}, gitRoot)
+	if dominant.Func != "" {
+		t.Fatalf("dominant = %+v, want the zero value (no file, can't be in-app)", dominant)
+	}
+	if len(all) != 0 {
+		t.Fatalf("all = %v, want empty (a symbol with no File is skipped entirely, not just excluded from dominance)", all)
+	}
+}
+
+// TestCaptureRuntimeAwareProfileBunIsHonestNotA404 verifies bug 5: a Bun
+// process requesting a cpu/heap profile never attempts CDP discovery
+// against Bun's WebKit/JSC inspector (which would 404 on GET /json/list —
+// Bun doesn't speak V8's CDP) and instead fails fast with an honest
+// limitation and recovery.
+func TestCaptureRuntimeAwareProfileBunIsHonestNotA404(t *testing.T) {
+	binding := &procbind.Binding{Runtime: procbind.RuntimeBun, InspectAddr: "localhost:6499"}
+	for _, ptype := range []profiler.ProfileType{profiler.ProfileCPU, profiler.ProfileHeap} {
+		_, method, step := captureRuntimeAwareProfile(context.Background(), 42, binding, ptype, "", "", false, 0)
+		if step.Status != stepFailed {
+			t.Fatalf("type %s: step.Status = %q, want failed", ptype, step.Status)
+		}
+		if method != "" {
+			t.Errorf("type %s: method = %q, want empty", ptype, method)
+		}
+		if step.Limitation != bunInspectorLimitation {
+			t.Errorf("type %s: Limitation = %q, want %q (never a raw 404)", ptype, step.Limitation, bunInspectorLimitation)
+		}
+		if step.Recovery != bunInspectorRecovery {
+			t.Errorf("type %s: Recovery = %q, want %q", ptype, step.Recovery, bunInspectorRecovery)
+		}
+	}
+}
+
+// TestCaptureRuntimeAwareProfileNodeRequiresInspectAddr verifies a
+// Node/Deno process with no known inspector address fails with a specific,
+// actionable message rather than silently falling through to an unrelated
+// pprof/sample attempt.
+func TestCaptureRuntimeAwareProfileNodeRequiresInspectAddr(t *testing.T) {
+	binding := &procbind.Binding{Runtime: procbind.RuntimeNode}
+	_, method, step := captureRuntimeAwareProfile(context.Background(), 42, binding, profiler.ProfileCPU, "", "", false, 0)
+	if step.Status != stepFailed || method != "" {
+		t.Fatalf("step = %+v, method = %q, want a failed step with no method", step, method)
+	}
+	if !strings.Contains(step.Limitation, "no inspector address") {
+		t.Errorf("Limitation = %q, want it to mention the missing inspector address", step.Limitation)
+	}
+}
+
+// TestDominantInAppSymbolAggregatesAcrossLines verifies a function's
+// activity split across several statements (three lines under the 15%
+// threshold individually) is summed before the threshold check, not
+// judged line by line.
+func TestDominantInAppSymbolAggregatesAcrossLines(t *testing.T) {
+	root, hotFile := gitCodebase(t)
+	dominant, _ := dominantInAppSymbol([]profiler.Symbol{
+		{Func: "spread", File: hotFile, Line: 10, Weight: 6},
+		{Func: "spread", File: hotFile, Line: 11, Weight: 5},
+		{Func: "spread", File: hotFile, Line: 12, Weight: 5},
+	}, root)
+	if dominant.Func != "spread" {
+		t.Fatalf("dominant.Func = %q, want spread", dominant.Func)
+	}
+	if dominant.Weight != 16 {
+		t.Fatalf("dominant.Weight = %v, want 16 (6+5+5 summed across spread's 3 hot lines)", dominant.Weight)
+	}
+}

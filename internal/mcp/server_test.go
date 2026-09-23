@@ -1,10 +1,13 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -451,7 +454,7 @@ func TestHandleKillStillRunningSurfacesNextAction(t *testing.T) {
 // TestHandleProfileCaptureRefusesWithoutConfirm mirrors TestHandleKill.
 func TestHandleProfileCaptureRefusesWithoutConfirm(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Profile: func(context.Context, int32, profiler.ProfileType) (profiler.Profile, error) {
+		Profile: func(context.Context, int32, profiler.ProfileType, string) (profiler.Profile, error) {
 			t.Fatalf("Profile must not be called without confirm")
 			return profiler.Profile{}, nil
 		},
@@ -474,7 +477,7 @@ func TestHandleProfileCaptureRefusesWithoutConfirm(t *testing.T) {
 func TestHandleProfileCaptureDefaultsType(t *testing.T) {
 	got := profiler.ProfileType("")
 	s := newTestServer(t, &Service{
-		Profile: func(_ context.Context, pid int32, ptype profiler.ProfileType) (profiler.Profile, error) {
+		Profile: func(_ context.Context, pid int32, ptype profiler.ProfileType, _ string) (profiler.Profile, error) {
 			got = ptype
 			return profiler.Profile{PID: pid, Type: ptype, Taken: time.Now(), Text: "heap profile: 1"}, nil
 		},
@@ -500,7 +503,7 @@ func TestHandleProfileCaptureDefaultsType(t *testing.T) {
 // a limitation, never as a blind success.
 func TestHandleProfileCaptureRefusesEmptyArtifact(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Profile: func(context.Context, int32, profiler.ProfileType) (profiler.Profile, error) {
+		Profile: func(context.Context, int32, profiler.ProfileType, string) (profiler.Profile, error) {
 			return profiler.Profile{PID: 7, Type: "heap"}, nil
 		},
 	})
@@ -527,7 +530,7 @@ func TestHandleProfileCaptureRefusesEmptyArtifact(t *testing.T) {
 // is reported as captured=true with a verified artifact receipt.
 func TestHandleProfileCaptureVerifiedArtifact(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Profile: func(context.Context, int32, profiler.ProfileType) (profiler.Profile, error) {
+		Profile: func(context.Context, int32, profiler.ProfileType, string) (profiler.Profile, error) {
 			return profiler.Profile{PID: 7, Type: "heap", Text: "heap profile: 1"}, nil
 		},
 	})
@@ -1193,4 +1196,224 @@ func TestHandleIssuesNormalizesNilServices(t *testing.T) {
 	if _, ok := m["issues"].([]any); !ok {
 		t.Fatalf("issues must be an array: %T", m["issues"])
 	}
+}
+
+// connectInMemory wires an in-memory client/server pair for a real wire-level
+// CallTool round trip (E1.7: "Add in-memory MCP CallTool tests"), instead of
+// calling the handler methods directly the way the rest of this file's tests
+// do. It returns the connected ClientSession and a cleanup func.
+func connectInMemory(t *testing.T, s *Server) (*mcp.ClientSession, func()) {
+	t.Helper()
+	ctx := context.Background()
+	clientTr, serverTr := mcp.NewInMemoryTransports()
+	ss, err := s.srv.Connect(ctx, serverTr, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.0.0"}, nil)
+	cs, err := client.Connect(ctx, clientTr, nil)
+	if err != nil {
+		ss.Close()
+		t.Fatalf("client connect: %v", err)
+	}
+	return cs, func() {
+		_ = cs.Close()
+		_ = ss.Close()
+	}
+}
+
+// callToolStructured runs one CallTool over the wire and returns its
+// StructuredContent as a map, failing the test on a transport error or an
+// unexpected content type (the server's own `result` helper always produces
+// a JSON object).
+func callToolStructured(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any) map[string]any {
+	t.Helper()
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("CallTool(%s): %v", name, err)
+	}
+	m, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("CallTool(%s): StructuredContent type = %T, want map[string]any (content=%+v)", name, res.StructuredContent, res.Content)
+	}
+	return m
+}
+
+// TestCallToolMutatingToolsRefuseWithoutConfirmOnWire is a real, in-memory
+// MCP wire round trip (not a direct handler call) verifying all four
+// mutating tools refuse a call that doesn't carry `confirm: true` — the
+// MCP-side safety gate documented in this package's own doc comment. Two
+// distinct paths both need covering (see AGENTS.md's mutating-MCP-tools
+// checklist): the SDK's own typed-schema validation rejects a request that
+// OMITS `confirm` outright (a required property) before the handler ever
+// runs, and the handler's own requireConfirm re-check refuses a
+// hand-built/schema-bypassing request that sends `confirm: false`
+// explicitly — both must end in a refusal an agent can act on, never a
+// silent mutation.
+func TestCallToolMutatingToolsRefuseWithoutConfirmOnWire(t *testing.T) {
+	s := NewServer(&Service{
+		Kill: func(int32, bool) (kill.Result, error) {
+			t.Fatal("Kill must not be called without confirm")
+			return kill.Result{}, nil
+		},
+		Profile: func(context.Context, int32, profiler.ProfileType, string) (profiler.Profile, error) {
+			t.Fatal("Profile must not be called without confirm")
+			return profiler.Profile{}, nil
+		},
+		Investigate: func(context.Context, int32, InvestigateOptions) map[string]any {
+			t.Fatal("Investigate must not be called without confirm")
+			return nil
+		},
+		Record: func(context.Context, int32, int) (string, error) {
+			t.Fatal("Record must not be called without confirm")
+			return "", nil
+		},
+	}, "test")
+	cs, cleanup := connectInMemory(t, s)
+	defer cleanup()
+
+	tools := []string{"monitor_kill", "monitor_profile_capture", "monitor_investigate", "monitor_record"}
+
+	for _, tool := range tools {
+		t.Run(tool+"/omitted", func(t *testing.T) {
+			// The MCP SDK itself rejects this before the handler runs:
+			// `confirm` has no `omitempty` in every *Input struct, so it is
+			// a required property in the generated JSON schema.
+			res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tool, Arguments: map[string]any{"pid": 999999}})
+			if err != nil {
+				t.Fatalf("CallTool(%s): transport error %v", tool, err)
+			}
+			if !res.IsError {
+				t.Fatalf("%s: IsError = false for a request missing confirm; content=%+v", tool, res.Content)
+			}
+			var text string
+			if len(res.Content) > 0 {
+				if tc, ok := res.Content[0].(*mcp.TextContent); ok {
+					text = tc.Text
+				}
+			}
+			if !strings.Contains(text, "confirm") {
+				t.Errorf("%s: rejection text = %q, want it to mention the missing confirm field", tool, text)
+			}
+		})
+		t.Run(tool+"/explicitFalse", func(t *testing.T) {
+			// A schema-valid call (confirm present, just false) reaches the
+			// handler, which must refuse it with its own structured
+			// {refused:true, reason} payload — not a protocol-level error —
+			// so a hand-built request that bypasses SDK-side validation
+			// still gets a refusal an agent can inspect programmatically.
+			m := callToolStructured(t, cs, tool, map[string]any{"pid": 999999, "confirm": false})
+			if refused, _ := m["refused"].(bool); !refused {
+				t.Fatalf("%s: refused=%v (want true) with confirm:false; payload=%v", tool, m["refused"], m)
+			}
+			if reason, _ := m["reason"].(string); reason == "" {
+				t.Errorf("%s: reason is empty; payload=%v", tool, m)
+			}
+		})
+	}
+}
+
+// TestCallToolProfileCaptureLiveNodeInspectorReturnsCPULines is a real,
+// in-memory MCP wire round trip against a REAL node --inspect process (not
+// a stub): monitor_profile_capture with type:cpu must come back with
+// method inspector_cpu and symbols carrying file:line (AC-6 / E1.7 — "CDP
+// line-level profiles of Node/Deno processes started with --inspect").
+func TestCallToolProfileCaptureLiveNodeInspectorReturnsCPULines(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH")
+	}
+	workload, err := filepath.Abs(filepath.Join("..", "..", "examples", "polyglot", "js", "workload.js"))
+	if err != nil || !fileExists(workload) {
+		t.Skipf("workload fixture not found at %s", workload)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a free port: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	// --jitless (interpreter only, no JIT inlining) matches
+	// specs/profile_node_lines.yml's own documented workaround for stable
+	// per-line attribution against this exact fixture.
+	cmd := exec.Command(nodeBin, "--jitless", "--inspect="+addr, workload)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start node: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+	pid := int32(cmd.Process.Pid)
+
+	deadline := time.Now().Add(10 * time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		if conn, dialErr := net.DialTimeout("tcp", addr, 200*time.Millisecond); dialErr == nil {
+			_ = conn.Close()
+			ready = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatalf("node inspector never came up on %s; stderr so far:\n%s", addr, stderr.String())
+	}
+	// Let the workload's setInterval hot loop accumulate real samples
+	// before the profiler window starts.
+	time.Sleep(300 * time.Millisecond)
+
+	svc := &Service{
+		Profile: func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string) (profiler.Profile, error) {
+			if ptype != profiler.ProfileCPU {
+				return profiler.Profile{}, fmt.Errorf("unexpected profile type %q", ptype)
+			}
+			if own, detail := profiler.VerifyInspectorOwnership(ctx, pid, addr); own != profiler.OwnershipOwned {
+				return profiler.Profile{}, fmt.Errorf("inspector %s not proven to belong to pid %d: %s", addr, pid, detail)
+			}
+			return profiler.ProfileInspector(ctx, pid, addr, 2*time.Second)
+		},
+	}
+	s := NewServer(svc, "test")
+	cs, cleanup := connectInMemory(t, s)
+	defer cleanup()
+
+	m := callToolStructured(t, cs, "monitor_profile_capture", map[string]any{
+		"pid": pid, "type": "cpu", "confirm": true,
+	})
+	if captured, _ := m["captured"].(bool); !captured {
+		t.Fatalf("captured = %v, want true; payload=%v", m["captured"], m)
+	}
+	profileMap, ok := m["profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("profile field missing or wrong type (%T); payload=%v", m["profile"], m)
+	}
+	if profileMap["method"] != "inspector_cpu" {
+		t.Fatalf("profile.method = %v, want inspector_cpu; payload=%v", profileMap["method"], m)
+	}
+	symbols, ok := profileMap["symbols"].([]any)
+	if !ok || len(symbols) == 0 {
+		t.Fatalf("profile.symbols = %v, want at least one CDP symbol", profileMap["symbols"])
+	}
+	first, ok := symbols[0].(map[string]any)
+	if !ok {
+		t.Fatalf("symbols[0] type = %T, want map[string]any", symbols[0])
+	}
+	if _, ok := first["line"]; !ok {
+		t.Errorf("symbols[0] missing a 'line' field (must carry file:line, not just a function name): %+v", first)
+	}
+	if _, ok := first["func"]; !ok {
+		t.Errorf("symbols[0] missing a 'func' field: %+v", first)
+	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

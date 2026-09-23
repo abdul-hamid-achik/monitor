@@ -42,48 +42,22 @@ func newProfileCmd() *cobra.Command {
 				return fmt.Errorf("--duration must be greater than zero and at most 2m")
 			}
 			binding, inspectErr := procbind.Inspect(ctx, pid, "")
-			jsRuntime := inspectErr == nil && (binding.Runtime == procbind.RuntimeNode ||
-				binding.Runtime == procbind.RuntimeBun || binding.Runtime == procbind.RuntimeDeno)
-			var prof profiler.Profile
-			if jsRuntime && (pt == profiler.ProfileCPU || pt == profiler.ProfileHeap) {
-				addr := inspectAddr
-				if addr == "" {
-					addr = binding.InspectAddr
+			var bindingPtr *procbind.Binding
+			if inspectErr == nil {
+				bindingPtr = &binding
+			}
+			// addrExplicit: an explicitly-passed --pprof-addr asserts the
+			// endpoint belongs to pid on the caller's behalf and skips the
+			// ownership proof, same as before this shared with `monitor
+			// investigate` and MCP's monitor_profile_capture.
+			addrExplicit := cmd.Flags().Changed("pprof-addr")
+			prof, _, step := captureRuntimeAwareProfile(ctx, pid, bindingPtr, pt, pprofAddr, inspectAddr, addrExplicit, duration)
+			if step.Status != stepOK {
+				msg := step.Limitation
+				if step.Recovery != "" {
+					msg += " (" + step.Recovery + ")"
 				}
-				if addr == "" {
-					return fmt.Errorf("%s process %d has no inspector address; start it with --inspect=127.0.0.1:<port> or pass --inspect-addr", binding.Runtime, pid)
-				}
-				if own, detail := profiler.VerifyInspectorOwnership(ctx, pid, addr); own != profiler.OwnershipOwned {
-					return fmt.Errorf("refusing inspector %s for pid %d: %s", addr, pid, detail)
-				}
-				var captureErr error
-				switch pt {
-				case profiler.ProfileCPU:
-					prof, captureErr = profiler.ProfileInspector(ctx, pid, addr, duration)
-				case profiler.ProfileHeap:
-					prof, captureErr = profiler.ProfileInspectorHeap(ctx, pid, addr)
-				}
-				if captureErr != nil {
-					return captureErr
-				}
-			} else {
-				if err := profiler.ValidateCapture(pt); err != nil {
-					return err
-				}
-				if pt != profiler.ProfileSample && !cmd.Flags().Changed("pprof-addr") {
-					if own, detail := profiler.VerifyListenerOwnership(ctx, pid, pprofAddr); own != profiler.OwnershipOwned {
-						return fmt.Errorf("refusing to scrape %s for pid %d: %s (pass --pprof-addr explicitly to assert the endpoint is correct, or use -t sample)", pprofAddr, pid, detail)
-					}
-				}
-				var captureErr error
-				// CaptureWithDuration, not Capture: --duration must reach the
-				// pprof CPU path's ?seconds=N (Capture's own duration is a
-				// fixed 1s, kept only for callers that haven't adopted a
-				// duration knob yet, e.g. MCP's monitor_profile_capture).
-				prof, captureErr = profiler.CaptureWithDuration(ctx, pid, pt, pprofAddr, duration)
-				if captureErr != nil {
-					return captureErr
-				}
+				return fmt.Errorf("%s", msg)
 			}
 			if output != "" {
 				if err := persistProfileOutput(&prof, output); err != nil {
@@ -515,6 +489,7 @@ func newInvestigateCmd() *cobra.Command {
 	var (
 		ttl          string
 		noSave       bool
+		includeRaw   bool
 		codebase     string
 		environment  string
 		deploymentID string
@@ -564,13 +539,19 @@ attached as fcheap tags + manifest context — never mixed into telemetry.`,
 				Service:      service,
 				GitSHA:       gitSHA,
 			})
+			// E1.7 payload diet: profile.text (a CDP CPU profile's full
+			// JSON, or a pprof capture's text dump — tens of KB for a
+			// real Node target) is dropped by default. --include-raw
+			// opts back in; `monitor profile --json` is a separate code
+			// path and is unaffected (glyphrun procmon depends on it).
+			out := report.redactRaw(includeRaw)
 			if noSave {
-				return WriteJSON(report)
+				return WriteJSON(out)
 			}
 			if JSONOutput(cmd) {
-				return WriteJSON(report)
+				return WriteJSON(out)
 			}
-			b, _ := json.MarshalIndent(report, "", "  ")
+			b, _ := json.MarshalIndent(out, "", "  ")
 			fmt.Println(string(b))
 			return nil
 		},
@@ -578,6 +559,7 @@ attached as fcheap tags + manifest context — never mixed into telemetry.`,
 	cmd.Flags().Bool("json", false, "emit JSON output")
 	cmd.Flags().StringVar(&ttl, "ttl", "7d", "TTL for the stash (fcheap --ttl)")
 	cmd.Flags().BoolVar(&noSave, "no-save", false, "skip the fcheap stash step")
+	cmd.Flags().BoolVar(&includeRaw, "include-raw", false, "keep the captured profile's raw text (CDP JSON / pprof dump) in the output; omitted by default to keep the payload small")
 	cmd.Flags().StringVar(&codebase, "codebase", "", "project root for codemap/vecgrep (default: auto-detect from process cwd)")
 	cmd.Flags().StringVar(&environment, "environment", "", "correlation env (or MONITOR_ENVIRONMENT / CHALUPA_CI_ENVIRONMENT)")
 	cmd.Flags().StringVar(&deploymentID, "deployment-id", "", "correlation deployment id (or MONITOR_DEPLOYMENT_ID / CHALUPA_DEPLOYMENT_ID)")

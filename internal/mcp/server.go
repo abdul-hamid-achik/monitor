@@ -88,9 +88,15 @@ type Service struct {
 	// SIGTERM. Used by monitor_kill. Required for mutating kill tools.
 	Kill func(pid int32, force bool) (kill.Result, error)
 
-	// Profile captures a profile of the given PID. Used by
-	// monitor_profile_capture. Optional; if nil the tool reports unavailable.
-	Profile func(ctx context.Context, pid int32, ptype profiler.ProfileType) (profiler.Profile, error)
+	// Profile captures a profile of the given PID, preferring the
+	// runtime-appropriate mechanism (CDP for Node/Deno with --inspect,
+	// honestly "unavailable" for Bun rather than a raw 404 — E1.7) over a
+	// blind pprof scrape. pprofAddr, when non-empty, is the target's
+	// net/http/pprof host:port AND asserts on the caller's behalf that it
+	// belongs to pid, skipping the ownership proof — same escape hatch as
+	// the CLI's --pprof-addr. Used by monitor_profile_capture. Optional;
+	// if nil the tool reports unavailable.
+	Profile func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string) (profiler.Profile, error)
 
 	// Investigate runs the diagnostic pipeline for the given PID. Used by
 	// monitor_investigate. Optional; if nil the tool reports a stub result
@@ -117,6 +123,13 @@ type InvestigateOptions struct {
 	Release      string
 	Service      string
 	GitSHA       string
+	// IncludeRaw keeps the captured profile's raw text (a CDP CPU
+	// profile's full JSON, or a pprof capture's text dump) in the
+	// returned report. Default false: the E1.7 payload diet omits it to
+	// keep monitor_investigate's response small (an investigate report
+	// against a real Node target ran ~36KB before this, mostly raw CDP
+	// JSON).
+	IncludeRaw bool
 }
 
 // Server wraps the MCP stdio transport.
@@ -214,8 +227,12 @@ func (s *Server) register() {
 		Annotations: mutatingAnnotations("Terminate process", true, false),
 	}, s.handleKill)
 	mcp.AddTool(s.srv, &mcp.Tool{
-		Name:        "monitor_profile_capture",
-		Description: "Capture a profile for a process. Requires `confirm: true`. type: heap|cpu|goroutine|sample.",
+		Name: "monitor_profile_capture",
+		Description: "Capture a profile for a process. Requires `confirm: true`. type: heap|cpu|goroutine|sample. " +
+			"Runtime-aware: Node/Deno with --inspect get a real CDP capture (file:line frames); Bun reports " +
+			"unavailable with an honest reason instead of failing oddly (Bun speaks JSC, not CDP). " +
+			"pprof_addr targets a non-default net/http/pprof port and asserts ownership. keep:true retains the " +
+			"raw profile text and on-disk temp file; the default discards both after the call.",
 		Annotations: mutatingAnnotations("Capture process profile", false, false),
 	}, s.handleProfileCapture)
 	mcp.AddTool(s.srv, &mcp.Tool{
@@ -225,7 +242,8 @@ func (s *Server) register() {
 			"(Node cmdline/cwd/package.json), ownership-gated profile, codemap correlate, " +
 			"vecgrep semantic hits, fcheap stash with ArtifactRefV1. Pass codebase when " +
 			"auto-detect fails. Optional environment/deployment_id/run_id/step_id/suite/attempt/release tag the " +
-			"incident for Chalupa CI. Requires `confirm: true`.",
+			"incident for Chalupa CI. The response omits the captured profile's raw text by default (payload " +
+			"diet); pass include_raw:true to keep it. Requires `confirm: true`.",
 	}, s.handleInvestigate)
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_record",
@@ -345,9 +363,11 @@ type killInput struct {
 
 // profileInput is the typed input for monitor_profile_capture.
 type profileInput struct {
-	PID     int32  `json:"pid"                jsonschema:"the PID to profile"`
-	Type    string `json:"type,omitempty"     jsonschema:"profile type: heap, cpu, goroutine, sample (default heap)"`
-	Confirm bool   `json:"confirm"            jsonschema:"must be true; confirms intent to capture a profile"`
+	PID       int32  `json:"pid"                  jsonschema:"the PID to profile"`
+	Type      string `json:"type,omitempty"       jsonschema:"profile type: heap, cpu, goroutine, sample (default heap)"`
+	PprofAddr string `json:"pprof_addr,omitempty" jsonschema:"host:port of the target's net/http/pprof server (Go heap/cpu/goroutine only); setting this asserts the endpoint belongs to pid and skips the ownership check, like the CLI's --pprof-addr"`
+	Keep      bool   `json:"keep,omitempty"       jsonschema:"keep the captured profile's raw text and on-disk temp file; default false discards both after the call so repeated captures don't leak /tmp/monitor-<type>-* files or bloat the response"`
+	Confirm   bool   `json:"confirm"              jsonschema:"must be true; confirms intent to capture a profile"`
 }
 
 // investigateInput is the typed input for monitor_investigate.
@@ -366,6 +386,7 @@ type investigateInput struct {
 	GitSHA       string `json:"git_sha,omitempty"       jsonschema:"correlation git sha"`
 	TTL          string `json:"ttl,omitempty"           jsonschema:"fcheap stash TTL (default 7d)"`
 	NoSave       bool   `json:"no_save,omitempty"      jsonschema:"skip fcheap stash; return profile inline"`
+	IncludeRaw   bool   `json:"include_raw,omitempty"  jsonschema:"keep the captured profile's raw text (CDP JSON / pprof dump) in the response; default false keeps the payload small"`
 }
 
 // recordInput is the typed input for monitor_record.
@@ -634,7 +655,7 @@ func (s *Server) handleProfileCapture(ctx context.Context, _ *mcp.CallToolReques
 	if s.svc.Profile == nil {
 		return result(map[string]any{"captured": false, "refused": true, "reason": "profile service not configured", "pid": in.PID})
 	}
-	prof, err := s.svc.Profile(ctx, in.PID, profiler.ProfileType(in.Type))
+	prof, err := s.svc.Profile(ctx, in.PID, profiler.ProfileType(in.Type), in.PprofAddr)
 	if err != nil {
 		return result(map[string]any{"captured": false, "error": err.Error(), "pid": in.PID})
 	}
@@ -651,12 +672,36 @@ func (s *Server) handleProfileCapture(ctx context.Context, _ *mcp.CallToolReques
 			},
 		})
 	}
+	// E1.7 payload diet + temp-file cleanup: unless the caller asked to
+	// keep it, drop the raw text (a CDP CPU profile's full JSON, or a
+	// pprof text dump) AND delete the on-disk temp file a pprof capture
+	// left behind, so repeated monitor_profile_capture calls don't leak
+	// /tmp/monitor-<type>-<pid>-*.pb.gz or bloat every response with a
+	// payload that can run into tens of KB. receipt was already computed
+	// above from the un-discarded profile, so it stays a true report of
+	// what was actually captured.
+	if !in.Keep {
+		if err := prof.DiscardRawArtifact(); err != nil {
+			receipt.Limitation = joinNonEmpty(receipt.Limitation, "cleanup: "+err.Error())
+		}
+	}
 	return result(map[string]any{
 		"captured": true,
 		"pid":      in.PID,
 		"profile":  prof,
 		"artifact": receipt, // {"verified":true,"size_bytes":N}
 	})
+}
+
+func joinNonEmpty(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	default:
+		return a + "; " + b
+	}
 }
 
 // handleInvestigate implements monitor_investigate. If the service has
@@ -682,6 +727,7 @@ func (s *Server) handleInvestigate(ctx context.Context, _ *mcp.CallToolRequest, 
 			Release:      in.Release,
 			Service:      in.Service,
 			GitSHA:       in.GitSHA,
+			IncludeRaw:   in.IncludeRaw,
 		})
 		verdict, _ := out["verdict"].(string)
 		out["investigated"] = verdict == "complete"

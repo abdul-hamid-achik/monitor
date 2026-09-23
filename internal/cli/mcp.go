@@ -15,6 +15,7 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
 	"github.com/abdul-hamid-achik/monitor/internal/mcp"
+	"github.com/abdul-hamid-achik/monitor/internal/procbind"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
 )
 
@@ -78,15 +79,30 @@ func newMCPServeCmd() *cobra.Command {
 				IssueGet:   getIssueForMCP,
 				// Mutating tools: thin wrappers over the CLI's existing logic.
 				Kill: kill.KillVerified,
-				Profile: func(ctx context.Context, pid int32, ptype profiler.ProfileType) (profiler.Profile, error) {
-					// MCP always scrapes the default pprof address, so prove the
-					// port belongs to the pid first; type:sample needs no endpoint.
-					if ptype != profiler.ProfileSample {
-						if own, detail := profiler.VerifyListenerOwnership(ctx, pid, ""); own != profiler.OwnershipOwned {
-							return profiler.Profile{}, fmt.Errorf("pprof endpoint %s not proven to belong to pid %d: %s; use type:sample instead", profiler.DefaultPprofAddr, pid, detail)
-						}
+				// Profile is runtime-aware (E1.7): Node/Deno with --inspect
+				// get a real CDP capture (file:line frames), Bun gets an
+				// honest "unavailable" instead of the 404 a real /json/list
+				// probe against its JSC inspector would produce, and
+				// everything else falls through to the same ownership-gated
+				// pprof/sample path monitor_profile_capture always used.
+				// pprofAddr, when the agent set it, both targets the scrape
+				// and asserts ownership on the agent's behalf (mirrors the
+				// CLI's --pprof-addr).
+				Profile: func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string) (profiler.Profile, error) {
+					binding, inspectErr := procbind.Inspect(ctx, pid, "")
+					var bindingPtr *procbind.Binding
+					if inspectErr == nil {
+						bindingPtr = &binding
 					}
-					return profiler.Capture(ctx, pid, ptype, "")
+					prof, _, step := captureRuntimeAwareProfile(ctx, pid, bindingPtr, ptype, pprofAddr, "", pprofAddr != "", 0)
+					if step.Status != stepOK {
+						msg := step.Limitation
+						if step.Recovery != "" {
+							msg = fmt.Sprintf("%s (%s)", msg, step.Recovery)
+						}
+						return profiler.Profile{}, fmt.Errorf("%s", msg)
+					}
+					return prof, nil
 				},
 				// Investigate runs the same real pipeline the CLI does
 				// (snapshot + profile + correlate + stash).
@@ -104,7 +120,7 @@ func newMCPServeCmd() *cobra.Command {
 						Release:      opts.Release,
 						Service:      opts.Service,
 						GitSHA:       opts.GitSHA,
-					}).toMap()
+					}).redactRaw(opts.IncludeRaw).toMap()
 				},
 				// Record captures a short screen recording via the platform
 				// recorder (screencapture / ffmpeg). Returns an error — turned
