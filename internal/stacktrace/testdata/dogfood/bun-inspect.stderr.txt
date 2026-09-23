@@ -1,0 +1,55 @@
+[bun] pid=16546 workload starting
+--------------------- Bun Inspector ---------------------
+--------------------- Bun Inspector ---------------------
+Listening:
+  ws://127.0.0.1:9240/5244f4cf-389f-4793-afbf-76895adb06e7
+Inspect in browser:
+  https://debug.bun.sh/#127.0.0.1:9240/5244f4cf-389f-4793-afbf-76895adb06e7
+[bun] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:15)
+    at tickErrors (/repo/examples/polyglot/js/workload.js:40:7)
+[bun] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:15)
+    at tickErrors (/repo/examples/polyglot/js/workload.js:40:7)
+[bun] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:15)
+    at tickErrors (/repo/examples/polyglot/js/workload.js:40:7)
+[bun] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:15)
+    at tickErrors (/repo/examples/polyglot/js/workload.js:40:7)
+[bun] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:15)
+    at tickErrors (/repo/examples/polyglot/js/workload.js:40:7)
+[bun] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:15)
+    at tickErrors (/repo/examples/polyglot/js/workload.js:40:7)
+[bun] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:15)
+    at tickErrors (/repo/examples/polyglot/js/workload.js:40:7)
+[bun] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:15)
+    at tickErrors (/repo/examples/polyglot/js/workload.js:40:7)
+[bun] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:15)
+    at tickErrors (/repo/examples/polyglot/js/workload.js:40:7)
+44 |     }
+45 |   }
+46 | }
+47 | 
+48 | function detonate() {
+49 |   throw new Error(`${RUNTIME} workload: intentional uncaught failure at t=${Date.now() - START}ms`);
+                                                                                                       ^
+error: bun workload: intentional uncaught failure at t=40001ms
+      at detonate (/repo/examples/polyglot/js/workload.js:49:99)
+      at <anonymous> (/repo/examples/polyglot/js/workload.js:64:3)
+
+Bun v1.4.2 (macOS arm64)

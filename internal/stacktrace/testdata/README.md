@@ -1,6 +1,6 @@
 # Stack-trace fixtures
 
-`dogfood/*.stderr.log` are real stderr captures of `examples/polyglot/*`
+`dogfood/*.stderr.txt` are real stderr captures of `examples/polyglot/*`
 workloads (Node 26.7, Deno 2.9.7, Bun 1.4.2, Python 3.14.2, Ruby 3.4.8,
 Go 1.26) recorded on 2026-09-22. Absolute paths were rewritten to
 `/repo/examples/polyglot/...`. Each workload prints periodic caught errors with

@@ -1,0 +1,9 @@
+[go-plain] pid=19138 workload starting (no pprof)
+[go-plain] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-plain] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-plain] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-plain] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-plain] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-plain] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-plain] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-plain] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"

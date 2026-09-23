@@ -1,0 +1,71 @@
+Debugger listening on ws://127.0.0.1:9239/fa0d31b7-1aa5-4e69-985b-2b3eaeb227aa
+For help, see: https://nodejs.org/learn/getting-started/debugging
+[node] pid=15342 workload starting
+[node] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (/repo/examples/polyglot/js/workload.js:40:7)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+[node] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (/repo/examples/polyglot/js/workload.js:40:7)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+Debugger attached.
+[node] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (/repo/examples/polyglot/js/workload.js:40:7)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+Debugger ending on ws://127.0.0.1:9239/fa0d31b7-1aa5-4e69-985b-2b3eaeb227aa
+For help, see: https://nodejs.org/learn/getting-started/debugging
+[node] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (/repo/examples/polyglot/js/workload.js:40:7)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+[node] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (/repo/examples/polyglot/js/workload.js:40:7)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+[node] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (/repo/examples/polyglot/js/workload.js:40:7)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+[node] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (/repo/examples/polyglot/js/workload.js:40:7)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+[node] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (/repo/examples/polyglot/js/workload.js:40:7)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+[node] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (/repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (/repo/examples/polyglot/js/workload.js:40:7)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+/repo/examples/polyglot/js/workload.js:49
+  throw new Error(`${RUNTIME} workload: intentional uncaught failure at t=${Date.now() - START}ms`);
+  ^
+
+Error: node workload: intentional uncaught failure at t=40020ms
+    at detonate (/repo/examples/polyglot/js/workload.js:49:9)
+    at Timeout._onTimeout (/repo/examples/polyglot/js/workload.js:64:3)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v26.7.0
