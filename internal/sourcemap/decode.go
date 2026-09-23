@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -155,6 +156,21 @@ func decodeMappings(mappings string) ([][]Segment, error) {
 			default:
 				return nil, fmt.Errorf("sourcemap: mappings line %d: segment has %d fields, want 1, 4 or 5", i, len(values))
 			}
+			// These are cumulative totals, not raw VLQ values: a valid map
+			// never drives one negative. A corrupted "mappings" string
+			// can, though (a stray/garbled delta), and letting that
+			// through would silently produce a bogus 0-based-turned-
+			// negative Line or Col once Resolve adds 1, rather than a
+			// clear decode error.
+			if genCol < 0 {
+				return nil, fmt.Errorf("sourcemap: mappings line %d: segment has a negative generated column", i)
+			}
+			if seg.HasSource && (srcIdx < 0 || srcLine < 0 || srcCol < 0) {
+				return nil, fmt.Errorf("sourcemap: mappings line %d: segment has a negative source position", i)
+			}
+			if seg.HasName && nameIdx < 0 {
+				return nil, fmt.Errorf("sourcemap: mappings line %d: segment has a negative name index", i)
+			}
 			seg.GeneratedColumn = genCol
 			if seg.HasSource {
 				seg.SourceIndex = srcIdx
@@ -166,6 +182,14 @@ func decodeMappings(mappings string) ([][]Segment, error) {
 			}
 			segs = append(segs, seg)
 		}
+		// The spec requires segments to be emitted in ascending
+		// GeneratedColumn order; a stable sort here means Resolve's column
+		// lookup (which assumes that order) still gets correct results
+		// against a document that violates it, without reordering
+		// same-column segments relative to each other.
+		sort.SliceStable(segs, func(a, b int) bool {
+			return segs[a].GeneratedColumn < segs[b].GeneratedColumn
+		})
 		lines[i] = segs
 	}
 	return lines, nil

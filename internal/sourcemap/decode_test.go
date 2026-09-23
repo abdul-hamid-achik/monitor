@@ -158,3 +158,53 @@ func TestDecodeInvalidJSON(t *testing.T) {
 		t.Fatal("expected an error for invalid JSON")
 	}
 }
+
+// TestDecodeMappingsRejectsNegativeSourcePosition proves a corrupted
+// "mappings" string that drives a cumulative field negative is a decode
+// error, not a silently wrong position. "AADA" is a=0 (genCol +0), A=0
+// (srcIdx +0), D=-1 (srcLine -1), A=0 (srcCol +0): the srcLine total goes
+// negative on the very first segment.
+func TestDecodeMappingsRejectsNegativeSourcePosition(t *testing.T) {
+	if _, err := decodeMappings("AADA"); err == nil {
+		t.Fatal("expected an error for a segment with a negative source line")
+	}
+}
+
+// TestDecodeMappingsRejectsNegativeGeneratedColumn covers the same
+// validation for the generated column itself: "D" alone is a 1-field
+// segment with delta -1, which cannot be a valid first generated column on
+// a line (columns start at 0 and only ever accumulate non-negative
+// deltas in a well-formed document).
+func TestDecodeMappingsRejectsNegativeGeneratedColumn(t *testing.T) {
+	if _, err := decodeMappings("D"); err == nil {
+		t.Fatal("expected an error for a negative generated column")
+	}
+}
+
+// TestDecodeMappingsRejectsNegativeNameIndex covers the 5-field case: the
+// name index delta alone goes negative.
+func TestDecodeMappingsRejectsNegativeNameIndex(t *testing.T) {
+	if _, err := decodeMappings("AAAAD"); err == nil {
+		t.Fatal("expected an error for a negative name index")
+	}
+}
+
+// TestDecodeMappingsSortsOutOfOrderSegments proves decodeMappings restores
+// ascending GeneratedColumn order within a line even when the document
+// doesn't emit segments that way (the spec requires it, but nothing
+// enforces it, and Resolve's column lookup assumes it). "UAAA" is a
+// generated-column delta of +10; "RAAE" is a delta of -8, landing at
+// generated column 2 - after "UAAA" already put the running column at 10.
+func TestDecodeMappingsSortsOutOfOrderSegments(t *testing.T) {
+	lines, err := decodeMappings("UAAA,RAAE")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(lines) != 1 || len(lines[0]) != 2 {
+		t.Fatalf("got %+v, want one line with two segments", lines)
+	}
+	if lines[0][0].GeneratedColumn != 2 || lines[0][1].GeneratedColumn != 10 {
+		t.Errorf("got columns [%d, %d], want [2, 10] (sorted ascending)",
+			lines[0][0].GeneratedColumn, lines[0][1].GeneratedColumn)
+	}
+}
