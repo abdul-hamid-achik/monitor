@@ -80,8 +80,16 @@ type IssueSummary struct {
 	Title         string `json:"title"`
 	ExceptionType string `json:"exception_type,omitempty"`
 	Handled       *bool  `json:"handled,omitempty"`
-	Project       string `json:"project"`
-	Service       string `json:"service,omitempty"`
+	// Level classifies an exception in the stacktrace vocabulary ("fatal",
+	// "error", "warning" — see issues.Issue.Level's own doc comment).
+	// Additive: "" for a non-exception issue kind or an older issue with no
+	// persisted level, never fabricated from Kind or Handled. The issue
+	// page's own header line (roadmap mockup §4: "regressed · error ·
+	// handled") is what actually needs this — Kind alone ("exception") does
+	// not carry a severity word.
+	Level   string `json:"level,omitempty"`
+	Project string `json:"project"`
+	Service string `json:"service,omitempty"`
 }
 
 // Timeline is Context.Timeline.

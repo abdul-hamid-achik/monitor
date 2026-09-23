@@ -1095,17 +1095,25 @@ func writeLatestNotFoundError(cmd *cobra.Command, resolved explain.ResolvedFrom)
 	return err
 }
 
+// issuePageWidth is the issue page header's own line width — the same
+// 100-column budget monitor hot's CodeFrame renders at
+// (widgets.DefaultCodeFrameWidth) — so the header's right-aligned badges
+// (issuePageBadges) land at a consistent column across every monitor
+// command's human output, not a width this file invents independently.
+const issuePageWidth = widgets.DefaultCodeFrameWidth
+
 // writeIssuePageHuman renders explain.Context as the mockup's "página del
 // issue": CULPRIT (with snippet), CAUSES, STACK, IMPACT, TOUCHED, and NEXT,
 // each degrading to an explicit "skipped: <detail>" line instead of a blank
 // section.
 func writeIssuePageHuman(w io.Writer, c *explain.Context) error {
-	header := fmt.Sprintf("%s  %s", c.Issue.ShortID, displayIssueValue(c.Issue.Title))
-	if _, err := fmt.Fprintf(w, "%s\n%s · %s · %s\n", header, c.Issue.Status, c.Issue.Kind, projectServiceLabel(c.Issue)); err != nil {
+	left := fmt.Sprintf("%s  %s", c.Issue.ShortID, displayIssueValue(c.Issue.Title))
+	if _, err := fmt.Fprintln(w, padHeaderLine(left, issuePageBadges(c), issuePageWidth)); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "first %s ago · last %s ago · %d event(s)\n\n",
-		humanDuration(time.Since(c.Timeline.FirstSeen)), humanDuration(time.Since(c.Timeline.LastSeen)), c.Timeline.Occurrences); err != nil {
+	if _, err := fmt.Fprintf(w, "%s · first seen %s · last seen %s · %d event(s)%s\n\n",
+		projectServiceLabel(c.Issue), relSince(c.Timeline.FirstSeen), relSince(c.Timeline.LastSeen),
+		c.Timeline.Occurrences, timeSourceSuffix(c.Timeline.TimeSource)); err != nil {
 		return err
 	}
 
@@ -1160,6 +1168,98 @@ func projectServiceLabel(issue explain.IssueSummary) string {
 		return issue.Project + " / " + issue.Service
 	}
 	return issue.Project
+}
+
+// padHeaderLine right-aligns right against left, padded with spaces to
+// width total columns — the roadmap mockup's own header shape ("91F3
+// ValueError: bad row <n>                    regressed · error ·
+// handled"), mirroring widgets.CodeFrame.renderHeader's own left/pad/right
+// layout (there padded with '-' instead of ' '). A left (or right) long
+// enough that width would go negative just gets one space of separation
+// instead of overlapping or a negative Repeat count. right == "" returns
+// left unchanged (nothing to align).
+func padHeaderLine(left, right string, width int) string {
+	if right == "" {
+		return left
+	}
+	gap := width - len([]rune(left)) - len([]rune(right))
+	if gap < 2 {
+		gap = 2
+	}
+	return left + strings.Repeat(" ", gap) + right
+}
+
+// issuePageStatusWord is the issue page header's own status word — lower-
+// case "regressed"/"new" (issueLabel's own convention, reused here so the
+// list and the page never disagree about what counts as new/regressed),
+// falling back to the issue's real store Status ("open"/"resolved"/
+// "ignored") when neither applies, matching the roadmap mockup's own
+// second example ("C4E0 ... open · error · handled").
+func issuePageStatusWord(c *explain.Context) string {
+	now := time.Now()
+	if c.Timeline.Reopened > 0 {
+		return "regressed"
+	}
+	if !c.Timeline.FirstSeen.IsZero() && now.Sub(c.Timeline.FirstSeen) < newIssueWindow {
+		return "new"
+	}
+	return c.Issue.Status
+}
+
+// issuePageBadges renders the issue page header's right-hand side — the
+// roadmap mockup §4's "regressed · error · handled": a status word
+// (issuePageStatusWord), the exception Level when known ("fatal"/"error"/
+// "warning" — "" for a non-exception issue kind or an older issue with no
+// persisted level omits this segment entirely rather than fabricating
+// one), and "handled"/"unhandled" when Handled is known (nil — no handled/
+// unhandled fact recorded at all — omits it, never guesses).
+func issuePageBadges(c *explain.Context) string {
+	parts := make([]string, 0, 3)
+	if s := issuePageStatusWord(c); s != "" {
+		parts = append(parts, s)
+	}
+	if c.Issue.Level != "" {
+		parts = append(parts, c.Issue.Level)
+	}
+	if c.Issue.Handled != nil {
+		if *c.Issue.Handled {
+			parts = append(parts, "handled")
+		} else {
+			parts = append(parts, "unhandled")
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// relSince renders a "just now" / "<N><unit> ago" relative-time phrase —
+// the fix for the review's "first now ago · last now ago" finding:
+// humanDuration's own "now" bucket (anything under a minute) reads fine
+// stand-alone in the issues-list LAST column, but turns into the nonsense
+// "now ago" once " ago" is appended after it, as the issue page's first/
+// last-seen line (and TOUCHED's own relative age) used to do.
+func relSince(t time.Time) string {
+	d := time.Since(t)
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Minute {
+		return "just now"
+	}
+	return humanDuration(d) + " ago"
+}
+
+// timeSourceSuffix renders Timeline.TimeSource's honest annotation for the
+// issue page header — " (times from log lines)" when TimeSource is "line"
+// (the roadmap mockup's own wording, §4: "3 events (times from log
+// lines)"). "" for every other value: "unknown" (this build's current
+// placeholder for every issue — see Timeline.TimeSource's own doc comment)
+// and "mtime"/"live" have no mockup wording of their own yet, so this stays
+// silent rather than inventing one.
+func timeSourceSuffix(ts string) string {
+	if ts == "line" {
+		return " (times from log lines)"
+	}
+	return ""
 }
 
 func writeCulpritSection(w io.Writer, culprit *explain.CulpritInfo) error {
@@ -1252,7 +1352,7 @@ func writeTouchedSection(w io.Writer, lt explain.LastTouched) error {
 	}
 	when := ""
 	if lt.AuthorTime != nil {
-		when = "  " + humanDuration(time.Since(*lt.AuthorTime)) + " ago"
+		when = "  " + relSince(*lt.AuthorTime)
 	}
 	_, err := fmt.Fprintf(w, "TOUCHED  %s \"%s\"%s   (local git blame; last touched, not suspect)\n", shortCommitSHA(lt.SHA), lt.Subject, when)
 	return err

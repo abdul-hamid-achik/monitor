@@ -299,7 +299,7 @@ func issueSummary(issue issues.Issue) IssueSummary {
 	}
 	return IssueSummary{
 		ID: issue.ID, ShortID: shortID(issue.ID), Status: string(issue.Status), Kind: issue.Kind,
-		Title: title, ExceptionType: issue.ExceptionType, Handled: issue.Handled,
+		Title: title, ExceptionType: issue.ExceptionType, Handled: issue.Handled, Level: issue.Level,
 		Project: issue.Project, Service: issue.Service,
 	}
 }

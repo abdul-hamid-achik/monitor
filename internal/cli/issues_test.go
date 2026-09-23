@@ -551,6 +551,31 @@ func TestIssueCommandHumanJSONAndMarkdown(t *testing.T) {
 	}
 }
 
+// TestIssueCommandHumanHeaderWording is the CLI-level regression for the
+// polish review's issue-page wording findings: "first seen just now · last
+// seen just now" (not the old "first now ago · last now ago"), the header
+// line's own level/handled badges (roadmap mockup §4), and
+// project/service on the same line as the timeline.
+func TestIssueCommandHumanHeaderWording(t *testing.T) {
+	noExternalToolsPATH(t)
+	root := newCLIRoot(t, "src/app.go", "package app\n\nfunc doWork() {\n\tpanic(\"boom\")\n}\n")
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	issue := seedCLIException(t, storePath, root, "src/app.go", 4, "doWork", time.Now().UTC())
+
+	human, err := executeIssueCommand(t, storePath, root, shortIssueID(issue.ID))
+	if err != nil {
+		t.Fatalf("issue (human): %v\n%s", err, human)
+	}
+	if strings.Contains(human, "now ago") {
+		t.Errorf("page must never read \"now ago\" (want \"just now\"):\n%s", human)
+	}
+	for _, want := range []string{"first seen just now", "last seen just now", "fatal", "polyglot / workload"} {
+		if !strings.Contains(human, want) {
+			t.Errorf("page missing %q:\n%s", want, human)
+		}
+	}
+}
+
 func TestIssueCommandLatestRespectsProjectFilter(t *testing.T) {
 	noExternalToolsPATH(t)
 	root := newCLIRoot(t, "src/app.go", "package app\n")
@@ -875,5 +900,100 @@ func TestIssuesListDefaultsToCurrentProject(t *testing.T) {
 	}
 	if bare != human {
 		t.Fatalf("bare issues output differs from issues list:\nbare:\n%s\nlist:\n%s", bare, human)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue-page wording (polish review)
+// ---------------------------------------------------------------------------
+
+func TestRelSinceJustNowAndAgoWording(t *testing.T) {
+	now := time.Now()
+	if got := relSince(now); got != "just now" {
+		t.Errorf("relSince(now) = %q, want %q", got, "just now")
+	}
+	if got := relSince(now.Add(-30 * time.Second)); got != "just now" {
+		t.Errorf("relSince(-30s) = %q, want %q (never \"now ago\")", got, "just now")
+	}
+	if got := relSince(now.Add(-3 * time.Hour)); got != "3h ago" {
+		t.Errorf("relSince(-3h) = %q, want %q", got, "3h ago")
+	}
+	// Clock skew (a future timestamp) must clamp to "just now", never a
+	// negative duration rendered as garbage.
+	if got := relSince(now.Add(time.Hour)); got != "just now" {
+		t.Errorf("relSince(future) = %q, want %q", got, "just now")
+	}
+}
+
+func TestTimeSourceSuffixOnlyAnnotatesLine(t *testing.T) {
+	if got := timeSourceSuffix("line"); got != " (times from log lines)" {
+		t.Errorf("timeSourceSuffix(line) = %q, want %q", got, " (times from log lines)")
+	}
+	for _, ts := range []string{"unknown", "mtime", "live", ""} {
+		if got := timeSourceSuffix(ts); got != "" {
+			t.Errorf("timeSourceSuffix(%q) = %q, want \"\" (no invented wording)", ts, got)
+		}
+	}
+}
+
+func TestIssuePageBadgesLevelAndHandled(t *testing.T) {
+	handledTrue, handledFalse := true, false
+	cases := []struct {
+		name string
+		c    *explain.Context
+		want string
+	}{
+		{
+			name: "regressed level handled",
+			c: &explain.Context{
+				Issue:    explain.IssueSummary{Status: "open", Level: "error", Handled: &handledTrue},
+				Timeline: explain.Timeline{Reopened: 1},
+			},
+			want: "regressed · error · handled",
+		},
+		{
+			name: "open level unhandled (mockup's second example)",
+			c: &explain.Context{
+				Issue:    explain.IssueSummary{Status: "open", Level: "error", Handled: &handledFalse},
+				Timeline: explain.Timeline{FirstSeen: time.Now().Add(-72 * time.Hour)},
+			},
+			want: "open · error · unhandled",
+		},
+		{
+			name: "new, no level or handled fact recorded",
+			c: &explain.Context{
+				Issue:    explain.IssueSummary{Status: "open"},
+				Timeline: explain.Timeline{FirstSeen: time.Now()},
+			},
+			want: "new",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := issuePageBadges(tc.c); got != tc.want {
+				t.Errorf("issuePageBadges() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPadHeaderLineRightAlignsWithinWidth(t *testing.T) {
+	got := padHeaderLine("A07E  boom", "regressed · error", 40)
+	if !strings.HasPrefix(got, "A07E  boom") || !strings.HasSuffix(got, "regressed · error") {
+		t.Errorf("padHeaderLine = %q, want left/right preserved", got)
+	}
+	if len([]rune(got)) < 40 {
+		t.Errorf("padHeaderLine = %q (%d runes), want at least width 40", got, len([]rune(got)))
+	}
+	// A left long enough to exceed width still gets separation, never
+	// overlaps right.
+	long := strings.Repeat("x", 50)
+	got = padHeaderLine(long, "badge", 40)
+	if !strings.HasPrefix(got, long) || !strings.HasSuffix(got, "badge") {
+		t.Errorf("padHeaderLine (overflow) = %q, want left/right both intact", got)
+	}
+	// right == "" returns left unchanged.
+	if got := padHeaderLine("plain", "", 40); got != "plain" {
+		t.Errorf("padHeaderLine with no badges = %q, want %q unchanged", got, "plain")
 	}
 }
