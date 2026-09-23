@@ -16,24 +16,48 @@ func envValue(t *testing.T, environ []string, name string) (string, bool) {
 	return "", false
 }
 
+// TestResolveLaunchIDsFreshLaunchRootEqualsOwnID is FIX 1 (docs/contracts/
+// local-sentry-naming.md §2): an OUTERMOST launch's MONITOR_LAUNCH_ROOT is
+// its own freshly minted MONITOR_LAUNCH_ID, never a directory -- so two
+// independent sibling launches (see
+// TestResolveLaunchIDsTwoIndependentLaunchesGetDistinctRoots below) never
+// share a root just because they happen to run in the same repo.
 func TestResolveLaunchIDsFreshLaunch(t *testing.T) {
-	launch := ResolveLaunchIDs([]string{"PATH=/bin"}, "web-api", "/repo")
+	launch := ResolveLaunchIDs([]string{"PATH=/bin"}, "web-api")
 	if launch.ID == "" {
 		t.Error("ID is empty, want a fresh random id")
 	}
 	if launch.Service != "web-api" {
 		t.Errorf("Service = %q, want web-api", launch.Service)
 	}
-	if launch.Root != "/repo" {
-		t.Errorf("Root = %q, want /repo", launch.Root)
+	if launch.Root != launch.ID {
+		t.Errorf("Root = %q, want it to equal the freshly minted ID %q (an outermost launch's root IS its own id)", launch.Root, launch.ID)
 	}
 }
 
 func TestResolveLaunchIDsFreshLaunchIDsAreUnique(t *testing.T) {
-	a := ResolveLaunchIDs(nil, "svc", "/repo")
-	b := ResolveLaunchIDs(nil, "svc", "/repo")
+	a := ResolveLaunchIDs(nil, "svc")
+	b := ResolveLaunchIDs(nil, "svc")
 	if a.ID == b.ID {
 		t.Errorf("two fresh launches got the same ID %q", a.ID)
+	}
+}
+
+// TestResolveLaunchIDsTwoIndependentLaunchesGetDistinctRoots is FIX 1's own
+// done-when: before the fix, ROOT was derived from a directory (git root or
+// cwd), so two SIBLING (non-nested) `monitor run --` launches against the
+// same repo shared one MONITOR_LAUNCH_ROOT -- and therefore one live
+// DedupeKey seed (detector.go's liveDedupeKey) -- even though neither was
+// watching the other. Seeding ROOT from each launch's own fresh ID instead
+// means two independent launches never collapse into each other just
+// because they live in the same repo and happen to print the same crash
+// text within the dedupe window.
+func TestResolveLaunchIDsTwoIndependentLaunchesGetDistinctRoots(t *testing.T) {
+	environ := []string{"PATH=/bin"} // neither carries an inherited MONITOR_LAUNCH_ROOT
+	a := ResolveLaunchIDs(environ, "svc-a")
+	b := ResolveLaunchIDs(environ, "svc-b")
+	if a.Root == b.Root {
+		t.Errorf("two independent (non-nested) launches got the same Root %q, want distinct roots", a.Root)
 	}
 }
 
@@ -50,7 +74,7 @@ func TestResolveLaunchIDsNestedInheritsOnlyRoot(t *testing.T) {
 		"MONITOR_LAUNCH_SERVICE=parent-svc",
 		"MONITOR_LAUNCH_ROOT=/parent/repo",
 	}
-	launch := ResolveLaunchIDs(environ, "web-api", "/child/repo/should/be/ignored")
+	launch := ResolveLaunchIDs(environ, "web-api")
 	if launch.Root != "/parent/repo" {
 		t.Errorf("Root = %q, want /parent/repo (inherited)", launch.Root)
 	}
@@ -66,9 +90,9 @@ func TestResolveLaunchIDsEmptyLaunchRootIsNotNesting(t *testing.T) {
 	// MONITOR_LAUNCH_ROOT="" (present but empty) must not be treated as
 	// nesting -- only a genuinely non-empty root signals an outer launch.
 	environ := []string{"MONITOR_LAUNCH_ROOT=", "MONITOR_LAUNCH_ID=stale"}
-	launch := ResolveLaunchIDs(environ, "svc", "/repo")
-	if launch.Root != "/repo" {
-		t.Errorf("Root = %q, want /repo (fresh launch, not nested)", launch.Root)
+	launch := ResolveLaunchIDs(environ, "svc")
+	if launch.Root != launch.ID {
+		t.Errorf("Root = %q, ID = %q, want a fresh launch's Root to equal its own ID (not nested)", launch.Root, launch.ID)
 	}
 	if launch.ID == "stale" {
 		t.Error("a fresh launch must not inherit a stale/empty-rooted MONITOR_LAUNCH_ID")

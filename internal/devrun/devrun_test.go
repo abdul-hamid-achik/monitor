@@ -92,16 +92,15 @@ func TestRunPropagatesChildExitCodeAndRecordsIssue(t *testing.T) {
 	}
 
 	// R-major-next-hint: Result plumbs the stored issue's own FULL id
-	// through (not just its display-only short id), so the exit summary's
-	// "next:" hint (opts.Quiet suppresses it above, see baseOptions; the
-	// rendering itself is covered directly by
-	// TestExitSummaryWithNewIssuesSuggestsNext) is a command that
-	// resolves TODAY: `monitor issue show <full id>` -- see
-	// FirstNewIssueFullID's doc comment.
+	// through (not just its display-only short id) for callers that need
+	// it, but the exit summary's "next:" hint (opts.Quiet suppresses it
+	// above, see baseOptions; the rendering itself is covered directly by
+	// TestExitSummaryWithNewIssuesSuggestsNext) is FIX 2's `monitor issue
+	// <short>` -- see FirstNewIssueFullID's doc comment.
 	if result.FirstNewIssueFullID != list[0].ID {
 		t.Errorf("FirstNewIssueFullID = %q, want the stored issue's own id %q", result.FirstNewIssueFullID, list[0].ID)
 	}
-	wantHint := "next: monitor issue show " + list[0].ID
+	wantHint := "next: monitor issue " + strings.ToLower(result.NewIssueIDs[0])
 	if got := ExitSummary(ExitSummaryInfo{NewIssueIDs: result.NewIssueIDs, FirstNewIssueFullID: result.FirstNewIssueFullID}); !strings.Contains(got, wantHint) {
 		t.Errorf("ExitSummary(result's own fields) = %q, want it to contain %q", got, wantHint)
 	}

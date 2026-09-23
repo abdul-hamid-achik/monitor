@@ -20,15 +20,22 @@ intent: |
   lock), with all 7 raw occurrences actually landing (the SUM of every
   resulting issue's occurrence_count is exactly 7 -- not merely "somewhere
   between 1 and 7", which could hide a store-lock regression that silently
-  dropped writes). Each of the 7 exports its OWN MONITOR_LAUNCH_ROOT before
-  launching (the live DedupeKey, docs/contracts/local-sentry-naming.md §5,
-  is sha256(MONITOR_LAUNCH_ROOT + block hash) within a short bucket -- see
+  dropped writes). None of the 7 sets MONITOR_LAUNCH_ROOT itself anymore
+  (a prior revision of this spec had to export a distinct one by hand per
+  launch, working around a real bug: MONITOR_LAUNCH_ROOT used to default to
+  a directory -- the launch's git root/cwd -- so 7 sibling launches sharing
+  one repo also shared one root and could collapse into each other via the
+  live DedupeKey). Since docs/contracts/local-sentry-naming.md §2's
+  ROOT-semantics fix, an unnested `monitor run --` seeds its own
+  MONITOR_LAUNCH_ROOT from its own freshly-minted MONITOR_LAUNCH_ID, so 7
+  independent launches already get 7 distinct roots for free, with nothing
+  for this spec to set up. The live DedupeKey itself
+  (docs/contracts/local-sentry-naming.md §5) is still
+  sha256(MONITOR_LAUNCH_ROOT + block hash) within a short bucket -- see
   internal/devrun/detector.go's dedupeBucketSeconds -- specifically so a
-  NESTED `monitor run --` does not double-count one real crash seen by two
-  detectors; giving 7 independent SIBLING launches distinct roots is what
-  keeps them from legitimately -- and here, misleadingly -- collapsing into
-  each other too, which is what let a store-lock regression hide behind
-  "1 <= occurrence_count <= 7"). At most 2 distinct issues are tolerated,
+  NESTED `monitor run --` still folds together with its own parent's launch,
+  which distinct roots for independent siblings must not break. At most 2
+  distinct issues are tolerated,
   not exactly 1: seven simultaneous compiled-Go-binary launches (plus
   glyph's own pty capture) can occasionally starve one detector goroutine
   past the Joiner's 300ms idle window between "goroutine 1 [running]:" and
@@ -67,7 +74,7 @@ preconditions:
       timeoutMs: 60000
     - run: "cat > /tmp/monitor-spec-run-launch/check_single.sh <<'SH'\n#!/bin/sh\nset -e\nMONITOR_ISSUES_STORE=/tmp/monitor-spec-run-launch/data/issues.veclite ./bin/monitor issues list --json > /tmp/monitor-spec-run-launch/single-issues.json\npython3 -c \"\nimport json\nd = json.load(open('/tmp/monitor-spec-run-launch/single-issues.json'))\nassert len(d) == 1, d\ni = d[0]\nassert i['culprit']['file'] == 'examples/polyglot/go-crash/main.go', i['culprit']\nassert i['culprit']['line'] == 11, i['culprit']\nassert i['occurrence_count'] == 1, i\nassert i['exception_type'] == 'panic', i\nprint('ok')\n\"\nSH\nchmod +x /tmp/monitor-spec-run-launch/check_single.sh"
       timeoutMs: 5000
-    - run: "cat > /tmp/monitor-spec-run-launch/concurrent.sh <<'SH'\n#!/bin/sh\nset -e\nrm -rf /tmp/monitor-spec-run-launch/concurrent-data /tmp/monitor-spec-run-launch/concurrent-state\nmkdir -p /tmp/monitor-spec-run-launch/concurrent-data /tmp/monitor-spec-run-launch/concurrent-state\nexport XDG_STATE_HOME=/tmp/monitor-spec-run-launch/concurrent-state\nexport MONITOR_ISSUES_STORE=/tmp/monitor-spec-run-launch/concurrent-data/issues.veclite\nrm -f /tmp/monitor-spec-run-launch/concurrent-*.out\ni=1\nwhile [ \"$i\" -le 7 ]; do\n  ( MONITOR_LAUNCH_ROOT=\"/tmp/monitor-spec-run-launch/concurrent-root-$i\" ./bin/monitor run -- /tmp/monitor-spec-run-launch/go-crash > \"/tmp/monitor-spec-run-launch/concurrent-$i.out\" 2>&1 ) &\n  i=$((i + 1))\ndone\nwait\nif grep -li 'ErrFileLocked' /tmp/monitor-spec-run-launch/concurrent-*.out >/dev/null 2>&1; then\n  echo 'ErrFileLocked found in concurrent run output'\n  exit 1\nfi\nif grep -l 'not recorded' /tmp/monitor-spec-run-launch/concurrent-*.out >/dev/null 2>&1; then\n  echo 'a concurrent run reported a failed write (store busy)'\n  cat /tmp/monitor-spec-run-launch/concurrent-*.out\n  exit 1\nfi\n./bin/monitor issues list --json > /tmp/monitor-spec-run-launch/concurrent-issues.json\npython3 -c \"\nimport json\nd = json.load(open('/tmp/monitor-spec-run-launch/concurrent-issues.json'))\nassert 1 <= len(d) <= 2, d\ntotal = sum(i['occurrence_count'] for i in d)\nassert total == 7, (total, d)\nfor i in d:\n    c = i.get('culprit')\n    assert c is None or c['line'] == 11, i\nprint('ok')\n\"\nSH\nchmod +x /tmp/monitor-spec-run-launch/concurrent.sh"
+    - run: "cat > /tmp/monitor-spec-run-launch/concurrent.sh <<'SH'\n#!/bin/sh\nset -e\nrm -rf /tmp/monitor-spec-run-launch/concurrent-data /tmp/monitor-spec-run-launch/concurrent-state\nmkdir -p /tmp/monitor-spec-run-launch/concurrent-data /tmp/monitor-spec-run-launch/concurrent-state\nexport XDG_STATE_HOME=/tmp/monitor-spec-run-launch/concurrent-state\nexport MONITOR_ISSUES_STORE=/tmp/monitor-spec-run-launch/concurrent-data/issues.veclite\nrm -f /tmp/monitor-spec-run-launch/concurrent-*.out\ni=1\nwhile [ \"$i\" -le 7 ]; do\n  ( ./bin/monitor run -- /tmp/monitor-spec-run-launch/go-crash > \"/tmp/monitor-spec-run-launch/concurrent-$i.out\" 2>&1 ) &\n  i=$((i + 1))\ndone\nwait\nif grep -li 'ErrFileLocked' /tmp/monitor-spec-run-launch/concurrent-*.out >/dev/null 2>&1; then\n  echo 'ErrFileLocked found in concurrent run output'\n  exit 1\nfi\nif grep -l 'not recorded' /tmp/monitor-spec-run-launch/concurrent-*.out >/dev/null 2>&1; then\n  echo 'a concurrent run reported a failed write (store busy)'\n  cat /tmp/monitor-spec-run-launch/concurrent-*.out\n  exit 1\nfi\n./bin/monitor issues list --json > /tmp/monitor-spec-run-launch/concurrent-issues.json\npython3 -c \"\nimport json\nd = json.load(open('/tmp/monitor-spec-run-launch/concurrent-issues.json'))\nassert 1 <= len(d) <= 2, d\ntotal = sum(i['occurrence_count'] for i in d)\nassert total == 7, (total, d)\nfor i in d:\n    c = i.get('culprit')\n    assert c is None or c['line'] == 11, i\nprint('ok')\n\"\nSH\nchmod +x /tmp/monitor-spec-run-launch/concurrent.sh"
       timeoutMs: 5000
 
 steps:
@@ -107,7 +114,7 @@ outcomes:
       command:
         run: "/tmp/monitor-spec-run-launch/check_single.sh"
   - id: seven_concurrent_runs_no_file_locked
-    description: 7 concurrent `monitor run --` launches (each with its own MONITOR_LAUNCH_ROOT) against the same store produce zero ErrFileLocked / failed writes, and the total occurrence_count across the (at most 2) resulting issues is exactly 7
+    description: 7 concurrent, independent `monitor run --` launches (each seeding its own distinct MONITOR_LAUNCH_ROOT automatically, per docs/contracts/local-sentry-naming.md §2) against the same store produce zero ErrFileLocked / failed writes, and the total occurrence_count across the (at most 2) resulting issues is exactly 7
     verify:
       command:
         run: "/tmp/monitor-spec-run-launch/concurrent.sh"

@@ -398,15 +398,16 @@ func liveDedupeKey(launchRoot string, block stacktrace.Block, observedAt time.Ti
 }
 
 // shortIssueID derives a display-only short id from an Issue.ID
-// ("ISS-<16 hex chars>", per internal/issues' newIssue): the uppercase
-// FIRST 4 hex characters after "ISS-", matching docs/contracts/
-// issue-context-v1.md's short_id field ("uppercase first 4 hex chars of the
-// id's hex portion") -- which is also what E2.5's prefix resolution
-// (`monitor issue <short_id>`) will accept, so a banner printed today
-// already resolves once that lands. This is a devrun-local, cosmetic
-// derivation -- internal/issues has no ShortID/ResolveID concept of its
-// own yet -- so it must never be persisted or treated as a stable
-// identifier beyond this run's own banners.
+// ("ISS-<16 hex chars>", per internal/issues' newIssue): the FIRST 4 hex
+// characters after "ISS-" (already lowercase, since issues.newIssue's hex
+// encoding is), matching docs/contracts/issue-context-v1.md's short_id
+// field -- which is also exactly what `monitor issue <id|short-prefix|
+// latest>` (E2.5, internal/cli/issues.go's newIssueCmd) accepts, so a
+// banner printed today, and the exit summary's "next:" hint (banner.go's
+// ExitSummary, FIX 2), already resolve with no further epic needed. This
+// is a devrun-local, cosmetic derivation -- internal/issues has no
+// ShortID/ResolveID concept of its own -- so it must never be persisted or
+// treated as a stable identifier beyond this run's own banners.
 func shortIssueID(id string) string {
 	id = strings.TrimPrefix(id, "ISS-")
 	if len(id) <= 4 {

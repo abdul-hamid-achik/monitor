@@ -190,10 +190,6 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if effectiveService == "" {
 		effectiveService = argv0Base
 	}
-	launchRoot := id.GitRoot
-	if launchRoot == "" {
-		launchRoot = cwd
-	}
 
 	// contextids.FromEnv must be computed BEFORE BuildEnv exports
 	// MONITOR_LAUNCH_* (docs/contracts/local-sentry-naming.md's "Occurrence
@@ -204,7 +200,11 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	// what monitor is about to export to its own child.
 	run := contextids.FromEnv(contextids.IDs{})
 
-	launch := ResolveLaunchIDs(environ, effectiveService, launchRoot)
+	// ResolveLaunchIDs takes no directory: MONITOR_LAUNCH_ROOT is this
+	// launch's own ID when it is not nested inside another `run --`, never
+	// id.GitRoot/cwd -- see ResolveLaunchIDs' doc comment (docs/contracts/
+	// local-sentry-naming.md §2's ROOT-semantics fix).
+	launch := ResolveLaunchIDs(environ, effectiveService)
 	env := BuildEnv(environ, launch, !opts.NoSourceMaps, scanStdout)
 
 	cmd := exec.CommandContext(ctx, opts.Argv[0], opts.Argv[1:]...)

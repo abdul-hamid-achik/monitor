@@ -57,19 +57,34 @@ type LaunchIDs struct {
 // an inner `--name web-api` must take effect as MONITOR_LAUNCH_SERVICE
 // exactly like the roadmap's own example names it, not be silently
 // replaced by whatever the OUTER launch happened to be named -- E3.2's
-// per-service launch registry depends on that too. name and root are used
-// to seed a fresh launch's Service/Root; callers pass the already-defaulted
-// effective service name and root (see devrun.go).
+// per-service launch registry depends on that too.
 //
-// docs/contracts/local-sentry-naming.md §2 currently still describes ALL
-// THREE MONITOR_LAUNCH_* values as inherited unchanged when nested; that
-// text predates this resolution and is out of date (it is not owned by
-// this file/PR to correct).
-func ResolveLaunchIDs(environ []string, name, root string) LaunchIDs {
+// ROOT semantics (docs/contracts/local-sentry-naming.md §2, the
+// dogfooding fix formerly tracked as "FIX 1"): when there is nothing to
+// inherit -- environ carries no non-empty MONITOR_LAUNCH_ROOT, i.e. this is
+// an OUTERMOST launch, not a nested one -- ROOT is this launch's own
+// freshly minted ID, never a directory. A directory-shaped root used to
+// mean "two independent sibling `monitor run --` launches in the same repo
+// whose crash text happens to be textually identical within the dedupe
+// window" collapsed into one occurrence, because they all shared the same
+// git-root/cwd-derived MONITOR_LAUNCH_ROOT -- the live DedupeKey
+// (detector.go's liveDedupeKey) is sha256(ROOT + hash(exception block)),
+// so an identical ROOT for two unrelated launches folds their otherwise-
+// distinct occurrences together. Seeding ROOT from ID instead means ROOT
+// answers "which outermost launch produced this text", not "which
+// directory it ran in": two sibling launches now mint two different IDs
+// and therefore two different roots (no collapsing), while a genuinely
+// nested launch (a task runner's `run --` spawning a real service's own
+// `run --`) still shares one root end to end, because only the INNER
+// launch's inheritance branch above ever fires -- the outer launch, being
+// itself outermost, seeded that shared root from its own ID the same way.
+func ResolveLaunchIDs(environ []string, name string) LaunchIDs {
+	id := newLaunchID()
+	root := id
 	if inherited, ok := launchRootFromEnviron(environ); ok {
 		root = inherited
 	}
-	return LaunchIDs{ID: newLaunchID(), Service: strings.TrimSpace(name), Root: root}
+	return LaunchIDs{ID: id, Service: strings.TrimSpace(name), Root: root}
 }
 
 // launchRootFromEnviron reports environ's MONITOR_LAUNCH_ROOT, when
