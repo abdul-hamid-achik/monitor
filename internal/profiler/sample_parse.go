@@ -27,6 +27,15 @@ import (
 // thread-root line from a nested one, because a nested frame that happens to
 // be the last thing needing its column also gets an all-space prefix (see
 // parseSampleTree's baseCol tracking instead).
+//
+// `sample` also emits two trailing sections that reuse this exact
+// "<prefix><count> name" shape with a different meaning: "Total number in
+// stack (recursive counted multiple, when >=5):" (per-function totals,
+// double-counting recursion) and "Sort by top of stack, same collapsed
+// (when >= 5):" (count comes AFTER the name, so this particular regex
+// mostly doesn't match it, but relying on that is fragile). parseSampleTree
+// stops scanning before either section — see its callGraphSection helper —
+// so this regex only ever runs against genuine call-graph rows.
 var sampleLineRe = regexp.MustCompile(`^([ +!:|]*)(\d+)\s+(.*)$`)
 
 // sampleFrameNameRe splits a frame's trailing text into the symbol name and
@@ -92,14 +101,60 @@ func parseSampleLine(line string) (prefix string, count int64, name, image strin
 	return m[1], n, name, image, true
 }
 
+// callGraphSection returns the "Call graph:" body of a `sample` capture: the
+// text starting right after that header line, up to (but not including)
+// whichever comes first of a blank line or one of the trailing per-function
+// summary sections `sample` appends after the tree ("Total number in stack
+// (recursive counted multiple, when >=5):", "Sort by top of stack, same
+// collapsed (when >= 5):", "Binary Images:").
+//
+// Those trailing sections matter because their rows can satisfy
+// sampleLineRe too (particularly "Total number in stack", which is
+// "<spaces><count><spaces><name>  (in <image>) ..." — indistinguishable in
+// shape from a real nested call-graph row). Without this boundary, those
+// rows get read as children of whatever frame happens to still be open on
+// the stack when the tree-walking loop reaches them, inventing self time
+// for arbitrary functions and inflating Stats.Samples. ok is false when the
+// text has no "Call graph:" header at all.
+func callGraphSection(text string) (body string, ok bool) {
+	const header = "Call graph:"
+	idx := strings.Index(text, header)
+	if idx < 0 {
+		return "", false
+	}
+	body = text[idx+len(header):]
+	for _, boundary := range []string{
+		"\nTotal number in stack",
+		"\nSort by top of stack",
+		"\nBinary Images:",
+		"\n\n",
+	} {
+		if end := strings.Index(body, boundary); end >= 0 && end < len(body) {
+			body = body[:end]
+		}
+	}
+	return body, true
+}
+
 // sampleStackFrame is one still-open node while walking a thread's call
 // tree depth-first.
 type sampleStackFrame struct {
-	col      int
-	count    int64
-	childSum int64
-	name     string
-	image    string
+	col       int
+	count     int64
+	childSum  int64
+	activeCum int64 // rolled-up rawActiveCum of every child finalized so far
+	name      string
+	image     string
+	// outermost is true when this is the shallowest currently-open
+	// occurrence of (name,image) on the path from the root to this node —
+	// see the recursion guard in parseSampleTree's finalize closure.
+	outermost bool
+	// isThreadRoot is true for the synthetic "<count> Thread_NNNN ..." row
+	// each thread's tree starts with. It is sample's own thread descriptor,
+	// not a call frame, and must never itself appear as a Symbol (self or
+	// cum) even though its self time and rolled-up cum still count toward
+	// the active/idle denominators exactly like any other frame's.
+	isThreadRoot bool
 }
 
 // aggKey identifies one function for self-time aggregation across every
@@ -111,7 +166,8 @@ type aggKey struct {
 }
 
 // parseSampleTree parses macOS `sample` call-graph text into a flat
-// []Symbol ranked by aggregate self time, plus the idle/active breakdown.
+// []Symbol ranked by cumulative (then self) time, plus the idle/active
+// breakdown.
 //
 // sample's output is a per-thread call tree rendered with '+'/'!'/':'/'|'
 // tree-drawing prefixes (see sampleLineRe). Each node's own count already
@@ -122,7 +178,21 @@ type aggKey struct {
 // digit" pattern, which real sample output never produces, and had no
 // concept of self time at all), and buckets known idle/blocking syscall
 // leaves (see idleLeafFuncs) out of the active total so they can never
-// crowd out the real hot function the way (idle) used to in V8 profiles.
+// crowd out the real hot function the way (idle) used to for CDP profiles.
+//
+// Self time alone systematically misses a function whose own cost is
+// (almost) entirely inside a callee — e.g. a JSON-marshal-heavy hot path
+// where the caller is just a thin wrapper around encoding/json.Marshal: its
+// self time is near zero on every occurrence, so it never surfaces in a
+// self-only top-N no matter how hot it truly is. So, alongside self, this
+// also computes each function's cumulative active time (its own active self
+// plus every active descendant's, with a recursion guard so a function that
+// calls itself doesn't get double-counted along one path) and ranks by that
+// first — the same flat/cum split symbolsFromPprof uses for real pprof
+// protos. "Active" deliberately excludes idle/blocking descendants (a
+// parking wrapper's cum must not be dominated by the syscall it blocks in),
+// which is why cum is computed bottom-up from each node's own
+// idle-classified self rather than from its raw (idle-inclusive) count.
 //
 // Thread-root detection: a thread's root line ("    784 Thread_28989881 ...")
 // always sits at the shallowest column in the whole "Call graph:" section —
@@ -133,9 +203,25 @@ type aggKey struct {
 // tracks the column of the first call-graph line seen (baseCol) and treats
 // any later line at that same column as a new thread's root.
 func parseSampleTree(text string) ([]Symbol, Stats) {
+	body, ok := callGraphSection(text)
+	if !ok {
+		return nil, Stats{}
+	}
+
 	selfTotals := make(map[aggKey]int64)
+	cumTotals := make(map[aggKey]int64)
 	var order []aggKey
+	seen := func(k aggKey) {
+		_, inSelf := selfTotals[k]
+		_, inCum := cumTotals[k]
+		if !inSelf && !inCum {
+			order = append(order, k)
+		}
+	}
+
 	var idleTotal, activeTotal, allTotal int64
+	pathCount := make(map[aggKey]int)
+	var stack []*sampleStackFrame
 
 	finalize := func(n *sampleStackFrame) {
 		self := n.count - n.childSum
@@ -145,23 +231,48 @@ func parseSampleTree(text string) ([]Symbol, Stats) {
 			// the totals.
 			self = 0
 		}
-		if self == 0 {
-			return
+		idle := isIdleLeafFunc(n.name)
+		if self > 0 {
+			allTotal += self
+			if idle {
+				idleTotal += self
+			} else {
+				activeTotal += self
+				if !n.isThreadRoot {
+					k := aggKey{Func: n.name, Image: n.image}
+					seen(k)
+					selfTotals[k] += self
+				}
+			}
 		}
-		allTotal += self
-		if isIdleLeafFunc(n.name) {
-			idleTotal += self
-			return
+
+		var selfActive int64
+		if !idle {
+			selfActive = self
 		}
+		nodeCum := selfActive + n.activeCum
+
 		k := aggKey{Func: n.name, Image: n.image}
-		if _, ok := selfTotals[k]; !ok {
-			order = append(order, k)
+		pathCount[k]--
+		if n.outermost && nodeCum > 0 && !n.isThreadRoot {
+			seen(k)
+			cumTotals[k] += nodeCum
 		}
-		selfTotals[k] += self
-		activeTotal += self
+
+		if len(stack) > 0 {
+			stack[len(stack)-1].activeCum += nodeCum
+		}
 	}
 
-	var stack []*sampleStackFrame
+	push := func(col int, count int64, name, image string, isThreadRoot bool) *sampleStackFrame {
+		k := aggKey{Func: name, Image: image}
+		outermost := pathCount[k] == 0
+		pathCount[k]++
+		f := &sampleStackFrame{col: col, count: count, name: name, image: image, outermost: outermost, isThreadRoot: isThreadRoot}
+		stack = append(stack, f)
+		return f
+	}
+
 	drain := func() {
 		for len(stack) > 0 {
 			top := stack[len(stack)-1]
@@ -177,7 +288,7 @@ func parseSampleTree(text string) ([]Symbol, Stats) {
 		}
 	}
 
-	sc := bufio.NewScanner(strings.NewReader(text))
+	sc := bufio.NewScanner(strings.NewReader(body))
 	// `sample` can emit very long frame lines (many collapsed PC offsets);
 	// grow well past bufio.Scanner's 64KiB default so a long line is
 	// skipped only for genuinely being longer than any real frame, not
@@ -195,18 +306,16 @@ func parseSampleTree(text string) ([]Symbol, Stats) {
 		}
 		if col <= baseCol {
 			// A new thread's tree starts fresh; close out everything left
-			// over from the previous thread (or the "Call graph:" line
-			// itself, which never reaches here since it has no leading
-			// digit).
+			// over from the previous thread.
 			drain()
-			stack = append(stack, &sampleStackFrame{col: col, count: count, name: name, image: image})
+			push(col, count, name, image, true)
 			continue
 		}
 		popTo(col)
 		if len(stack) > 0 {
 			stack[len(stack)-1].childSum += count
 		}
-		stack = append(stack, &sampleStackFrame{col: col, count: count, name: name, image: image})
+		push(col, count, name, image, false)
 	}
 	drain()
 
@@ -217,16 +326,24 @@ func parseSampleTree(text string) ([]Symbol, Stats) {
 	out := make([]Symbol, 0, len(order))
 	for _, k := range order {
 		self := selfTotals[k]
-		if self <= 0 {
+		cum := cumTotals[k]
+		if self <= 0 && cum <= 0 {
 			continue
 		}
-		var weight float64
+		var weight, cumPct float64
 		if activeTotal > 0 {
 			weight = float64(self) / float64(activeTotal) * 100
+			cumPct = float64(cum) / float64(activeTotal) * 100
 		}
-		out = append(out, Symbol{Func: k.Func, File: k.Image, Weight: weight})
+		out = append(out, Symbol{Func: k.Func, File: k.Image, Weight: weight, Cum: cumPct})
 	}
+	// Rank by cumulative time first (a wrapper whose own self time is ~0 but
+	// whose call site is the hot line must still outrank a low-cum leaf),
+	// falling back to self weight, matching symbolsFromPprof's sort.
 	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Cum != out[j].Cum {
+			return out[i].Cum > out[j].Cum
+		}
 		if out[i].Weight != out[j].Weight {
 			return out[i].Weight > out[j].Weight
 		}
