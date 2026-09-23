@@ -63,6 +63,7 @@ outcomes:
       type:cpu against a real bun --inspect process: captured:false,
       status:"unavailable", limitation mentions Bun's JSC/WebKit inspector
       and a non-empty recovery, never "404" or "Not Found".
+    timeoutMs: 20000
     verify:
       command:
         timeoutMs: 20000
@@ -72,6 +73,7 @@ outcomes:
       type:heap against the same real bun --inspect process behaves
       identically to type:cpu -- Bun's inspector never speaks CDP for
       either capture kind.
+    timeoutMs: 20000
     verify:
       command:
         timeoutMs: 20000
@@ -83,6 +85,7 @@ outcomes:
       "has no inspector address ... start it with --inspect" message
       (which would only lead a Bun user to the same JSC dead end) — the
       Bun check runs BEFORE the missing-inspector-address check.
+    timeoutMs: 20000
     verify:
       command:
         timeoutMs: 20000

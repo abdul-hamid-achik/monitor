@@ -634,7 +634,7 @@ func TestHandleProfileCaptureLinesTrueSkipsHonestly(t *testing.T) {
 			}, nil
 		},
 	})
-	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Type: "sample", Lines: true, Confirm: true})
+	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Type: "cpu", Lines: true, Confirm: true})
 	if err != nil {
 		t.Fatalf("handleProfileCapture returned hard error: %v", err)
 	}

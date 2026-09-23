@@ -242,6 +242,7 @@ outcomes:
       a short id prefix matching more than one issue lists every candidate
       and exits 2, in both the human and --json form, instead of silently
       guessing one
+    timeoutMs: 30000
     verify:
       command:
         timeoutMs: 30000

@@ -70,6 +70,7 @@ outcomes:
       captured:true, method pprof_cpu, and main.heavyStringify among the
       symbols -- the runtime-aware dispatch shared with `monitor profile`
       and investigate (E1.7).
+    timeoutMs: 20000
     verify:
       command:
         timeoutMs: 20000
@@ -80,6 +81,7 @@ outcomes:
       absent from the response (payload diet -- a pprof heap capture's Text
       is otherwise a human-readable top-N summary, which this omits by
       default same as CDP/pprof-cpu's raw payload).
+    timeoutMs: 20000
     verify:
       command:
         timeoutMs: 20000
@@ -97,6 +99,7 @@ outcomes:
       Scoped to THIS target's own pid ($P) throughout, so it never touches
       -- or is confused by -- another process's leftover
       monitor-heap-*.pb.gz files sharing the same temp directory.
+    timeoutMs: 20000
     verify:
       command:
         timeoutMs: 20000
@@ -108,6 +111,7 @@ outcomes:
       deleted -- a human explicitly asking to keep the raw artifact still
       can. Cleans up the file it deliberately keeps (scoped to this
       target's own pid) so the outcome leaves no litter of its own behind.
+    timeoutMs: 20000
     verify:
       command:
         timeoutMs: 20000

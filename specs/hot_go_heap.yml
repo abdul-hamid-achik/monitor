@@ -48,7 +48,7 @@ target:
     [
       "sh",
       "-c",
-      "set -m; (cd examples/polyglot/go-pprof && exec go run .) >/tmp/monitor-spec-hot-go-heap.log 2>&1 & P=$!; sleep 2; ./bin/monitor hot \"$P\" --type heap --pprof-addr 127.0.0.1:6069 --func main.buildIndex --json; R=$?; kill -TERM -\"$P\" 2>/dev/null; sleep 0.3; kill -KILL -\"$P\" 2>/dev/null; exit $R",
+      "set -m; (cd examples/polyglot/go-pprof && exec go run .) >/tmp/monitor-spec-hot-go-heap.log 2>&1 & P=$!; for i in $(seq 1 120); do curl -s -o /dev/null http://127.0.0.1:6069/debug/pprof/ && break; sleep 0.25; done; sleep 1; ./bin/monitor hot \"$P\" --type heap --pprof-addr 127.0.0.1:6069 --func main.buildIndex --json; R=$?; kill -TERM -\"$P\" 2>/dev/null; sleep 0.3; kill -KILL -\"$P\" 2>/dev/null; exit $R",
     ]
   cwd: "."
 
@@ -85,6 +85,7 @@ outcomes:
       the JSON heatmap's main.buildIndex names line 96 (the composite
       literal doing the actual retained allocation) as its MAX-SELF line,
       not line 99 (the cheaper map-insertion append).
+    timeoutMs: 20000
     verify:
       command:
         timeoutMs: 20000
@@ -98,7 +99,7 @@ outcomes:
         run: |
           set -m;
           (cd examples/polyglot/go-pprof && exec go run .) >/tmp/monitor-spec-hot-go-heap.log 2>&1 &
-          P=$!; sleep 2;
+          P=$!; for i in $(seq 1 120); do curl -s -o /dev/null http://127.0.0.1:6069/debug/pprof/ && break; sleep 0.25; done; sleep 1;
           ./bin/monitor hot "$P" --type heap --pprof-addr 127.0.0.1:6069 --func main.buildIndex --json > /tmp/monitor-spec-hot-go-heap.json 2>&1;
           kill -TERM -"$P" 2>/dev/null; sleep 0.3; kill -KILL -"$P" 2>/dev/null;
           python3 -c "
@@ -111,26 +112,28 @@ outcomes:
 
   - id: names_allocation_line_96_human
     description: the human CodeFrame marks line 96 with the '>' hot-line marker
+    timeoutMs: 20000
     verify:
       command:
         timeoutMs: 20000
         run: >-
           set -m;
           (cd examples/polyglot/go-pprof && exec go run .) >/tmp/monitor-spec-hot-go-heap.log 2>&1 &
-          P=$!; sleep 2;
+          P=$!; for i in $(seq 1 120); do curl -s -o /dev/null http://127.0.0.1:6069/debug/pprof/ && break; sleep 0.25; done; sleep 1;
           ./bin/monitor hot "$P" --type heap --pprof-addr 127.0.0.1:6069 --func main.buildIndex > /tmp/monitor-spec-hot-go-heap.txt 2>&1;
           kill -TERM -"$P" 2>/dev/null; sleep 0.3; kill -KILL -"$P" 2>/dev/null;
           grep -qE '^>[[:space:]]+96[[:space:]]*\|' /tmp/monitor-spec-hot-go-heap.txt
 
   - id: profile_type_heap_inuse
     description: the JSON reports profile_type heap_inuse (inuse_space), not cpu
+    timeoutMs: 20000
     verify:
       command:
         timeoutMs: 20000
         run: >-
           set -m;
           (cd examples/polyglot/go-pprof && exec go run .) >/tmp/monitor-spec-hot-go-heap.log 2>&1 &
-          P=$!; sleep 2;
+          P=$!; for i in $(seq 1 120); do curl -s -o /dev/null http://127.0.0.1:6069/debug/pprof/ && break; sleep 0.25; done; sleep 1;
           ./bin/monitor hot "$P" --type heap --pprof-addr 127.0.0.1:6069 --json > /tmp/monitor-spec-hot-go-heap.json 2>&1;
           kill -TERM -"$P" 2>/dev/null; sleep 0.3; kill -KILL -"$P" 2>/dev/null;
           grep -q '"profile_type":[[:space:]]*"heap_inuse"' /tmp/monitor-spec-hot-go-heap.json
@@ -141,13 +144,14 @@ outcomes:
       toolchain pid) and says so honestly via the "(child of go N)" clause
       — proof the pid handed to monitor hot was the WRAPPER, not the
       already-resolved leaf.
+    timeoutMs: 20000
     verify:
       command:
         timeoutMs: 20000
         run: >-
           set -m;
           (cd examples/polyglot/go-pprof && exec go run .) >/tmp/monitor-spec-hot-go-heap.log 2>&1 &
-          P=$!; sleep 2;
+          P=$!; for i in $(seq 1 120); do curl -s -o /dev/null http://127.0.0.1:6069/debug/pprof/ && break; sleep 0.25; done; sleep 1;
           OUT=$(./bin/monitor hot "$P" --type heap --pprof-addr 127.0.0.1:6069);
           kill -TERM -"$P" 2>/dev/null; sleep 0.3; kill -KILL -"$P" 2>/dev/null;
           echo "$OUT" | head -1 | grep -q "^monitor > go pid" &&
@@ -155,13 +159,14 @@ outcomes:
 
   - id: clean_exit
     description: the binary exits cleanly
+    timeoutMs: 20000
     verify:
       command:
         timeoutMs: 20000
         run: >-
           set -m;
           (cd examples/polyglot/go-pprof && exec go run .) >/tmp/monitor-spec-hot-go-heap.log 2>&1 &
-          P=$!; sleep 2;
+          P=$!; for i in $(seq 1 120); do curl -s -o /dev/null http://127.0.0.1:6069/debug/pprof/ && break; sleep 0.25; done; sleep 1;
           ./bin/monitor hot "$P" --type heap --pprof-addr 127.0.0.1:6069 --json >/dev/null 2>&1;
           R=$?;
           kill -TERM -"$P" 2>/dev/null; sleep 0.3; kill -KILL -"$P" 2>/dev/null;

@@ -74,6 +74,7 @@ outcomes:
     timeoutMs: 15000
     verify:
       command:
+        timeoutMs: 15000
         run: "D=$(mktemp -d); touch \"$D/Gemfile\"; printf 'sleep 30\\n' > \"$D/svc.rb\"; (cd \"$D\" && exec ruby svc.rb >/dev/null 2>&1) & P=$!; sleep 1; OUT=$(./bin/monitor resolve --runtime ruby --codebase-root \"$D\" --json 2>&1); PROC=$(./bin/monitor process \"$P\" --json 2>&1); kill \"$P\" 2>/dev/null || true; rm -rf \"$D\"; echo \"$OUT\" | grep -q \"\\\"pid\\\": $P\\b\" && echo \"$PROC\" | grep -q '\"Gemfile\"'"
   - id: clean_exit
     description: --version still exits cleanly (baseline sanity check for the target command)
