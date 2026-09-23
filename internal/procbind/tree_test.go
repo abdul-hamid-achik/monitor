@@ -3,9 +3,11 @@ package procbind
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -163,6 +165,21 @@ func TestIsGoToolchainWrapper(t *testing.T) {
 	if isGoToolchainWrapper(realBinary, Binding{Cmdline: []string{"myservice", "run"}}) {
 		t.Fatal("a real binary named myservice must never be treated as the go toolchain, even if its own argv happens to contain \"run\"")
 	}
+	// Regression: "-C dir" (and "-C=dir") is the only flag `go` allows
+	// before its subcommand, and must be scanned past rather than making
+	// isGoToolchainWrapper require cmdline[1] == "run" literally.
+	if !isGoToolchainWrapper(toolchain, Binding{Cmdline: []string{"go", "-C", "go-plain", "run", "."}}) {
+		t.Fatal("`go -C dir run .` should be classified as the toolchain wrapper")
+	}
+	if !isGoToolchainWrapper(toolchain, Binding{Cmdline: []string{"go", "-C=go-plain", "run", "."}}) {
+		t.Fatal("`go -C=dir run .` should be classified as the toolchain wrapper")
+	}
+	if isGoToolchainWrapper(toolchain, Binding{Cmdline: []string{"go", "-C", "go-plain", "build", "./..."}}) {
+		t.Fatal("`go -C dir build` must not be treated as a `go run` wrapper")
+	}
+	if isGoToolchainWrapper(toolchain, Binding{Cmdline: []string{"go", "-C"}}) {
+		t.Fatal("a dangling `-C` with no directory or subcommand must not be treated as a `go run` wrapper")
+	}
 }
 
 func TestLooksLikeGoRunBinary(t *testing.T) {
@@ -175,7 +192,18 @@ func TestLooksLikeGoRunBinary(t *testing.T) {
 		{"/Users/dev/Library/Caches/go-build/f3/f37af6352cf2766186d23dd786dca-d/go-plain", true},
 		// The classic per-invocation temp-dir shape from older Go versions/platforms.
 		{"/tmp/go-build123456789/b001/exe/go-plain", true},
+		// Regression: a CUSTOM, already-warm GOCACHE need not contain
+		// "/go-build" anywhere in its path at all -- only the bare
+		// substring check used to require that. The structural
+		// "<xx>/<hash>-d/<name>" shape must still match regardless of
+		// where GOCACHE itself lives.
+		{"/tmp/scratch-gocache/83/8352048abcdef0123456789abcdef01-d/go-plain", true},
 		{"/usr/local/bin/go-plain", false},
+		// Regression: an unrelated binary living under a directory whose
+		// NAME merely contains "go-build" (as opposed to the real
+		// go-build*/bNNN/exe/ or <xx>/<hash>-d/ shapes) must not be
+		// misclassified as a `go run` artifact.
+		{"/Users/dev/src/go-builder/bin/server", false},
 		{"", false},
 	}
 	for _, tt := range tests {
@@ -434,5 +462,451 @@ func TestResolveLeafResolvesCompiledGoRunBinary(t *testing.T) {
 	}
 	if !looksLikeGoRunBinary(binding.Exe) {
 		t.Fatalf("resolved binary's exe %q does not look like a `go run` build artifact", binding.Exe)
+	}
+}
+
+// -- npm/yarn-family wrapper detection (argv, not process Name) --------
+
+func TestIsNodeHostedWrapper(t *testing.T) {
+	tests := []struct {
+		name    string
+		cmdline []string
+		want    bool
+	}{
+		// Rewritten process titles (process.title = "npm"/"yarn"), which --
+		// like Ruby Bundler's kernel_load rewrite handled elsewhere in this
+		// package -- collapse the whole visible cmdline into cmdline[0].
+		{"npm title with args", []string{"npm start"}, true},
+		{"bare npm title", []string{"npm"}, true},
+		{"bare yarn title", []string{"yarn"}, true},
+		{"yarn title with args", []string{"yarn start"}, true},
+		{"npx title", []string{"npx cowsay hi"}, true},
+		{"pnpm title", []string{"pnpm run dev"}, true},
+		// No title rewrite: the wrapper's own entry script is still
+		// visible as an ordinary node argv.
+		{"npm-cli.js argv", []string{"node", "/usr/local/lib/node_modules/npm/bin/npm-cli.js", "start"}, true},
+		{"npx-cli.js argv", []string{"node", "/opt/npm/bin/npx-cli.js", "cowsay"}, true},
+		{"classic yarn.js argv", []string{"node", "/opt/yarn/bin/yarn.js", "start"}, true},
+		{"yarn bin shim path", []string{"node", "/usr/local/Cellar/yarn/1.22.22/libexec/bin/yarn.js", "start"}, true},
+		{"pnpm.cjs argv", []string{"node", "/opt/pnpm/bin/pnpm.cjs", "run", "dev"}, true},
+		{"tsx entry", []string{"node", "/app/node_modules/tsx/dist/cli.mjs", "src/index.ts"}, true},
+		{"ts-node entry", []string{"node", "/app/node_modules/.bin/../ts-node/dist/bin.js", "src/index.ts"}, true},
+		// Must NOT fire on an ordinary application process.
+		{"plain node script", []string{"node", "server.js"}, false},
+		{"plain node absolute path", []string{"node", "/app/dist/server.js"}, false},
+		{"empty cmdline", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isNodeHostedWrapper(tt.cmdline); got != tt.want {
+				t.Errorf("isNodeHostedWrapper(%v) = %v, want %v", tt.cmdline, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestResolveLeafSkipsNodeHostedNpmWrapperViaFakeTable pins the E3.2
+// blocker down at the unit level: a fake table whose npm-family wrapper
+// process has Name=="node" (the real macOS/Linux shape -- see the doc
+// comment on wrapperNames) must still be skipped in favor of its node
+// child, using only argv to tell them apart. This is the fake-table
+// coverage the wrapper-skip logic previously had none of, now possible
+// because LeafOptions.Inspector is injectable.
+func TestResolveLeafSkipsNodeHostedNpmWrapperViaFakeTable(t *testing.T) {
+	table := []ProcInfo{
+		{PID: 1, PPID: 0, Name: "sh"},
+		{PID: 2, PPID: 1, Name: "node"}, // npm, title-rewritten to "npm start"
+		{PID: 3, PPID: 2, Name: "node"}, // the actual script npm launched
+	}
+	fakeInspect := func(_ context.Context, pid int32, _ string) (Binding, error) {
+		switch pid {
+		case 2:
+			return Binding{PID: 2, Name: "node", Runtime: RuntimeNode, Cmdline: []string{"npm start"}}, nil
+		case 3:
+			return Binding{PID: 3, Name: "node", Runtime: RuntimeNode, Cmdline: []string{"node", "/app/server.js"}, MainScript: "/app/server.js"}, nil
+		default:
+			return Binding{}, fmt.Errorf("unexpected pid %d", pid)
+		}
+	}
+	binding, candidates, err := ResolveLeaf(context.Background(), 1, LeafOptions{
+		Enumerator: fakeEnumerator(table),
+		Inspector:  fakeInspect,
+	})
+	if err != nil {
+		t.Fatalf("ResolveLeaf: %v (candidates=%+v)", err, candidates)
+	}
+	if binding.PID != 3 {
+		t.Fatalf("ResolveLeaf = %+v, want pid 3 (the node script), not the npm wrapper pid 2", binding)
+	}
+}
+
+// TestResolveLeafReturnsInProcessWrapperWhenItHasNoChildren pins down "skip
+// it only when it has a runtime descendant, so a ts-node that runs the
+// script in-process is still returned": a node-hosted wrapper with NO
+// children in the tree must be returned as-is rather than excluded into a
+// dead end.
+func TestResolveLeafReturnsInProcessWrapperWhenItHasNoChildren(t *testing.T) {
+	table := []ProcInfo{
+		{PID: 1, PPID: 0, Name: "sh"},
+		{PID: 2, PPID: 1, Name: "node"}, // ts-node, running the script in-process
+	}
+	fakeInspect := func(_ context.Context, pid int32, _ string) (Binding, error) {
+		if pid == 2 {
+			return Binding{PID: 2, Name: "node", Runtime: RuntimeNode, Cmdline: []string{"node", "/app/node_modules/ts-node/dist/bin.js", "app.ts"}}, nil
+		}
+		return Binding{}, fmt.Errorf("unexpected pid %d", pid)
+	}
+	binding, candidates, err := ResolveLeaf(context.Background(), 1, LeafOptions{
+		Enumerator: fakeEnumerator(table),
+		Inspector:  fakeInspect,
+	})
+	if err != nil {
+		t.Fatalf("ResolveLeaf: %v (candidates=%+v)", err, candidates)
+	}
+	if binding.PID != 2 {
+		t.Fatalf("ResolveLeaf = %+v, want pid 2 (the in-process ts-node returned as its own leaf, since it has no children)", binding)
+	}
+}
+
+// TestResolveLeafNeverReturnsItsOwnPID guards against monitor resolving
+// itself as the runtime leaf: when monitor runs under `go run`, its OWN
+// compiled binary lives under the go build cache, the exact shape
+// looksLikeGoRunBinary exists to recognize. The fake table plants this
+// test binary's REAL os.Getpid() as a descendant candidate that would
+// otherwise classify as a perfectly valid go leaf, so removing the
+// self-pid exclusion makes this test fail rather than vacuously pass.
+func TestResolveLeafNeverReturnsItsOwnPID(t *testing.T) {
+	self := int32(os.Getpid())
+	table := []ProcInfo{
+		{PID: 1, PPID: 0, Name: "go"},
+		{PID: self, PPID: 1, Name: "monitor"},
+	}
+	fakeInspect := func(_ context.Context, pid int32, _ string) (Binding, error) {
+		if pid == self {
+			return Binding{PID: self, Name: "monitor", Runtime: RuntimeGo}, nil
+		}
+		return Binding{}, fmt.Errorf("unexpected pid %d", pid)
+	}
+	_, candidates, err := ResolveLeaf(context.Background(), 1, LeafOptions{
+		Enumerator: fakeEnumerator(table),
+		Inspector:  fakeInspect,
+	})
+	if err == nil {
+		t.Fatalf("ResolveLeaf must never return the calling process's own pid, want an error since no other candidate exists (candidates=%+v)", candidates)
+	}
+}
+
+// -- Real npm integration (the exact E3.2 done-when scenario) ----------
+
+// resolveRealNodeAndNpmCli locates node's REAL executable path (via
+// process.execPath, NOT the "node" PATH entry's own location) and its
+// bundled npm-cli.js, skipping the test if either cannot be found. On a
+// dev machine where node is managed by a version manager (asdf, nvm, ...),
+// the "node"/"npm" PATH entries are commonly resolver shim scripts (which
+// fork their own transient subprocesses -- verified live on this
+// project's own dev box with asdf -- to pick the active node version
+// before exec'ing into the real binaries) rather than the real
+// interpreter, and that resolution's own forked helper processes would
+// otherwise race with (and can transiently masquerade as) the real
+// npm/node process tree the tests below exist to pin down. Running node
+// directly on npm's own npm-cli.js, once fully resolved, has exactly the
+// process shape a plain `npm start` settles into.
+func resolveRealNodeAndNpmCli(t *testing.T) (nodePath, npmCliPath string) {
+	t.Helper()
+	shimNodePath, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH")
+	}
+	out, err := exec.Command(shimNodePath, "-e", "process.stdout.write(process.execPath)").Output()
+	if err != nil {
+		t.Skipf("cannot resolve node's real exec path: %v", err)
+	}
+	nodePath = strings.TrimSpace(string(out))
+	npmCliPath = filepath.Join(filepath.Dir(filepath.Dir(nodePath)), "lib", "node_modules", "npm", "bin", "npm-cli.js")
+	if _, statErr := os.Stat(npmCliPath); statErr != nil {
+		t.Skipf("npm-cli.js not found next to node (%s): %v", npmCliPath, statErr)
+	}
+	return nodePath, npmCliPath
+}
+
+// startNpmStart spawns `npm start` (specifically, node running npm's own
+// npm-cli.js entry script -- see resolveRealNodeAndNpmCli) in a fresh temp
+// directory whose package.json's "start" script directly invokes node on
+// workload.js, returning the pid (already Setpgid'd, cleaned up via
+// t.Cleanup). Used by the ResolveLeaf-alone npm-wrapper test: this is the
+// exact live process shape E3.2's done-when names explicitly -- `npm
+// start` must resolve to its node child, not npm itself.
+func startNpmStart(t *testing.T) int32 {
+	t.Helper()
+	nodePath, npmCliPath := resolveRealNodeAndNpmCli(t)
+	workload := workloadJSPath(t)
+	dir := t.TempDir()
+	pkg := fmt.Sprintf(`{"name":"resolve-leaf-fixture","version":"1.0.0","private":true,"scripts":{"start":%q}}`, nodePath+" "+workload)
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(nodePath, npmCliPath, "start")
+	cmd.Dir = dir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot spawn npm: %v", err)
+	}
+	t.Cleanup(func() { killProcessGroup(t, cmd.Process.Pid) })
+	root := int32(cmd.Process.Pid)
+	waitForDescendantCount(t, root, 1, 15*time.Second)
+	return root
+}
+
+// TestResolveLeafSkipsNpmWrapperAndFindsNodeChild is the real, non-simulated
+// E3.2 done-when: "`yarn start` / `npm run dev` resolve to the node child,
+// not the wrapper" (roadmap, E3.2). Unlike
+// TestResolveLeafSkipsShWrapperAndFindsNodeChild (which simulates the shape
+// with sh -> node, a process whose Name already classifies as Unknown and
+// so never exercised the argv-based npm detection), this runs a real npm.
+func TestResolveLeafSkipsNpmWrapperAndFindsNodeChild(t *testing.T) {
+	root := startNpmStart(t)
+	binding, candidates, err := resolveLeafRetry(root, 10*time.Second)
+	if err != nil {
+		t.Fatalf("ResolveLeaf: %v (candidates=%+v)", err, candidates)
+	}
+	if binding.Runtime != RuntimeNode {
+		t.Fatalf("ResolveLeaf runtime = %q, want node (binding=%+v)", binding.Runtime, binding)
+	}
+	if binding.PID == root {
+		t.Fatal("ResolveLeaf resolved the npm wrapper itself instead of its node child")
+	}
+}
+
+// -- Resolve(..., DescendantOf: ...) tests (moved from bind_test.go; see --
+// -- its comment for why E3.2's own tests live here, not there)         --
+
+// TestResolveDescendantOfRestrictsToPidSubtree pins down the E3.2 addition
+// to ResolveOptions: DescendantOf must restrict candidate processes to a
+// live pid's descendants instead of scanning every process on the host.
+// This starts a real "sh -c 'sleep 30 & wait'" (the "& wait" forces sh to
+// fork a genuine child instead of exec-optimizing into "sleep" with the
+// SAME pid -- the behavior many sh implementations use for a single simple
+// command with no further shell work left, verified live on this project's
+// own dev box), then resolves with DescendantOf=<sh pid> and no OTHER
+// selector. With no runtime, codebase-root or main-script-suffix filter,
+// matchesBinding accepts ANY process, so the single result must be the
+// "sleep" child -- proving the DescendantOf restriction, not some other
+// selector, is what narrowed the match down from every live process to
+// exactly one.
+func TestResolveDescendantOfRestrictsToPidSubtree(t *testing.T) {
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not on PATH")
+	}
+	sleepPath, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("sleep not on PATH")
+	}
+	cmd := exec.Command(shPath, "-c", sleepPath+" 30 & wait")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot spawn sh: %v", err)
+	}
+	t.Cleanup(func() { killProcessGroup(t, cmd.Process.Pid) })
+
+	root := int32(cmd.Process.Pid)
+	ctx := context.Background()
+	deadline := time.Now().Add(5 * time.Second)
+	var binding Binding
+	for {
+		// Runtime must be set explicitly to RuntimeUnknown ("unknown"), the
+		// documented "no runtime filter" sentinel: the zero value of the
+		// Runtime field is the empty string, which matchesBinding treats as
+		// a (never-matching) filter for a runtime literally named "", not
+		// as "no filter". The CLI's own --runtime flag defaults to the
+		// string "unknown" for exactly this reason.
+		binding, err = Resolve(ctx, ResolveOptions{Runtime: RuntimeUnknown, DescendantOf: root})
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Resolve(DescendantOf=%d): %v", root, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if binding.PID == root {
+		t.Fatal("Resolve(DescendantOf) matched the sh wrapper itself, not its sleep child")
+	}
+	if !strings.Contains(binding.Name, "sleep") {
+		t.Fatalf("Resolve(DescendantOf) matched pid %d name=%q, want the sleep child", binding.PID, binding.Name)
+	}
+}
+
+// TestResolveDescendantOfCountsAsASelector pins down that DescendantOf alone
+// (no runtime/codebase-root/main-script-suffix) satisfies the "at least one
+// process selector is required" guard, matching --descendant-of being a
+// valid `monitor resolve` invocation on its own. Runtime is set explicitly
+// to RuntimeUnknown (the zero value is the empty string "", a DIFFERENT,
+// always-failing sentinel -- see matchesBinding), matching the CLI's own
+// --runtime flag default, and DescendantOf targets a pid vanishingly
+// unlikely to exist (so the subtree is empty and this cannot accidentally
+// pass by matching a real, unrelated process): this test's only job is to
+// prove the guard itself does not fire, not to check any match outcome.
+func TestResolveDescendantOfCountsAsASelector(t *testing.T) {
+	_, err := Resolve(context.Background(), ResolveOptions{Runtime: RuntimeUnknown, DescendantOf: 999999})
+	if err != nil && strings.Contains(err.Error(), "at least one process selector is required") {
+		t.Fatalf("DescendantOf alone (Runtime=RuntimeUnknown) should count as a selector, got %v", err)
+	}
+}
+
+// TestResolveDescendantOfSkipsNpmWrapperForRuntimeFilter pins down the
+// "combined mode" half of the E3.2 blocker, reproducing finding 2's exact
+// live repro shape: `sh -c 'npm start & wait'` with `--descendant-of <sh>
+// --runtime node` used to fail ambiguous (2 matches: npm itself AND its
+// node child), because DescendantOf's candidate filtering applied no
+// wrapper skip of its own. Root here is the SH pid, not npm's own pid --
+// unlike a bare `startNpmStart(t)` root, which tree.Descendants always
+// excludes by construction and so could never actually exercise this
+// wrapper-skip path in combined mode (npm would never be a candidate
+// either way). With npm as a MID-level descendant instead, npm's own
+// candidacy is exactly what must be filtered out.
+func TestResolveDescendantOfSkipsNpmWrapperForRuntimeFilter(t *testing.T) {
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not on PATH")
+	}
+	nodePath, npmCliPath := resolveRealNodeAndNpmCli(t)
+	workload := workloadJSPath(t)
+	dir := t.TempDir()
+	pkg := fmt.Sprintf(`{"name":"resolve-leaf-fixture","version":"1.0.0","private":true,"scripts":{"start":%q}}`, nodePath+" "+workload)
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := nodePath + " " + npmCliPath + " start & wait"
+	cmd := exec.Command(shPath, "-c", script)
+	cmd.Dir = dir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot spawn sh: %v", err)
+	}
+	t.Cleanup(func() { killProcessGroup(t, cmd.Process.Pid) })
+	root := int32(cmd.Process.Pid)
+	waitForDescendantCount(t, root, 2, 15*time.Second)
+
+	ctx := context.Background()
+	deadline := time.Now().Add(10 * time.Second)
+	var binding Binding
+	for {
+		binding, err = Resolve(ctx, ResolveOptions{Runtime: RuntimeNode, DescendantOf: root})
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Resolve(Runtime=node, DescendantOf=%d): %v", root, err)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if binding.MainScript == "" || !strings.HasSuffix(filepath.ToSlash(binding.MainScript), "workload.js") {
+		t.Fatalf("Resolve(DescendantOf) combined with --runtime node matched %+v, want the real workload.js child, not the npm wrapper", binding)
+	}
+}
+
+// TestResolveDescendantOfReclassifiesGoRunCompiledChild pins down the other
+// half of the same combined-mode gap: --descendant-of together with
+// --runtime go must reclassify the compiled `go run` child the same way
+// ResolveLeaf does, not match the `go` toolchain process itself (which
+// classifyRuntime already, separately, classifies as RuntimeGo on its own
+// process name).
+func TestResolveDescendantOfReclassifiesGoRunCompiledChild(t *testing.T) {
+	goPath, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go not on PATH")
+	}
+	goPlainDir := goPlainDirPath(t)
+	cmd := exec.Command(goPath, "run", ".")
+	cmd.Dir = goPlainDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot spawn go run: %v", err)
+	}
+	t.Cleanup(func() { killProcessGroup(t, cmd.Process.Pid) })
+
+	root := int32(cmd.Process.Pid)
+	waitForDescendantCount(t, root, 1, 20*time.Second)
+
+	ctx := context.Background()
+	deadline := time.Now().Add(15 * time.Second)
+	var binding Binding
+	for {
+		binding, err = Resolve(ctx, ResolveOptions{Runtime: RuntimeGo, DescendantOf: root})
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Resolve(Runtime=go, DescendantOf=%d): %v", root, err)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if binding.PID == root {
+		t.Fatal("Resolve(DescendantOf) combined with --runtime go matched the go toolchain itself, not the compiled binary")
+	}
+	if !looksLikeGoRunBinary(binding.Exe) {
+		t.Fatalf("resolved binary's exe %q does not look like a `go run` build artifact", binding.Exe)
+	}
+}
+
+// TestResolveDescendantOfAmbiguousReturnsTypedErrorWithCandidates pins down
+// the "exit code 2 with the candidate list" requirement for the COMBINED
+// mode, not just the "alone" leaf-resolution path AmbiguousLeafError
+// already covered for: two node children under the same sh wrapper, with
+// --runtime node added, must come back as *AmbiguousLeafError listing both
+// rather than an untyped "process selector is ambiguous" error the CLI
+// could only report as a plain exit 1.
+func TestResolveDescendantOfAmbiguousReturnsTypedErrorWithCandidates(t *testing.T) {
+	nodePath, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH")
+	}
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not on PATH")
+	}
+	workload := workloadJSPath(t)
+	script := nodePath + " " + workload + " & " + nodePath + " " + workload + " & wait"
+	cmd := exec.Command(shPath, "-c", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot spawn sh: %v", err)
+	}
+	t.Cleanup(func() { killProcessGroup(t, cmd.Process.Pid) })
+
+	root := int32(cmd.Process.Pid)
+	waitForDescendantCount(t, root, 2, 5*time.Second)
+
+	// Retry until the DEFINITIVE final state (both node children fully
+	// forked AND exec'd, so both classify as node) is reached, rather than
+	// stopping at the first non-"no process matched" result: right after
+	// sh forks each backgrounded job, there is a brief fork()-but-not-yet-
+	// exec()'d window where a child can still look like its parent shell
+	// image, not "node" yet. Stopping on an early, single-match SUCCESS in
+	// that window (rather than retrying past it) would latch onto a
+	// transient false negative for the ambiguity this test exists to pin
+	// down -- verified flaky under `go test -race`, which slows and
+	// reorders scheduling enough to land in that window noticeably more
+	// often than an unraced run does.
+	var rerr error
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		_, rerr = Resolve(context.Background(), ResolveOptions{Runtime: RuntimeNode, DescendantOf: root})
+		var ambiguous *AmbiguousLeafError
+		if errors.As(rerr, &ambiguous) {
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	var ambiguous *AmbiguousLeafError
+	if !errors.As(rerr, &ambiguous) {
+		t.Fatalf("Resolve(DescendantOf) combined with --runtime node error = %v, want *AmbiguousLeafError", rerr)
+	}
+	if len(ambiguous.Candidates) != 2 {
+		t.Fatalf("ambiguous candidates = %+v, want exactly 2", ambiguous.Candidates)
 	}
 }

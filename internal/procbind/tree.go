@@ -3,7 +3,9 @@ package procbind
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/shirou/gopsutil/v4/process"
@@ -176,13 +178,22 @@ func (t *Tree) Info(pid int32) (ProcInfo, bool) {
 }
 
 // wrapperNames are short process names that never host application code
-// themselves: shells, package-manager launchers, and TS-execution shims.
-// ResolveLeaf skips these as leaf candidates and looks at their children
-// instead. Most of these already classify as RuntimeUnknown via
-// classifyRuntime, so this list mostly documents intent; the one name that
-// does NOT classify as Unknown is "go" (see isGoToolchainWrapper), which is
-// deliberately handled separately since skipping it unconditionally would
-// also skip a real compiled binary that happens to be named "go".
+// themselves: shells and env. ResolveLeaf skips these as leaf candidates
+// and looks at their children instead.
+//
+// npm, yarn, npx, pnpm, tsx and ts-node are deliberately NOT in this map,
+// even though E3.2 names all of them as wrappers to skip: each ships as a
+// `#!/usr/bin/env node` script, so the live process's kernel-reported
+// short name (what gopsutil's Name/PPID enumeration reads, and what "go"
+// would collide with too if it were name-based) is "node", not "npm" or
+// "yarn" -- verified live on this project's own dev box (`npm start` and
+// real `yarn start` both report Name=="node"). A name-based map entry for
+// them would therefore never fire on the exact platform E3.2 exists for.
+// isNodeHostedWrapper below detects them by argv instead, the only signal
+// that actually distinguishes them from an ordinary `node app.js`. These
+// entries stay in the map anyway as a defensive/documentation fallback for
+// the rare case a shim genuinely execs as a binary literally named that
+// (e.g. some corepack/nvm shim shapes).
 var wrapperNames = map[string]bool{
 	"sh": true, "bash": true, "zsh": true, "dash": true, "env": true,
 	"yarn": true, "npm": true, "npx": true, "pnpm": true,
@@ -193,29 +204,116 @@ func isWrapperName(name string) bool {
 	return wrapperNames[strings.ToLower(filepath.Base(name))]
 }
 
+// nodeWrapperTitles are the argv[0] values npm and classic yarn (v1) set
+// via process.title once running, either bare ("npm", "yarn") or -- since a
+// title rewrite on POSIX systems overwrites the process's own argv memory
+// region, which is exactly what gopsutil's KERN_PROCARGS2-backed Cmdline()
+// read then sees, the identical phenomenon bind.go's
+// extractBundlerProctitleScript already handles for Ruby's Bundler --
+// collapsed into a single whitespace-joined element together with the
+// invoked script/args (e.g. "npm start"). Only the first whitespace field
+// of cmdline[0] is checked for exactly this reason.
+var nodeWrapperTitles = map[string]bool{
+	"npm": true, "yarn": true, "npx": true, "pnpm": true,
+	"tsx": true, "ts-node": true,
+}
+
+// nodeWrapperScriptBasenames are entry-script basenames npm/npx/pnpm and
+// classic yarn's JS launcher ship as, for when no title rewrite happened
+// (or gopsutil could not read it) and the wrapper is still visible as an
+// ordinary "node /path/to/X ..." argv.
+var nodeWrapperScriptBasenames = map[string]bool{
+	"npm-cli.js": true, "npx-cli.js": true, "yarn.js": true,
+	"pnpm.cjs": true, "pnpm.js": true,
+}
+
+// nodeWrapperPathSegments matches entry-script paths whose basename alone
+// is not distinctive enough (tsx and ts-node's CLI entry files) or that
+// classic yarn also ships as a bin shim rather than a bare *.js file.
+var nodeWrapperPathSegments = []string{
+	"/yarn/bin/yarn", "tsx/dist/cli.mjs", "tsx/dist/cli.cjs",
+	"ts-node/dist/bin.js", "ts-node/dist/bin-esm.js", "ts-node/dist/bin-transpile.js",
+}
+
+// isNodeHostedWrapper reports whether a process classifyRuntime already
+// sees as plain RuntimeNode is actually npm, yarn, npx, pnpm, tsx or
+// ts-node running as a `#!/usr/bin/env node` script -- see the doc comment
+// on wrapperNames for why the process's *Name* can never distinguish this
+// case. The only source of truth left is argv: either a rewritten process
+// title or the path to the wrapper's own entry script.
+func isNodeHostedWrapper(cmdline []string) bool {
+	if len(cmdline) == 0 {
+		return false
+	}
+	if fields := strings.Fields(cmdline[0]); len(fields) > 0 {
+		if nodeWrapperTitles[strings.ToLower(filepath.Base(fields[0]))] {
+			return true
+		}
+	}
+	for _, arg := range cmdline {
+		if nodeWrapperScriptBasenames[strings.ToLower(filepath.Base(arg))] {
+			return true
+		}
+		lower := strings.ToLower(filepath.ToSlash(arg))
+		for _, seg := range nodeWrapperPathSegments {
+			if strings.Contains(lower, seg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // isGoToolchainWrapper reports whether binding is the `go` toolchain itself
 // fronting a `go run` invocation, as opposed to a compiled binary that
 // happens to be named "go". classifyRuntime (bind.go) already classifies a
 // bare "go" process name as RuntimeGo, which is correct for a
 // statically-compiled service literally named "go" but wrong here: under
 // `go run`, the live "go" process is the build/launch tool, and the actual
-// application runs as its child (see looksLikeGoRunBinary). Gating on
-// cmdline[1] == "run" keeps this from misfiring on `go build`, `go test`,
-// or a real Go binary that happens to be named "go".
+// application runs as its child (see looksLikeGoRunBinary). Gating on the
+// "run" subcommand (past a leading "-C dir"/"-C=dir" -- the only flag `go`
+// allows before its subcommand) keeps this from misfiring on `go build`,
+// `go test`, or a real Go binary that happens to be named "go".
 func isGoToolchainWrapper(info ProcInfo, binding Binding) bool {
 	if strings.ToLower(filepath.Base(info.Name)) != "go" {
 		return false
 	}
-	return len(binding.Cmdline) > 1 && binding.Cmdline[1] == "run"
+	args := binding.Cmdline
+	if len(args) < 2 {
+		return false
+	}
+	i := 1
+	switch {
+	case args[i] == "-C":
+		i += 2 // "-C" and its separate directory argument
+	case strings.HasPrefix(args[i], "-C="):
+		i++
+	}
+	return i < len(args) && args[i] == "run"
 }
 
-// looksLikeGoRunBinary reports whether exe sits inside the Go toolchain's
-// build cache or a per-invocation build temp directory -- both are known
-// locations for the binary `go run` executes, across Go versions/platforms:
-// the classic "$TMPDIR/go-buildNNN/b001/exe/<name>" per-invocation temp
-// directory, and the build-cache path Go now reuses directly on some
-// platforms/versions, "$GOCACHE/<xx>/<hash>-d/<name>" (verified live on
-// this machine: Go 1.26.6/darwin, GOCACHE under ~/Library/Caches/go-build).
+// goRunTempDirPattern matches the classic per-invocation build temp
+// directory shape `go run` has used across Go versions/platforms:
+// "$TMPDIR/go-buildNNN/b001/exe/<name>".
+var goRunTempDirPattern = regexp.MustCompile(`/go-build[^/]*/b\d+/exe/[^/]+$`)
+
+// goRunCacheDirPattern matches the build-cache path Go now reuses directly
+// on some platforms/versions instead of a fresh temp dir:
+// "$GOCACHE/<xx>/<hash>-d/<name>" (verified live on this machine, Go
+// 1.26.6/darwin, default GOCACHE under ~/Library/Caches/go-build, and with
+// a custom GOCACHE elsewhere). This is matched structurally by the
+// two-level "<2 hex chars>/<hex string>-d/<name>" shape rather than by
+// hardcoding a GOCACHE location, so it survives GOCACHE being redirected.
+var goRunCacheDirPattern = regexp.MustCompile(`/[0-9a-f]{2}/[0-9a-f]{8,64}-d/[^/]+$`)
+
+// looksLikeGoRunBinary reports whether exe sits inside one of the two known
+// `go run` build-output locations above. This is a structural path-shape
+// match rather than the previous bare `strings.Contains(exe, "/go-build")`
+// substring check, for two reasons: a bare substring check missed the
+// build-cache shape whenever a *custom* GOCACHE was warm already (its path
+// need not contain "/go-build" at all), and it could misclassify an
+// unrelated binary that merely happens to live under a directory whose
+// *name* contains "go-build" (e.g. "~/src/go-builder/bin/server").
 // classifyRuntime never sees this process as Go on its own, because its
 // live process name is the compiled program's own name (e.g. "go-plain"),
 // not "go" or "*.test".
@@ -223,7 +321,8 @@ func looksLikeGoRunBinary(exe string) bool {
 	if exe == "" {
 		return false
 	}
-	return strings.Contains(filepath.ToSlash(exe), "/go-build")
+	slash := filepath.ToSlash(exe)
+	return goRunTempDirPattern.MatchString(slash) || goRunCacheDirPattern.MatchString(slash)
 }
 
 func isSupportedLeafRuntime(rt Runtime) bool {
@@ -245,12 +344,22 @@ type Candidate struct {
 	MainScript string  `json:"main_script,omitempty"`
 }
 
+// InspectFunc matches Inspect's signature. LeafOptions.Inspector lets tests
+// substitute a fake one alongside a fake Enumerator.
+type InspectFunc func(ctx context.Context, pid int32, codebaseOverride string) (Binding, error)
+
 // LeafOptions configures ResolveLeaf. The zero value is the common case:
-// resolve against the live process table via DefaultEnumerator.
+// resolve against the live process table via DefaultEnumerator, inspecting
+// each candidate with the real Inspect.
 type LeafOptions struct {
 	// Enumerator overrides the process-table source; nil uses DefaultEnumerator.
 	// Tests inject a fake table here.
 	Enumerator Enumerator
+	// Inspector overrides per-candidate enrichment; nil uses Inspect. Tests
+	// inject a fake one, together with Enumerator, so the wrapper-skip
+	// logic (npm/yarn/npx/pnpm/tsx/ts-node, the go run toolchain) can be
+	// pinned down without touching the real process table.
+	Inspector InspectFunc
 }
 
 // AmbiguousLeafError is returned when two or more descendants at the same
@@ -289,26 +398,17 @@ func ResolveLeaf(ctx context.Context, root int32, opts LeafOptions) (Binding, []
 	if err != nil {
 		return Binding{}, nil, err
 	}
+	inspector := opts.Inspector
+	if inspector == nil {
+		inspector = Inspect
+	}
 
 	for _, level := range tree.descendantLevels(root) {
 		var matched []Binding
 		for _, pid := range level {
-			info, known := tree.byPID[pid]
-			if known && isWrapperName(info.Name) {
+			binding, ok := classifyLeafCandidate(ctx, tree, inspector, pid)
+			if !ok || !isSupportedLeafRuntime(binding.Runtime) {
 				continue
-			}
-			binding, inspectErr := Inspect(ctx, pid, "")
-			if inspectErr != nil {
-				continue // exited between enumeration and inspection
-			}
-			if isGoToolchainWrapper(info, binding) {
-				continue
-			}
-			if !isSupportedLeafRuntime(binding.Runtime) {
-				if !looksLikeGoRunBinary(binding.Exe) {
-					continue
-				}
-				binding.Runtime = RuntimeGo
 			}
 			matched = append(matched, binding)
 		}
@@ -326,4 +426,50 @@ func ResolveLeaf(ctx context.Context, root int32, opts LeafOptions) (Binding, []
 		}
 	}
 	return Binding{}, nil, fmt.Errorf("no runtime leaf process found under pid %d", root)
+}
+
+// classifyLeafCandidate applies E3.2's leaf-resolution rules to one
+// candidate pid: it is excluded (ok=false) when it is the calling process
+// itself, a name-known wrapper (shell/env), the `go` toolchain fronting
+// `go run`, or an npm-family/TS-execution wrapper hosted by node that still
+// has at least one child of its own (so its real runtime is expected to
+// show up as that child instead -- see isNodeHostedWrapper's doc comment).
+// A `go run` compiled child is reclassified to RuntimeGo here, before the
+// caller applies any runtime filter, so every caller sees the same
+// classification. binding is only meaningful when ok is true.
+//
+// Shared by ResolveLeaf's BFS and Resolve's DescendantOf candidate
+// filtering (bind.go), so both modes agree on what counts as a real
+// runtime leaf under a given pid.
+func classifyLeafCandidate(ctx context.Context, t *Tree, inspector InspectFunc, pid int32) (Binding, bool) {
+	if pid == int32(os.Getpid()) {
+		// Never resolve to the calling `monitor` process itself: when
+		// monitor runs under `go run`, its own compiled binary lives
+		// under the go build cache -- exactly the shape looksLikeGoRunBinary
+		// exists to recognize -- so resolving a `go run` ancestor's
+		// descendants could otherwise return monitor's OWN pid as the "go"
+		// leaf it just so happens to be. Ancestors of this process are not
+		// separately special-cased: in every realistic shape (a shell, the
+		// go toolchain itself) they are already excluded by the wrapper
+		// and go-toolchain checks below.
+		return Binding{}, false
+	}
+	info, known := t.byPID[pid]
+	if known && isWrapperName(info.Name) {
+		return Binding{}, false
+	}
+	binding, inspectErr := inspector(ctx, pid, "")
+	if inspectErr != nil {
+		return Binding{}, false // exited between enumeration and inspection
+	}
+	if isGoToolchainWrapper(info, binding) {
+		return Binding{}, false
+	}
+	if binding.Runtime == RuntimeNode && len(t.children[pid]) > 0 && isNodeHostedWrapper(binding.Cmdline) {
+		return Binding{}, false
+	}
+	if !isSupportedLeafRuntime(binding.Runtime) && looksLikeGoRunBinary(binding.Exe) {
+		binding.Runtime = RuntimeGo
+	}
+	return binding, true
 }

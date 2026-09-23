@@ -1,16 +1,11 @@
 package procbind
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 )
 
 func TestBindingJSONNeverReturnsArgv(t *testing.T) {
@@ -316,75 +311,8 @@ func TestMatchesBindingDisambiguatesRuntimeRootAndEntryPoint(t *testing.T) {
 	}
 }
 
-// TestResolveDescendantOfRestrictsToPidSubtree pins down the E3.2 addition
-// to ResolveOptions: DescendantOf must restrict candidate processes to a
-// live pid's descendants instead of scanning every process on the host.
-// This starts a real "sh -c 'sleep 30 & wait'" (the "& wait" forces sh to
-// fork a genuine child instead of exec-optimizing into "sleep" with the
-// SAME pid — the behavior many sh implementations use for a single simple
-// command with no further shell work left, verified live on this project's
-// own dev box; see tree_test.go for the same note against node), then
-// resolves with DescendantOf=<sh pid> and no OTHER selector. With no
-// runtime, codebase-root or main-script-suffix filter, matchesBinding
-// accepts ANY process, so the single result must be the "sleep" child --
-// proving the DescendantOf restriction, not some other selector, is what
-// narrowed the match down from every live process to exactly one.
-func TestResolveDescendantOfRestrictsToPidSubtree(t *testing.T) {
-	shPath, err := exec.LookPath("sh")
-	if err != nil {
-		t.Skip("sh not on PATH")
-	}
-	sleepPath, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Skip("sleep not on PATH")
-	}
-	cmd := exec.Command(shPath, "-c", sleepPath+" 30 & wait")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		t.Skipf("cannot spawn sh: %v", err)
-	}
-	t.Cleanup(func() {
-		if killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
-			t.Logf("kill process group %d: %v", cmd.Process.Pid, killErr)
-		}
-		_ = cmd.Wait()
-	})
-
-	root := int32(cmd.Process.Pid)
-	ctx := context.Background()
-	deadline := time.Now().Add(5 * time.Second)
-	var binding Binding
-	for {
-		// Runtime must be set explicitly to RuntimeUnknown ("unknown"), the
-		// documented "no runtime filter" sentinel: the zero value of the
-		// Runtime field is the empty string, which matchesBinding treats as
-		// a (never-matching) filter for a runtime literally named "", not
-		// as "no filter". The CLI's own --runtime flag defaults to the
-		// string "unknown" for exactly this reason.
-		binding, err = Resolve(ctx, ResolveOptions{Runtime: RuntimeUnknown, DescendantOf: root})
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("Resolve(DescendantOf=%d): %v", root, err)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if binding.PID == root {
-		t.Fatal("Resolve(DescendantOf) matched the sh wrapper itself, not its sleep child")
-	}
-	if !strings.Contains(binding.Name, "sleep") {
-		t.Fatalf("Resolve(DescendantOf) matched pid %d name=%q, want the sleep child", binding.PID, binding.Name)
-	}
-}
-
-// TestResolveDescendantOfCountsAsASelector pins down that DescendantOf alone
-// (no runtime/codebase-root/main-script-suffix) now satisfies the "at least
-// one process selector is required" guard, matching --descendant-of being a
-// valid `monitor resolve` invocation on its own.
-func TestResolveDescendantOfCountsAsASelector(t *testing.T) {
-	_, err := Resolve(context.Background(), ResolveOptions{DescendantOf: 1})
-	if err != nil && strings.Contains(err.Error(), "at least one process selector is required") {
-		t.Fatalf("DescendantOf alone should count as a selector, got %v", err)
-	}
-}
+// TestResolveDescendantOfRestrictsToPidSubtree and
+// TestResolveDescendantOfCountsAsASelector live in tree_test.go, alongside
+// the rest of E3.2's process-tree tests, not here: this file's ownership
+// for E3.2 is additions to Resolve/ResolveOptions only, not new top-level
+// tests of its own.

@@ -80,14 +80,35 @@ func Resolve(ctx context.Context, opts ResolveOptions) (Binding, error) {
 	if opts.Runtime == RuntimeUnknown && opts.CodebaseRoot == "" && opts.MainScriptSuffix == "" && opts.DescendantOf == 0 {
 		return Binding{}, fmt.Errorf("at least one process selector is required")
 	}
-	var candidatePIDs []int32
+	wantRoot := canonicalPath(opts.CodebaseRoot)
+	wantSuffix := filepath.Clean(opts.MainScriptSuffix)
+	matches := make([]Binding, 0, 2)
+
 	if opts.DescendantOf != 0 {
+		// Apply the SAME leaf-resolution rules ResolveLeaf's BFS uses
+		// (tree.go's classifyLeafCandidate) to every descendant before
+		// matching it against the caller's selector: without this, a
+		// `--descendant-of <pid> --runtime go` still matched the `go run`
+		// toolchain process itself (never reclassified to its compiled
+		// child), and an npm/yarn wrapper (which classifyRuntime sees as
+		// plain "node") collided with its own node child under
+		// `--runtime node`, producing a spurious ambiguous match. Filtering
+		// here keeps "alone" (ResolveLeaf) and "combined with another
+		// selector" (this branch) agreeing on what counts as a real
+		// runtime leaf under a given pid.
 		tree, err := BuildTree(ctx, nil)
 		if err != nil {
 			return Binding{}, err
 		}
 		for _, info := range tree.Descendants(opts.DescendantOf) {
-			candidatePIDs = append(candidatePIDs, info.PID)
+			binding, ok := classifyLeafCandidate(ctx, tree, Inspect, info.PID)
+			if !ok {
+				continue
+			}
+			if !matchesBinding(binding, opts, wantRoot, wantSuffix) {
+				continue
+			}
+			matches = append(matches, binding)
 		}
 	} else {
 		processes, err := process.ProcessesWithContext(ctx)
@@ -95,27 +116,37 @@ func Resolve(ctx context.Context, opts ResolveOptions) (Binding, error) {
 			return Binding{}, fmt.Errorf("list processes: %w", err)
 		}
 		for _, p := range processes {
-			candidatePIDs = append(candidatePIDs, p.Pid)
+			binding, inspectErr := Inspect(ctx, p.Pid, "")
+			if inspectErr != nil {
+				continue
+			}
+			if !matchesBinding(binding, opts, wantRoot, wantSuffix) {
+				continue
+			}
+			matches = append(matches, binding)
 		}
 	}
-	wantRoot := canonicalPath(opts.CodebaseRoot)
-	wantSuffix := filepath.Clean(opts.MainScriptSuffix)
-	matches := make([]Binding, 0, 2)
-	for _, pid := range candidatePIDs {
-		binding, inspectErr := Inspect(ctx, pid, "")
-		if inspectErr != nil {
-			continue
-		}
-		if !matchesBinding(binding, opts, wantRoot, wantSuffix) {
-			continue
-		}
-		matches = append(matches, binding)
-	}
+
 	sort.Slice(matches, func(i, j int) bool { return matches[i].PID < matches[j].PID })
 	if len(matches) == 0 {
-		return Binding{}, fmt.Errorf("no process matched runtime=%q codebase_root=%q main_script_suffix=%q descendant_of=%d", opts.Runtime, opts.CodebaseRoot, opts.MainScriptSuffix, opts.DescendantOf)
+		if opts.DescendantOf != 0 {
+			return Binding{}, fmt.Errorf("no process matched runtime=%q codebase_root=%q main_script_suffix=%q descendant_of=%d", opts.Runtime, opts.CodebaseRoot, opts.MainScriptSuffix, opts.DescendantOf)
+		}
+		return Binding{}, fmt.Errorf("no process matched runtime=%q codebase_root=%q main_script_suffix=%q", opts.Runtime, opts.CodebaseRoot, opts.MainScriptSuffix)
 	}
 	if len(matches) > 1 {
+		if opts.DescendantOf != 0 {
+			// Route through the same typed error ResolveLeaf uses, so the
+			// CLI can report exit code 2 with the full candidate list for
+			// EITHER shape of `resolve --descendant-of` -- alone or
+			// combined with another selector -- rather than only the
+			// "alone" leaf-resolution path.
+			candidates := make([]Candidate, 0, len(matches))
+			for _, match := range matches {
+				candidates = append(candidates, Candidate{PID: match.PID, Name: match.Name, Runtime: match.Runtime, MainScript: match.MainScript})
+			}
+			return Binding{}, &AmbiguousLeafError{Candidates: candidates}
+		}
 		identities := make([]string, 0, len(matches))
 		for _, match := range matches {
 			identities = append(identities, fmt.Sprintf("pid=%d name=%q main_script=%q", match.PID, match.Name, match.MainScript))
