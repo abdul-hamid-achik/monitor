@@ -52,6 +52,8 @@ preconditions:
       timeoutMs: 5000
     - run: "command -v node"
       timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
     - run: "test -f examples/polyglot/js/workload.js"
       timeoutMs: 5000
 
@@ -76,21 +78,37 @@ outcomes:
 
   - id: names_hot_line_17_json
     description: |
-      the JSON heatmap names heavyStringify's real hot line (17), not its
-      declaration line. Symbols/lines are already weight-sorted within a
-      function (heat.Build), and the schema's field order is
-      line,self,cum,pct_of_function — so the first "line" following the
-      first "heavyStringify" match is the highest-weighted one; no JSON
-      parser needed (same technique specs/profile_node_lines.yml uses).
+      the JSON heatmap names heavyStringify's real hot line (17) as its
+      MAX-SELF line, not just "17 appears somewhere" — lines are NOT
+      guaranteed weight-sorted (heat.Build emits them ascending by line
+      number), so this asserts on the actual self weight via python3,
+      matching specs/mcp_profile_lines.yml's own stronger technique,
+      instead of assuming the first "line" field after the first
+      "heavyStringify" match happens to be the hottest one (it commonly
+      isn't at a longer --duration, when the 2s sampling window's start
+      drifts past workload.js's early low-weight lines).
     verify:
       command:
-        run: >-
+        # A literal block (never a folded ">-" one): the python3 heredoc
+        # below needs its own real newlines preserved. YAML's folded style
+        # joins every line break into a single space instead -- verified
+        # live: that collapsed the whole python script onto ONE line with
+        # its original per-line indentation still attached, which Python
+        # then rejected outright ("IndentationError: unexpected indent")
+        # before ever reaching the assertion this outcome exists to check.
+        run: |
           PORT=$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close();});');
           node --jitless --inspect=127.0.0.1:$PORT examples/polyglot/js/workload.js >/tmp/monitor-spec-hot-pid-stderr.log 2>&1 &
           P=$!; sleep 1;
           ./bin/monitor hot "$P" --duration 2s --json > /tmp/monitor-spec-hot-pid.json 2>&1;
           kill "$P" 2>/dev/null;
-          awk '/"name":[[:space:]]*"heavyStringify"/{f=1} f && /"line":/{print; exit}' /tmp/monitor-spec-hot-pid.json | grep -q '"line":[[:space:]]*17'
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/monitor-spec-hot-pid.json'))
+          hs = next(f for f in d['functions'] if f['name'] == 'heavyStringify')
+          best = max(hs['lines'], key=lambda l: l.get('self', 0))
+          assert best['line'] == 17, hs['lines']
+          "
 
   - id: names_hot_line_17_human
     description: the human CodeFrame marks line 17 with the '>' hot-line marker
@@ -107,8 +125,10 @@ outcomes:
   - id: live_header_names_runtime_and_inspector
     description: |
       the human output opens with the roadmap's live-capture banner
-      ("monitor > node pid N ... inspector <addr> ..."), and never leaks a
-      ws:// URL (only the port, per the golden rule).
+      ("monitor > [<name> = ]node pid N ... inspector <addr> ..." — the
+      optional "<name> = " clause comes from the leaf's own main script,
+      workload.js here), and never leaks a ws:// URL (only the port, per
+      the golden rule).
     verify:
       command:
         run: >-
@@ -117,7 +137,8 @@ outcomes:
           P=$!; sleep 1;
           OUT=$(./bin/monitor hot "$P" --duration 2s);
           kill "$P" 2>/dev/null;
-          echo "$OUT" | head -1 | grep -q "^monitor > node pid" &&
+          echo "$OUT" | head -1 | grep -q "^monitor > " &&
+          echo "$OUT" | head -1 | grep -q "node pid" &&
           echo "$OUT" | head -1 | grep -q "inspector 127.0.0.1:$PORT" &&
           ! echo "$OUT" | grep -q "ws://"
 

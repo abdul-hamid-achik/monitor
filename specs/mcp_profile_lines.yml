@@ -106,7 +106,11 @@ outcomes:
           "
 
   - id: names_planted_hot_line_17
-    description: some function's lines[] names workload.js's planted hot line (17)
+    description: |
+      workload.js's planted hot line (17) is the MAX-SELF line, in the
+      MAX-SELF function (heavyStringify) — not just "17 appears somewhere",
+      which a top-3-by-cum cap could satisfy with 17 present but buried
+      under cooler lines/functions.
     verify:
       command:
         run: |
@@ -114,8 +118,9 @@ outcomes:
           import json
           d = json.load(open('/tmp/monitor-spec-mcp-lines/response.json'))
           lh = d['result']['structuredContent']['line_heatmap']
-          lines = [l['line'] for f in lh['functions'] for l in f.get('lines', [])]
-          assert 17 in lines, lines
+          hs = next(f for f in lh['functions'] if f['name'] == 'heavyStringify')
+          best = max(hs['lines'], key=lambda l: l.get('self', 0))
+          assert best['line'] == 17, hs['lines']
           "
 
   - id: bounded_to_top_3_functions_top_8_lines
