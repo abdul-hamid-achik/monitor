@@ -107,6 +107,119 @@ func TestIssuesListFiltersLimitsAndRendersHumanOutput(t *testing.T) {
 	}
 }
 
+// TestIssuesListWindowFlags exercises --since/--until/--run-id/--release/
+// --kind end to end through the CLI command (E2.6), against the same
+// issues.Store.List filters the MCP monitor_issues tool maps.
+func TestIssuesListWindowFlags(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.veclite")
+	store := openIssueCLIStore(t, path)
+	base := time.Now().UTC().Add(-time.Hour)
+	exIssue, _, err := store.UpsertOccurrence(issues.OccurrenceInput{
+		ObservedAt: base, Project: "monitor", Kind: issues.KindException, Message: "boom",
+		RunID: "run-a", Release: "rel-a",
+	})
+	if err != nil {
+		t.Fatalf("seed exception issue: %v", err)
+	}
+	if _, _, err := store.UpsertOccurrence(issues.OccurrenceInput{
+		ObservedAt: base, Project: "monitor", Kind: "monitor.alert.cpu_spike", Message: "cpu spike", RunID: "run-a",
+	}); err != nil {
+		t.Fatalf("seed alert issue: %v", err)
+	}
+	closeIssueCLIStore(t, store)
+
+	output, err := executeIssuesCommand(t, path, "list", "--kind", "exception", "--json")
+	if err != nil {
+		t.Fatalf("list --kind exception: %v", err)
+	}
+	var got []issues.Issue
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatalf("decode: %v (%s)", err, output)
+	}
+	if len(got) != 1 || got[0].ID != exIssue.ID {
+		t.Fatalf("--kind exception = %+v, want only %s", got, exIssue.ID)
+	}
+
+	output, err = executeIssuesCommand(t, path, "list", "--run-id", "run-a", "--json")
+	if err != nil {
+		t.Fatalf("list --run-id: %v", err)
+	}
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("--run-id run-a = %+v, want both issues", got)
+	}
+
+	output, err = executeIssuesCommand(t, path, "list", "--release", "rel-a", "--json")
+	if err != nil {
+		t.Fatalf("list --release: %v", err)
+	}
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != exIssue.ID {
+		t.Fatalf("--release rel-a = %+v, want only %s", got, exIssue.ID)
+	}
+
+	output, err = executeIssuesCommand(t, path, "list", "--since", "24h", "--json")
+	if err != nil {
+		t.Fatalf("list --since 24h: %v", err)
+	}
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("--since 24h = %+v, want both issues (seeded 1h ago)", got)
+	}
+
+	output, err = executeIssuesCommand(t, path, "list", "--since", "1m", "--json")
+	if err != nil {
+		t.Fatalf("list --since 1m: %v", err)
+	}
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("--since 1m = %+v, want none (seeded 1h ago)", got)
+	}
+
+	// --until N means "active at/before N ago": a bound OLDER than the
+	// issues' first_seen (1h ago) excludes them (their whole window starts
+	// after the bound); a bound more RECENT than first_seen includes them.
+	output, err = executeIssuesCommand(t, path, "list", "--until", "2h", "--json")
+	if err != nil {
+		t.Fatalf("list --until 2h: %v", err)
+	}
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("--until 2h = %+v, want none (both issues' first_seen is 1h ago, after the 2h-ago bound)", got)
+	}
+
+	output, err = executeIssuesCommand(t, path, "list", "--until", "30m", "--json")
+	if err != nil {
+		t.Fatalf("list --until 30m: %v", err)
+	}
+	if err := json.Unmarshal([]byte(output), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("--until 30m = %+v, want both issues (first_seen 1h ago is at/before the 30m-ago bound)", got)
+	}
+
+	if _, err := executeIssuesCommand(t, path, "list", "--kind", "bogus"); err == nil {
+		t.Fatal("--kind bogus succeeded")
+	}
+	if _, err := executeIssuesCommand(t, path, "list", "--since", "not-a-time"); err == nil {
+		t.Fatal("--since not-a-time succeeded")
+	}
+	if _, err := executeIssuesCommand(t, path, "list", "--until", "not-a-time"); err == nil {
+		t.Fatal("--until not-a-time succeeded")
+	}
+}
+
 func TestIssuesShowJSONBoundsOccurrences(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "issues.veclite")
 	store := openIssueCLIStore(t, path)

@@ -80,7 +80,15 @@ type Service struct {
 
 	// IssuesList and IssueGet expose the durable local issue index. Both are
 	// read-only and should open a fresh shared-read snapshot per call.
-	IssuesList func(ctx context.Context, opts issues.ListOptions) ([]issues.Issue, error)
+	//
+	// IssuesList takes the monitor_issues filters exactly as the MCP caller
+	// supplied them (Since/Until unparsed strings) rather than a pre-built
+	// issues.ListOptions: interpreting them -- issues.ParseWindowBound, the
+	// same shared parser the CLI's --since/--until flags use -- is the
+	// Service implementation's job (internal/cli/mcp.go's listIssuesForMCP),
+	// not handleIssues'. This keeps the MCP handler a pure field copy with
+	// zero business logic, matching every other tool's handler/Service split.
+	IssuesList func(ctx context.Context, filter IssuesListFilter) ([]issues.Issue, error)
 	IssueGet   func(ctx context.Context, id string, occurrenceLimit int) (issues.Issue, []issues.Occurrence, error)
 
 	// Kill terminates the given PID and returns the verified Result (outcome
@@ -101,6 +109,22 @@ type Service struct {
 	// Record starts a vidtrace recording for the given PID. Used by
 	// monitor_record. Optional; if nil the tool reports vidtrace missing.
 	Record func(ctx context.Context, pid int32, durationSeconds int) (string, error)
+}
+
+// IssuesListFilter carries monitor_issues' filters exactly as the MCP
+// caller supplied them: Since/Until stay unparsed strings so handleIssues
+// can be a pure field copy, and the Service implementation
+// (internal/cli/mcp.go's listIssuesForMCP) is the single place -- alongside
+// the CLI's --since/--until flags -- that calls issues.ParseWindowBound.
+type IssuesListFilter struct {
+	Statuses []issues.Status
+	Project  string
+	Service  string
+	Since    string
+	Until    string
+	RunID    string
+	Release  string
+	Kind     string
 }
 
 // InvestigateOptions is the optional input for Service.Investigate beyond pid.
@@ -200,7 +224,9 @@ func (s *Server) register() {
 		Name:        "monitor_issues",
 		Annotations: readOnlyAnnotations("List local issues"),
 		Description: "List recurring local issues, newest first. Read-only; no confirm field. " +
-			"Filter by statuses (open|resolved|ignored), project, or service; limit defaults to 50 and is capped at 200.",
+			"Filter by statuses (open|resolved|ignored), project, service, since/until (RFC3339 or a duration " +
+			"like 10m/24h meaning that long ago), run_id, release, or kind (exception|alert|investigation|any); " +
+			"limit defaults to 50 and is capped at 200.",
 	}, s.handleIssues)
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_issue",
@@ -290,7 +316,17 @@ type issuesInput struct {
 	Statuses []string `json:"statuses,omitempty" jsonschema:"optional statuses: open, resolved, ignored"`
 	Project  string   `json:"project,omitempty"  jsonschema:"case-insensitive project filter"`
 	Service  string   `json:"service,omitempty"  jsonschema:"case-insensitive service filter"`
-	Limit    int      `json:"limit,omitempty"    jsonschema:"maximum issues to return (default 50, max 200)"`
+	// Since/Until/RunID/Release/Kind (E2.6) are passed through unparsed:
+	// issues.ParseWindowBound and issues.Store.List (the domain/service
+	// layer, not this handler) own interpreting them, so the CLI's
+	// --since/--until/--run-id/--release/--kind flags and this tool always
+	// mean exactly the same filter.
+	Since   string `json:"since,omitempty"   jsonschema:"only issues active at/after this time: RFC3339, or a duration like 10m/24h meaning that long ago"`
+	Until   string `json:"until,omitempty"   jsonschema:"only issues active at/before this time: RFC3339, or a duration like 10m/24h meaning that long ago"`
+	RunID   string `json:"run_id,omitempty"  jsonschema:"filter by a run id the issue has seen"`
+	Release string `json:"release,omitempty" jsonschema:"filter by a release the issue has seen"`
+	Kind    string `json:"kind,omitempty"    jsonschema:"filter by kind: exception, alert, investigation, or any (default: any)"`
+	Limit   int    `json:"limit,omitempty"    jsonschema:"maximum issues to return (default 50, max 200)"`
 }
 
 type issueInput struct {
@@ -521,12 +557,27 @@ func (s *Server) handleIssues(ctx context.Context, _ *mcp.CallToolRequest, in *i
 	if limit > maxIssuesLimit {
 		limit = maxIssuesLimit
 	}
-	items, err := s.svc.IssuesList(ctx, issues.ListOptions{Statuses: statuses, Project: in.Project, Service: in.Service})
+	// Since/Until are passed through unparsed: interpreting them
+	// (issues.ParseWindowBound) is the Service implementation's job (see
+	// IssuesListFilter's doc comment), not this handler's -- the actual
+	// filter matching (window overlap, RunID/Release aggregate lookup, Kind
+	// prefix rule) all happens in issues.Store.List either way.
+	items, err := s.svc.IssuesList(ctx, IssuesListFilter{
+		Statuses: statuses, Project: in.Project, Service: in.Service,
+		Since: in.Since, Until: in.Until, RunID: in.RunID, Release: in.Release, Kind: in.Kind,
+	})
 	if err != nil {
 		return result(map[string]any{"issues": []issues.Issue{}, "total": 0, "truncated": false, "error": err.Error()})
 	}
 	if items == nil {
 		items = []issues.Issue{}
+	}
+	// Payload diet (AC-6): a list row carries only a trimmed
+	// LatestException summary, never the full frame/cause detail -- see
+	// issues.SummarizeForList. monitor_issue (Store.Get, one issue) keeps
+	// the untrimmed detail.
+	for i := range items {
+		items[i] = issues.SummarizeForList(items[i])
 	}
 	total := len(items)
 	if len(items) > limit {

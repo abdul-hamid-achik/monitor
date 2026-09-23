@@ -380,6 +380,25 @@ func TestConcurrentUpsertIsAtomicWithinStore(t *testing.T) {
 	}
 }
 
+// TestListValidatesFiltersEvenOnAnEmptyStore is a regression test: an
+// invalid --status/--kind must be rejected the same way against a store
+// whose issues collection does not exist yet (nothing has ever been
+// written) as against a populated one, not silently accepted just because
+// List's early "nothing to filter" path would otherwise skip validation.
+func TestListValidatesFiltersEvenOnAnEmptyStore(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "issues.veclite"))
+	if _, err := store.List(ListOptions{Kind: "bogus"}); err == nil {
+		t.Fatal("invalid Kind on an empty store did not return an error")
+	}
+	if _, err := store.List(ListOptions{Statuses: []Status{"bogus"}}); err == nil {
+		t.Fatal("invalid Statuses on an empty store did not return an error")
+	}
+	got, err := store.List(ListOptions{Kind: "any"})
+	if err != nil || len(got) != 0 {
+		t.Fatalf("valid filters on an empty store = %+v, %v", got, err)
+	}
+}
+
 func TestListFiltersSortsLimitsAndUsesNonNilEmptySlices(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "issues.veclite"))
 	empty, err := store.List(ListOptions{})
@@ -596,6 +615,385 @@ func TestStoreRetentionBoundsIssuesAndOccurrences(t *testing.T) {
 	}
 	if updated.OccurrenceCount != 4 {
 		t.Fatalf("cumulative occurrence count = %d, want 4", updated.OccurrenceCount)
+	}
+}
+
+// TestIssueOccurrenceDecodeV1_15Unchanged decodes a hand-written v1.15-shape
+// Issue/Occurrence JSON fixture -- every field that existed before E2.3/E2.6
+// added Culprit/LatestException/FirstGitSHA/Level/Handled/Runs/Releases
+// (Issue) and Exception/DedupeKey (Occurrence) -- and asserts the original
+// fields decode exactly as before, with every new field at its zero value.
+// This is the "additive; v1.15 JSON must still decode unchanged" done-when.
+func TestIssueOccurrenceDecodeV1_15Unchanged(t *testing.T) {
+	const issueJSON = `{
+		"id": "ISS-0123456789ABCDEF",
+		"fingerprint": "abc123",
+		"fingerprint_version": "v1",
+		"project": "checkout",
+		"service": "api",
+		"kind": "investigation",
+		"title": "Investigation: api",
+		"message": "manual process investigation",
+		"exception_type": "",
+		"symbols": ["pkg.Handler"],
+		"severity": "warning",
+		"status": "open",
+		"first_seen": "2026-07-27T12:00:00Z",
+		"last_seen": "2026-07-27T12:05:00Z",
+		"occurrence_count": 3,
+		"reopened_count": 0
+	}`
+	var issue Issue
+	if err := json.Unmarshal([]byte(issueJSON), &issue); err != nil {
+		t.Fatalf("decode v1.15 issue: %v", err)
+	}
+	if issue.ID != "ISS-0123456789ABCDEF" || issue.FingerprintVersion != "v1" || issue.OccurrenceCount != 3 ||
+		len(issue.Symbols) != 1 || issue.Symbols[0] != "pkg.Handler" {
+		t.Fatalf("v1.15 fields decoded wrong: %+v", issue)
+	}
+	if issue.Culprit != nil || issue.LatestException != nil || issue.FirstGitSHA != "" ||
+		issue.Level != "" || issue.Handled != nil || len(issue.Runs) != 0 || len(issue.Releases) != 0 {
+		t.Fatalf("E2.3/E2.6 fields were not zero-valued on a v1.15 issue: %+v", issue)
+	}
+	// Round-tripping through the current struct and back must not corrupt
+	// the original fields either (the additive fields all carry omitempty).
+	reencoded, err := json.Marshal(issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var roundTrip Issue
+	if err := json.Unmarshal(reencoded, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if roundTrip.ID != issue.ID || roundTrip.OccurrenceCount != issue.OccurrenceCount {
+		t.Fatalf("round-trip changed v1.15 fields: %+v", roundTrip)
+	}
+
+	const occurrenceJSON = `{
+		"id": "OCC-0123456789ABCDEF",
+		"issue_id": "ISS-0123456789ABCDEF",
+		"observed_at": "2026-07-27T12:00:00Z",
+		"project": "checkout",
+		"service": "api",
+		"kind": "investigation",
+		"title": "Investigation: api",
+		"message": "manual process investigation",
+		"exception_type": "",
+		"symbols": ["pkg.Handler"],
+		"severity": "warning",
+		"run_id": "run-1",
+		"release": "v1.15.0",
+		"pid": 42,
+		"tree_hash": "deadbeef",
+		"evidence_refs": ["fcheap://stash/1"],
+		"evidence": [{"kind": "monitor.incident", "uri": "fcheap://stash/1"}]
+	}`
+	var occurrence Occurrence
+	if err := json.Unmarshal([]byte(occurrenceJSON), &occurrence); err != nil {
+		t.Fatalf("decode v1.15 occurrence: %v", err)
+	}
+	if occurrence.ID != "OCC-0123456789ABCDEF" || occurrence.RunID != "run-1" || occurrence.PID != 42 ||
+		len(occurrence.EvidenceRefs) != 1 || len(occurrence.Evidence) != 1 {
+		t.Fatalf("v1.15 occurrence fields decoded wrong: %+v", occurrence)
+	}
+	if occurrence.Exception != nil || occurrence.DedupeKey != "" {
+		t.Fatalf("E2.3 occurrence fields were not zero-valued on a v1.15 occurrence: %+v", occurrence)
+	}
+}
+
+func TestListWindowFiltersSinceUntilRunIDReleaseKind(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "issues.veclite"))
+	base := time.Now().UTC().Add(-time.Hour)
+
+	exceptionFingerprint := strings.Repeat("ab", 32) // 64 hex chars, like a real sha256 fingerprint
+	exIssue, _, err := store.UpsertOccurrence(OccurrenceInput{
+		ObservedAt: base, Project: "acme", Kind: KindException, Message: "boom",
+		RunID: "run-a", Release: "rel-a", Fingerprint: exceptionFingerprint, FingerprintVersion: FingerprintVersionV2,
+	})
+	if err != nil {
+		t.Fatalf("seed exception issue: %v", err)
+	}
+	// A second occurrence on the SAME issue widens its Runs/Releases set and
+	// its LastSeen without opening a new issue.
+	if _, _, err := store.UpsertOccurrence(OccurrenceInput{
+		ObservedAt: base.Add(30 * time.Minute), Project: "acme", Kind: KindException, Message: "boom",
+		RunID: "run-b", Release: "rel-b", Fingerprint: exceptionFingerprint, FingerprintVersion: FingerprintVersionV2,
+	}); err != nil {
+		t.Fatalf("second exception occurrence: %v", err)
+	}
+
+	alertIssue, _, err := store.UpsertOccurrence(OccurrenceInput{
+		ObservedAt: base, Project: "acme", Kind: "monitor.alert.cpu_spike", Message: "cpu spike", RunID: "run-a",
+	})
+	if err != nil {
+		t.Fatalf("seed alert issue: %v", err)
+	}
+
+	investigationIssue, _, err := store.UpsertOccurrence(OccurrenceInput{
+		ObservedAt: base, Project: "acme", Kind: "investigation", Message: "manual process investigation",
+	})
+	if err != nil {
+		t.Fatalf("seed investigation issue: %v", err)
+	}
+
+	// run-a matches the exception issue (first occurrence) and the alert
+	// issue, but not the investigation issue.
+	byRun, err := store.List(ListOptions{RunID: "run-a"})
+	if err != nil {
+		t.Fatalf("List RunID: %v", err)
+	}
+	if !containsIssueID(byRun, exIssue.ID) || !containsIssueID(byRun, alertIssue.ID) || containsIssueID(byRun, investigationIssue.ID) {
+		t.Fatalf("RunID=run-a results = %+v", byRun)
+	}
+	// run-b was only ever seen by the exception issue's second occurrence.
+	byRunB, err := store.List(ListOptions{RunID: "run-b"})
+	if err != nil {
+		t.Fatalf("List RunID: %v", err)
+	}
+	if len(byRunB) != 1 || byRunB[0].ID != exIssue.ID {
+		t.Fatalf("RunID=run-b results = %+v", byRunB)
+	}
+	if _, err := store.List(ListOptions{RunID: "no-such-run"}); err != nil {
+		t.Fatal(err)
+	}
+	byMissingRun, err := store.List(ListOptions{RunID: "no-such-run"})
+	if err != nil || len(byMissingRun) != 0 {
+		t.Fatalf("RunID=no-such-run results = %+v, err=%v", byMissingRun, err)
+	}
+
+	byRelease, err := store.List(ListOptions{Release: "rel-b"})
+	if err != nil || len(byRelease) != 1 || byRelease[0].ID != exIssue.ID {
+		t.Fatalf("Release=rel-b results = %+v, err=%v", byRelease, err)
+	}
+
+	byKindException, err := store.List(ListOptions{Kind: "exception"})
+	if err != nil || len(byKindException) != 1 || byKindException[0].ID != exIssue.ID {
+		t.Fatalf("Kind=exception results = %+v, err=%v", byKindException, err)
+	}
+	byKindAlert, err := store.List(ListOptions{Kind: "alert"})
+	if err != nil || len(byKindAlert) != 1 || byKindAlert[0].ID != alertIssue.ID {
+		t.Fatalf("Kind=alert results = %+v, err=%v", byKindAlert, err)
+	}
+	byKindInvestigation, err := store.List(ListOptions{Kind: "investigation"})
+	if err != nil || len(byKindInvestigation) != 1 || byKindInvestigation[0].ID != investigationIssue.ID {
+		t.Fatalf("Kind=investigation results = %+v, err=%v", byKindInvestigation, err)
+	}
+	byKindAny, err := store.List(ListOptions{Kind: "any"})
+	if err != nil || len(byKindAny) != 3 {
+		t.Fatalf("Kind=any results = %+v, err=%v", byKindAny, err)
+	}
+	if _, err := store.List(ListOptions{Kind: "bogus"}); err == nil {
+		t.Fatal("invalid kind did not return an error")
+	}
+
+	// Since/Until: base+90m is after every issue's LastSeen -> excluded;
+	// base-1m..base+1h includes them (the exception issue's LastSeen is
+	// base+30m).
+	future := base.Add(90 * time.Minute)
+	excluded, err := store.List(ListOptions{Since: future})
+	if err != nil || len(excluded) != 0 {
+		t.Fatalf("Since in the future results = %+v, err=%v", excluded, err)
+	}
+	included, err := store.List(ListOptions{Since: base.Add(-time.Minute), Until: base.Add(time.Hour)})
+	if err != nil || len(included) != 3 {
+		t.Fatalf("Since/Until window results = %+v, err=%v", included, err)
+	}
+}
+
+func containsIssueID(issues []Issue, id string) bool {
+	for _, issue := range issues {
+		if issue.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// TestListWindowFilterPerformanceOver10kOccurrences is the E2.6 done-when:
+// "a window query over 10k occurrences takes less than 300ms". Runs/
+// Releases aggregates (see Issue.Runs's doc comment) are what makes this
+// possible: List reads only the issues collection, never the occurrences
+// one, so its cost tracks the number of ISSUES, not occurrences.
+//
+// Seeding goes straight through veclite's collection API (store.db is
+// reachable because this test lives in-package) instead of 10,000
+// UpsertOccurrence calls: veclite v0.22.1 (pinned in go.mod; the WAL/atomic-
+// Save fix is upstream roadmap item E1.8a, not this package's job) fsyncs
+// and rewrites the WHOLE file on every UpsertOccurrence's Sync, so seeding
+// this way is O(n^2) and takes minutes, not milliseconds -- it would dwarf
+// the 300ms budget with setup cost that has nothing to do with what this
+// test actually measures (List's own algorithmic cost). One Sync after
+// every record is inserted keeps setup fast while still exercising List
+// against a store whose occurrences collection genuinely holds 10k rows.
+func TestListWindowFilterPerformanceOver10kOccurrences(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "issues.veclite"))
+	const (
+		totalOccurrences  = 10_000
+		numIssues         = 1_000
+		occurrencesPerIss = totalOccurrences / numIssues
+	)
+	base := time.Now().UTC().Add(-time.Hour)
+	nato := []string{
+		"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+		"india", "juliett", "kilo", "lima", "mike", "november", "oscar", "papa",
+		"quebec", "romeo", "sierra", "tango", "uniform", "victor", "whiskey",
+		"xray", "yankee", "zulu",
+	}
+	issueWord := func(n int) string { return nato[n/len(nato)%len(nato)] + "-" + nato[n%len(nato)] }
+
+	for i := 0; i < numIssues; i++ {
+		id := fmt.Sprintf("ISS-PERF%05d", i)
+		lastSeen := base.Add(time.Duration(i) * time.Second)
+		issue := Issue{
+			ID: id, Fingerprint: fmt.Sprintf("perf-fingerprint-%d", i), FingerprintVersion: FingerprintVersionV2,
+			Project: "acme", Kind: KindException, Title: issueWord(i), Message: issueWord(i),
+			Symbols: []string{}, Status: StatusOpen,
+			FirstSeen: base, LastSeen: lastSeen, OccurrenceCount: occurrencesPerIss,
+			// Every issue sees its own RunID/Release; issue #7 is the one
+			// the assertions below look for.
+			Runs: []string{fmt.Sprintf("run-%d", i)}, Releases: []string{"v1"},
+		}
+		content, err := json.Marshal(issue)
+		if err != nil {
+			t.Fatalf("marshal seed issue %d: %v", i, err)
+		}
+		if _, err := store.db.Collection(issuesCollection).InsertTextDocument(string(content), map[string]any{
+			"id": issue.ID, "fingerprint": issue.Fingerprint, "status": string(issue.Status),
+			"project": issue.Project, "service": issue.Service, "last_seen": issue.LastSeen,
+		}); err != nil {
+			t.Fatalf("insert seed issue %d: %v", i, err)
+		}
+		for j := 0; j < occurrencesPerIss; j++ {
+			occurrence := Occurrence{
+				ID: fmt.Sprintf("OCC-PERF%05d-%02d", i, j), IssueID: id,
+				ObservedAt: base.Add(time.Duration(i) * time.Second), Project: "acme", Kind: KindException,
+				Symbols: []string{}, EvidenceRefs: []string{}, Evidence: []EvidenceRef{}, Count: 1,
+			}
+			occContent, err := json.Marshal(occurrence)
+			if err != nil {
+				t.Fatalf("marshal seed occurrence %d/%d: %v", i, j, err)
+			}
+			if _, err := store.db.Collection(occurrencesCollection).InsertTextDocument(string(occContent), map[string]any{
+				"id": occurrence.ID, "issue_id": occurrence.IssueID, "observed_at": occurrence.ObservedAt, "dedupe_key": "",
+			}); err != nil {
+				t.Fatalf("insert seed occurrence %d/%d: %v", i, j, err)
+			}
+		}
+	}
+	if err := store.db.Sync(); err != nil {
+		t.Fatalf("Sync after bulk seed: %v", err)
+	}
+	if got := store.db.Collection(occurrencesCollection).Count(); got != totalOccurrences {
+		t.Fatalf("seeded %d occurrences, want %d", got, totalOccurrences)
+	}
+
+	start := time.Now()
+	got, err := store.List(ListOptions{RunID: "run-7", Release: "v1", Kind: "exception", Since: base.Add(-time.Minute)})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "ISS-PERF00007" {
+		t.Fatalf("filtered result = %+v, want exactly issue #7", got)
+	}
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("List over a store with %d occurrences (%d issues) took %s, want < 300ms", totalOccurrences, numIssues, elapsed)
+	}
+}
+
+// TestCulpritLatestExceptionTrackObservedAtNotWriteOrder is the fix for the
+// minor finding at store.go:227: Issue.Culprit/LatestException are
+// documented as tracking the issue's LATEST occurrence, but were overwritten
+// by whichever write arrived last regardless of that write's ObservedAt.
+// Recording a NEWER occurrence first and then replaying an OLDER one (as
+// `stacktrace parse --record` catching up on a log would) must leave the
+// newer occurrence's culprit/exception detail in place -- LastSeen already
+// gets this right; Culprit/LatestException must match it.
+func TestCulpritLatestExceptionTrackObservedAtNotWriteOrder(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "issues.veclite"))
+	newExceptionInfo := func(line int) *ExceptionInfo {
+		return &ExceptionInfo{Type: "TypeError", Value: fmt.Sprintf("boom at line %d", line)}
+	}
+	newCulprit := func(line int) *Culprit {
+		return &Culprit{Function: "handle", File: "src/app.go", Line: line, Source: "stack"}
+	}
+
+	base := time.Now().UTC().Add(-time.Hour)
+	newer := base.Add(time.Minute)
+
+	// Write the NEWER occurrence first (line 99), then the OLDER one (line
+	// 10) -- e.g. a live event recorded before an old log replay catches up.
+	seeded, _, err := store.UpsertOccurrence(OccurrenceInput{
+		ObservedAt: base, Project: "p", Message: "boom", ExceptionType: "TypeError",
+		Culprit: newCulprit(1), Exception: newExceptionInfo(1),
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	fingerprint := seeded.Fingerprint
+
+	issueAfterNewer, _, err := store.UpsertOccurrence(OccurrenceInput{
+		ObservedAt: newer, Project: "p", Message: "boom", ExceptionType: "TypeError",
+		Fingerprint: fingerprint, Culprit: newCulprit(99), Exception: newExceptionInfo(99),
+	})
+	if err != nil {
+		t.Fatalf("newer occurrence: %v", err)
+	}
+	if issueAfterNewer.Culprit == nil || issueAfterNewer.Culprit.Line != 99 {
+		t.Fatalf("Culprit after the newer write = %+v, want line 99", issueAfterNewer.Culprit)
+	}
+
+	issueAfterOlder, _, err := store.UpsertOccurrence(OccurrenceInput{
+		ObservedAt: base.Add(30 * time.Second), Project: "p", Message: "boom", ExceptionType: "TypeError",
+		Fingerprint: fingerprint, Culprit: newCulprit(10), Exception: newExceptionInfo(10),
+	})
+	if err != nil {
+		t.Fatalf("older (replayed) occurrence: %v", err)
+	}
+	if issueAfterOlder.Culprit == nil || issueAfterOlder.Culprit.Line != 99 {
+		t.Fatalf("Culprit after replaying an OLDER occurrence = %+v, want it to stay at line 99 (the newer one)", issueAfterOlder.Culprit)
+	}
+	if issueAfterOlder.LatestException == nil || issueAfterOlder.LatestException.Value != "boom at line 99" {
+		t.Fatalf("LatestException after replaying an older occurrence = %+v, want it to stay at line 99", issueAfterOlder.LatestException)
+	}
+	// LastSeen must still reflect the newest ObservedAt seen so far,
+	// matching Culprit/LatestException instead of disagreeing with them.
+	if !issueAfterOlder.LastSeen.Equal(newer) {
+		t.Fatalf("LastSeen = %v, want %v", issueAfterOlder.LastSeen, newer)
+	}
+
+	// A genuinely newer occurrence (past `newer`) must still update both.
+	issueAfterNewest, _, err := store.UpsertOccurrence(OccurrenceInput{
+		ObservedAt: newer.Add(time.Minute), Project: "p", Message: "boom", ExceptionType: "TypeError",
+		Fingerprint: fingerprint, Culprit: newCulprit(200), Exception: newExceptionInfo(200),
+	})
+	if err != nil {
+		t.Fatalf("newest occurrence: %v", err)
+	}
+	if issueAfterNewest.Culprit == nil || issueAfterNewest.Culprit.Line != 200 {
+		t.Fatalf("Culprit after a genuinely newer occurrence = %+v, want line 200", issueAfterNewest.Culprit)
+	}
+}
+
+func TestAppendBoundedUniqueDedupesAndEvictsOldest(t *testing.T) {
+	var values []string
+	for i := 0; i < maxIssueRunsReleases+5; i++ {
+		values = appendBoundedUnique(values, fmt.Sprintf("run-%d", i), maxIssueRunsReleases)
+	}
+	if len(values) != maxIssueRunsReleases {
+		t.Fatalf("len(values) = %d, want %d", len(values), maxIssueRunsReleases)
+	}
+	if values[0] != "run-5" {
+		t.Fatalf("oldest 5 were not evicted first: values[0] = %q", values[0])
+	}
+	before := len(values)
+	values = appendBoundedUnique(values, "run-9", maxIssueRunsReleases)
+	if len(values) != before {
+		t.Fatalf("re-adding an existing value changed the length: %d -> %d", before, len(values))
+	}
+	values = appendBoundedUnique(values, "", maxIssueRunsReleases)
+	if len(values) != before {
+		t.Fatal("an empty value was appended")
 	}
 }
 

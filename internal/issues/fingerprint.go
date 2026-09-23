@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/abdul-hamid-achik/monitor/internal/stacktrace"
 )
 
 var (
@@ -53,6 +55,80 @@ func normalizeMessage(value string) string {
 	value = hexPattern.ReplaceAllString(value, "<hex>")
 	value = numPattern.ReplaceAllString(value, "<n>")
 	return spacePattern.ReplaceAllString(value, " ")
+}
+
+// maxFingerprintFrames is the exception-chain fingerprint's "top-5 in_app
+// frames" cap; see docs/contracts/local-sentry-naming.md §6.
+const maxFingerprintFrames = 5
+
+// FingerprintV2Exception is the exception-chain fingerprint rule
+// (docs/contracts/local-sentry-naming.md §6):
+//
+//	sha256("v2", "exception", project, outer.Type, outerFrames, innermost.Type)
+//
+// outerFrames is the outer exception's top-5 in_app frames -- counted from
+// the crash frame backward, so the LAST 5 of the in_app-filtered subset, not
+// the first 5 -- rendered "func@relfile" with line/column numbers stripped.
+// When the outer exception has zero in_app frames, outerFrames is replaced
+// by the outer exception's normalized message instead (the same
+// normalization FingerprintV1 uses), so two events that differ only in a
+// dynamic value (an IP, an id) still group. The innermost cause is
+// ex.Chained's last entry, or ex itself when there is no chain.
+//
+// ex must already have had stacktrace.ApplyGitRoot applied (Frame.InApp and
+// the git-root-relative Filename set) -- RecordException does this before
+// calling. Sampled/profiler symbols, codemap FQNs, vecgrep scores, PIDs,
+// releases, and the service name never enter this hash.
+func FingerprintV2Exception(ex stacktrace.Exception, project string) string {
+	outer := topInAppFrames(ex.Frames, maxFingerprintFrames)
+	var outerPart string
+	if len(outer) == 0 {
+		outerPart = normalizeMessage(ex.Value)
+	} else {
+		rendered := make([]string, len(outer))
+		for i, f := range outer {
+			rendered[i] = f.Function + "@" + f.Filename
+		}
+		outerPart = strings.Join(rendered, "\x1e")
+	}
+	parts := []string{
+		FingerprintVersionV2,
+		"exception",
+		normalizeIdentity(project),
+		normalizeIdentity(ex.Type),
+		outerPart,
+		normalizeIdentity(innermostCauseType(ex)),
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x1f")))
+	return hex.EncodeToString(sum[:])
+}
+
+// topInAppFrames filters frames to those with InApp set and returns at most
+// n of them, closest to the crash frame (frames' last element) -- i.e. the
+// filtered subsequence's own last n entries, in their original relative
+// (oldest-to-newest) order.
+func topInAppFrames(frames []stacktrace.Frame, n int) []stacktrace.Frame {
+	inApp := make([]stacktrace.Frame, 0, len(frames))
+	for _, f := range frames {
+		if f.InApp {
+			inApp = append(inApp, f)
+		}
+	}
+	if len(inApp) > n {
+		inApp = inApp[len(inApp)-n:]
+	}
+	return inApp
+}
+
+// innermostCauseType returns the innermost cause's Type: ex.Chained's last
+// entry when there is a chain, else ex's own Type (ex.Chained is already a
+// flat outer-to-innermost list; every parser in internal/stacktrace builds
+// it that way, so no recursive walk is needed).
+func innermostCauseType(ex stacktrace.Exception) string {
+	if len(ex.Chained) == 0 {
+		return ex.Type
+	}
+	return ex.Chained[len(ex.Chained)-1].Type
 }
 
 func normalizedSymbols(values []string) []string {

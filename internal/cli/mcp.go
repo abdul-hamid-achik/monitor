@@ -124,7 +124,21 @@ func newMCPServeCmd() *cobra.Command {
 	return cmd
 }
 
-func listIssuesForMCP(_ context.Context, opts issues.ListOptions) (items []issues.Issue, err error) {
+// listIssuesForMCP is mcp.Service.IssuesList's implementation: the one place
+// (alongside newIssuesListCmd's CLI flags) that turns monitor_issues' raw
+// since/until strings into time.Time via the shared issues.ParseWindowBound,
+// so internal/mcp/server.go's handleIssues stays a pure field copy with no
+// business logic of its own (see mcp.IssuesListFilter's doc comment).
+func listIssuesForMCP(_ context.Context, filter mcp.IssuesListFilter) (items []issues.Issue, err error) {
+	now := time.Now()
+	since, err := issues.ParseWindowBound(filter.Since, now)
+	if err != nil {
+		return nil, err
+	}
+	until, err := issues.ParseWindowBound(filter.Until, now)
+	if err != nil {
+		return nil, err
+	}
 	path, err := issues.ResolvePath("")
 	if err != nil {
 		return nil, err
@@ -138,7 +152,10 @@ func listIssuesForMCP(_ context.Context, opts issues.ListOptions) (items []issue
 			err = closeErr
 		}
 	}()
-	return store.List(opts)
+	return store.List(issues.ListOptions{
+		Statuses: filter.Statuses, Project: filter.Project, Service: filter.Service,
+		Since: since, Until: until, RunID: filter.RunID, Release: filter.Release, Kind: filter.Kind,
+	})
 }
 
 func getIssueForMCP(_ context.Context, id string, occurrenceLimit int) (issue issues.Issue, occurrences []issues.Occurrence, err error) {
