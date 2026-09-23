@@ -133,6 +133,7 @@ export default defineConfig({
           text: 'Contracts',
           items: [
             { text: 'Monitor Incident v1', link: '/contracts/monitor-incident-v1' },
+            { text: 'Doctor v1', link: '/contracts/doctor-v1' },
           ],
         },
       ],
