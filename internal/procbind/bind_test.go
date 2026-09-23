@@ -145,9 +145,11 @@ func TestExtractMainScriptRubyBundlerProctitle(t *testing.T) {
 	// Bundler's kernel_load path (used for ruby-shebang bin scripts like
 	// bin/rails, bin/rake, bin/puma) rewrites the live process's argv via
 	// Process.setproctitle("#{file} #{args}"): argv[0] becomes one
-	// whitespace-joined string and every later element is blanked. The
-	// first token of that joined string is the real, already-resolved
-	// script path.
+	// whitespace-joined string. The first token of that joined string is
+	// the real, already-resolved script path. What follows argv[0] is
+	// deliberately NOT asserted to be blank here: see the two live-shape
+	// regression cases below, which pin down what this project's own
+	// verification actually observed on a live process.
 	got := extractMainScript(RuntimeRuby, []string{"/app/bin/rails server", "", ""}, cwd)
 	if got != "/app/bin/rails" {
 		t.Fatalf("bundler proctitle main = %q, want /app/bin/rails", got)
@@ -162,6 +164,38 @@ func TestExtractMainScriptRubyBundlerProctitle(t *testing.T) {
 	got = extractMainScript(RuntimeRuby, []string{"ruby", "app.rb"}, cwd)
 	if got != "/app/app.rb" {
 		t.Fatalf("plain ruby argv must not be treated as a rewritten proctitle, got %q", got)
+	}
+}
+
+// TestExtractMainScriptRubyBundlerProctitleLiveShapes pins down the two
+// actual live argv shapes observed by running real "bundle exec <script>
+// arg1 arg2" processes on this project's own darwin dev box (killed
+// immediately after inspection) — not synthetic guesses. A prior revision
+// of extractBundlerProctitleScript required len(cmdline)>=2 with every
+// element after index 0 equal to "", which rejected BOTH of these real
+// shapes and never actually fired on any live Bundler-loaded process.
+func TestExtractMainScriptRubyBundlerProctitleLiveShapes(t *testing.T) {
+	cwd := "/app"
+	// System Ruby 2.6.10 + Bundler 1.17.2: "bundle exec mysvc arg1 arg2"
+	// collapses to a cmdline of length 1. Nothing at all follows argv[0] —
+	// not even a blank element — because there is nothing left to blank.
+	got := extractMainScript(RuntimeRuby, []string{"/app/bin/mysvc arg1 arg2"}, cwd)
+	if got != "/app/bin/mysvc" {
+		t.Fatalf("bundler proctitle len-1 cmdline main = %q, want /app/bin/mysvc", got)
+	}
+	// Ruby 3.4.8 + Bundler 2.6.9 on the same OS instead leaves trailing
+	// elements that are NOT blank: they are leaked environment-variable
+	// strings from past the end of the process's original argv
+	// reservation (an emulated-setproctitle/gopsutil-parsing artifact).
+	// These must be ignored, not treated as a disqualifying signal.
+	got = extractMainScript(RuntimeRuby, []string{
+		"/app/bin/mysvc arg1 arg2",
+		"__CF_USER_TEXT_ENCODING=0x0:0:0",
+		"PATH=/usr/bin:/bin",
+		"PWD=/app",
+	}, cwd)
+	if got != "/app/bin/mysvc" {
+		t.Fatalf("bundler proctitle leaked-env-tail main = %q, want /app/bin/mysvc", got)
 	}
 }
 

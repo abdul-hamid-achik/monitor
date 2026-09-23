@@ -345,18 +345,24 @@ func isNodeish(base string) bool {
 // extractMainScript returns the first non-flag path-like argument that looks
 // like a JS/TS/Python/Ruby entry for interpreter runtimes.
 func extractMainScript(rt Runtime, cmdline []string, cwd string) string {
-	if len(cmdline) < 2 {
-		return ""
-	}
 	switch rt {
 	case RuntimeNode, RuntimeBun, RuntimeDeno, RuntimePython, RuntimeRuby:
 	default:
 		return ""
 	}
 	if rt == RuntimeRuby {
+		// Checked before the len(cmdline)<2 guard below: Bundler's proctitle
+		// rewrite commonly collapses a live process down to a SINGLE cmdline
+		// element (verified live with both Ruby 2.6/Bundler 1.17 and Ruby
+		// 3.4/Bundler 2.6 — see extractBundlerProctitleScript), so bailing
+		// out early on a short cmdline would silently skip the one shape
+		// this branch exists to handle.
 		if script := extractBundlerProctitleScript(cmdline, cwd); script != "" {
 			return script
 		}
+	}
+	if len(cmdline) < 2 {
+		return ""
 	}
 	for i := 1; i < len(cmdline); i++ {
 		arg := cmdline[i]
@@ -418,26 +424,36 @@ func extractMainScript(rt Runtime, cmdline []string, cwd string) string {
 // shebang (the common case for bin/rails, bin/rake, bin/puma) is not exec'd
 // into a new process: bundler/cli/exec.rb loads it in-process via
 // Kernel#load and then calls Process.setproctitle("#{file} #{args}"). That
-// collapses cmdline into a single whitespace-joined string in argv[0] and
-// blanks every later element, so the ordinary flag-walking loop in
-// extractMainScript never sees a separate script argument at all. When that
-// exact shape is detected, the first whitespace-separated token of argv[0]
-// is the real, already-resolved script path (e.g. an absolute path to
-// bin/rails) — it needs no further flag or extension interpretation, only
-// cwd-relative resolution.
+// rewrites cmdline[0] into a single whitespace-joined string (e.g.
+// "/app/bin/rails server") — the first token of it is the real,
+// already-resolved script path and needs no further flag or extension
+// interpretation, only cwd-relative resolution.
+//
+// What happens to cmdline[1:] after the rewrite is NOT reliable enough to
+// gate on, and this deliberately does not try: verified live on this
+// project's own darwin dev box, system Ruby 2.6.10 + Bundler 1.17.2
+// collapses "bundle exec mysvc arg1 arg2" down to a cmdline of length 1
+// (nothing at all follows cmdline[0]), while Ruby 3.4.8 + Bundler 2.6.9 on
+// the same OS instead leaves 1-6 EXTRA elements that are not blank — they
+// are leaked environment-variable strings (e.g. "PATH=...", "PWD=...")
+// from past the end of the process's original argv reservation, an
+// emulated-setproctitle/gopsutil-parsing artifact, not real argv. Earlier
+// revisions of this function required len(cmdline)>=2 and every element
+// from index 1 onward to be "", which is exactly backwards: it rejected the
+// length-1 shape entirely and rejected the leaked-env-var shape too,
+// meaning it never actually fired on any live Bundler-loaded process this
+// was tested against. The only signal this now trusts is cmdline[0]
+// containing whitespace, which a normal argv[0] (always a bare resolved
+// interpreter/binary path) never does.
 //
 // Processes launched as "bundle exec ruby app.rb" do not hit this path:
 // Bundler execs straight into the interpreter for that case (Kernel#exec,
 // a real execve), which leaves argv looking exactly like a plain "ruby ..."
-// invocation and is handled by the normal loop below.
+// invocation (cmdline[0] == "ruby", no whitespace) and is handled by the
+// ordinary flag-walking loop in extractMainScript instead.
 func extractBundlerProctitleScript(cmdline []string, cwd string) string {
-	if len(cmdline) < 2 || !strings.ContainsAny(cmdline[0], " \t") {
+	if len(cmdline) == 0 || !strings.ContainsAny(cmdline[0], " \t") {
 		return ""
-	}
-	for _, rest := range cmdline[1:] {
-		if rest != "" {
-			return ""
-		}
 	}
 	fields := strings.Fields(cmdline[0])
 	if len(fields) == 0 {
