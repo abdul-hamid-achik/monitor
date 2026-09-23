@@ -138,6 +138,35 @@ func TestJoinerCapsFirstLine(t *testing.T) {
 	}
 }
 
+// A single huge header line is cut to the per-line cap, leaving room in the
+// block for the frames that follow it.
+func TestJoinerHugeHeaderKeepsFrames(t *testing.T) {
+	text := "TypeError: " + strings.Repeat("x", 70*1024) + "\n    at f (/repo/app/a.js:1:1)\n    at g (/repo/app/a.js:2:1)\n"
+	exs := Detect(text)
+	if len(exs) != 1 || len(exs[0].Frames) != 2 {
+		t.Fatalf("got %s, want one event with 2 frames", strings.Join(summarizeAll(exs), " | "))
+	}
+	if len(exs[0].Value) > maxLineBytes {
+		t.Errorf("value is %d bytes, want <= %d", len(exs[0].Value), maxLineBytes)
+	}
+}
+
+// Prev is the adjacent line even when it closed another block, so a trace
+// right after a logger record is dated by it.
+func TestJoinerPrevIsAdjacentLine(t *testing.T) {
+	bs := feedAll(NewJoiner(), time.Unix(0, 0), 0,
+		"2026-09-22T10:04:37.123Z\terror\trequest failed\t{}",
+		"panic: boom",
+		"",
+		"goroutine 1 [running]:",
+		"main.main()",
+		"\t/repo/main.go:5 +0x1d",
+	)
+	if len(bs) != 2 || bs[1].Prev != "2026-09-22T10:04:37.123Z\terror\trequest failed\t{}" {
+		t.Fatalf("got %+v, want the panic block's Prev to be the zap line", bs)
+	}
+}
+
 func TestTruncateUTF8KeepsRunesWhole(t *testing.T) {
 	s := strings.Repeat("é", 10) // 2 bytes each
 	got := truncateUTF8(s, 5)

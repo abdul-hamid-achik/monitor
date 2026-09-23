@@ -139,11 +139,12 @@ type Block struct {
 	Lines     []string
 	LineStart int // 1-based, inclusive
 	LineEnd   int // 1-based, inclusive
-	// Prev is the line immediately before LineStart when that line
-	// belonged to no block (typically the logger line that introduced
-	// the trace, e.g. "2026-09-22 10:04:37,123 ERROR app: request
-	// failed"); "" otherwise. Parsers read ObservedAt and, for Python,
-	// the handled signal from it.
+	// Prev is the stream line immediately before LineStart (typically the
+	// logger line that introduced the trace, e.g. "2026-09-22
+	// 10:04:37,123 ERROR app: request failed"), whether or not it was part
+	// of another block; "" for the first line. Parsers read ObservedAt and
+	// the handled / type signals some formats print just before a stack
+	// from it.
 	Prev string
 	// Location is the zone used for zone-less timestamps (Python
 	// asctime, Ruby Logger, Go's log package); nil means time.Local.
@@ -237,13 +238,18 @@ func (j *Joiner) maxBytes() int {
 	return DefaultMaxBytes
 }
 
+// maxLineBytes caps a single line (a minified bundle line, a huge JSON
+// message) well below the block cap, so one oversized header still leaves
+// room for the frames that follow it.
+const maxLineBytes = 8 << 10
+
 // clean normalizes one input line: it drops a trailing CR (CRLF input from
 // Windows tools or TTY-attached containers), strips ANSI escapes, and
-// truncates the line so that it alone always fits under MaxBytes.
+// truncates the line to maxLineBytes (and always under MaxBytes).
 func (j *Joiner) clean(line string) string {
 	line = strings.TrimRight(line, "\r")
 	line = StripANSI(line)
-	return truncateUTF8(line, j.maxBytes()-1)
+	return truncateUTF8(line, min(maxLineBytes, j.maxBytes()-1))
 }
 
 // truncateUTF8 cuts s to at most n bytes without splitting a rune.
@@ -338,11 +344,14 @@ func (j *Joiner) process(out []Block, queue []queued) []Block {
 			j.bytes += len(q.line) + 1
 			j.lineEnd = q.no
 			j.skips = 0
+			j.prev, j.prevNo = q.line, q.no
 		case vTentative:
 			j.pending = append(j.pending, q)
 			j.bytes += len(q.line) + 1
+			j.prev, j.prevNo = q.line, q.no
 		case vSkip:
 			// Interleaved noise: dropped, the block stays open.
+			j.prev, j.prevNo = q.line, q.no
 		default:
 			b, pend := j.close()
 			out = appendBlock(out, b)
@@ -377,6 +386,7 @@ func (j *Joiner) tryStart(q queued) {
 	if j.prevNo > 0 && j.prevNo == q.no-1 {
 		j.blockPrev = j.prev
 	}
+	j.prev, j.prevNo = q.line, q.no
 }
 
 // close completes the open block with its committed lines and returns the
@@ -391,6 +401,11 @@ func (j *Joiner) close() (Block, []queued) {
 		Location:  j.Location,
 	}
 	pend := append([]queued(nil), j.pending...)
+	// The tentative tail is re-read, so the line before whatever comes
+	// next is the block's last committed line.
+	if n := len(j.lines); n > 0 {
+		j.prev, j.prevNo = j.lines[n-1], j.lineEnd
+	}
 	j.open = false
 	j.kind = ""
 	j.g = nil

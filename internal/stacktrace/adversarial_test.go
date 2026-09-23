@@ -45,7 +45,8 @@ func TestNewBlocksAreNeverSwallowed(t *testing.T) {
 			text: "2026-09-22T10:04:37.123Z\terror\trequest failed\t{}\n" + goCrashText,
 			want: []string{
 				`message/go error handled "request failed" @-(0) [2026-09-22T10:04:37.123Z]`,
-				`gopanic/go fatal unhandled panic: boom @main.main@main.go:11(1)`,
+				// The logger line just before the panic dates it.
+				`gopanic/go fatal unhandled panic: boom @main.main@main.go:11(1) [2026-09-22T10:04:37.123Z]`,
 			},
 		},
 		{
