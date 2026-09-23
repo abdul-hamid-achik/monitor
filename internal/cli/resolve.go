@@ -29,13 +29,20 @@ func newResolveCmd() *cobra.Command {
 			defer cancel()
 
 			// --descendant-of with no OTHER selector runs leaf resolution:
-			// walk descendants of the given pid (root itself first) and
-			// return the first one that classifies as an application
-			// runtime, skipping wrapper processes (a shell, yarn/npm/pnpm,
-			// the `go run` toolchain, ...). --descendant-of combined with
-			// another selector instead just restricts the ordinary
-			// selector match to that pid's descendants — see
-			// procbind.ResolveOptions.DescendantOf.
+			// walk descendants of the given pid (root itself first, so it
+			// CAN be the answer -- the common case for a plain
+			// `node server.js` launch) and return the first one that
+			// classifies as an application runtime, skipping wrapper
+			// processes (a shell, yarn/npm/npx/pnpm, tsx/ts-node, the
+			// `go run` toolchain, ...).
+			//
+			// --descendant-of combined with another selector instead
+			// restricts the ordinary selector match to that pid's
+			// DESCENDANTS only (the root pid itself is never a candidate
+			// there -- see procbind.ResolveOptions.DescendantOf and
+			// Tree.Descendants), with the same wrapper skip and `go run`
+			// reclassification applied first so both shapes of
+			// --descendant-of agree on what a real runtime leaf is.
 			if descendantOf != 0 && runtime == procbind.RuntimeUnknown && codebaseRoot == "" && mainScriptSuffix == "" {
 				binding, candidates, err := procbind.ResolveLeaf(ctx, descendantOf, procbind.LeafOptions{})
 				if err != nil {
@@ -56,6 +63,16 @@ func newResolveCmd() *cobra.Command {
 				DescendantOf:     descendantOf,
 			})
 			if err != nil {
+				// --descendant-of combined with another selector can be
+				// ambiguous too (e.g. an npm wrapper and its node child
+				// both matching --runtime node); route it through the same
+				// exit-2-with-candidates path as the "alone" leaf case
+				// above, rather than falling through to a plain exit 1.
+				var ambiguous *procbind.AmbiguousLeafError
+				if errors.As(err, &ambiguous) {
+					printAmbiguousLeaf(cmd, descendantOf, ambiguous.Candidates)
+					os.Exit(2)
+				}
 				return err
 			}
 			return writeResolveResult(cmd, binding)
@@ -64,7 +81,7 @@ func newResolveCmd() *cobra.Command {
 	cmd.Flags().StringVar(&runtimeName, "runtime", "unknown", "runtime selector: node, bun, deno, go, python, ruby")
 	cmd.Flags().StringVar(&codebaseRoot, "codebase-root", "", "exact detected codebase root")
 	cmd.Flags().StringVar(&mainScriptSuffix, "main-script-suffix", "", "required suffix of the runtime entry script")
-	cmd.Flags().Int32Var(&descendantOf, "descendant-of", 0, "restrict matching to descendants of this pid; alone, resolves the leaf runtime process under it")
+	cmd.Flags().Int32Var(&descendantOf, "descendant-of", 0, "restrict matching to this pid's descendants (never the pid itself); alone (no other selector), resolves the leaf runtime process under it, which may be the pid itself")
 	cmd.Flags().Bool("json", false, "emit JSON output")
 	return cmd
 }

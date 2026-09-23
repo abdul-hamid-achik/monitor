@@ -56,6 +56,17 @@ outcomes:
     verify:
       command:
         run: "sh -c 'node examples/polyglot/js/workload.js & node examples/polyglot/js/workload.js & wait' >/dev/null 2>&1 & SHPID=$!; RC=1; OUT=''; for i in $(seq 1 50); do OUT=$(./bin/monitor resolve --descendant-of \"$SHPID\" 2>&1); RC=$?; [ \"$RC\" -eq 2 ] && break; sleep 0.1; done; pkill -P \"$SHPID\" 2>/dev/null || true; kill \"$SHPID\" 2>/dev/null || true; [ \"$RC\" -eq 2 ] && echo \"$OUT\" | grep -qi ambiguous"
+  - id: ambiguous_combined_mode_exits_2_and_lists_candidates
+    description: |
+      the same two-node-children ambiguity, but with --descendant-of
+      COMBINED with --runtime node (not alone): this must reach the same
+      exit-2-with-candidates behavior as the leaf-alone outcome above,
+      through procbind.Resolve's DescendantOf path rather than
+      procbind.ResolveLeaf, instead of falling through to a plain exit 1.
+    timeoutMs: 20000
+    verify:
+      command:
+        run: "sh -c 'node examples/polyglot/js/workload.js & node examples/polyglot/js/workload.js & wait' >/dev/null 2>&1 & SHPID=$!; RC=1; OUT=''; for i in $(seq 1 50); do OUT=$(./bin/monitor resolve --descendant-of \"$SHPID\" --runtime node 2>&1); RC=$?; [ \"$RC\" -eq 2 ] && break; sleep 0.1; done; pkill -P \"$SHPID\" 2>/dev/null || true; kill \"$SHPID\" 2>/dev/null || true; [ \"$RC\" -eq 2 ] && echo \"$OUT\" | grep -qi ambiguous"
   - id: clean_exit
     description: the baseline target command exits cleanly
     verify:
