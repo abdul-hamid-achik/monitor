@@ -98,7 +98,17 @@ var (
 
 // cachedHealth returns compute()'s result, reusing a cached one from the last
 // healthCacheTTL for the same (tool, dir, binary path + mtime).
-func cachedHealth(tool, dir, path string, mtime time.Time, compute func() Health) Health {
+//
+// The result is stored ONLY when ctx.Err() == nil after compute() returns.
+// ProbeCodemap/ProbeVecgrep are exported for long-lived callers (a future MCP
+// server, investigate's correlate step) that may pass a ctx that's already
+// canceled or carries a short deadline. Without this check, one such caller
+// would poison the shared 60s cache with an "unavailable" result computed
+// under a dead context, and every OTHER caller probing the same dir — even
+// one with a perfectly healthy, uncancelled ctx — would get that poisoned
+// result for up to 60s. `monitor doctor` runs once per process so it never
+// observes this, but it's real for any longer-lived consumer.
+func cachedHealth(ctx context.Context, tool, dir, path string, mtime time.Time, compute func() Health) Health {
 	key := healthCacheKey{tool: tool, dir: dir, path: path, mtime: mtime.UnixNano()}
 	healthCacheMu.Lock()
 	if e, ok := healthCache[key]; ok && time.Since(e.computed) < healthCacheTTL {
@@ -108,6 +118,14 @@ func cachedHealth(tool, dir, path string, mtime time.Time, compute func() Health
 	healthCacheMu.Unlock()
 
 	h := compute()
+
+	if ctx.Err() != nil {
+		// The caller's ctx died (was already canceled/expired, or expired
+		// mid-probe) during compute(): h reflects that dead ctx, not this
+		// tool/dir's real health, so it must never be reused by a later
+		// caller with a fresh ctx.
+		return h
+	}
 
 	healthCacheMu.Lock()
 	healthCache[key] = healthCacheEntry{health: h, computed: time.Now()}
@@ -149,7 +167,7 @@ func ProbeCodemap(ctx context.Context, dir string) Health {
 			Recovery: "install codemap: cd ~/projects/codemap && go install ./cmd/codemap",
 		}
 	}
-	return cachedHealth("codemap", dir, path, binaryModTime(path), func() Health {
+	return cachedHealth(ctx, "codemap", dir, path, binaryModTime(path), func() Health {
 		return computeCodemapHealth(ctx, path, dir)
 	})
 }
@@ -166,9 +184,33 @@ type codemapStatusEnvelope struct {
 	Hint       string `json:"hint"`
 	Registered bool   `json:"registered"`
 	Project    string `json:"project"`
+	// Nodes distinguishes a project codemap has actually indexed from one
+	// that's merely registered (`codemap init` without `codemap index`
+	// leaves registered:true, nodes:0). See the HealthOK doc comment above:
+	// "the project is indexed and results can be trusted" doesn't hold for a
+	// registered-but-empty project.
+	Nodes int64 `json:"nodes"`
+}
+
+// canceledByCallerHealth reports that ctx (the caller's context, not the
+// probe's own internal timeout) is why this probe couldn't complete. It is
+// deliberately worded differently from a real "timed out after 3s" (a
+// property of the tool being probed) so a caller never confuses its own
+// cancellation with the tool actually hanging — and cachedHealth never
+// caches this result (see its doc comment).
+func canceledByCallerHealth(tool, detailPrefix string, ctxErr error) Health {
+	return Health{
+		Tool:   tool,
+		State:  HealthUnavailable,
+		Detail: detailPrefix + ": canceled by caller: " + ctxErr.Error(),
+	}
 }
 
 func computeCodemapHealth(ctx context.Context, path, dir string) Health {
+	if err := ctx.Err(); err != nil {
+		return canceledByCallerHealth("codemap", "codemap status --json", err)
+	}
+
 	h := Health{Tool: "codemap", Path: path, Version: shortBinaryVersion(ctx, path)}
 
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -189,6 +231,16 @@ func computeCodemapHealth(ctx context.Context, path, dir string) Health {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
+
+	// Check the CALLER's ctx first: context.DeadlineExceeded on cctx is
+	// ambiguous between "our own 3s timer fired" and "ctx's own, possibly
+	// much shorter, deadline expired first" (context.WithTimeout's child
+	// reports whichever error caused it to finish, and both cases report the
+	// identical DeadlineExceeded sentinel). Only when ctx itself is still
+	// live do we know the 3s figure below is actually true.
+	if err := ctx.Err(); err != nil {
+		return canceledByCallerHealth("codemap", "codemap status --json", err)
+	}
 
 	if cctx.Err() == context.DeadlineExceeded {
 		h.State = HealthUnavailable
@@ -258,6 +310,19 @@ func computeCodemapHealth(ctx context.Context, path, dir string) Health {
 		h.Recovery = "run: codemap index"
 		return h
 	}
+	if env.Nodes == 0 {
+		// registered:true, nodes:0 is what `codemap init` without `codemap
+		// index` leaves (verified live against codemap v0.66,
+		// StatusWithOptions in ~/projects/codemap/internal/app/service_init.go
+		// sets Registered=true as soon as the project row exists, before any
+		// indexing happens). Reporting HealthOK here would tell every
+		// consumer (explain.Build, hot, issues --at) that impact/blast-radius
+		// results can be trusted, when there is nothing indexed to query yet.
+		h.State = HealthNotIndexed
+		h.Detail = "project is registered with codemap but has no indexed nodes yet"
+		h.Recovery = "run: codemap index"
+		return h
+	}
 	h.State = HealthOK
 	return h
 }
@@ -284,7 +349,7 @@ func ProbeVecgrep(ctx context.Context, dir string) Health {
 			Recovery: "install vecgrep: cd ~/projects/vecgrep && go install ./cmd/vecgrep",
 		}
 	}
-	return cachedHealth("vecgrep", dir, path, binaryModTime(path), func() Health {
+	return cachedHealth(ctx, "vecgrep", dir, path, binaryModTime(path), func() Health {
 		return computeVecgrepHealth(ctx, path, dir)
 	})
 }
@@ -310,12 +375,26 @@ type vecgrepLightweightStatus struct {
 // `vecgrep index`.
 const vecgrepNotIndexedRecovery = "vecgrep branch switch (restore an existing snapshot for this branch), or vecgrep index (build one)"
 
+// vecgrepUninitializedRecovery covers a directory that was never `vecgrep
+// init`-ed at all (or sits inside a different project's boundary). Unlike
+// vecgrepNotIndexedRecovery's case, NEITHER `vecgrep branch switch` nor
+// `vecgrep index` works here — both fail with "not in a vecgrep project"
+// until `vecgrep init` has run — so recommending them (as vecgrep's own
+// error text does point to `vecgrep init`, verified live against an
+// uninitialized scratch repo and ~/projects/file.cheap) would send an agent
+// down two dead ends before the one command that actually works.
+const vecgrepUninitializedRecovery = "vecgrep init, then vecgrep index"
+
 // vecgrepUninitializedPattern matches vecgrep's plain-text (non-JSON) error
 // when the directory was never `vecgrep init`-ed, or sits inside a different
 // registered project's boundary — both distinct from "initialized but empty".
 var vecgrepUninitializedPattern = regexp.MustCompile(`not in a vecgrep project|nested project boundary`)
 
 func computeVecgrepHealth(ctx context.Context, path, dir string) Health {
+	if err := ctx.Err(); err != nil {
+		return canceledByCallerHealth("vecgrep", "vecgrep status", err)
+	}
+
 	h := Health{Tool: "vecgrep", Path: path, Version: shortBinaryVersion(ctx, path)}
 
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -329,6 +408,13 @@ func computeVecgrepHealth(ctx context.Context, path, dir string) Health {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
+
+	// See the matching check in computeCodemapHealth: cctx's DeadlineExceeded
+	// is ambiguous between our own 3s timer and ctx's own (possibly shorter)
+	// deadline, so ctx must be checked first.
+	if err := ctx.Err(); err != nil {
+		return canceledByCallerHealth("vecgrep", "vecgrep status", err)
+	}
 
 	if cctx.Err() == context.DeadlineExceeded {
 		h.State = HealthUnavailable
@@ -348,7 +434,7 @@ func computeVecgrepHealth(ctx context.Context, path, dir string) Health {
 		if vecgrepUninitializedPattern.MatchString(msg) {
 			h.State = HealthNotIndexed
 			h.Detail = firstNonEmpty(msg, "project is not indexed by vecgrep")
-			h.Recovery = vecgrepNotIndexedRecovery
+			h.Recovery = vecgrepUninitializedRecovery
 			return h
 		}
 		h.State = HealthUnavailable

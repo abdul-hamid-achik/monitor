@@ -96,6 +96,29 @@ exit 4
 	}
 }
 
+// TestProbeCodemapRegisteredButEmptyIsNotIndexed reproduces the live shape
+// left by `codemap init` without a following `codemap index` (verified
+// against a real codemap v0.66 in a scratch project, 2026-09-22):
+// registered:true, nodes:0. HealthOK's contract is "the project is indexed
+// and results can be trusted"; a registered-but-empty project doesn't meet
+// that, and codemapStatusEnvelope didn't even decode `nodes` before this
+// fix, so every consumer trusted an empty blast-radius/impact result.
+func TestProbeCodemapRegisteredButEmptyIsNotIndexed(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeBinary(t, dir, "codemap", `#!/bin/sh
+printf '%s' '{"project":"demo","root":"/tmp/demo","registered":true,"nodes":0,"edges":0,"files":0}'
+exit 0
+`)
+	setFakePATH(t, dir)
+	h := ProbeCodemap(context.Background(), t.TempDir())
+	if h.State != HealthNotIndexed {
+		t.Fatalf("state = %q, want %q for registered:true,nodes:0; health = %+v", h.State, HealthNotIndexed, h)
+	}
+	if h.Recovery == "" {
+		t.Errorf("expected a non-empty recovery for a registered-but-empty project: %+v", h)
+	}
+}
+
 func TestProbeCodemapNotIndexed(t *testing.T) {
 	dir := t.TempDir()
 	writeFakeBinary(t, dir, "codemap", `#!/bin/sh
@@ -156,6 +179,83 @@ exit 0
 	}
 	if len(data) != 1 {
 		t.Fatalf("codemap status invoked %d times, want 1 (second ProbeCodemap call should hit the cache)", len(data))
+	}
+}
+
+// TestProbeCodemapCanceledContextIsNotCached reproduces the cache-poisoning
+// bug: a caller whose ctx is already canceled (or has a deadline that's
+// already passed) got a cached "unavailable" result under the SAME (tool,
+// dir, binary) key that a later, perfectly healthy caller with a fresh ctx
+// then received too, for up to 60s. `monitor doctor` never hits this (one
+// process, one call), but the probes are exported for reuse by longer-lived
+// callers (a future MCP server, investigate's correlate step) where a
+// canceled request must never contaminate every other in-flight probe of
+// the same directory.
+func TestProbeCodemapCanceledContextIsNotCached(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeBinary(t, dir, "codemap", `#!/bin/sh
+printf '%s' '{"project":"demo","root":"/tmp/demo","registered":true,"nodes":10}'
+exit 0
+`)
+	setFakePATH(t, dir)
+
+	target := t.TempDir()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	first := ProbeCodemap(canceled, target)
+	if first.State != HealthUnavailable {
+		t.Fatalf("state = %q, want %q for an already-canceled ctx; health = %+v", first.State, HealthUnavailable, first)
+	}
+	if !strings.Contains(first.Detail, "canceled by caller") {
+		t.Errorf("detail = %q, want it to name the CALLER's cancellation", first.Detail)
+	}
+	if strings.Contains(first.Detail, "timed out after 3s") {
+		t.Errorf("detail = %q, must not claim a 3s tool timeout for a ctx canceled before the probe ever ran", first.Detail)
+	}
+
+	second := ProbeCodemap(context.Background(), target)
+	if second.State != HealthOK {
+		t.Fatalf("state = %q, want %q: the canceled-ctx result must not have poisoned the cache for this fresh, uncanceled call; health = %+v", second.State, HealthOK, second)
+	}
+}
+
+// TestProbeVecgrepParentDeadlineNotMisreportedAsToolTimeout reproduces the
+// second half of the same finding: a parent ctx whose deadline is SHORTER
+// than the probe's own 3s timeout expires mid-probe. cctx.Err() ==
+// context.DeadlineExceeded either way (the sentinel doesn't distinguish
+// "our own 3s timer fired" from "the caller's much shorter deadline fired
+// first"), so before this fix the probe blamed a nonexistent 3s tool
+// timeout instead of the caller's own ~100ms deadline — and cached that
+// misleading result besides.
+func TestProbeVecgrepParentDeadlineNotMisreportedAsToolTimeout(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeBinary(t, dir, "vecgrep", `#!/bin/sh
+sleep 1
+printf '%s' '{"stats":{"chunks":5},"freshness":{"state":"fresh"}}'
+`)
+	// As in TestProbeCodemapTimeout: the fake binary's own `sleep` needs a
+	// real sleep on PATH too.
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+"/bin:/usr/bin")
+
+	target := t.TempDir()
+	shortCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	first := ProbeVecgrep(shortCtx, target)
+	if first.State != HealthUnavailable {
+		t.Fatalf("state = %q, want %q; health = %+v", first.State, HealthUnavailable, first)
+	}
+	if strings.Contains(first.Detail, "timed out after 3s") {
+		t.Errorf("detail = %q, must not blame the tool's 3s timeout for the CALLER's 100ms deadline expiring", first.Detail)
+	}
+	if !strings.Contains(first.Detail, "canceled by caller") {
+		t.Errorf("detail = %q, want it to name the caller's short deadline", first.Detail)
+	}
+
+	second := ProbeVecgrep(context.Background(), target)
+	if second.State != HealthOK {
+		t.Fatalf("state = %q, want %q: the short-deadline result must not have poisoned the cache for this fresh call; health = %+v", second.State, HealthOK, second)
 	}
 }
 
