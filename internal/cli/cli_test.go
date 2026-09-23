@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -24,6 +26,66 @@ func TestCorrelateProfileSkipsFramesWithoutFileLine(t *testing.T) {
 	}
 	if got := correlateProfile(context.Background(), syms, ""); len(got) != 0 {
 		t.Errorf("frames without file:line should be skipped; got %v", got)
+	}
+}
+
+// TestCorrelateProfileDedupesByFileFuncAndCarriesLineRange: flattenCDPProfile
+// now emits one row per hot *line* of a function, so the same (file,func)
+// can appear many times (e.g. heavyStringify's lines 3/4/5/6). correlate must
+// call codemap symbol-at/impact only once per distinct (file,func) pair and
+// still carry codemap's StartLine/EndLine through into every row that shares
+// that function.
+func TestCorrelateProfileDedupesByFileFuncAndCarriesLineRange(t *testing.T) {
+	binDir := t.TempDir()
+	callLog := filepath.Join(binDir, "calls.log")
+	script := `#!/bin/sh
+echo "$@" >> "$CODEMAP_CALL_LOG"
+case " $* " in
+  *" symbol-at "*) printf '%s' '{"file":"hot.js","line":5,"fqn":"heavyStringify","kind":"function","resolution":"enclosing","indexed":true,"start_line":1,"end_line":9}' ;;
+  *" impact "*) printf '%s' '{"symbol":"heavyStringify","found":true,"call_graph":"resolved","direct_callers":["a"],"blast_radius":["a","b"],"tests":[],"untested":true}' ;;
+  *) exit 9 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "codemap"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CODEMAP_CALL_LOG", callLog)
+
+	// Three rows, two distinct (file,func) pairs: heavyStringify appears at
+	// lines 5 and 4 (its top two hot lines), other appears once.
+	syms := []profiler.Symbol{
+		{Func: "heavyStringify", File: "hot.js", Line: 5, Weight: 60},
+		{Func: "heavyStringify", File: "hot.js", Line: 4, Weight: 30},
+		{Func: "other", File: "hot.js", Line: 20, Weight: 10},
+	}
+	got := correlateProfile(context.Background(), syms, "")
+	if len(got) != 3 {
+		t.Fatalf("expected 3 correlated rows (one per symbol), got %d: %+v", len(got), got)
+	}
+	for _, row := range got {
+		if row["func"] != "heavyStringify" {
+			continue
+		}
+		if row["start_line"] != 1 || row["end_line"] != 9 {
+			t.Errorf("row %+v missing carried start_line/end_line", row)
+		}
+	}
+	raw, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatalf("codemap was never invoked: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	symbolAtCalls := 0
+	for _, l := range lines {
+		if strings.Contains(l, "symbol-at") {
+			symbolAtCalls++
+		}
+	}
+	// Exactly 2 unique (file,func) pairs (hot.js/heavyStringify, hot.js/other)
+	// → exactly 2 symbol-at calls, not 3.
+	if symbolAtCalls != 2 {
+		t.Errorf("symbol-at called %d times, want 2 (deduped by file,func); calls:\n%s", symbolAtCalls, raw)
 	}
 }
 

@@ -574,11 +574,30 @@ attached as fcheap tags + manifest context — never mixed into telemetry.`,
 	return cmd
 }
 
+// correlatedSymbol caches one codemap symbol-at + impact lookup so repeat
+// (file,func) pairs — common now that flattenCDPProfile emits one row per
+// hot *line* of the same function — only spend the codemap subprocess
+// budget once.
+type correlatedSymbol struct {
+	sym     ecosystem.SymbolAt
+	symErr  error
+	imp     ecosystem.Impact
+	impErr  error
+	impDone bool
+}
+
 // correlateProfile resolves each profile frame's file:line to its enclosing
-// codemap symbol (FQN/kind), enriching the diagnose flow. Best-effort: it
-// returns nil when codemap isn't on PATH or there are no frames, and silently
-// skips frames codemap can't resolve. codebase, when non-empty, is passed as
-// `codemap -C` so the correct index is used.
+// codemap symbol (FQN/kind/start-end line range), enriching the diagnose
+// flow. Best-effort: it returns nil when codemap isn't on PATH or there are
+// no frames, and silently skips frames codemap can't resolve. codebase, when
+// non-empty, is passed as `codemap -C` so the correct index is used.
+//
+// Frames are deduped by (file, func) before spending the codemap call
+// budget: several rows can now share one enclosing function (e.g. the same
+// function's hottest lines from flattenCDPProfile's per-line aggregation),
+// and they resolve to the same symbol/impact, so only the first occurrence
+// of a given (file, func) triggers a subprocess call — the rest reuse the
+// cached result.
 func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase string) []map[string]any {
 	if !ecosystem.CodemapAvailable() || len(syms) == 0 {
 		return nil
@@ -590,23 +609,41 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase stri
 	correlateCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	resolvedFrames := 0
+	cache := make(map[string]*correlatedSymbol)
 	for _, s := range syms {
 		if s.File == "" || s.Line <= 0 {
 			continue
 		}
-		if resolvedFrames >= 12 || correlateCtx.Err() != nil {
+		if correlateCtx.Err() != nil {
 			break
 		}
-		resolvedFrames++
+		key := s.File + "\x00" + s.Func
+		cs, cached := cache[key]
+		if !cached {
+			if resolvedFrames >= 12 {
+				break
+			}
+			resolvedFrames++
+			cs = &correlatedSymbol{}
+			// Bound each codemap subprocess so one slow/hung invocation can't
+			// stall the whole pipeline (and hang the stdio MCP server, whose
+			// ctx has no deadline). Mirrors ecosystem.probe()'s per-call timeout.
+			cs.sym, cs.symErr = ecosystem.CodemapSymbolAtPath(correlateCtx, s.File, s.Line, opts)
+			if cs.symErr == nil && cs.sym.FQN != "" {
+				// Enrich resolved frames with blast radius + test coverage,
+				// turning the frame list into a "fix this first" ranking.
+				// One call per (file,func), not per line.
+				cs.imp, cs.impErr = ecosystem.CodemapImpactAtPath(correlateCtx, s.File, s.Line, 0, opts)
+				cs.impDone = true
+			}
+			cache[key] = cs
+		}
 		entry := map[string]any{"func": s.Func, "file": s.File, "line": s.Line}
 		if s.Weight > 0 {
 			entry["weight_pct"] = s.Weight
 		}
-		// Bound each codemap subprocess so one slow/hung invocation can't stall
-		// the whole pipeline (and hang the stdio MCP server, whose ctx has no
-		// deadline). Mirrors ecosystem.probe()'s per-call timeout.
-		sym, err := ecosystem.CodemapSymbolAtPath(correlateCtx, s.File, s.Line, opts)
-		if err == nil {
+		if cs.symErr == nil {
+			sym := cs.sym
 			entry["resolution"] = sym.Resolution
 			entry["indexed"] = sym.Indexed
 			if !sym.Indexed {
@@ -615,10 +652,14 @@ func correlateProfile(ctx context.Context, syms []profiler.Symbol, codebase stri
 			if sym.FQN != "" {
 				entry["fqn"] = sym.FQN
 				entry["kind"] = sym.Kind
-				// Enrich resolved frames with blast radius + test coverage,
-				// turning the frame list into a "fix this first" ranking.
-				imp, ierr := ecosystem.CodemapImpactAtPath(correlateCtx, s.File, s.Line, 0, opts)
-				if ierr == nil && imp.Found {
+				if sym.StartLine > 0 {
+					entry["start_line"] = sym.StartLine
+				}
+				if sym.EndLine > 0 {
+					entry["end_line"] = sym.EndLine
+				}
+				if cs.impDone && cs.impErr == nil && cs.imp.Found {
+					imp := cs.imp
 					entry["call_graph"] = imp.CallGraph
 					if imp.Resolution != "" {
 						entry["impact_resolution"] = imp.Resolution
