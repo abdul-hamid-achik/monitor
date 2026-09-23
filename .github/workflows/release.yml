@@ -26,33 +26,39 @@ jobs:
           go-version: "1.26.5"
           cache: true
 
+      # Runtime specs (mvp_errors_*, hot_*, run_*) launch real node/deno/bun/
+      # python/ruby workloads, so every interpreter monitor supports has to be
+      # on PATH here too (kept identical to ci.yml's specs job).
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: "2.9.x"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.x"
+
+      - uses: ruby/setup-ruby@e8944e80fb94b20106697132f8c20c665fab29e9 # v1.325.0
+        with:
+          ruby-version: "3.4"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
       - name: Install Glyphrun
         run: |
-          go install github.com/abdul-hamid-achik/glyphrun/cmd/glyph@v0.14.0
+          go install github.com/abdul-hamid-achik/glyphrun/cmd/glyph@v0.20.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Build Monitor
         run: go build -o bin/monitor ./cmd/monitor
 
       - name: Run behavioral specs
-        # The two exceptions require a locally installed integration or a
-        # macOS-only utility. Their behavior is covered by unit tests.
-        run: |
-          fail=0
-          for spec in specs/*.yml; do
-            case "$spec" in
-              */stash.yml) echo "skip $spec (needs fcheap)"; continue ;;
-              */profile_sample.yml) echo "skip $spec (needs macOS sample)"; continue ;;
-            esac
-            result=$(glyph run "$spec" --format json | python3 -c "import sys, json; print(json.load(sys.stdin).get('status', ''))")
-            if [ "$result" = "passed" ]; then
-              echo "PASS $spec"
-            else
-              echo "FAIL $spec ($result)"
-              fail=1
-            fi
-          done
-          exit "$fail"
+        run: scripts/specs.sh
 
   release:
     needs: specs

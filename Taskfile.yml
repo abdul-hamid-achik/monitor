@@ -99,17 +99,9 @@ tasks:
 
   specs:
     desc: Run all glyphrun behavioral specs
+    deps: [build]
     cmds:
-      - |
-        if ! command -v glyph >/dev/null 2>&1; then
-          echo "SKIP: glyph not installed"
-          exit 0
-        fi
-        for spec in specs/*.yml; do
-          echo "--- Running $spec ---"
-          glyph run "$spec"
-        done
-      - echo "Specs complete."
+      - scripts/specs.sh
 
   docs:
     desc: Serve the VitePress documentation site locally
