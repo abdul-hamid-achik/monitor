@@ -80,14 +80,20 @@ Sampled/profiler symbols, codemap FQNs, vecgrep scores, PIDs, releases, and
 the service name never enter this hash.
 
 **Culprit** is the single frame monitor blames as the most actionable line:
-the innermost cause's own crash frame when that frame is in-app, otherwise
-the outer exception's crash frame when that one is in-app, otherwise no
-culprit at all (a crash that bottoms out entirely inside a dependency). The
-rationale: the innermost cause is usually the one line an in-app developer
-can actually fix, but when even that bottoms out inside `node_modules`,
-`site-packages`, `vendor`, or a language's own standard library, the outer
-exception's own in-app frame is a more actionable pointer than a third-party
-line.
+the innermost cause's own **last in-app frame** when it has one, otherwise
+the outer exception's own last in-app frame, otherwise no culprit at all. A
+cause's "last in-app frame" does not have to be its literal crash frame —
+walking backward from the crash frame to the nearest in-app one still counts:
+an exception raised inside a runtime, stdlib, or dependency function that
+in-app code called directly (Node's `fs.readFileSync` raising `ENOENT`,
+Python's `json.loads` raising `JSONDecodeError`) still blames that in-app
+caller, not nothing. Culprit only falls through to nothing when there is no
+in-app frame anywhere in the chain — a crash that bottoms out entirely inside
+`node_modules`, `site-packages`, `vendor`, or a language's own standard
+library, with no in-app caller above it either. The rationale: the innermost
+cause is usually the one line an in-app developer can actually fix, but when
+even that bottoms out inside a dependency, the outer exception's own in-app
+frame is a more actionable pointer than a third-party line.
 
 **Chain ordering.** Runtimes disagree on which order they print a chained
 exception in — Node's `[cause]` and Go's `pkg/errors`-style `%+v` both print
@@ -100,14 +106,27 @@ before fingerprinting ever runs, so the identity rule above never has to
 special-case a runtime's print order.
 
 Each stored issue additionally carries `culprit`, `latest_exception` (type,
-value, runtime, handled, up to 12 in-app frames, and up to 3 causes with
-their own culprits — capped around 2 KB), `first_git_sha` (the local git
-HEAD when the issue was first observed), `level` (`fatal`, `error`, or
-`warning`), and `handled`. A stored occurrence keeps its own `exception`
-detail only on an issue's *first* occurrence, to bound store size; every
-later occurrence relies on the issue's `latest_exception` instead. All of
+value, runtime, handled, up to 12 in-app frames, and up to 3 causes — always
+including the innermost one — with their own culprits; capped around 2 KB,
+with the exception `value` truncated first when a message runs long, so a
+pathologically long message never crowds out every frame), `first_git_sha`
+(from the run context's Git SHA — `MONITOR_GIT_SHA`, `GIT_SHA`, or
+`GITHUB_SHA`, whichever is set; **not** resolved from the local git HEAD, so
+an ordinary local dev session with none of those set leaves it empty),
+`level` (`fatal`, `error`, or `warning`), and `handled`. A stored occurrence
+keeps its own `exception` detail only on an issue's *first* occurrence, to
+bound store size; every later occurrence relies on the issue's
+`latest_exception` instead, which always tracks the occurrence with the
+*newest* `observed_at` seen so far — replaying an older log line after a
+newer one was already recorded never overwrites it with stale detail. All of
 this is additive JSON: an issue or occurrence written before this existed
 still decodes with these fields simply absent.
+
+An event with in-app frames but no exception type or message at all — for
+example a Ruby `rescue`-printed backtrace (`warn e.backtrace`) — still
+records: its fingerprint and culprit come from its frames exactly as usual,
+and its title/message fall back to the culprit-facing frame ("`func
+(file:line)`") since there is no type/value text to show instead.
 
 `issues.RecordException` does not scrub the exception text itself — the
 caller (`monitor run --`, `monitor stacktrace parse --record`) is expected
@@ -165,14 +184,31 @@ limits default to 50 and 20 respectively and must be between 1 and 200.
 | Flag | Matches |
 |------|---------|
 | `--since` / `--until` | an issue whose activity window (`first_seen`..`last_seen`) overlaps the given bound. Accepts an RFC3339 timestamp or a duration (`10m`, `24h`) meaning "that long ago". |
-| `--run-id` | an issue that has seen this run id on any occurrence (`MONITOR_LAUNCH_ID` / `CHALUPA_CI_RUN_ID`, not just its first). |
-| `--release` | an issue that has seen this release on any occurrence. |
+| `--run-id` | an issue that has this run id among its 25 most recently seen (see below). |
+| `--release` | an issue that has this release among its 25 most recently seen. |
 | `--kind` | `exception`, `alert` (any `monitor.alert.<rule>` kind), `investigation`, or `any` (the default). |
 
+`--since`/`--until` test whether the issue's *whole activity window*
+overlaps the bound, not whether an occurrence actually landed inside it: an
+issue first seen 10 hours ago and last seen 1 hour ago still matches a
+`--since 6h --until 4h` window even though nothing happened in that
+particular 2-hour slice. This keeps a window query fast (`list` only reads
+the issues collection, never occurrences) at the cost of an occasional false
+positive; confirm against `monitor issues show <id>`'s own occurrence
+timestamps when precision matters.
+
 `--run-id`/`--release` match against a small, bounded, deduplicated set of
-every distinct value an issue has seen (its 25 most recent), not a scan of
-every retained occurrence — a window query stays fast even over a store
-holding tens of thousands of occurrences.
+every distinct value an issue has seen, capped at its 25 *most recently
+seen* — not a scan of every retained occurrence, which is what keeps a
+window query fast even over a store holding tens of thousands of
+occurrences. The tradeoff: a run id or release seen only on an issue's
+*older* occurrences (evicted from that set by 25 newer ones) will not match,
+and an issue written before this aggregate existed (a v1.15-era issue) never
+matches a `--run-id`/`--release` filter at all. The run id itself comes from
+`MONITOR_RUN_ID` / `CHALUPA_CI_RUN_ID` / `CHALUPA_RUN_ID` (see
+[Chalupa correlation](#chalupa-correlation) below) — not `MONITOR_LAUNCH_ID`,
+which is a separate, later-epic identifier for `monitor run -- <cmd>`'s own
+launch, not for this run-correlation field.
 
 Lifecycle behavior is intentionally small:
 
@@ -188,6 +224,12 @@ occurrence bodies. It evicts the oldest issue groups when the issue cap is
 exceeded and deletes their retained occurrences. Occurrence-only eviction is
 FIFO, but an issue's `occurrence_count` remains cumulative, so it can be larger
 than the number of occurrence bodies returned by `show` or `monitor_issue`.
+
+`list`'s rows carry a trimmed `latest_exception` (type, value, runtime,
+handled — no frames, no causes); `culprit` stays untouched, so a row still
+names a `file:line`. `show` (and MCP's `monitor_issue`) return the full,
+untrimmed detail for that one issue instead — listing dozens of issues at
+once should not cost every row its full ~2 KB exception budget.
 
 ## Read issues through MCP
 
