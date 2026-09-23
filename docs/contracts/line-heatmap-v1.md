@@ -1,10 +1,13 @@
-# `monitor.line_heatmap.v1` (Draft)
+# `monitor.line_heatmap.v1`
 
-> **Status: Draft.** This schema is not implemented yet — it is the target
-> output of `heat.Build` (E3.1), the planned single producer behind
-> `monitor hot <file|pid|service>`. Field names may still change before that
-> PR lands. See the [naming ADR](./local-sentry-naming) for `monitor hot`'s
-> command shape.
+> **Status: Implemented for `monitor hot --file <path>`** (E3.1,
+> `profiler.BuildHeatmap`, the `heat.Build` this document originally
+> drafted). Resolving a live `<pid|service>` target — the `hot <pid>` /
+> `hot <service>` forms the naming ADR also documents — is E3.2, a later
+> wave; today's `--file`-only CLI gives that combination a clear
+> "not implemented yet" error rather than doing nothing silently. See the
+> [naming ADR](./local-sentry-naming) for `monitor hot`'s full command
+> shape.
 
 ## Why this exists
 
@@ -26,8 +29,20 @@ model instead of adding a second, format-specific renderer per profiler:
 
 A function's line range comes from `codemap symbol-at`, when codemap is
 healthy; `range_source: "observed"` marks a range inferred from the sample
-data itself when codemap is unavailable, so a heatmap can still render with
-an honest caveat instead of failing outright.
+data itself when codemap is unavailable (or, for a function with zero
+attributed `lines` — a pure ancestor whose only signal is its `callees` —
+falls back to its own generated declaration line as both start and end),
+so a heatmap can still render with an honest caveat instead of failing
+outright.
+
+`FromCDP` also excludes a JS runtime's own bootstrap/module-loader frames
+(Node's `node:internal/...` built-ins, and the analogous `ext:`/`deno:`
+schemes Deno's isolate uses) from `functions` entirely, rather than listing
+them as zero-self wrapper rows: every sample's stack passes through a
+runtime's own module-loading machinery, so including it would bury real
+user functions under a wall of `(anonymous)` bootstrap wrappers. Their real
+CPU time still counts toward `active_samples` — it's excluded from the
+function list, not from the honesty accounting.
 
 ## Shape
 
@@ -37,7 +52,7 @@ an honest caveat instead of failing outright.
   "profile_type": "cpu", // "cpu" | "heap_inuse" | "heap_alloc" | "goroutine"
   "unit": "samples", // or "bytes" for heap profiles
   "method": "v8_position_ticks", // "v8_position_ticks" | "pprof_proto" | "cpuprofile_file" | "darwin_sample"
-  "runtime": "node", // "node" | "deno" | "bun" | "go" | "python" | "ruby"
+  "runtime": "unknown", // "node" | "deno" | "bun" | "go" | "python" | "ruby" | "unknown"
 
   "samples": 12000,
   "active_samples": 11840, // excludes (idle)/(program)/(GC) pseudo-frames
@@ -61,7 +76,7 @@ an honest caveat instead of failing outright.
           "pct_of_function": 91.4, // this line's share of its OWN function's weight
           "code": "      s += JSON.stringify({ i, item, doubled, pad: 'x'.repeat(64) });",
           "mapping": "exact", // "exact" | "ambiguous" | "transpiled" | "inferred" | ""
-          "stale": false, // true when the mapped file's current sha256 no longer matches what was profiled
+          "stale": false, // true when the .map file is older than the generated file it maps by more than a small tolerance (internal/sourcemap's mtime check — not a content hash)
           "issues": [
             // additive, v1.17 E3.4: errors × heat cross-reference,
             // read from the issues store, not computed here
@@ -71,7 +86,7 @@ an honest caveat instead of failing outright.
       ],
       "callees": [
         { "func": "JSON.stringify", "cum": 7600 }
-      ]
+      ] // sorted by cum descending, capped at 5
     }
   ],
 
@@ -86,6 +101,23 @@ an honest caveat instead of failing outright.
 
 ## Notes on specific fields
 
+- **`runtime`** defaults to `"unknown"` for a file-loaded `.cpuprofile`
+  (`monitor hot --file`): Node, Deno, and Bun all write the identical CDP
+  wire shape, so it is genuinely not determinable from the file's content
+  alone — degrading honestly to `"unknown"` rather than guessing `"node"`.
+  A live capture (E3.2, `monitor hot <pid|service>`) can set it from
+  `procbind`'s own runtime detection once that wiring lands. `"go"` is
+  always known for a pprof-sourced heatmap: the pprof proto format itself
+  is only ever produced by `monitor profile`/`net/http/pprof` capturing a
+  Go process in this codebase.
+- **`functions`** is sorted by `cum_pct` descending (then `self_pct`
+  descending, then `name`) and capped at 25 entries by default
+  (`monitor hot --top N` overrides the cap; `--func NAME` filters to one
+  function by exact name instead). Sorting by `cum_pct` — not `self_pct` —
+  matches a thin wrapper's cumulative total inheriting almost entirely from
+  a callee it does no real work of its own on; `monitor hot`'s own default
+  CodeFrame target is still chosen by highest `self_pct`, not this sort
+  order, since a wrapper's own line is never the interesting one to expand.
 - **`lines[].pct_of_function`** is always relative to the *function's own*
   weight (`self`/`cum` roll-up within that function), not the profile total —
   this is what lets `monitor hot --file v8-hot.cpuprofile` name "the hot line
@@ -97,7 +129,17 @@ an honest caveat instead of failing outright.
   mappings), `transpiled` (mapped through a build step without a source
   map), `inferred` (no source map at all; the location was guessed), or
   `""` when no source map applies (plain Go, or a `.go` file profiled
-  directly). Staleness is a **separate** boolean, `lines[].stale`, not a
+  directly). `heat.Build` itself only ever produces `exact`, `ambiguous`, or
+  `""` — the three outcomes `internal/sourcemap.Resolver.Resolve` itself can
+  return, given only a line (no column: V8 `positionTicks`/pprof lines carry
+  no column, so `Resolve` is queried at the column of the generated line's
+  first non-blank character rather than column 0, which several bundlers'
+  output maps to the tail of the *previous* statement instead of the one
+  actually on that line — verified live against a real `bun build
+  --sourcemap=external` output, see `internal/profiler/testdata/tssrc`).
+  `transpiled`/`inferred` describe a *guess* made in the absence of a map
+  entirely, which is `stacktrace.Frame`'s business, not `heat.Build`'s.
+  Staleness is a **separate** boolean, `lines[].stale`, not a
   fifth `mapping` value: a profiled line can go stale after profiling (the
   file changed since), which is a signal a per-crash stack `Frame` has no
   equivalent for, so it does not belong inside the shared enum.
