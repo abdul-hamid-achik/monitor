@@ -258,6 +258,17 @@ to 'info' (or 'error' for stderr lines without a level).`,
 					_ = store.Close()
 				}
 			}()
+			// Capture no longer syncs the store on every line (batched flush;
+			// see logger.Store.maybeSyncLocked), so a SIGTERM/SIGINT must
+			// force a flush explicitly rather than rely on the runner
+			// draining its pipes and returning promptly. Close() below still
+			// flushes unconditionally, so this is a belt-and-suspenders
+			// durability improvement, not the only thing making capture
+			// crash-safe on a clean shutdown.
+			go func() {
+				<-ctx.Done()
+				_ = store.Sync()
+			}()
 
 			runner := capture.NewRunner(store)
 			runner.MaxLines = maxLines
