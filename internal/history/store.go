@@ -159,15 +159,23 @@ func (s *Store) ensureCollection() error {
 	if s.db.HasCollection(collection) {
 		return nil
 	}
-	// WithMemoryLimits only takes effect for the lifetime of THIS collection
-	// object; it is not what keeps the cap alive across a reopen (see
-	// defaultMaxRecords' doc comment). It is still worth setting at creation
-	// so a long single session gets veclite's own free per-insert enforcement
-	// in addition to enforceRecordLimitLocked below.
-	_, err := s.db.CreateCollection(collection, veclite.WithMemoryLimits(veclite.MemoryConfig{
-		MaxRecords:     s.maxRecords,
-		EvictionPolicy: "fifo",
-	}))
+	// Deliberately created WITHOUT veclite.WithMemoryLimits. It is not what
+	// keeps the cap alive across a reopen (see defaultMaxRecords' doc
+	// comment) — that is enforceRecordLimitLocked's job, from Go-level Store
+	// state on every Append. Passing a MemoryConfig here is not "free" extra
+	// enforcement either: veclite@v0.22.1's enforceMemoryLimitIfConfigured
+	// runs on every single InsertTextDocument call for a collection created
+	// with one, evicting min(count-MaxRecords, EvictionBatchSize) records —
+	// 1, the first time the cap is reached — via a full sorted scan of the
+	// collection on EVERY insert once at capacity. That pins the count at
+	// maxRecords forever in the very session that creates the store and
+	// defeats enforceRecordLimitLocked's batching below, whose 10%-overflow
+	// threshold then never fires because veclite's own per-insert eviction
+	// never lets the collection grow past the cap in the first place.
+	// Letting enforceRecordLimitLocked be the ONLY enforcement is what makes
+	// eviction actually batched from the moment the store is created, not
+	// only after a reopen.
+	_, err := s.db.CreateCollection(collection)
 	return err
 }
 

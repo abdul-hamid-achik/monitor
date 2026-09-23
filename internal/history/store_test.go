@@ -5,7 +5,37 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	veclite "github.com/abdul-hamid-achik/veclite"
 )
+
+// openWithMaxRecords opens a fresh history store whose Go-level maxRecords
+// cap is set BEFORE the collection is created (Open always uses
+// defaultMaxRecords for that). Tests that need a small cap in effect at
+// creation time — to exercise veclite's own per-insert eviction behavior
+// rather than only enforceRecordLimitLocked's after-the-fact batching — use
+// this instead of Open + a post-hoc `w.maxRecords = n` override, which only
+// ever changes the Go-level cap and leaves the (much larger) cap baked into
+// the collection at creation time alone.
+func openWithMaxRecords(t *testing.T, path string, maxRecords int) *Store {
+	t.Helper()
+	db, err := veclite.Open(path)
+	if err != nil {
+		t.Fatalf("veclite.Open: %v", err)
+	}
+	s := &Store{
+		db:           db,
+		maxRecords:   maxRecords,
+		syncEvery:    defaultSyncEvery,
+		syncInterval: defaultSyncInterval,
+		lastSync:     time.Now(),
+	}
+	if err := s.ensureCollection(); err != nil {
+		_ = db.Close()
+		t.Fatalf("ensureCollection: %v", err)
+	}
+	return s
+}
 
 func TestAppendAndQuery(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "h.veclite")
@@ -85,6 +115,48 @@ func TestMemoryLimitsSurviveReopen(t *testing.T) {
 	}
 	if len(pts) != 5 {
 		t.Fatalf("record count after reopen = %d, want capped at 5 (MaxRecords lost on reopen was bug 13)", len(pts))
+	}
+}
+
+// TestFreshStoreDoesNotEvictOnEveryInsert is history's counterpart to the
+// same regression covered in internal/logger: veclite@v0.22.1's own
+// per-insert enforcement (only triggered by a MemoryConfig passed to
+// CreateCollection) evicted one record via a full sorted scan on EVERY
+// insert once the collection reached its cap, in the very same session that
+// created the store — pinning Count() at maxRecords and defeating
+// enforceRecordLimitLocked's batching below, which used to only take effect
+// after a reopen. ensureCollection no longer passes WithMemoryLimits, so a
+// fresh store (never reopened) must let the collection grow past maxRecords
+// by up to ~10% before evicting, then evict the whole accumulated batch.
+func TestFreshStoreDoesNotEvictOnEveryInsert(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "h.veclite")
+	w := openWithMaxRecords(t, path, 100)
+	closeStoreOnCleanup(t, w)
+
+	for i := 0; i < 105; i++ {
+		if err := w.Append(Sample{Metric: "cpu.usage", Value: float64(i)}); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	pts, err := w.Query("cpu.usage", time.Time{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(pts) != 105 {
+		t.Fatalf("record count after 105 appends = %d, want 105 (no per-insert eviction on a fresh store)", len(pts))
+	}
+
+	for i := 0; i < 5; i++ {
+		if err := w.Append(Sample{Metric: "cpu.usage", Value: float64(200 + i)}); err != nil {
+			t.Fatalf("Append (batch trigger) %d: %v", i, err)
+		}
+	}
+	pts, err = w.Query("cpu.usage", time.Time{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(pts) != 100 {
+		t.Fatalf("record count after 110 appends = %d, want capped back to 100 by the batched eviction", len(pts))
 	}
 }
 
