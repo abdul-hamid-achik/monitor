@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
 	"github.com/abdul-hamid-achik/monitor/internal/incidents"
+	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/notify"
 )
 
@@ -261,5 +263,61 @@ func TestWatchLoopRejectsUnsafeIntervalBeforeTicker(t *testing.T) {
 	err := watchLoop(context.Background(), nil, nil, 0, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "at least 100ms") {
 		t.Fatalf("error = %v, want validation before ticker creation", err)
+	}
+}
+
+// TestRecordAlertOccurrenceReleasesStoreBetweenCalls is the watch half of
+// bug 12 (E1.2): recordAlertOccurrence must open the issue store fresh for
+// its one delivery and release it before returning, never holding it for
+// the watch loop's lifetime. A second, independent writer must be able to
+// acquire the store immediately afterward instead of timing out.
+func TestRecordAlertOccurrenceReleasesStoreBetweenCalls(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.veclite")
+	ev := collector.Event{Timestamp: time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)}
+	alert := collector.Alert{Rule: "cpu_spike", Severity: "warning", Detail: "cpu at 95%", PID: 123, Process: "worker"}
+
+	issue, occurrence, err := recordAlertOccurrence(context.Background(), path, ev, alert, nil, incidents.CaptureResult{})
+	if err != nil {
+		t.Fatalf("recordAlertOccurrence: %v", err)
+	}
+	if issue.ID == "" || occurrence.IssueID != issue.ID {
+		t.Fatalf("issue/occurrence mapping = %+v / %+v", issue, occurrence)
+	}
+
+	// A second writer must acquire the store right away: recordAlertOccurrence
+	// must not still be holding it.
+	store, err := issues.OpenStoreWait(context.Background(), path, 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("second writer could not acquire the store after recordAlertOccurrence returned: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close second writer: %v", err)
+	}
+
+	// A second delivery groups into the same issue (same alert identity).
+	second, _, err := recordAlertOccurrence(context.Background(), path, ev, alert, nil, incidents.CaptureResult{})
+	if err != nil {
+		t.Fatalf("second recordAlertOccurrence: %v", err)
+	}
+	if second.ID != issue.ID || second.OccurrenceCount != 2 {
+		t.Fatalf("second delivery = %+v, want it grouped with %s at occurrence_count 2", second, issue.ID)
+	}
+}
+
+// TestRecordAlertOccurrenceHostForSystemWideAlert covers project.Resolve's
+// PID-less special case end to end from watch's own call site: a
+// system-wide alert (no attached process, e.g. swap/disk pressure) groups
+// under project "host", not whatever directory monitor was launched from.
+func TestRecordAlertOccurrenceHostForSystemWideAlert(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.veclite")
+	ev := collector.Event{Timestamp: time.Now()}
+	alert := collector.Alert{Rule: "swap_pressure", Severity: "critical", Detail: "swap at 92%"}
+
+	issue, _, err := recordAlertOccurrence(context.Background(), path, ev, alert, nil, incidents.CaptureResult{})
+	if err != nil {
+		t.Fatalf("recordAlertOccurrence: %v", err)
+	}
+	if issue.Project != "host" {
+		t.Fatalf("Project = %q, want host for a PID-less system-wide alert", issue.Project)
 	}
 }

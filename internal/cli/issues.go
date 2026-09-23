@@ -190,27 +190,26 @@ func newIssueStatusCmd(storePath *string, action string, status issues.Status) *
 			if err != nil {
 				return writeIssueError(cmd, action, id, err)
 			}
-			store, err := issues.OpenStore(path)
-			if err != nil {
-				return writeIssueError(cmd, action, id, err)
-			}
+			// Waits up to issues.DefaultWriterWait for a concurrent writer
+			// (e.g. a live `watch --stash`) to release its brief exclusive
+			// lock instead of failing outright with ErrFileLocked (bug 12).
 			var updated issues.Issue
-			switch status {
-			case issues.StatusResolved:
-				updated, err = store.Resolve(id)
-			case issues.StatusOpen:
-				updated, err = store.Reopen(id)
-			case issues.StatusIgnored:
-				updated, err = store.Ignore(id)
-			default:
-				err = fmt.Errorf("unsupported target status %q", status)
-			}
-			closeErr := store.Close()
+			err = issues.WithWriter(cmd.Context(), path, issues.DefaultWriterWait, func(store *issues.Store) error {
+				var statusErr error
+				switch status {
+				case issues.StatusResolved:
+					updated, statusErr = store.Resolve(id)
+				case issues.StatusOpen:
+					updated, statusErr = store.Reopen(id)
+				case issues.StatusIgnored:
+					updated, statusErr = store.Ignore(id)
+				default:
+					statusErr = fmt.Errorf("unsupported target status %q", status)
+				}
+				return statusErr
+			})
 			if err != nil {
 				return writeIssueError(cmd, action, id, err)
-			}
-			if closeErr != nil {
-				return writeIssueError(cmd, action, id, closeErr)
 			}
 			if JSONOutput(cmd) {
 				return writeIssueJSON(cmd.OutOrStdout(), issueMutationOutput{Updated: true, Issue: updated})

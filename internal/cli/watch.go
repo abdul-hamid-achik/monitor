@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +19,7 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/incidents"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/notify"
+	"github.com/abdul-hamid-achik/monitor/internal/project"
 )
 
 // Event is the NDJSON event type emitted by `monitor watch --json`.
@@ -216,18 +216,20 @@ durable issue index with their run context and evidence reference.`,
 			c := NewCollector(interval)
 			ctx, cancel := Context()
 			defer cancel()
-			var issueStore *issues.Store
+			// The issue store is opened fresh for each delivery below (via
+			// issues.WithWriter), never held for the watch loop's lifetime:
+			// holding it here would keep this process's exclusive writer
+			// lock for as long as `watch --stash` runs, starving investigate
+			// / issues resolve / the MCP investigate path with
+			// veclite.ErrFileLocked the whole time (bug 12). Only the path
+			// is resolved once, up front.
+			var issueStorePath string
 			if stash {
-				if path, err := issues.ResolvePath(""); err == nil {
-					issueStore, err = issues.OpenStore(path)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "monitor: issue store unavailable: %v\n", err)
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "monitor: issue store unavailable: %v\n", err)
-				}
-				if issueStore != nil {
-					defer issueStore.Close()
+				var pathErr error
+				issueStorePath, pathErr = issues.ResolvePath("")
+				if pathErr != nil {
+					fmt.Fprintf(os.Stderr, "monitor: issue store unavailable: %v\n", pathErr)
+					issueStorePath = ""
 				}
 			}
 
@@ -273,8 +275,8 @@ durable issue index with their run context and evidence reference.`,
 						if err != nil {
 							ev2.StashErr = err.Error()
 						}
-						if issueStore != nil {
-							issue, occurrence, issueErr := recordAlertOccurrence(issueStore, ev, a, d, res)
+						if issueStorePath != "" {
+							issue, occurrence, issueErr := recordAlertOccurrence(ctx2, issueStorePath, ev, a, d, res)
 							if issueErr != nil {
 								ev2.IssueErr = issueErr.Error()
 							} else {
@@ -374,18 +376,26 @@ durable issue index with their run context and evidence reference.`,
 	return cmd
 }
 
-func recordAlertOccurrence(store *issues.Store, ev collector.Event, alert collector.Alert, diagnosis *incidents.Diagnosis, stash incidents.CaptureResult) (issues.Issue, issues.Occurrence, error) {
-	context := contextids.FromEnv(contextids.IDs{})
-	project := strings.TrimSpace(os.Getenv("MONITOR_PROJECT"))
-	if project == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			project = filepath.Base(cwd)
-		}
+// recordAlertOccurrence opens the issue store fresh for this one delivery
+// (via issues.WithWriter), so it never holds the store's exclusive writer
+// lock across ticks or alerts (bug 12). project.Resolve replaces the ad hoc
+// MONITOR_PROJECT/cwd-basename derivation this used to do inline, so watch
+// and investigate agree on the same project/service identity (bug 15); a
+// PID-less alert (a system-wide rule with no attached process) resolves to
+// project "host" instead of whatever directory monitor happened to be
+// launched from.
+func recordAlertOccurrence(ctx context.Context, path string, ev collector.Event, alert collector.Alert, diagnosis *incidents.Diagnosis, stash incidents.CaptureResult) (issues.Issue, issues.Occurrence, error) {
+	ids := contextids.FromEnv(contextids.IDs{})
+	var dir string
+	if cwd, err := os.Getwd(); err == nil {
+		dir = cwd
 	}
-	if project == "" {
-		project = "local"
-	}
-	service := firstNonEmpty(context.Service, alert.Process)
+	identity := project.Resolve(project.Hints{
+		ExplicitService: ids.Service,
+		ProcessName:     alert.Process,
+		Dir:             dir,
+		PID:             alert.PID,
+	})
 	message := alert.Detail
 	title := alert.Rule
 	if diagnosis != nil && diagnosis.Summary != "" {
@@ -410,26 +420,34 @@ func recordAlertOccurrence(store *issues.Store, ev collector.Event, alert collec
 	}
 	metadata := map[string]string{}
 	for key, value := range map[string]string{
-		"environment": context.Environment, "deployment_id": context.DeploymentID,
-		"step_id": context.StepID, "suite": context.Suite, "attempt": context.Attempt,
-		"git_sha": context.GitSHA, "trigger": "alert",
+		"environment": ids.Environment, "deployment_id": ids.DeploymentID,
+		"step_id": ids.StepID, "suite": ids.Suite, "attempt": ids.Attempt,
+		"git_sha": ids.GitSHA, "trigger": "alert",
 	} {
 		if value != "" {
 			metadata[key] = value
 		}
 	}
-	return store.UpsertOccurrence(issues.OccurrenceInput{
-		ObservedAt: ev.Timestamp, Project: project, Service: service,
+	input := issues.OccurrenceInput{
+		ObservedAt: ev.Timestamp, Project: identity.Slug, Service: identity.Service,
 		Kind:  "monitor.alert." + firstNonEmpty(alert.Rule, "unknown"),
 		Title: title, Message: message, Severity: alert.Severity,
-		RunID: context.RunID, Release: context.Release, PID: alert.PID,
+		RunID: ids.RunID, Release: ids.Release, PID: alert.PID,
 		TreeHash: stash.TreeHash, EvidenceRefs: evidence, Evidence: typedEvidence, Metadata: metadata,
 		Run: &issues.RunContext{
-			ID: context.RunID, Environment: context.Environment, DeploymentID: context.DeploymentID,
-			StepID: context.StepID, Suite: context.Suite, Attempt: context.Attempt,
-			Release: context.Release, GitSHA: context.GitSHA,
+			ID: ids.RunID, Environment: ids.Environment, DeploymentID: ids.DeploymentID,
+			StepID: ids.StepID, Suite: ids.Suite, Attempt: ids.Attempt,
+			Release: ids.Release, GitSHA: ids.GitSHA,
 		},
+	}
+	var issue issues.Issue
+	var occurrence issues.Occurrence
+	err := issues.WithWriter(ctx, path, issues.DefaultWriterWait, func(store *issues.Store) error {
+		var writeErr error
+		issue, occurrence, writeErr = store.UpsertOccurrence(input)
+		return writeErr
 	})
+	return issue, occurrence, err
 }
 
 func watchLoop(ctx context.Context, c *collector.Collector, engine *analyzer.Engine, interval time.Duration, gate *alertCooldownGate, handlers []watchAlertHandler) error {
