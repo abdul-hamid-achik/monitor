@@ -22,9 +22,23 @@
 # For each spec this prints one of:
 #   PASS <spec>
 #   SKIP <spec> (<reason>)
-#   FAIL <spec> (<status>)
+#   FAIL <spec> (<status>[: <diagnostic>])
 # and exits non-zero if any spec FAILed (SKIPs never fail the run).
+#
+# glyph's own diagnostics/progress are written to stderr on purpose (its
+# configureLogger routes them there; GLYPHRUN_PROGRESS=always makes that
+# noisier still) — only its `--format json` stdout is the parseable result.
+# stdout and stderr are therefore captured to two separate files below;
+# merging them would let a stray progress/log line break the JSON parse and
+# turn a real PASS into a false "invalid glyph output" FAIL.
 set -u
+
+# LC_ALL=C before the glob below expands, so `specs/*.yml` sorts the same
+# way regardless of the shell's locale. Without this, a run under
+# en_US.UTF-8 (a typical local shell) and one under C/C.UTF-8 (a typical CI
+# image) can list the same spec files in a different order, which breaks
+# "local and CI print the same list" for no reason other than locale.
+export LC_ALL=C
 
 GLYPH="${GLYPH:-glyph}"
 
@@ -38,6 +52,11 @@ fi
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "scripts/specs.sh: 'jq' not found on PATH" >&2
+  exit 1
+fi
+
+if [ ! -x ./bin/monitor ]; then
+  echo "scripts/specs.sh: ./bin/monitor not found or not executable (run 'task build', or 'go build -o bin/monitor ./cmd/monitor', first)" >&2
   exit 1
 fi
 
@@ -60,7 +79,8 @@ is_extra_skip() {
 
 fail=0
 tmp_out="$(mktemp)"
-trap 'rm -f "$tmp_out"' EXIT
+tmp_err="$(mktemp)"
+trap 'rm -f "$tmp_out" "$tmp_err"' EXIT
 
 for spec in "${specs[@]}"; do
   base="$(basename "$spec")"
@@ -91,20 +111,49 @@ for spec in "${specs[@]}"; do
     continue
   fi
 
-  if ! "$GLYPH" run "$spec" --format json >"$tmp_out" 2>&1; then
-    echo "FAIL $spec (glyph exited non-zero)"
-    sed 's/^/    /' "$tmp_out"
-    fail=1
+  : >"$tmp_out"
+  : >"$tmp_err"
+  "$GLYPH" run "$spec" --format json >"$tmp_out" 2>"$tmp_err"
+  glyph_exit=$?
+
+  status="$(jq -r '.status // empty' <"$tmp_out" 2>/dev/null)"
+
+  if [ "$glyph_exit" -eq 0 ] && [ "$status" = "passed" ]; then
+    echo "PASS $spec"
     continue
   fi
 
-  status="$(jq -r '.status // empty' <"$tmp_out" 2>/dev/null)"
-  if [ "$status" = "passed" ]; then
-    echo "PASS $spec"
-  else
-    echo "FAIL $spec (${status:-invalid glyph output})"
-    fail=1
+  if [ -z "$status" ]; then
+    status="glyph exited $glyph_exit with no parseable status"
   fi
+
+  # glyph reports a single top-level `.diagnostic` for a run that never got
+  # to evaluate any outcome (status "errored", e.g. a missing precondition).
+  # A run that failed an outcome instead carries its detail per-outcome, so
+  # fall back to the first non-passed outcome's message — this way FAIL is
+  # never printed bare in either case.
+  detail="$(jq -r '
+      .diagnostic
+      // ((.outcomes // []) | map(select(.status != "passed")) | .[0].message)
+      // empty
+    ' <"$tmp_out" 2>/dev/null)"
+
+  if [ -n "$detail" ]; then
+    echo "FAIL $spec ($status: $detail)"
+  else
+    echo "FAIL $spec ($status)"
+  fi
+
+  run_dir="$(jq -r '.runDir // empty' <"$tmp_out" 2>/dev/null)"
+  if [ -n "$run_dir" ]; then
+    echo "    run dir: $run_dir"
+  fi
+  if [ -s "$tmp_err" ]; then
+    echo "    glyph stderr:"
+    sed 's/^/      /' "$tmp_err"
+  fi
+
+  fail=1
 done
 
 exit "$fail"
