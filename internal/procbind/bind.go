@@ -496,9 +496,13 @@ func resolvePath(arg, cwd string) string {
 func extractInspectAddr(rt Runtime, cmdline []string) string {
 	defaultInspect := "127.0.0.1:9229"
 	if rt == RuntimeBun {
-		// A bare --inspect on Bun listens on 127.0.0.1:6499 (with a random
-		// URL path Bun prints at startup); 9229 is the Node/Deno default.
-		defaultInspect = "127.0.0.1:6499"
+		// A bare --inspect on Bun listens on ws://localhost:6499/<uuid>
+		// (its own startup banner says "localhost"), and on macOS it in
+		// fact binds only the IPv6 loopback [::1]:6499 -- not 127.0.0.1.
+		// Using the hostname "localhost" here, rather than hardcoding an
+		// IPv4 literal, lets a dialer try both address families instead of
+		// getting connection-refused against an interface Bun never bound.
+		defaultInspect = "localhost:6499"
 	}
 	for i := range cmdline {
 		arg := cmdline[i]

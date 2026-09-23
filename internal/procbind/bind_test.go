@@ -180,9 +180,12 @@ func TestExtractInspectAddr(t *testing.T) {
 		// Bare --inspect takes no separate value: a following numeric-looking
 		// token is the script (or a script argument), never an implicit port.
 		{RuntimeNode, []string{"node", "--inspect", "9229", "a.js"}, "127.0.0.1:9229"},
-		// Bun's bare --inspect defaults to 6499, not the Node/Deno 9229.
-		{RuntimeBun, []string{"bun", "--inspect", "app.ts"}, "127.0.0.1:6499"},
-		{RuntimeBun, []string{"bun", "--inspect-brk", "app.ts"}, "127.0.0.1:6499"},
+		// Bun's bare --inspect defaults to 6499, not the Node/Deno 9229, and
+		// the hostname is "localhost" (matching Bun's own banner; on macOS
+		// it in fact binds only the IPv6 loopback [::1]:6499, not
+		// 127.0.0.1), not a hardcoded IPv4 literal.
+		{RuntimeBun, []string{"bun", "--inspect", "app.ts"}, "localhost:6499"},
+		{RuntimeBun, []string{"bun", "--inspect-brk", "app.ts"}, "localhost:6499"},
 		{RuntimeBun, []string{"bun", "--inspect=6500", "app.ts"}, "127.0.0.1:6500"},
 	}
 	for _, tt := range tests {
