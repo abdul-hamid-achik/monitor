@@ -151,35 +151,64 @@ func (s *Store) ensureCollections() error {
 }
 
 // UpsertOccurrence records one occurrence, creates its issue when necessary,
-// and automatically reopens a resolved issue as a regression.
+// and automatically reopens a resolved issue as a regression. It is the
+// original, narrower sibling of UpsertOccurrenceResult -- kept unchanged so
+// every existing caller (investigate, watch) that never sets
+// OccurrenceInput's E2.3 fields (Fingerprint, DedupeKey, Exception, Culprit)
+// keeps its exact historical behavior.
 func (s *Store) UpsertOccurrence(input OccurrenceInput) (Issue, Occurrence, error) {
+	result, err := s.UpsertOccurrenceResult(input)
+	return result.Issue, result.Occurrence, err
+}
+
+// UpsertOccurrenceResult is UpsertOccurrence's richer sibling (E2.3): same
+// semantics, plus honoring OccurrenceInput.Fingerprint/DedupeKey/Exception/
+// Culprit and reporting whether the write deduped against an existing
+// occurrence. RecordException is the usual caller; UpsertOccurrence itself
+// is a thin wrapper around this for callers that don't need UpsertResult.
+func (s *Store) UpsertOccurrenceResult(input OccurrenceInput) (UpsertResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.upsertOccurrenceLocked(input)
+}
+
+// upsertOccurrenceLocked does the real work; s.mu must already be held.
+func (s *Store) upsertOccurrenceLocked(input OccurrenceInput) (UpsertResult, error) {
 	if err := s.requireWritable(); err != nil {
-		return Issue{}, Occurrence{}, err
+		return UpsertResult{}, err
 	}
 	input = normalizeOccurrenceInput(input)
 	if err := validateOccurrenceInput(input); err != nil {
-		return Issue{}, Occurrence{}, err
+		return UpsertResult{}, err
 	}
 
-	fingerprint := FingerprintV1(FingerprintInput{
-		Project: input.Project, Service: input.Service, Kind: input.Kind,
-		ExceptionType: input.ExceptionType, Message: input.Message, Symbols: input.Symbols,
-	})
+	fingerprint := strings.TrimSpace(input.Fingerprint)
+	if fingerprint == "" {
+		fingerprint = FingerprintV1(FingerprintInput{
+			Project: input.Project, Service: input.Service, Kind: input.Kind,
+			ExceptionType: input.ExceptionType, Message: input.Message, Symbols: input.Symbols,
+		})
+	}
 	issueRecord, err := s.db.Collection(issuesCollection).FindOne(veclite.Equal("fingerprint", fingerprint))
 	if err != nil && !errors.Is(err, veclite.ErrNotFound) {
-		return Issue{}, Occurrence{}, fmt.Errorf("find issue by fingerprint: %w", err)
+		return UpsertResult{}, fmt.Errorf("find issue by fingerprint: %w", err)
 	}
 
 	now := input.ObservedAt
-	issue := Issue{}
-	if issueRecord == nil {
+	var issue Issue
+	isNewIssue := issueRecord == nil
+	if isNewIssue {
 		issue = newIssue(input, fingerprint)
-	} else if err := json.Unmarshal([]byte(issueRecord.Content), &issue); err != nil {
-		return Issue{}, Occurrence{}, fmt.Errorf("decode issue %d: %w", issueRecord.ID, err)
 	} else {
+		if err := json.Unmarshal([]byte(issueRecord.Content), &issue); err != nil {
+			return UpsertResult{}, fmt.Errorf("decode issue %d: %w", issueRecord.ID, err)
+		}
 		normalizeIssueSlices(&issue)
+		if deduped, ok, err := s.findDedupedOccurrence(issue.ID, input.DedupeKey); err != nil {
+			return UpsertResult{}, err
+		} else if ok {
+			return UpsertResult{Issue: issue, Occurrence: deduped, Deduped: true}, nil
+		}
 		issue.LastSeen = laterTime(issue.LastSeen, now)
 		issue.FirstSeen = earlierTime(issue.FirstSeen, now)
 		issue.OccurrenceCount += input.Count
@@ -189,30 +218,104 @@ func (s *Store) UpsertOccurrence(input OccurrenceInput) (Issue, Occurrence, erro
 			issue.ResolvedAt = nil
 			issue.ReopenedCount++
 		}
+		// Culprit/LatestException track the issue's LATEST occurrence (see
+		// their doc comments), unlike Title/Message/ExceptionType/Severity
+		// which stay frozen at creation. Only overwrite when this
+		// occurrence actually carries exception detail, so a differently
+		// kinded write sharing the fingerprint space (should not normally
+		// happen, but defensively) never blanks out a real one.
+		if input.Culprit != nil {
+			issue.Culprit = input.Culprit
+		}
+		if input.Exception != nil {
+			issue.LatestException = input.Exception
+		}
 	}
+	applyRunReleaseAggregate(&issue, input)
 
 	occurrence := occurrenceFromInput(input, issue.ID)
+	if !isNewIssue {
+		// Exception detail is retained only on an issue's FIRST occurrence
+		// to bound store size (see Occurrence.Exception); newIssue already
+		// copied it onto the issue as LatestException/Culprit above.
+		occurrence.Exception = nil
+	}
 	occurrenceContent, err := json.Marshal(occurrence)
 	if err != nil {
-		return Issue{}, Occurrence{}, fmt.Errorf("encode occurrence: %w", err)
+		return UpsertResult{}, fmt.Errorf("encode occurrence: %w", err)
 	}
 	occurrenceRecordID, err := s.db.Collection(occurrencesCollection).InsertTextDocument(string(occurrenceContent), map[string]any{
 		"id": occurrence.ID, "issue_id": issue.ID, "observed_at": occurrence.ObservedAt,
+		"dedupe_key": occurrence.DedupeKey,
 	})
 	if err != nil {
-		return Issue{}, Occurrence{}, fmt.Errorf("insert occurrence: %w", err)
+		return UpsertResult{}, fmt.Errorf("insert occurrence: %w", err)
 	}
 	if err := s.saveIssue(issueRecord, issue); err != nil {
 		_ = s.db.Collection(occurrencesCollection).Delete(occurrenceRecordID)
-		return Issue{}, Occurrence{}, err
+		return UpsertResult{}, err
 	}
 	if err := s.enforceRecordBounds(DefaultMaxIssues, DefaultMaxOccurrences); err != nil {
-		return Issue{}, Occurrence{}, err
+		return UpsertResult{}, err
 	}
 	if err := s.syncAndSecure(); err != nil {
-		return Issue{}, Occurrence{}, err
+		return UpsertResult{}, err
 	}
-	return issue, occurrence, nil
+	return UpsertResult{Issue: issue, Occurrence: occurrence}, nil
+}
+
+// findDedupedOccurrence looks up dedupeKey among issueID's retained
+// occurrences (docs/contracts/local-sentry-naming.md §5). An empty
+// dedupeKey always misses -- most callers never set OccurrenceInput.
+// DedupeKey, and an empty key must never accidentally match another empty-
+// keyed occurrence.
+func (s *Store) findDedupedOccurrence(issueID, dedupeKey string) (Occurrence, bool, error) {
+	key := strings.TrimSpace(dedupeKey)
+	if key == "" {
+		return Occurrence{}, false, nil
+	}
+	record, err := s.db.Collection(occurrencesCollection).FindOne(
+		veclite.Equal("issue_id", issueID), veclite.Equal("dedupe_key", key))
+	if errors.Is(err, veclite.ErrNotFound) {
+		return Occurrence{}, false, nil
+	}
+	if err != nil {
+		return Occurrence{}, false, fmt.Errorf("find occurrence by dedupe key: %w", err)
+	}
+	var occurrence Occurrence
+	if err := json.Unmarshal([]byte(record.Content), &occurrence); err != nil {
+		return Occurrence{}, false, fmt.Errorf("decode occurrence %d: %w", record.ID, err)
+	}
+	normalizeOccurrenceSlices(&occurrence)
+	return occurrence, true, nil
+}
+
+// maxIssueRunsReleases bounds Issue.Runs and Issue.Releases; see their doc
+// comment on Issue.
+const maxIssueRunsReleases = 25
+
+// applyRunReleaseAggregate folds input's RunID/Release into issue's
+// deduplicated, size-bounded Runs/Releases sets.
+func applyRunReleaseAggregate(issue *Issue, input OccurrenceInput) {
+	issue.Runs = appendBoundedUnique(issue.Runs, input.RunID, maxIssueRunsReleases)
+	issue.Releases = appendBoundedUnique(issue.Releases, input.Release, maxIssueRunsReleases)
+}
+
+func appendBoundedUnique(values []string, value string, max int) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, v := range values {
+		if v == value {
+			return values
+		}
+	}
+	values = append(values, value)
+	if len(values) > max {
+		values = values[len(values)-max:]
+	}
+	return values
 }
 
 // enforceRecordBounds caps both collections. When an old issue group is
@@ -263,10 +366,23 @@ func (s *Store) enforceRecordBounds(maxIssues, maxOccurrences int) error {
 }
 
 func newIssue(input OccurrenceInput, fingerprint string) Issue {
-	return Issue{
-		ID:                 "ISS-" + strings.ToUpper(fingerprint[:16]),
+	version := strings.TrimSpace(input.FingerprintVersion)
+	if version == "" || strings.TrimSpace(input.Fingerprint) == "" {
+		version = FingerprintVersionV1
+	}
+	// A FingerprintV1/V2 hash is always a 64-char sha256 hex digest, well
+	// over 16 chars. OccurrenceInput.Fingerprint (E2.3) lets a caller supply
+	// its own precomputed value, though, so guard the slice instead of
+	// trusting it: a short custom fingerprint gets the whole thing as its
+	// ID suffix rather than panicking.
+	idSuffix := fingerprint
+	if len(idSuffix) > 16 {
+		idSuffix = idSuffix[:16]
+	}
+	issue := Issue{
+		ID:                 "ISS-" + strings.ToUpper(idSuffix),
 		Fingerprint:        fingerprint,
-		FingerprintVersion: FingerprintVersionV1,
+		FingerprintVersion: version,
 		Project:            input.Project,
 		Service:            input.Service,
 		Kind:               input.Kind,
@@ -275,11 +391,34 @@ func newIssue(input OccurrenceInput, fingerprint string) Issue {
 		ExceptionType:      input.ExceptionType,
 		Symbols:            cloneStrings(input.Symbols),
 		Severity:           input.Severity,
+		Level:              input.Level,
+		Handled:            exceptionHandled(input.Exception),
 		Status:             StatusOpen,
 		FirstSeen:          input.ObservedAt,
 		LastSeen:           input.ObservedAt,
 		OccurrenceCount:    input.Count,
+		Culprit:            input.Culprit,
+		LatestException:    input.Exception,
+		FirstGitSHA:        runGitSHA(input.Run),
 	}
+	return issue
+}
+
+// exceptionHandled clones ExceptionInfo.Handled so the stored Issue never
+// aliases a caller-owned pointer.
+func exceptionHandled(info *ExceptionInfo) *bool {
+	if info == nil || info.Handled == nil {
+		return nil
+	}
+	v := *info.Handled
+	return &v
+}
+
+func runGitSHA(run *RunContext) string {
+	if run == nil {
+		return ""
+	}
+	return run.GitSHA
 }
 
 func occurrenceFromInput(input OccurrenceInput, issueID string) Occurrence {
@@ -291,6 +430,7 @@ func occurrenceFromInput(input OccurrenceInput, issueID string) Occurrence {
 		RunID: input.RunID, Release: input.Release, PID: input.PID, TreeHash: input.TreeHash,
 		EvidenceRefs: cloneStrings(input.EvidenceRefs), Metadata: cloneMap(input.Metadata),
 		Run: cloneRun(input.Run), Evidence: cloneEvidence(input.Evidence), Count: input.Count,
+		Exception: input.Exception, DedupeKey: strings.TrimSpace(input.DedupeKey),
 	}
 }
 
@@ -347,19 +487,27 @@ func (s *Store) List(opts ListOptions) ([]Issue, error) {
 	if err := s.requireOpen(); err != nil {
 		return nil, err
 	}
-	if !s.db.HasCollection(issuesCollection) {
-		return []Issue{}, nil
-	}
-	records, err := s.db.Collection(issuesCollection).Find()
-	if err != nil {
-		return nil, fmt.Errorf("list issues: %w", err)
-	}
+	// Validate filters before the HasCollection short-circuit below: an
+	// invalid --status or --kind must be rejected the same way against a
+	// brand-new, still-empty store as against a populated one, not silently
+	// accepted just because there is nothing yet to filter.
 	statuses := make(map[Status]struct{}, len(opts.Statuses))
 	for _, status := range opts.Statuses {
 		if !validStatus(status) {
 			return nil, fmt.Errorf("list issues: invalid status %q", status)
 		}
 		statuses[status] = struct{}{}
+	}
+	kind := strings.ToLower(strings.TrimSpace(opts.Kind))
+	if !validKindFilter(kind) {
+		return nil, fmt.Errorf("list issues: invalid kind %q", opts.Kind)
+	}
+	if !s.db.HasCollection(issuesCollection) {
+		return []Issue{}, nil
+	}
+	records, err := s.db.Collection(issuesCollection).Find()
+	if err != nil {
+		return nil, fmt.Errorf("list issues: %w", err)
 	}
 	result := make([]Issue, 0, len(records))
 	for _, record := range records {
@@ -376,6 +524,24 @@ func (s *Store) List(opts ListOptions) ([]Issue, error) {
 			continue
 		}
 		if opts.Service != "" && !strings.EqualFold(opts.Service, issue.Service) {
+			continue
+		}
+		// Since/Until (E2.6): an issue matches when its activity window
+		// [FirstSeen, LastSeen] overlaps [Since, Until]. A zero bound on
+		// either side leaves that side unbounded.
+		if !opts.Since.IsZero() && issue.LastSeen.Before(opts.Since) {
+			continue
+		}
+		if !opts.Until.IsZero() && issue.FirstSeen.After(opts.Until) {
+			continue
+		}
+		if opts.RunID != "" && !containsFold(issue.Runs, opts.RunID) {
+			continue
+		}
+		if opts.Release != "" && !containsFold(issue.Releases, opts.Release) {
+			continue
+		}
+		if !matchesKind(issue.Kind, kind) {
 			continue
 		}
 		result = append(result, issue)
@@ -581,6 +747,46 @@ func validateOccurrenceInput(input OccurrenceInput) error {
 
 func validStatus(status Status) bool {
 	return status == StatusOpen || status == StatusResolved || status == StatusIgnored
+}
+
+// alertKindPrefix is the literal watch.go writes for every alert-derived
+// Issue.Kind ("monitor.alert.<rule>"); see docs/contracts/
+// local-sentry-naming.md's Issue.Kind row.
+const alertKindPrefix = "monitor.alert."
+
+// validKindFilter reports whether kind (already lower-cased and trimmed) is
+// one of ListOptions.Kind's accepted sentinel values, including "" (no
+// filter).
+func validKindFilter(kind string) bool {
+	switch kind {
+	case "", "any", KindException, "investigation", "alert":
+		return true
+	default:
+		return false
+	}
+}
+
+// matchesKind reports whether issueKind satisfies a (lower-cased, trimmed)
+// ListOptions.Kind filter; see ListOptions.Kind's doc comment.
+func matchesKind(issueKind, kind string) bool {
+	switch kind {
+	case "", "any":
+		return true
+	case "alert":
+		return strings.HasPrefix(issueKind, alertKindPrefix)
+	default:
+		return strings.EqualFold(issueKind, kind)
+	}
+}
+
+// containsFold reports whether values contains target, case-insensitively.
+func containsFold(values []string, target string) bool {
+	for _, v := range values {
+		if strings.EqualFold(v, target) {
+			return true
+		}
+	}
+	return false
 }
 
 func earlierTime(a, b time.Time) time.Time {
