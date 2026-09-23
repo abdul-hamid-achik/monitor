@@ -38,6 +38,12 @@ type Store struct {
 	path      string
 	retention RetentionPolicy
 	lastSweep time.Time
+
+	// pendingWrites / lastSync / syncCount implement the bounded flush policy
+	// described on maybeSyncLocked.
+	pendingWrites int
+	lastSync      time.Time
+	syncCount     int
 }
 
 const (
@@ -55,15 +61,26 @@ const (
 	MaxSearchLimit = 1_000
 
 	defaultSweepInterval = 5 * time.Minute
+
+	// DefaultSyncEvery / DefaultSyncInterval bound how many captured lines can
+	// accumulate in memory before Append durably flushes them, whichever
+	// bound is crossed first. See maybeSyncLocked.
+	DefaultSyncEvery    = 1_000
+	DefaultSyncInterval = 5 * time.Second
 )
 
-// RetentionPolicy bounds a writer by record age and count. Sweeps run inside
-// the Store writer mutex; no background goroutine mutates the database, so
-// read-only shared readers retain their point-in-time snapshot semantics.
+// RetentionPolicy bounds a writer by record age, count, and flush cadence.
+// Sweeps run inside the Store writer mutex; no background goroutine mutates
+// the database, so read-only shared readers retain their point-in-time
+// snapshot semantics.
 type RetentionPolicy struct {
 	MaxAge        time.Duration
 	MaxRecords    int
 	SweepInterval time.Duration
+	// SyncEvery / SyncInterval bound how long captured lines can sit
+	// unflushed; see maybeSyncLocked. Zero or negative selects the defaults.
+	SyncEvery    int
+	SyncInterval time.Duration
 }
 
 func defaultRetentionPolicy() RetentionPolicy {
@@ -71,6 +88,8 @@ func defaultRetentionPolicy() RetentionPolicy {
 		MaxAge:        DefaultMaxAge,
 		MaxRecords:    DefaultMaxRecords,
 		SweepInterval: defaultSweepInterval,
+		SyncEvery:     DefaultSyncEvery,
+		SyncInterval:  DefaultSyncInterval,
 	}
 }
 
@@ -142,6 +161,7 @@ func OpenStoreWithRetention(path string, retention RetentionPolicy) (*Store, err
 		path:      path,
 		collName:  defaultCollection,
 		retention: retention,
+		lastSync:  time.Now(),
 	}
 	if err := s.ensureCollection(); err != nil {
 		_ = db.Close()
@@ -197,6 +217,12 @@ func normalizeRetentionPolicy(policy RetentionPolicy) RetentionPolicy {
 	if policy.SweepInterval <= 0 {
 		policy.SweepInterval = defaults.SweepInterval
 	}
+	if policy.SyncEvery <= 0 {
+		policy.SyncEvery = defaults.SyncEvery
+	}
+	if policy.SyncInterval <= 0 {
+		policy.SyncInterval = defaults.SyncInterval
+	}
 	return policy
 }
 
@@ -232,14 +258,16 @@ func (s *Store) Append(e Entry) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.applyRetention(time.Now(), false)
-	return err
+	if _, err := s.applyRetention(time.Now(), false); err != nil {
+		return err
+	}
+	return s.maybeSyncLocked()
 }
 
 // applyRetention removes expired/legacy-old entries and enforces FIFO record
-// bounds. It runs only on writers while Store.mu is held. When it deletes
-// anything, Sync publishes a compact atomic snapshot that new shared readers
-// can open without contending with the writer.
+// bounds. It runs only on writers while Store.mu is held. It no longer syncs
+// on its own; Append's call to maybeSyncLocked is the single place that
+// decides when to durably flush (see that method's doc comment for why).
 func (s *Store) applyRetention(now time.Time, force bool) (int, error) {
 	if !force && !s.lastSweep.IsZero() && now.Sub(s.lastSweep) < s.retention.SweepInterval {
 		return s.enforceRecordLimit()
@@ -272,34 +300,93 @@ func (s *Store) applyRetention(now time.Time, force bool) (int, error) {
 
 	evicted, err := s.enforceRecordLimit()
 	deleted += evicted
-	if err != nil {
-		return deleted, err
-	}
-	if deleted > 0 {
-		if err := s.db.Sync(); err != nil {
-			return deleted, err
-		}
-	}
-	return deleted, nil
+	return deleted, err
 }
 
+// enforceRecordLimit re-applies the MaxRecords cap, batching the (expensive,
+// O(n log n)) sorted eviction pass so it runs roughly once every ~10% of
+// MaxRecords rather than once per captured line once the store is at
+// capacity. It no longer syncs directly — see maybeSyncLocked.
 func (s *Store) enforceRecordLimit() (int, error) {
 	coll := s.db.Collection(defaultCollection)
 	count := coll.Count()
-	if count <= s.retention.MaxRecords {
+	overflow := count - s.retention.MaxRecords
+	if overflow < evictionBatchThreshold(s.retention.MaxRecords) {
 		return 0, nil
 	}
 	evicted := coll.EnforceMemoryLimit(veclite.MemoryConfig{
 		MaxRecords:        s.retention.MaxRecords,
 		EvictionPolicy:    "fifo",
-		EvictionBatchSize: count,
+		EvictionBatchSize: overflow,
 	})
-	if evicted > 0 {
-		if err := s.db.Sync(); err != nil {
-			return evicted, err
-		}
-	}
 	return evicted, nil
+}
+
+// evictionBatchThreshold is how far a collection may grow past its cap before
+// enforceRecordLimit pays for a sorted eviction pass, as a fraction of the cap
+// (minimum 1 record). See the identical helper and its longer rationale in
+// internal/history/store.go — logger and history share the same batching
+// strategy.
+func evictionBatchThreshold(max int) int {
+	b := max / 10
+	if b < 1 {
+		b = 1
+	}
+	return b
+}
+
+// maybeSyncLocked durably flushes the store once SyncEvery Append calls have
+// accumulated or SyncInterval of wall-clock time has passed since the last
+// flush, whichever comes first, then resets both counters. Must be called
+// with s.mu held.
+//
+// Append used to call db.Sync() (a full gob-encode + fsync of the whole
+// database) every time enforceRecordLimit evicted a record, which — once the
+// store reached its cap — meant every single captured line paid for a full
+// rewrite. Bounding the flush cadence instead trades a small, documented
+// crash-loss / reader-staleness window for a large reduction in write
+// amplification; Close and Sync still flush unconditionally.
+func (s *Store) maybeSyncLocked() error {
+	s.pendingWrites++
+	if s.pendingWrites < s.retention.SyncEvery && time.Since(s.lastSync) < s.retention.SyncInterval {
+		return nil
+	}
+	return s.syncLocked()
+}
+
+// syncLocked performs the actual flush and resets the batching counters. Must
+// be called with s.mu held.
+func (s *Store) syncLocked() error {
+	if err := s.db.Sync(); err != nil {
+		return err
+	}
+	s.pendingWrites = 0
+	s.lastSync = time.Now()
+	s.syncCount++
+	return nil
+}
+
+// Sync flushes pending writes to disk immediately, ignoring the batching
+// policy in maybeSyncLocked. Callers that need a captured line visible to a
+// concurrent OpenReadOnly reader sooner than SyncInterval — or that are about
+// to stop, e.g. on SIGTERM/SIGINT — should call this directly.
+func (s *Store) Sync() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return nil
+	}
+	return s.syncLocked()
+}
+
+// SyncCount returns how many times Sync has actually flushed to disk (via
+// either the batching policy or an explicit Sync call). Exposed for tests and
+// diagnostics that need to observe write amplification, not for callers that
+// need durability guarantees.
+func (s *Store) SyncCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.syncCount
 }
 
 func recordTime(rec *veclite.Record) time.Time {

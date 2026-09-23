@@ -237,6 +237,118 @@ func TestStoreRetentionEvictsOldestAndExpired(t *testing.T) {
 	}
 }
 
+// TestMemoryLimitsSurviveReopen is the regression for bug 13 (veclite side):
+// veclite v0.22.1 does not persist a collection's MemoryConfig across a
+// reopen (loadFromSnapshot rebuilds the collection without it), so a store
+// that relied solely on the WithMemoryLimits option passed to
+// CreateCollection would silently lose its cap the first time it was closed
+// and reopened. enforceRecordLimit re-applies RetentionPolicy.MaxRecords from
+// Go-level Store state on every Append instead, independent of veclite's
+// internal config, so the cap must survive Close+Open.
+func TestMemoryLimitsSurviveReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs.veclite")
+	policy := RetentionPolicy{MaxAge: time.Hour, MaxRecords: 5}
+
+	w, err := OpenStoreWithRetention(path, policy)
+	if err != nil {
+		t.Fatalf("OpenStoreWithRetention: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		if err := w.Append(Entry{Message: "pre-reopen", Raw: "pre-reopen"}); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	w2, err := OpenStoreWithRetention(path, policy)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	closeStoreOnCleanup(t, w2)
+	for i := 0; i < 10; i++ {
+		if err := w2.Append(Entry{Message: "post-reopen", Raw: "post-reopen"}); err != nil {
+			t.Fatalf("post-reopen Append %d: %v", i, err)
+		}
+	}
+
+	got, err := w2.Search("", 100)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("record count after reopen = %d, want capped at 5 (MaxRecords lost on reopen was bug 13)", len(got))
+	}
+}
+
+// TestAppendBatchesSyncsAcrossManyLines is the write-amplification regression
+// for E1.11: once a store is at its record cap, Append used to call
+// db.Sync() — a full gob-encode + fsync of the whole database — on every
+// single captured line. With MaxRecords=100 and the default SyncEvery, 10k
+// appends must cause at most 10 full rewrites.
+func TestAppendBatchesSyncsAcrossManyLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs.veclite")
+	store, err := OpenStoreWithRetention(path, RetentionPolicy{MaxAge: time.Hour, MaxRecords: 100})
+	if err != nil {
+		t.Fatalf("OpenStoreWithRetention: %v", err)
+	}
+	closeStoreOnCleanup(t, store)
+
+	const lines = 10_000
+	for i := 0; i < lines; i++ {
+		if err := store.Append(Entry{Message: "line", Raw: "line"}); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	if got := store.SyncCount(); got > 10 {
+		t.Fatalf("SyncCount = %d for %d appends at MaxRecords=100, want <= 10", got, lines)
+	}
+}
+
+// TestReaderSeesLinesWithinSyncInterval verifies the freshness half of
+// E1.11: a concurrent OpenReadOnly reader must see a captured line within
+// SyncInterval, not only at Close.
+func TestReaderSeesLinesWithinSyncInterval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs.veclite")
+	store, err := OpenStoreWithRetention(path, RetentionPolicy{
+		MaxAge:       time.Hour,
+		MaxRecords:   DefaultMaxRecords,
+		SyncEvery:    DefaultSyncEvery, // far more than the one line below
+		SyncInterval: 30 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreWithRetention: %v", err)
+	}
+	closeStoreOnCleanup(t, store)
+
+	if err := store.Append(Entry{Message: "fresh needle", Raw: "fresh needle"}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	// One line is far below SyncEvery, so only the time-based bound can have
+	// flushed it; wait past SyncInterval before reading it back from disk.
+	time.Sleep(150 * time.Millisecond)
+	// A second Append is what actually observes that the interval elapsed
+	// (maybeSyncLocked is only evaluated inside Append/Sync); it's a distinct
+	// line so it does not itself satisfy the assertion below.
+	if err := store.Append(Entry{Message: "trigger", Raw: "trigger"}); err != nil {
+		t.Fatalf("Append (trigger): %v", err)
+	}
+
+	reader, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	closeStoreOnCleanup(t, reader)
+	got, err := reader.Search("needle", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("reader saw %d matches for the needle within SyncInterval, want 1", len(got))
+	}
+}
+
 func TestSearchCapsExcessiveLimit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "logs.veclite")
 	store, err := OpenStoreWithRetention(path, RetentionPolicy{MaxRecords: MaxSearchLimit + 10})
