@@ -52,8 +52,22 @@ type Profile struct {
 	Path    string         `json:"path,omitempty"`
 	Text    string         `json:"text,omitempty"`
 	Symbols []Symbol       `json:"symbols,omitempty"`
+	Stats   *Stats         `json:"stats,omitempty"`
 	Receipt *Receipt       `json:"receipt,omitempty"`
 	Context contextids.IDs `json:"context,omitempty"`
+}
+
+// Stats reports the pseudo-frame/idle breakdown of a profile so callers
+// never divide a hot line's weight by a padded denominator. Samples is every
+// observed sample (including idle/GC/program pseudo-frames and, for macOS
+// `sample`, idle syscalls); ActiveSamples excludes them. Additive: omitted
+// entirely (via Profile.Stats being nil) for capture methods that don't
+// compute it (pprof text/proto dumps, plain `go tool pprof`).
+type Stats struct {
+	Samples       int     `json:"samples"`
+	ActiveSamples int     `json:"active_samples"`
+	IdlePct       float64 `json:"idle_pct"`
+	GCPct         float64 `json:"gc_pct"`
 }
 
 // ValidateCaptureWith checks a requested profile type against an injected
