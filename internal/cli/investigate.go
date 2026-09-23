@@ -73,6 +73,13 @@ type investigateReport struct {
 	Occurrence    *issues.Occurrence       `json:"occurrence,omitempty"`
 	IssueError    string                   `json:"issue_error,omitempty"`
 	Note          string                   `json:"note,omitempty"`
+	// CodebaseOverride is opts.Codebase verbatim, kept alongside the
+	// resolved Process.CodebaseRoot so recordInvestigateOccurrence can tell
+	// an explicit `--codebase` override apart from an auto-detected root:
+	// an override must win over the process's own cwd for project identity
+	// even when that cwd is readable (e.g. a daemon with cwd "/"). Not
+	// serialized: Process.CodebaseRoot already carries the resolved value.
+	CodebaseOverride string `json:"-"`
 }
 
 // toMap JSON-round-trips the report so the MCP surface gets snake_case keys.
@@ -218,8 +225,9 @@ func investigatePipeline(ctx context.Context, pid int32, opts InvestigateOptions
 		opts.TTL = "7d"
 	}
 	report := investigateReport{
-		PID:       pid,
-		StartedAt: time.Now().Format(time.RFC3339),
+		PID:              pid,
+		StartedAt:        time.Now().Format(time.RFC3339),
+		CodebaseOverride: opts.Codebase,
 		Context: contextids.FromEnv(contextids.IDs{
 			Environment:  opts.Environment,
 			DeploymentID: opts.DeploymentID,
@@ -452,6 +460,17 @@ func investigatePipeline(ctx context.Context, pid int32, opts InvestigateOptions
 // CodebaseRoot as the git-root/marker walk's starting point, since in a
 // monorepo the codebase root is often the nearest manifest, not the git
 // root, and Resolve needs to tell those two apart itself.
+//
+// An explicit `investigate --codebase <root>` (report.CodebaseOverride)
+// wins over the process's own cwd: without this, a daemon with cwd "/" (or
+// any cwd outside the intended root) silently ignored the override for
+// project identity, even though it was honored for codemap/vecgrep
+// correlation. report.CodebaseOverride is checked before Process at all,
+// so it applies even when identify failed to bind a process (report.Process
+// == nil). Neither this override nor Process.Cwd ever falls back to
+// monitor's own os.Getwd() (project.Resolve's Hints.UseWorkingDir is
+// intentionally left unset): investigate describes the target process, not
+// the monitor invocation itself.
 func recordInvestigateOccurrence(report *investigateReport) (issues.Issue, issues.Occurrence, error) {
 	path, err := issues.ResolvePath("")
 	if err != nil {
@@ -459,9 +478,11 @@ func recordInvestigateOccurrence(report *investigateReport) (issues.Issue, issue
 	}
 
 	processName := ""
-	dir := ""
 	if report.Process != nil {
 		processName = strings.TrimSpace(report.Process.Name)
+	}
+	dir := strings.TrimSpace(report.CodebaseOverride)
+	if dir == "" && report.Process != nil {
 		dir = firstNonEmpty(report.Process.Cwd, report.Process.CodebaseRoot)
 	}
 	identity := project.Resolve(project.Hints{
