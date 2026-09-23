@@ -5,13 +5,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
+	"github.com/abdul-hamid-achik/monitor/internal/explain"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
+	"github.com/abdul-hamid-achik/monitor/internal/project"
+	"github.com/abdul-hamid-achik/monitor/internal/widgets"
 )
 
 const (
@@ -55,14 +62,26 @@ func (e *issueCommandError) Unwrap() error { return e.err }
 func newIssuesCmd() *cobra.Command {
 	var storePath string
 	cmd := &cobra.Command{
-		Use:          "issues <subcommand>",
-		Aliases:      []string{"issue"},
+		// "issue" (singular) used to be a cobra Aliases entry of this
+		// command; E2.5 gives it its own, different meaning (newIssueCmd,
+		// registered in root.go) -- the naming ADR's `issue`/`issues`
+		// collision row -- so it is deliberately NOT an alias here anymore.
+		Use:          "issues [flags]",
 		Short:        "List and manage durable grouped issues",
 		SilenceUsage: true,
 	}
 	cmd.PersistentFlags().StringVar(&storePath, "store", "", "issue store path (default: $MONITOR_ISSUES_STORE or XDG data dir)")
+	listCmd := newIssuesListCmd(&storePath)
+	// Bare `monitor issues [flags]` behaves exactly like
+	// `monitor issues list [flags]` (see the local-sentry roadmap's UX
+	// mockup, which calls it this way, e.g. `monitor issues --since 24h`);
+	// `issues list` keeps working unchanged for scripts that already spell
+	// it out. Both share the exact same flag variables and RunE, so a flag
+	// parsed through either command line means the same thing.
+	cmd.RunE = listCmd.RunE
+	cmd.Flags().AddFlagSet(listCmd.Flags())
 	cmd.AddCommand(
-		newIssuesListCmd(&storePath),
+		listCmd,
 		newIssuesShowCmd(&storePath),
 		newIssueStatusCmd(&storePath, "resolve", issues.StatusResolved),
 		newIssueStatusCmd(&storePath, "reopen", issues.StatusOpen),
@@ -73,15 +92,17 @@ func newIssuesCmd() *cobra.Command {
 
 func newIssuesListCmd(storePath *string) *cobra.Command {
 	var (
-		statuses []string
-		project  string
-		service  string
-		since    string
-		until    string
-		runID    string
-		release  string
-		kind     string
-		limit    int
+		statuses    []string
+		projectFlag string
+		service     string
+		since       string
+		until       string
+		runID       string
+		release     string
+		kind        string
+		limit       int
+		at          string
+		root        string
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -112,16 +133,25 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 			if err != nil {
 				return &issueCommandError{action: "list", err: err}
 			}
+			// --at (E3.4/E3's "monitor issues --at <file:line>") narrows to
+			// issues whose culprit lands inside the target function/line, a
+			// query that can legitimately match an issue outside the
+			// default page size -- use every matching issue, not just the
+			// first --limit of them, in that mode.
+			effectiveLimit := limit
+			if strings.TrimSpace(at) != "" {
+				effectiveLimit = 0
+			}
 			entries, listErr := store.List(issues.ListOptions{
 				Statuses: parsedStatuses,
-				Project:  strings.TrimSpace(project),
+				Project:  strings.TrimSpace(projectFlag),
 				Service:  strings.TrimSpace(service),
 				Since:    sinceBound,
 				Until:    untilBound,
 				RunID:    strings.TrimSpace(runID),
 				Release:  strings.TrimSpace(release),
 				Kind:     strings.TrimSpace(kind),
-				Limit:    limit,
+				Limit:    effectiveLimit,
 			})
 			closeErr := store.Close()
 			if listErr != nil {
@@ -133,6 +163,9 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 			if entries == nil {
 				entries = []issues.Issue{}
 			}
+			if strings.TrimSpace(at) != "" {
+				return runIssuesAt(cmd, entries, at, root)
+			}
 			// Payload diet (AC-6): a list row carries only a trimmed
 			// LatestException summary, never the full frame/cause detail --
 			// see issues.SummarizeForList. `issues show` (Store.Get, one
@@ -143,11 +176,11 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 			if JSONOutput(cmd) {
 				return writeIssueJSON(cmd.OutOrStdout(), entries)
 			}
-			return writeIssueList(cmd.OutOrStdout(), entries)
+			return writeIssuesListHuman(cmd.OutOrStdout(), path, entries, projectFlag)
 		},
 	}
 	cmd.Flags().StringSliceVar(&statuses, "status", nil, "filter by status (open, resolved, ignored; repeatable)")
-	cmd.Flags().StringVar(&project, "project", "", "filter by project")
+	cmd.Flags().StringVar(&projectFlag, "project", "", "filter by project")
 	cmd.Flags().StringVar(&service, "service", "", "filter by service")
 	cmd.Flags().StringVar(&since, "since", "", "only issues active at/after this time (RFC3339 or a duration like 10m, 24h ago)")
 	cmd.Flags().StringVar(&until, "until", "", "only issues active at/before this time (RFC3339 or a duration like 10m, 24h ago)")
@@ -155,6 +188,8 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 	cmd.Flags().StringVar(&release, "release", "", "filter by a release the issue has seen")
 	cmd.Flags().StringVar(&kind, "kind", "", "filter by kind: exception, alert, investigation, or any (default: any)")
 	cmd.Flags().IntVar(&limit, "limit", defaultIssueListLimit, "maximum issues to return (1-200)")
+	cmd.Flags().StringVar(&at, "at", "", "list issues whose culprit is inside the function containing, or exactly at, this file:line")
+	cmd.Flags().StringVar(&root, "root", "", "git/codebase root for --at's codemap lookup (default: discovered from the working directory)")
 	cmd.Flags().Bool("json", false, "emit JSON output")
 	return cmd
 }
@@ -232,6 +267,14 @@ func newIssueStatusCmd(storePath *string, action string, status issues.Status) *
 			// lock instead of failing outright with ErrFileLocked (bug 12).
 			var updated issues.Issue
 			err = issues.WithWriter(cmd.Context(), path, issues.DefaultWriterWait, func(store *issues.Store) error {
+				// Accept a short_id/prefix (as `monitor issues`/`monitor
+				// issue` display them and as explain.Build's own NEXT
+				// actions suggest), not just the literal full ID.
+				resolvedID, resolveErr := store.ResolveID(id)
+				if resolveErr != nil {
+					return resolveErr
+				}
+				id := resolvedID
 				var statusErr error
 				switch status {
 				case issues.StatusResolved:
@@ -335,24 +378,234 @@ func writeIssueJSON(w io.Writer, value any) error {
 	return encoder.Encode(value)
 }
 
-func writeIssueList(w io.Writer, entries []issues.Issue) error {
+// activityWindow/activityBuckets size the human list's 24h sparkline column
+// (docs/contracts/local-sentry-naming.md's UX mockup section 3: a 10-char
+// ".........#"-style column).
+const (
+	activityWindow  = 24 * time.Hour
+	activityBuckets = 10
+	// newIssueWindow bounds the "NEW" label (issueLabel): an issue whose
+	// FIRST occurrence landed within this long ago is still "new" for
+	// display purposes, distinct from "REGRESSED" (ReopenedCount > 0,
+	// which applies regardless of age). This is a monitor-CLI display
+	// convention, not part of any persisted field.
+	newIssueWindow = 24 * time.Hour
+	// maxWhereLen/maxTitleLen truncate the human table's widest free-text
+	// columns so one long title or a deeply nested path never blows out
+	// every other column's alignment in a real terminal width.
+	maxTitleLen = 55
+	maxWhereLen = 40
+)
+
+// writeIssuesListHuman renders entries as `monitor issues`' human table:
+// short ids, a 24h activity sparkline, a NEW/REGRESSED label folded into the
+// status cell, and a WHERE column naming the culprit file:line -- see the
+// local-sentry roadmap's UX mockup section 3. storePath is reopened
+// read-only (best-effort: a failure here degrades to an all-empty
+// sparkline column rather than failing the whole list) to read each
+// entry's recent occurrence timestamps, since issues.Issue itself does not
+// carry a time series.
+func writeIssuesListHuman(w io.Writer, storePath string, entries []issues.Issue, projectFilter string) error {
 	if len(entries) == 0 {
 		_, err := fmt.Fprintln(w, "No issues found.")
 		return err
 	}
+	now := time.Now()
+	activity := activityBucketsFor(storePath, entries, now)
+
+	if err := writeIssuesListHeader(w, entries, projectFilter, now); err != nil {
+		return err
+	}
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "ID\tSTATUS\tSEVERITY\tLAST SEEN\tCOUNT\tSERVICE\tTITLE"); err != nil {
+	if _, err := fmt.Fprintln(tw, "ID\tEVENTS\t24H\tLAST\tTITLE\tWHERE"); err != nil {
 		return err
 	}
 	for _, issue := range entries {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
-			issue.ID, issue.Status, displayIssueValue(issue.Severity),
-			issue.LastSeen.Format(time.RFC3339), issue.OccurrenceCount,
-			displayIssueValue(issue.Service), displayIssueValue(firstNonEmpty(issue.Title, issue.Message))); err != nil {
+		statusCell := strings.TrimSpace(issueLabel(issue, now) + " " + severityWord(issue))
+		title := truncateDisplay(displayIssueValue(firstNonEmpty(issue.Title, issue.Message)), maxTitleLen)
+		if statusCell != "" {
+			title = statusCell + "  " + title
+		}
+		line := widgets.RenderActivityLine(activity[issue.ID])
+		if _, err := fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n",
+			strings.ToUpper(shortIssueID(issue.ID)), issue.OccurrenceCount, line,
+			humanDuration(now.Sub(issue.LastSeen)), title,
+			truncateDisplay(culpritLocation(issue), maxWhereLen)); err != nil {
 			return err
 		}
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	return writeIssuesListFooter(w, entries)
+}
+
+// writeIssuesListHeader prints "<project> · N open · M new in the last
+// hour" (or a project-less variant when the results span more than one
+// project and none was requested via --project).
+func writeIssuesListHeader(w io.Writer, entries []issues.Issue, projectFilter string, now time.Time) error {
+	label := strings.TrimSpace(projectFilter)
+	if label == "" {
+		label = commonProject(entries)
+	}
+	var open, newInLastHour int
+	for _, issue := range entries {
+		if issue.Status == issues.StatusOpen {
+			open++
+		}
+		if !issue.FirstSeen.IsZero() && now.Sub(issue.FirstSeen) < time.Hour {
+			newInLastHour++
+		}
+	}
+	parts := []string{}
+	if label != "" {
+		parts = append(parts, label)
+	}
+	parts = append(parts, fmt.Sprintf("%d open", open))
+	if newInLastHour > 0 {
+		parts = append(parts, fmt.Sprintf("%d new in the last hour", newInLastHour))
+	}
+	_, err := fmt.Fprintln(w, strings.Join(parts, " · "))
+	return err
+}
+
+// writeIssuesListFooter prints the mockup's "next" hint line, pointing at
+// the top (most recently active) row's short id.
+func writeIssuesListFooter(w io.Writer, entries []issues.Issue) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	id := strings.ToLower(shortIssueID(entries[0].ID))
+	_, err := fmt.Fprintf(w, "next  monitor issue %s  ·  monitor issue %s --md | pbcopy  ·  monitor issues --status resolved\n", id, id)
+	return err
+}
+
+// commonProject returns entries' shared Project when every entry has the
+// same one, else "".
+func commonProject(entries []issues.Issue) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	first := entries[0].Project
+	for _, e := range entries[1:] {
+		if e.Project != first {
+			return ""
+		}
+	}
+	return first
+}
+
+// activityBucketsFor reads up to a bounded number of recent occurrences per
+// entry and buckets their timestamps into the last activityWindow. A
+// failure to open storePath degrades to every issue reporting an
+// all-empty (all-'.') sparkline rather than failing the list -- the
+// sparkline is a nice-to-have annotation, never load-bearing.
+func activityBucketsFor(storePath string, entries []issues.Issue, now time.Time) map[string][]int64 {
+	result := make(map[string][]int64, len(entries))
+	store, err := issues.OpenReadOnly(storePath)
+	if err != nil {
+		return result
+	}
+	defer store.Close()
+	since := now.Add(-activityWindow)
+	for _, issue := range entries {
+		occurrences, err := store.Occurrences(issue.ID, 500)
+		if err != nil {
+			continue
+		}
+		times := make([]time.Time, 0, len(occurrences))
+		for _, occ := range occurrences {
+			times = append(times, occ.ObservedAt)
+		}
+		result[issue.ID] = widgets.BucketCounts(times, since, now, activityBuckets)
+	}
+	return result
+}
+
+// issueLabel returns "REGRESSED" (reopened at least once, regardless of
+// age), "NEW" (first seen within newIssueWindow and never reopened), or ""
+// (an ordinary, already-known open issue) -- monitor issues' display-only
+// convention, not a persisted field.
+func issueLabel(issue issues.Issue, now time.Time) string {
+	if issue.ReopenedCount > 0 {
+		return "REGRESSED"
+	}
+	if !issue.FirstSeen.IsZero() && now.Sub(issue.FirstSeen) < newIssueWindow {
+		return "NEW"
+	}
+	return ""
+}
+
+// severityWord renders the human list's short severity word: "fatal" for
+// an uncaught crash, "handled" for a caught-and-printed error, else the
+// stacktrace Level ("error"/"warning") or, lacking that, the legacy free-
+// form Severity field.
+func severityWord(issue issues.Issue) string {
+	switch {
+	case issue.Level == "fatal":
+		return "fatal"
+	case issue.Handled != nil && *issue.Handled:
+		return "handled"
+	case issue.Level != "":
+		return issue.Level
+	default:
+		return issue.Severity
+	}
+}
+
+// culpritLocation renders "file:line" from issue.Culprit, or "-" when the
+// issue has none (a message-only event whose message-search fallback
+// hasn't been resolved, or a non-exception issue kind).
+func culpritLocation(issue issues.Issue) string {
+	if issue.Culprit == nil || issue.Culprit.File == "" {
+		return "-"
+	}
+	if issue.Culprit.Line > 0 {
+		return fmt.Sprintf("%s:%d", issue.Culprit.File, issue.Culprit.Line)
+	}
+	return issue.Culprit.File
+}
+
+// shortIssueID is issues.Issue.ID's short_id (see docs/contracts/
+// issue-context-v1.md): the first 4 hex characters after "ISS-". Mirrors
+// internal/explain's unexported shortID -- duplicated rather than exported
+// across the package boundary for this one display use.
+func shortIssueID(id string) string {
+	suffix := strings.TrimPrefix(id, "ISS-")
+	if len(suffix) > 4 {
+		return suffix[:4]
+	}
+	return suffix
+}
+
+// humanDuration renders a coarse, single-unit relative age ("2m", "9h",
+// "3d") for the LAST column -- deliberately coarser than time.Duration's
+// own String(), which would print "2m3.412s" and blow out the column.
+func humanDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return "now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	default:
+		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
+	}
+}
+
+// truncateDisplay shortens s to at most n runes, marking the cut with a
+// trailing "..." (three ASCII dots, matching the mockup's own "...") when it
+// actually had to cut anything.
+func truncateDisplay(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n || n <= 3 {
+		return s
+	}
+	return string(r[:n-3]) + "..."
 }
 
 func writeIssueDetail(w io.Writer, out issueDetailOutput) error {
@@ -396,4 +649,474 @@ func displayIssueValue(value string) string {
 		return "-"
 	}
 	return value
+}
+
+// ---------------------------------------------------------------------------
+// `monitor issues --at <file:line>` (E3.4 / roadmap "errores x calor")
+// ---------------------------------------------------------------------------
+
+// issuesAtOutput is `issues --at`'s --json shape: additive to the plain
+// list's []issues.Issue (it's the same slice, just pre-filtered), plus the
+// resolved target so a caller can tell a codemap-backed range match from a
+// bare exact-line one.
+type issuesAtOutput struct {
+	File    string         `json:"file"`
+	Line    int            `json:"line"`
+	Symbol  string         `json:"symbol,omitempty"`
+	RangeOK bool           `json:"range_resolved"`
+	Start   int            `json:"start,omitempty"`
+	End     int            `json:"end,omitempty"`
+	Issues  []issues.Issue `json:"issues"`
+}
+
+// runIssuesAt filters entries (already matching every other --status/
+// --project/... flag) to those whose culprit lands inside the function
+// containing target, or -- when codemap can't resolve that range (honest
+// degradation, never a fabricated range) -- exactly on target's line.
+func runIssuesAt(cmd *cobra.Command, entries []issues.Issue, at, rootFlag string) error {
+	file, line, err := parseFileLine(at)
+	if err != nil {
+		return &issueCommandError{action: "list --at", err: err}
+	}
+	root := resolveExplainRoot(rootFlag)
+	out := issuesAtOutput{File: file, Line: line}
+
+	if root != "" {
+		if health := ecosystem.ProbeCodemap(cmd.Context(), root); health.State == ecosystem.HealthOK {
+			if sym, err := ecosystem.CodemapSymbolAtPath(cmd.Context(), file, line, ecosystem.CodemapOpts{Path: root}); err == nil && sym.Resolution != "none" && sym.StartLine > 0 {
+				out.RangeOK = true
+				out.Symbol = sym.Symbol
+				out.Start, out.End = sym.StartLine, sym.EndLine
+			}
+		}
+	}
+
+	matched := make([]issues.Issue, 0, len(entries))
+	for _, issue := range entries {
+		if !culpritMatchesAt(issue, out) {
+			continue
+		}
+		matched = append(matched, issue)
+	}
+	out.Issues = matched
+
+	if JSONOutput(cmd) {
+		return writeIssueJSON(cmd.OutOrStdout(), out)
+	}
+	return writeIssuesAtHuman(cmd.OutOrStdout(), out)
+}
+
+// culpritMatchesAt reports whether issue's culprit falls inside out's
+// resolved symbol range, or -- when no range was resolved -- exactly on
+// out's target line. Both branches require the same file.
+func culpritMatchesAt(issue issues.Issue, out issuesAtOutput) bool {
+	if issue.Culprit == nil || issue.Culprit.File == "" {
+		return false
+	}
+	if filepath.Clean(issue.Culprit.File) != filepath.Clean(out.File) {
+		return false
+	}
+	if out.RangeOK {
+		return issue.Culprit.Line >= out.Start && issue.Culprit.Line <= out.End
+	}
+	return issue.Culprit.Line == out.Line
+}
+
+func writeIssuesAtHuman(w io.Writer, out issuesAtOutput) error {
+	switch {
+	case out.RangeOK:
+		symbol := out.Symbol
+		if symbol == "" {
+			symbol = "?"
+		}
+		if _, err := fmt.Fprintf(w, "%s() · %s:%d-%d (codemap) · %d issue(s) in this function\n",
+			symbol, out.File, out.Start, out.End, len(out.Issues)); err != nil {
+			return err
+		}
+	default:
+		if _, err := fmt.Fprintf(w, "%s:%d · %d issue(s) at this line (codemap unavailable: exact-line match only)\n",
+			out.File, out.Line, len(out.Issues)); err != nil {
+			return err
+		}
+	}
+	if len(out.Issues) == 0 {
+		return nil
+	}
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "LINE\tID\tEVENTS\tSTATUS\tTITLE"); err != nil {
+		return err
+	}
+	for _, issue := range out.Issues {
+		line := 0
+		if issue.Culprit != nil {
+			line = issue.Culprit.Line
+		}
+		if _, err := fmt.Fprintf(tw, "%d\t%s\t%d\t%s\t%s\n",
+			line, strings.ToUpper(shortIssueID(issue.ID)), issue.OccurrenceCount, issue.Status,
+			truncateDisplay(displayIssueValue(firstNonEmpty(issue.Title, issue.Message)), maxTitleLen)); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+// parseFileLine parses "path/to/file:123" -- the LAST ':' separates the
+// line number, so a path containing ':' elsewhere (rare, but legal on
+// POSIX filesystems) still parses correctly.
+func parseFileLine(at string) (file string, line int, err error) {
+	at = strings.TrimSpace(at)
+	idx := strings.LastIndex(at, ":")
+	if idx <= 0 || idx == len(at)-1 {
+		return "", 0, fmt.Errorf("invalid --at %q: want file:line", at)
+	}
+	line, err = strconv.Atoi(at[idx+1:])
+	if err != nil || line <= 0 {
+		return "", 0, fmt.Errorf("invalid --at %q: line must be a positive integer", at)
+	}
+	return at[:idx], line, nil
+}
+
+// resolveExplainRoot picks the git/codebase root `issues --at` and
+// `monitor issue` resolve codemap/git/snippet lookups against: an explicit
+// override when given, else the same working-directory-based resolution
+// project.Resolve uses everywhere else in monitor (see internal/explain.
+// Options.Root's doc comment).
+func resolveExplainRoot(explicit string) string {
+	if root := strings.TrimSpace(explicit); root != "" {
+		return root
+	}
+	return project.Resolve(project.Hints{UseWorkingDir: true}).GitRoot
+}
+
+// ---------------------------------------------------------------------------
+// `monitor issue <id|short-prefix|latest>` (E2.5)
+// ---------------------------------------------------------------------------
+
+func newIssueCmd() *cobra.Command {
+	var (
+		storePath, projectFlag, service, kind, root string
+		md                                          bool
+	)
+	cmd := &cobra.Command{
+		Use:   "issue <id|short-prefix|latest>",
+		Short: "Show one issue's full context: culprit, causes, impact, and next steps",
+		Long: `issue prints the monitor.issue_context.v1 page for one issue: the
+culprit line and snippet, the exception chain's causes, the in-app
+stack, codemap's blast radius (impact), the last commit that touched
+the culprit line, and proposed next steps.
+
+<id> may be a full issue ID, an unambiguous short_id/prefix (as shown
+by 'monitor issues'), or the literal "latest" -- optionally narrowed
+by --project/--service/--kind -- to mean "the most recently active
+issue". An ambiguous prefix exits 2 and lists every match.
+
+--json emits the full monitor.issue_context.v1 contract at the
+"standard" budget. --md emits a paste-ready markdown page for an
+agent.`,
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rawID := strings.TrimSpace(args[0])
+			if rawID == "" {
+				return &issueCommandError{action: "issue", err: fmt.Errorf("id is required")}
+			}
+			path, err := resolveIssueStorePath(storePath)
+			if err != nil {
+				return &issueCommandError{action: "issue", err: err}
+			}
+			store, err := issues.OpenReadOnly(path)
+			if err != nil {
+				return &issueCommandError{action: "issue", id: rawID, err: err}
+			}
+			defer store.Close()
+
+			opts := explain.Options{Budget: explain.BudgetStandard, Root: resolveExplainRoot(root), Redact: true}
+			targetID := rawID
+			if strings.EqualFold(rawID, "latest") {
+				latest, resolved, ok, latestErr := explain.ResolveLatest(store, explain.LatestFilter{
+					Project: projectFlag, Service: service, Kind: kind,
+				})
+				if latestErr != nil {
+					return &issueCommandError{action: "issue", id: rawID, err: latestErr}
+				}
+				if !ok {
+					return writeLatestNotFoundError(cmd, resolved)
+				}
+				opts.ResolvedFrom = &resolved
+				targetID = latest.ID
+			}
+
+			built, buildErr := explain.Build(cmd.Context(), store, targetID, opts)
+			if buildErr != nil {
+				var ambiguous *issues.AmbiguousIDError
+				if errors.As(buildErr, &ambiguous) {
+					printAmbiguousIssueError(cmd, rawID, ambiguous)
+					os.Exit(2)
+				}
+				return writeIssueError(cmd, "issue", rawID, buildErr)
+			}
+
+			switch {
+			case md:
+				_, err := fmt.Fprint(cmd.OutOrStdout(), built.RenderMarkdown())
+				return err
+			case JSONOutput(cmd):
+				return writeIssueJSON(cmd.OutOrStdout(), built)
+			default:
+				return writeIssuePageHuman(cmd.OutOrStdout(), built)
+			}
+		},
+	}
+	cmd.Flags().StringVar(&storePath, "store", "", "issue store path (default: $MONITOR_ISSUES_STORE or XDG data dir)")
+	cmd.Flags().StringVar(&projectFlag, "project", "", "restrict \"latest\" to this project")
+	cmd.Flags().StringVar(&service, "service", "", "restrict \"latest\" to this service")
+	cmd.Flags().StringVar(&kind, "kind", "", "restrict \"latest\" to this kind: exception (default), alert, investigation, or any")
+	cmd.Flags().StringVar(&root, "root", "", "git/codebase root for culprit/impact/blame lookups (default: discovered from the working directory)")
+	cmd.Flags().Bool("json", false, "emit the full monitor.issue_context.v1 JSON contract")
+	cmd.Flags().BoolVar(&md, "md", false, "emit a paste-ready markdown page for an agent")
+	return cmd
+}
+
+// printAmbiguousIssueError reports every candidate a short prefix matched.
+// The caller is responsible for os.Exit(2) right after calling this
+// (mirrors internal/cli/resolve.go's printAmbiguousLeaf/os.Exit(2) split
+// for procbind.AmbiguousLeafError): keeping the exit call OUT of this
+// function is what lets a test exercise the printed output in-process,
+// without actually terminating the test binary -- see
+// TestPrintAmbiguousIssueError* in issues_test.go, and
+// specs/issues_context.yml for the real exit-2 process behavior.
+func printAmbiguousIssueError(cmd *cobra.Command, id string, ambiguous *issues.AmbiguousIDError) {
+	if JSONOutput(cmd) {
+		_ = writeIssueJSON(cmd.OutOrStdout(), map[string]any{
+			"error": "ambiguous", "id": id, "candidates": ambiguous.Matches,
+		})
+		return
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "issue id %q is ambiguous (%d matches):\n", id, len(ambiguous.Matches))
+	for _, m := range ambiguous.Matches {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", m)
+	}
+}
+
+// writeLatestNotFoundError reports "latest" (optionally filtered) matching
+// nothing: a real command failure for the CLI (exit 1, unlike MCP's
+// monitor_issue, which turns the same situation into a non-error recovery
+// hint -- see internal/mcp/server.go's handleIssue), but with a full,
+// actionable message of its own rather than the generic issueCommandError
+// wrapper's flattened "issue latest not found" (which would silently drop
+// exactly which filters were applied).
+func writeLatestNotFoundError(cmd *cobra.Command, resolved explain.ResolvedFrom) error {
+	err := fmt.Errorf("%w: no issue matches \"latest\" (project=%q service=%q kind=%q) -- try `monitor issues` to see what is open",
+		issues.ErrIssueNotFound, resolved.Project, resolved.Service, resolved.Kind)
+	if JSONOutput(cmd) {
+		_ = writeIssueJSON(cmd.OutOrStdout(), map[string]any{
+			"error": err.Error(), "id": "latest", "not_found": true, "resolved_from": resolved,
+			"recovery": "try `monitor issues` to see what is open, or widen --kind to any",
+		})
+	}
+	return err
+}
+
+// writeIssuePageHuman renders explain.Context as the mockup's "página del
+// issue": CULPRIT (with snippet), CAUSES, STACK, IMPACT, TOUCHED, and NEXT,
+// each degrading to an explicit "skipped: <detail>" line instead of a blank
+// section.
+func writeIssuePageHuman(w io.Writer, c *explain.Context) error {
+	header := fmt.Sprintf("%s  %s", c.Issue.ShortID, displayIssueValue(c.Issue.Title))
+	if _, err := fmt.Fprintf(w, "%s\n%s · %s · %s\n", header, c.Issue.Status, c.Issue.Kind, projectServiceLabel(c.Issue)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "first %s ago · last %s ago · %d event(s)\n\n",
+		humanDuration(time.Since(c.Timeline.FirstSeen)), humanDuration(time.Since(c.Timeline.LastSeen)), c.Timeline.Occurrences); err != nil {
+		return err
+	}
+
+	if err := writeCulpritSection(w, c.Culprit); err != nil {
+		return err
+	}
+	if err := writeCausesSection(w, c.Causes); err != nil {
+		return err
+	}
+	if err := writeStackSection(w, c); err != nil {
+		return err
+	}
+	if err := writeImpactSection(w, c.Impact); err != nil {
+		return err
+	}
+	if err := writeTouchedSection(w, c.LastTouched); err != nil {
+		return err
+	}
+	// Only degraded entries NOT already surfaced inline above (IMPACT and
+	// TOUCHED each print their own "skipped: <detail>" line when their
+	// dependency is unhealthy) are worth a separate line here -- otherwise
+	// a codemap/git problem would print twice, once under its own section
+	// and once more under a generic "DEGRADED" heading. An entry like
+	// "vecgrep" (informational alongside a successful git_grep culprit) or
+	// "message_search"/"snippet" (skipped, with no other section to carry
+	// it) has nowhere else to appear, so those still get printed.
+	if err := writeDegradedSection(w, extraDegraded(c)); err != nil {
+		return err
+	}
+	return writeNextSection(w, c.Next)
+}
+
+// extraDegraded returns c.Degraded minus any entry whose component is
+// already fully represented by IMPACT or TOUCHED's own inline "skipped:"
+// line (same detail text) -- see writeIssuePageHuman's comment above.
+func extraDegraded(c *explain.Context) []explain.Degraded {
+	extra := make([]explain.Degraded, 0, len(c.Degraded))
+	for _, d := range c.Degraded {
+		if d.Component == "codemap" && c.Impact.Status != explain.SectionOK && c.Impact.Detail == d.Detail {
+			continue
+		}
+		if d.Component == "git" && c.LastTouched.Status != explain.SectionOK && c.LastTouched.Detail == d.Detail {
+			continue
+		}
+		extra = append(extra, d)
+	}
+	return extra
+}
+
+func projectServiceLabel(issue explain.IssueSummary) string {
+	if issue.Service != "" {
+		return issue.Project + " / " + issue.Service
+	}
+	return issue.Project
+}
+
+func writeCulpritSection(w io.Writer, culprit *explain.CulpritInfo) error {
+	if culprit == nil {
+		_, err := fmt.Fprintln(w, "CULPRIT  none in this chain (see message-search fallback status below)")
+		return err
+	}
+	loc := culprit.File
+	if culprit.Line > 0 {
+		loc = fmt.Sprintf("%s:%d", culprit.File, culprit.Line)
+	}
+	suffix := ""
+	if culprit.Source == "message_search" {
+		suffix = fmt.Sprintf("  inferred from message · via %s · confidence %s", culprit.Via, culprit.Confidence)
+	}
+	if _, err := fmt.Fprintf(w, "CULPRIT  %s in %s()%s\n", loc, culprit.Function, suffix); err != nil {
+		return err
+	}
+	if culprit.Snippet == nil {
+		return nil
+	}
+	for i, line := range culprit.Snippet.Lines {
+		n := culprit.Snippet.Start + i
+		marker := "  "
+		if n == culprit.Snippet.Highlight {
+			marker = "> "
+		}
+		if _, err := fmt.Fprintf(w, "%s%4d | %s\n", marker, n, line); err != nil {
+			return err
+		}
+	}
+	if culprit.Snippet.Stale {
+		_, err := fmt.Fprintln(w, "         (snippet may be stale: touched after this issue was first recorded)")
+		return err
+	}
+	return nil
+}
+
+func writeCausesSection(w io.Writer, causes []explain.CauseEntry) error {
+	if len(causes) == 0 {
+		return nil
+	}
+	for i, cause := range causes {
+		role := "outer"
+		if i == len(causes)-1 {
+			role = "innermost cause"
+		}
+		if cause.Culprit != nil {
+			_, err := fmt.Fprintf(w, "CAUSES   %s          %s · %s:%d in %s()\n", cause.Type, role, cause.Culprit.File, cause.Culprit.Line, cause.Culprit.Function)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "CAUSES   %s          %s\n", cause.Type, role); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeStackSection(w io.Writer, c *explain.Context) error {
+	_, err := fmt.Fprintf(w, "STACK    in-app %d%s\n", len(c.Frames), collapsedSuffix(c.Truncated.Frames))
+	return err
+}
+
+func collapsedSuffix(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" · %d more collapsed (--json for the full list)", n)
+}
+
+func writeImpactSection(w io.Writer, impact explain.ImpactInfo) error {
+	if impact.Status != explain.SectionOK {
+		return writeSkippedLine(w, "IMPACT", impact.Detail, impact.Recovery)
+	}
+	_, err := fmt.Fprintf(w, "IMPACT   %d caller(s) · blast %d · %d test(s) · call_graph=%s\n",
+		impact.Callers, impact.BlastRadius, impact.Tests, displayIssueValue(impact.CallGraph))
+	return err
+}
+
+func writeTouchedSection(w io.Writer, lt explain.LastTouched) error {
+	if lt.Status != explain.SectionOK {
+		return writeSkippedLine(w, "TOUCHED", lt.Detail, lt.Recovery)
+	}
+	when := ""
+	if lt.AuthorTime != nil {
+		when = "  " + humanDuration(time.Since(*lt.AuthorTime)) + " ago"
+	}
+	_, err := fmt.Fprintf(w, "TOUCHED  %s \"%s\"%s   (local git blame; last touched, not suspect)\n", shortCommitSHA(lt.SHA), lt.Subject, when)
+	return err
+}
+
+func writeDegradedSection(w io.Writer, degraded []explain.Degraded) error {
+	for _, d := range degraded {
+		label := strings.ToUpper(d.Component)
+		if err := writeSkippedLine(w, label, d.Detail, d.Recovery); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeSkippedLine(w io.Writer, label, detail, recovery string) error {
+	if _, err := fmt.Fprintf(w, "%-8s skipped: %s\n", label, detail); err != nil {
+		return err
+	}
+	if recovery == "" {
+		return nil
+	}
+	_, err := fmt.Fprintf(w, "%-8s recovery: %s\n", "", recovery)
+	return err
+}
+
+func writeNextSection(w io.Writer, next []explain.NextAction) error {
+	for i, n := range next {
+		label := "NEXT"
+		if i > 0 {
+			label = ""
+		}
+		cmdText := n.CLI
+		if cmdText == "" {
+			cmdText = n.MCP
+		}
+		if _, err := fmt.Fprintf(w, "%-8s %-40s %s\n", label, cmdText, n.Why); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func shortCommitSHA(sha string) string {
+	if len(sha) > 10 {
+		return sha[:10]
+	}
+	return sha
 }

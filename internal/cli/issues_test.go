@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/abdul-hamid-achik/monitor/internal/contextids"
+	"github.com/abdul-hamid-achik/monitor/internal/explain"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
+	"github.com/abdul-hamid-achik/monitor/internal/project"
+	"github.com/abdul-hamid-achik/monitor/internal/stacktrace"
 )
 
 func TestIssuesCommandTree(t *testing.T) {
@@ -91,10 +96,21 @@ func TestIssuesListFiltersLimitsAndRendersHumanOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("human list: %v", err)
 	}
-	for _, value := range []string{"ID", "STATUS", newest.ID, old.ID, "Newest"} {
+	// The human table shows short ids (see docs/contracts/issue-context-v1.md),
+	// not the full "ISS-..." id, and a WHERE/24H/EVENTS-shaped header --
+	// see writeIssuesListHuman.
+	for _, value := range []string{"EVENTS", "24H", "WHERE", shortIssueID(newest.ID), shortIssueID(old.ID), "Newest"} {
 		if !strings.Contains(human, value) {
 			t.Errorf("human list missing %q:\n%s", value, human)
 		}
+	}
+	// Bare `monitor issues` (no "list") renders identically.
+	bare, err := executeIssuesCommand(t, path)
+	if err != nil {
+		t.Fatalf("bare issues: %v", err)
+	}
+	if bare != human {
+		t.Fatalf("bare `issues` output differs from `issues list`:\nbare:\n%s\nlist:\n%s", bare, human)
 	}
 
 	if _, err := executeIssuesCommand(t, path, "list", "--status", "broken"); err == nil || !strings.Contains(err.Error(), "invalid issue status") {
@@ -397,5 +413,292 @@ func closeIssueCLIStore(t *testing.T, store *issues.Store) {
 	t.Helper()
 	if err := store.Close(); err != nil {
 		t.Fatalf("close issue store: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// `monitor issue <id|short-prefix|latest>` (E2.5)
+// ---------------------------------------------------------------------------
+
+// noExternalToolsPATH points PATH at an empty directory so codemap/vecgrep/
+// git are all reported unavailable quickly and deterministically -- these
+// CLI-level tests care about monitor's own wiring (flags, JSON shape,
+// exit-2 candidate reporting), not the real dev machine's tool versions;
+// internal/explain's own tests already cover the healthy-tool paths with
+// fake binaries on PATH.
+func noExternalToolsPATH(t *testing.T) {
+	t.Helper()
+	t.Setenv("PATH", t.TempDir())
+}
+
+// seedCLIException records one exception issue straight through
+// issues.RecordException (the same call `monitor run --`/`stacktrace parse
+// --record` will make once E2.4/E2.1 land) with a real in-app culprit frame
+// under root, for the `monitor issue`/`--at` CLI tests below.
+func seedCLIException(t *testing.T, storePath, root, relFile string, line int, function string, observedAt time.Time) issues.Issue {
+	t.Helper()
+	abs := filepath.Join(root, relFile)
+	ex := stacktrace.Exception{
+		Runtime: "go", Type: "panic", Value: "boom at " + relFile, Parser: "gopanic", Level: "fatal",
+		Frames: []stacktrace.Frame{{Function: function, AbsPath: abs, Filename: abs, Lineno: line}},
+	}
+	id := project.Identity{Slug: "polyglot", Service: "workload", Root: root, GitRoot: root}
+	res, err := issues.RecordException(t.Context(), storePath, issues.DefaultWriterWait, ex, id, contextids.IDs{}, issues.RecordExceptionOptions{ObservedAt: observedAt})
+	if err != nil {
+		t.Fatalf("seedCLIException: %v", err)
+	}
+	return res.Issue
+}
+
+// newCLIRoot creates a temp "git root" (just enough for project.Resolve's
+// findGitRoot / internal/explain's snippet EvalSymlinks confinement -- a
+// bare .git directory marker, not a real repository) with one source file.
+func newCLIRoot(t *testing.T, relFile, content string) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.Join(root, relFile)
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func executeIssueCommand(t *testing.T, storePath, root string, args ...string) (string, error) {
+	t.Helper()
+	cmd := newIssueCmd()
+	var output, stderr bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs(append([]string{"--store", storePath, "--root", root}, args...))
+	err := cmd.Execute()
+	return output.String(), err
+}
+
+func TestIssueCommandRegisteredAtTopLevel(t *testing.T) {
+	root := Root()
+	for _, cmd := range root.Commands() {
+		if cmd.Name() == "issue" {
+			if cmd.Flags().Lookup("json") == nil || cmd.Flags().Lookup("md") == nil {
+				t.Fatalf("issue command missing --json/--md")
+			}
+			return
+		}
+	}
+	t.Fatal("root command is missing the top-level `issue` command")
+}
+
+func TestIssuesCommandNoLongerAliasesIssue(t *testing.T) {
+	root := Root()
+	for _, cmd := range root.Commands() {
+		if cmd.Name() != "issues" {
+			continue
+		}
+		for _, alias := range cmd.Aliases {
+			if alias == "issue" {
+				t.Fatal("`issues` still aliases `issue`; E2.5 gives `issue` its own top-level command (naming ADR's issue/issues collision row)")
+			}
+		}
+	}
+}
+
+func TestIssueCommandHumanJSONAndMarkdown(t *testing.T) {
+	noExternalToolsPATH(t)
+	root := newCLIRoot(t, "src/app.go", "package app\n\nfunc doWork() {\n\tpanic(\"boom\")\n}\n")
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	issue := seedCLIException(t, storePath, root, "src/app.go", 4, "doWork", time.Now().UTC())
+
+	human, err := executeIssueCommand(t, storePath, root, shortIssueID(issue.ID))
+	if err != nil {
+		t.Fatalf("issue (human): %v\n%s", err, human)
+	}
+	for _, want := range []string{"CULPRIT", "src/app.go:4", "doWork", "NEXT"} {
+		if !strings.Contains(human, want) {
+			t.Errorf("human page missing %q:\n%s", want, human)
+		}
+	}
+
+	jsonOut, err := executeIssueCommand(t, storePath, root, shortIssueID(issue.ID), "--json")
+	if err != nil {
+		t.Fatalf("issue --json: %v\n%s", err, jsonOut)
+	}
+	var got explain.Context
+	if err := json.Unmarshal([]byte(jsonOut), &got); err != nil {
+		t.Fatalf("decode: %v (%s)", err, jsonOut)
+	}
+	if got.Schema != explain.Schema || got.Budget != string(explain.BudgetStandard) {
+		t.Fatalf("schema/budget = %q/%q", got.Schema, got.Budget)
+	}
+	if got.Culprit == nil || got.Culprit.File != "src/app.go" || got.Culprit.Line != 4 {
+		t.Fatalf("culprit = %+v", got.Culprit)
+	}
+
+	md, err := executeIssueCommand(t, storePath, root, shortIssueID(issue.ID), "--md")
+	if err != nil {
+		t.Fatalf("issue --md: %v", err)
+	}
+	if !strings.Contains(md, "## Culprit") || !strings.Contains(md, "src/app.go:4") {
+		t.Errorf("markdown missing culprit section:\n%s", md)
+	}
+}
+
+func TestIssueCommandLatestRespectsProjectFilter(t *testing.T) {
+	noExternalToolsPATH(t)
+	root := newCLIRoot(t, "src/app.go", "package app\n")
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	now := time.Now().UTC()
+	want := seedCLIException(t, storePath, root, "src/app.go", 1, "f", now.Add(-time.Minute))
+	// A more recent issue in a DIFFERENT project must not win under
+	// --project polyglot.
+	other := project.Identity{Slug: "other", Root: root, GitRoot: root}
+	if _, err := issues.RecordException(t.Context(), storePath, issues.DefaultWriterWait,
+		stacktrace.Exception{Runtime: "go", Type: "panic", Value: "elsewhere", Level: "fatal"},
+		other, contextids.IDs{}, issues.RecordExceptionOptions{ObservedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := executeIssueCommand(t, storePath, root, "latest", "--project", "polyglot", "--json")
+	if err != nil {
+		t.Fatalf("issue latest: %v\n%s", err, out)
+	}
+	var got explain.Context
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode: %v (%s)", err, out)
+	}
+	if got.Issue.ID != want.ID {
+		t.Fatalf("resolved = %s, want %s", got.Issue.ID, want.ID)
+	}
+	if got.ResolvedFrom == nil || got.ResolvedFrom.Project != "polyglot" {
+		t.Fatalf("resolved_from = %+v", got.ResolvedFrom)
+	}
+}
+
+func TestIssueCommandLatestNoMatchIsAnErrorWithRecoveryHint(t *testing.T) {
+	noExternalToolsPATH(t)
+	root := newCLIRoot(t, "src/app.go", "package app\n")
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+
+	_, err := executeIssueCommand(t, storePath, root, "latest", "--project", "nothing-here")
+	if err == nil || !errors.Is(err, issues.ErrIssueNotFound) {
+		t.Fatalf("err = %v, want ErrIssueNotFound", err)
+	}
+
+	out, err := executeIssueCommand(t, storePath, root, "latest", "--project", "nothing-here", "--json")
+	if err == nil {
+		t.Fatal("expected a non-nil error even with --json")
+	}
+	var payload map[string]any
+	if jsonErr := json.Unmarshal([]byte(out), &payload); jsonErr != nil {
+		t.Fatalf("decode: %v (%s)", jsonErr, out)
+	}
+	if payload["recovery"] == nil || payload["not_found"] != true {
+		t.Fatalf("payload = %+v, want a recovery hint and not_found:true", payload)
+	}
+}
+
+func TestIssueCommandNotFound(t *testing.T) {
+	noExternalToolsPATH(t)
+	root := newCLIRoot(t, "src/app.go", "package app\n")
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	if _, err := issues.OpenStore(storePath); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := executeIssueCommand(t, storePath, root, "ISS-MISSING")
+	if err == nil || !errors.Is(err, issues.ErrIssueNotFound) {
+		t.Fatalf("err = %v, want ErrIssueNotFound", err)
+	}
+}
+
+// TestPrintAmbiguousIssueErrorHumanAndJSON exercises printAmbiguousIssueError
+// directly (see its own doc comment for why the os.Exit(2) call is kept out
+// of the tested function): specs/issues_context.yml covers the real
+// process-level exit code.
+func TestPrintAmbiguousIssueErrorHumanAndJSON(t *testing.T) {
+	ambiguous := &issues.AmbiguousIDError{Prefix: "a0", Matches: []string{"ISS-A0AA000000000000", "ISS-A0BB000000000000"}}
+
+	cmd := newIssueCmd()
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	printAmbiguousIssueError(cmd, "a0", ambiguous)
+	human := stderr.String()
+	if !strings.Contains(human, "ambiguous") || !strings.Contains(human, "ISS-A0AA000000000000") || !strings.Contains(human, "ISS-A0BB000000000000") {
+		t.Fatalf("human ambiguous output = %q", human)
+	}
+
+	cmd = newIssueCmd()
+	if err := cmd.Flags().Set("json", "true"); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	printAmbiguousIssueError(cmd, "a0", ambiguous)
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode: %v (%s)", err, stdout.String())
+	}
+	if payload["error"] != "ambiguous" {
+		t.Fatalf("payload = %+v", payload)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// `monitor issues --at <file:line>` (E3.4 / roadmap "errores x calor")
+// ---------------------------------------------------------------------------
+
+func TestIssuesAtExactLineFallbackWhenCodemapUnavailable(t *testing.T) {
+	noExternalToolsPATH(t)
+	root := newCLIRoot(t, "src/app.go", "package app\n\nfunc a() {\n\tpanic(\"a\")\n}\n\nfunc b() {\n\tpanic(\"b\")\n}\n")
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	now := time.Now().UTC()
+	wantMatch := seedCLIException(t, storePath, root, "src/app.go", 4, "a", now)
+	seedCLIException(t, storePath, root, "src/app.go", 8, "b", now) // different line, must not match
+
+	out, err := executeIssuesCommand(t, storePath, "--at", "src/app.go:4", "--root", root, "--json")
+	if err != nil {
+		t.Fatalf("issues --at: %v\n%s", err, out)
+	}
+	var got struct {
+		RangeResolved bool           `json:"range_resolved"`
+		Issues        []issues.Issue `json:"issues"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode: %v (%s)", err, out)
+	}
+	if got.RangeResolved {
+		t.Error("range_resolved = true, want false (codemap unavailable)")
+	}
+	if len(got.Issues) != 1 || got.Issues[0].ID != wantMatch.ID {
+		t.Fatalf("issues = %+v, want only %s", got.Issues, wantMatch.ID)
+	}
+}
+
+func TestIssuesAtHumanOutputAndNoMatch(t *testing.T) {
+	noExternalToolsPATH(t)
+	root := newCLIRoot(t, "src/app.go", "package app\n")
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	seedCLIException(t, storePath, root, "src/app.go", 1, "f", time.Now().UTC())
+
+	human, err := executeIssuesCommand(t, storePath, "--at", "src/app.go:1", "--root", root)
+	if err != nil {
+		t.Fatalf("issues --at (human): %v\n%s", err, human)
+	}
+	for _, want := range []string{"LINE", "ID", "codemap unavailable"} {
+		if !strings.Contains(human, want) {
+			t.Errorf("human --at output missing %q:\n%s", want, human)
+		}
+	}
+
+	none, err := executeIssuesCommand(t, storePath, "--at", "src/other.go:1", "--root", root)
+	if err != nil {
+		t.Fatalf("issues --at (no match): %v", err)
+	}
+	if strings.Contains(none, "LINE\tID") {
+		t.Errorf("expected no table for a non-matching --at target:\n%s", none)
 	}
 }
