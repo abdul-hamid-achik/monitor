@@ -52,10 +52,17 @@ func nowRFC3339() string {
 }
 
 // AnalyzeResult is what the Analyze service returns: how many samples the
-// window produced and the diagnoses derived from them.
+// window produced, the diagnoses derived from them, and the raw rule alerts
+// the window's analyzer engine raised (bug 17: before Alerts existed, the
+// engine's rules — the same CPUSpike/RSSGrowth/DiskFill/SwapPressure/
+// Zombie/Threshold set `monitor watch` runs, via analyzer.NewDefaultEngine —
+// ran on every sample but their findings were discarded; only the separate
+// cross-signal Diagnoses table was ever returned). Alerts is additive and
+// omitted when empty, so existing JSON consumers are unaffected.
 type AnalyzeResult struct {
 	Samples   int                   `json:"samples"`
 	Diagnoses []collector.Diagnosis `json:"diagnoses"`
+	Alerts    []collector.Alert     `json:"alerts,omitempty"`
 }
 
 // Service is the dependency the MCP server wraps. Each field is a thin
@@ -181,9 +188,13 @@ func (s *Server) register() {
 			"\"something is slow\", the machine feels sluggish, a process seems stuck, or memory/CPU " +
 			"looks wrong. Read-only and safe: there is NO confirm field. Samples metrics once per second " +
 			"for window_seconds (default 10, min 4, max 60) and returns " +
-			"diagnoses: [{summary, evidence, confidence, next_actions}]. Pass pid to focus on one process. " +
-			"healthy:true with an empty diagnoses list means nothing anomalous was observed in the window; " +
-			"retry with a larger window_seconds before concluding the system is fine.",
+			"diagnoses: [{summary, evidence, confidence, next_actions}] (cross-signal patterns like a " +
+			"memory leak or CPU spin) and alerts: [{severity, rule, pid, process, detail}] (the plain " +
+			"per-sample findings \u2014 cpu_spike, rss_growth, disk_fill, swap_pressure, zombie_process, and " +
+			"threshold when configured \u2014 that `monitor watch` would also raise for the same window). Pass " +
+			"pid to focus on one process. healthy:true with empty diagnoses AND alerts means nothing " +
+			"anomalous was observed in the window; retry with a larger window_seconds before concluding " +
+			"the system is fine.",
 	}, s.handleAnalyze)
 	mcp.AddTool(s.srv, &mcp.Tool{
 		Name:        "monitor_issues",
@@ -468,16 +479,21 @@ func (s *Server) handleAnalyze(ctx context.Context, _ *mcp.CallToolRequest, in *
 	if diags == nil {
 		diags = []collector.Diagnosis{}
 	}
+	alerts := res.Alerts
+	if alerts == nil {
+		alerts = []collector.Alert{}
+	}
 	out := map[string]any{
 		"window_seconds": w,
 		"samples":        res.Samples,
 		"diagnoses":      diags,
-		"healthy":        len(diags) == 0,
+		"alerts":         alerts,
+		"healthy":        len(diags) == 0 && len(alerts) == 0,
 	}
 	if in.PID > 0 {
 		out["pid"] = in.PID
 	}
-	if len(diags) == 0 {
+	if len(diags) == 0 && len(alerts) == 0 {
 		out["note"] = fmt.Sprintf("no anomalies detected over the %ds window", w)
 	}
 	return result(out)

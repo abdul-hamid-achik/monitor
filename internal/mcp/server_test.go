@@ -1029,6 +1029,73 @@ func TestHandleAnalyze(t *testing.T) {
 	}
 }
 
+// TestHandleAnalyzeSurfacesAlerts is the wire regression for bug 17's second
+// half: AnalyzeResult.Alerts (the plain rule findings analyzeWindow now
+// collects from the same NewDefaultEngine rules `monitor watch` runs) must
+// reach the monitor_analyze JSON payload as an additive "alerts" field, and
+// must count toward "healthy"/"note" the same way Diagnoses does — a caller
+// seeing healthy:true while a zombie_process alert fired would be worse off
+// than seeing no Diagnoses at all.
+func TestHandleAnalyzeSurfacesAlerts(t *testing.T) {
+	alerts := []collector.Alert{{
+		Severity: "warning", Rule: "zombie_process", PID: 300,
+		Detail: "orphan (pid 300) is a zombie awaiting parent 1",
+	}}
+	s := newTestServer(t, &Service{
+		Analyze: func(_ context.Context, w int, _ int32) (AnalyzeResult, error) {
+			return AnalyzeResult{Samples: w, Alerts: alerts}, nil
+		},
+	})
+	_, payload, err := s.handleAnalyze(context.Background(), nil, &analyzeInput{})
+	if err != nil {
+		t.Fatalf("handleAnalyze: %v", err)
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", payload)
+	}
+	gotAlerts, ok := m["alerts"].([]any)
+	if !ok {
+		t.Fatalf("alerts should be a JSON array (never null); got %T", m["alerts"])
+	}
+	if len(gotAlerts) != 1 {
+		t.Fatalf("len(alerts) = %d, want 1", len(gotAlerts))
+	}
+	a0, _ := gotAlerts[0].(map[string]any)
+	if a0["rule"] != "zombie_process" {
+		t.Errorf("alerts[0].rule = %v, want zombie_process", a0["rule"])
+	}
+	if healthy, _ := m["healthy"].(bool); healthy {
+		t.Error("healthy = true with a live alert present, want false")
+	}
+	if m["note"] != nil {
+		t.Errorf("note should be omitted once an alert is present; got %v", m["note"])
+	}
+}
+
+// TestHandleAnalyzeAlertsDefaultToEmptyArray covers the nil-vs-empty JSON
+// contract for Alerts, matching Diagnoses' existing guarantee — an agent
+// parsing monitor_analyze must never see `"alerts": null`.
+func TestHandleAnalyzeAlertsDefaultToEmptyArray(t *testing.T) {
+	s := newTestServer(t, &Service{
+		Analyze: func(_ context.Context, w int, _ int32) (AnalyzeResult, error) {
+			return AnalyzeResult{Samples: w}, nil
+		},
+	})
+	_, payload, err := s.handleAnalyze(context.Background(), nil, &analyzeInput{})
+	if err != nil {
+		t.Fatalf("handleAnalyze: %v", err)
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", payload)
+	}
+	alerts, ok := m["alerts"].([]any)
+	if !ok || len(alerts) != 0 {
+		t.Fatalf("alerts = %v (%T), want an empty JSON array", m["alerts"], m["alerts"])
+	}
+}
+
 func TestHandleIssuesIsBoundedAndReadOnly(t *testing.T) {
 	items := make([]issues.Issue, 250)
 	for i := range items {

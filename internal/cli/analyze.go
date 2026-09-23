@@ -17,6 +17,11 @@ type analyzeReport struct {
 	Samples   int                   `json:"samples"`
 	Healthy   bool                  `json:"healthy"`
 	Diagnoses []collector.Diagnosis `json:"diagnoses"`
+	// Alerts is additive (bug 17): the plain rule findings (CPUSpike,
+	// RSSGrowth, DiskFill, SwapPressure, Zombie, Threshold) the same
+	// analyzer.NewDefaultEngine rule set `monitor watch` runs raised over the
+	// window, distinct from the cross-signal Diagnoses table below.
+	Alerts []collector.Alert `json:"alerts,omitempty"`
 }
 
 func newAnalyzeCmd() *cobra.Command {
@@ -50,9 +55,14 @@ Examples:
 			if diagnoses == nil {
 				diagnoses = []collector.Diagnosis{}
 			}
+			alerts := result.Alerts
+			if alerts == nil {
+				alerts = []collector.Alert{}
+			}
 			report := analyzeReport{
 				Window: window.String(), Interval: interval.String(), PID: pid,
-				Samples: result.Samples, Healthy: len(diagnoses) == 0, Diagnoses: diagnoses,
+				Samples: result.Samples, Healthy: len(diagnoses) == 0 && len(alerts) == 0,
+				Diagnoses: diagnoses, Alerts: alerts,
 			}
 			if JSONOutput(cmd) {
 				return WriteJSON(report)
@@ -94,6 +104,11 @@ func printAnalyzeReport(w io.Writer, report analyzeReport) error {
 	if report.Healthy {
 		_, err := fmt.Fprintln(w, "No cross-signal process anomalies found.")
 		return err
+	}
+	for _, alert := range report.Alerts {
+		if _, err := fmt.Fprintf(w, "\n[%s] %s: %s\n", alert.Severity, alert.Rule, alert.Detail); err != nil {
+			return err
+		}
 	}
 	for _, diagnosis := range report.Diagnoses {
 		if _, err := fmt.Fprintf(w, "\n[%s] %s\n", diagnosis.Confidence, diagnosis.Summary); err != nil {

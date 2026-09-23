@@ -1,7 +1,9 @@
 package analyzer
 
 import (
+	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/abdul-hamid-achik/monitor/internal/config"
@@ -66,6 +68,28 @@ func TestNewDefaultEngineAddsThresholdRuleWhenConfigured(t *testing.T) {
 		}
 		if th.CPUPercent != cfg.CPUAlertThreshold || th.MemPercent != cfg.MemoryAlertThreshold {
 			t.Errorf("cfg=%+v: threshold rule = %+v", cfg, th)
+		}
+	}
+}
+
+// TestNewDefaultEngineIsWiredIntoConsumers is a structural guard for bug 17:
+// having one rule-set source is worthless if watch, Studio, or the MCP/CLI
+// analyze window quietly stop calling it and build their own *Engine again.
+// It greps each consumer's source for the literal call rather than exercising
+// the CLI (which would need a live collector and multi-second wall-clock
+// waits), so it is cheap and fails loudly the moment any of the three drifts.
+func TestNewDefaultEngineIsWiredIntoConsumers(t *testing.T) {
+	for _, path := range []string{
+		"../cli/watch.go",
+		"../ui/studio/model.go",
+		"../cli/mcp.go",
+	} {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if !strings.Contains(string(src), "analyzer.NewDefaultEngine(") {
+			t.Errorf("%s no longer calls analyzer.NewDefaultEngine — rule-set parity with `monitor watch` (bug 17) would silently drift again", path)
 		}
 	}
 }
