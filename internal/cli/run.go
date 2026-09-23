@@ -64,7 +64,16 @@ is present:
       MONITOR_RUN_ID, which belong to the legacy spec runner and to
       internal/contextids respectively. cmd's own exit code (or
       128+signal, if it was killed by one) becomes monitor's exit
-      code.`,
+      code.
+
+      A scanned stream becomes a pipe for the child (--scan turns off
+      that stream's isatty), which changes some runtimes' own stdio
+      buffering: Ruby switches stdout from line- to full-block-buffering
+      once stdout is not a TTY, the same way Python does (--scan stdout
+      or --scan both set PYTHONUNBUFFERED=1 to counter it for Python;
+      Ruby has no equivalent env var, so a scanned Ruby stdout may be
+      delayed in the terminal until its buffer fills or the process
+      exits).`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if cmd.ArgsLenAtDash() < 0 {
 				return cobra.ExactArgs(1)(cmd, args)

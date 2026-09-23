@@ -2,6 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -77,7 +80,14 @@ func TestNewRunCmdLegacyModeStillDispatchesToGlyphrun(t *testing.T) {
 	}
 }
 
-func TestNewRunCmdDashModeLaunchesAndPropagatesExitCode(t *testing.T) {
+// TestNewRunCmdDashModeLaunchesAndSucceedsOnExitZero only covers the exit-0
+// path: RunE returns nil straight through without ever reaching its
+// os.Exit(result.ExitCode) branch (see newRunCmd), so it cannot prove that
+// branch propagates a NON-zero code correctly. See
+// TestNewRunCmdDashModePropagatesNonZeroExitCode below for that, via the
+// standard re-exec-the-test-binary pattern (os.Exit inside the same process
+// would kill the test binary itself).
+func TestNewRunCmdDashModeLaunchesAndSucceedsOnExitZero(t *testing.T) {
 	isolateRunStore(t)
 	cmd := newRunCmd()
 	var out bytes.Buffer
@@ -86,6 +96,50 @@ func TestNewRunCmdDashModeLaunchesAndPropagatesExitCode(t *testing.T) {
 	cmd.SetArgs([]string{"--quiet", "--", "true"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() = %v, want `run -- true` to succeed", err)
+	}
+}
+
+// monitorRunSubprocessEnv, when set to "1", tells this test binary (re-
+// invoked as a subprocess below) to run `monitor run -- sh -c "exit 3"`
+// and let its os.Exit(3) actually terminate the subprocess, instead of
+// running the whole test suite.
+const monitorRunSubprocessEnv = "MONITOR_RUN_TEST_DASH_MODE_SUBPROCESS"
+
+// TestNewRunCmdDashModePropagatesNonZeroExitCode proves newRunCmd's
+// os.Exit(result.ExitCode) branch (docs/contracts/local-sentry-naming.md's
+// "se propaga el exit code" rule) actually fires for a non-zero code, not
+// just the (already covered) implicit `return nil` on success. os.Exit
+// cannot be called from an ordinary in-process test without killing the
+// whole `go test` binary, so this re-execs the test binary itself with a
+// marker env var, the same pattern os/exec's own tests use for
+// TestHelperProcess-style subprocess assertions.
+func TestNewRunCmdDashModePropagatesNonZeroExitCode(t *testing.T) {
+	if os.Getenv(monitorRunSubprocessEnv) == "1" {
+		isolateRunStore(t)
+		cmd := newRunCmd()
+		cmd.SetOut(os.Stdout)
+		cmd.SetErr(os.Stderr)
+		cmd.SetArgs([]string{"--quiet", "--", "sh", "-c", "exit 3"})
+		_ = cmd.Execute()
+		// If os.Exit(3) did not already terminate the process above,
+		// RunE's non-zero branch did not fire -- exit a code the parent
+		// below does not expect (3), so a regression is a definite
+		// failure rather than an accidental pass.
+		os.Exit(9)
+	}
+
+	execCmd := exec.Command(os.Args[0], "-test.run=^TestNewRunCmdDashModePropagatesNonZeroExitCode$", "-test.v")
+	execCmd.Env = append(os.Environ(), monitorRunSubprocessEnv+"=1")
+	var out bytes.Buffer
+	execCmd.Stdout, execCmd.Stderr = &out, &out
+	err := execCmd.Run()
+
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("subprocess did not exit with an *exec.ExitError (got %v); output:\n%s", err, out.String())
+	}
+	if exitErr.ExitCode() != 3 {
+		t.Errorf("subprocess exit code = %d, want 3 (monitor run -- must propagate the child's own exit code); output:\n%s", exitErr.ExitCode(), out.String())
 	}
 }
 
