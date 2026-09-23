@@ -44,6 +44,8 @@ func Parse(block Block) *Exception {
 		return parseRubyLogger(block)
 	case "gopanic":
 		return parseGopanic(block)
+	case "go-goroutine":
+		return parseGoroutineDump(block)
 	case "zap-console":
 		return parseZapConsole(block)
 	case "zap-json":

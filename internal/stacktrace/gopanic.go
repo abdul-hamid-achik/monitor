@@ -148,33 +148,8 @@ func parseGopanic(block Block) *Exception {
 
 	var frames []Frame
 	if goroutineIdx >= 0 {
-		for i := goroutineIdx + 1; i < len(lines); i++ {
-			l := lines[i]
-			if strings.TrimSpace(l) == "" || reGoroutineHeader.MatchString(l) {
-				break
-			}
-			if strings.HasPrefix(l, "created by ") {
-				// The spawn site, not part of the panicking stack.
-				if i+1 < len(lines) && reGoFrameFile.MatchString(lines[i+1]) {
-					i++
-				}
-				continue
-			}
-			m := reGoFuncCallLine.FindStringSubmatch(l)
-			if m == nil {
-				continue
-			}
-			f := Frame{Function: m[1], Module: goModule(m[1])}
-			if i+1 < len(lines) {
-				if fm := reGoFrameFile.FindStringSubmatch(lines[i+1]); fm != nil {
-					f = goFrame(m[1], fm[1], fm[2])
-					i++
-				}
-			}
-			frames = append(frames, f)
-		}
+		frames = goStanzaFrames(lines, goroutineIdx)
 	}
-	reverseFrames(frames)
 
 	ex := &Exception{
 		Runtime:    "go",
@@ -192,5 +167,92 @@ func parseGopanic(block Block) *Exception {
 		ex.Chained = append(ex.Chained, Exception{Type: "panic", Value: values[i]})
 	}
 	inheritChain(ex)
+	return ex
+}
+
+// goStanzaFrames parses the goroutine stanza whose header is lines[header]
+// into Frames, oldest first (Go prints the innermost call first).
+func goStanzaFrames(lines []string, header int) []Frame {
+	var frames []Frame
+	for i := header + 1; i < len(lines); i++ {
+		l := lines[i]
+		if strings.TrimSpace(l) == "" || reGoroutineHeader.MatchString(l) {
+			break
+		}
+		if strings.HasPrefix(l, "created by ") {
+			// The spawn site, not part of the panicking stack.
+			if i+1 < len(lines) && reGoFrameFile.MatchString(lines[i+1]) {
+				i++
+			}
+			continue
+		}
+		m := reGoFuncCallLine.FindStringSubmatch(l)
+		if m == nil {
+			continue
+		}
+		f := Frame{Function: m[1], Module: goModule(m[1])}
+		if i+1 < len(lines) {
+			if fm := reGoFrameFile.FindStringSubmatch(lines[i+1]); fm != nil {
+				f = goFrame(m[1], fm[1], fm[2])
+				i++
+			}
+		}
+		frames = append(frames, f)
+	}
+	reverseFrames(frames)
+	return frames
+}
+
+// --- a recovered panic logged with its goroutine stack ---
+
+// A goroutine stanza with no "panic:" header is what a server that
+// recovers panics logs: net/http prints "http: panic serving <addr>:
+// <value>" and then runtime.Stack. It is an event only when the line just
+// before it reports a panic; a bare dump (debug.PrintStack, SIGQUIT) is not.
+var (
+	reHTTPPanicPrev = regexp.MustCompile(`panic serving \S+: (.*)$`)
+	rePanicPrev     = regexp.MustCompile(`(?i)\bpanic(?:ked|king)?\b[^:]*?:\s+(.*)$`)
+)
+
+var goroutineDumpRule = blockRule{
+	kind:  "go-goroutine",
+	start: reGoroutineHeader.MatchString,
+	open:  func(string) grammar { return &gopanicGrammar{st: goStFrames} },
+}
+
+func parseGoroutineDump(block Block) *Exception {
+	var val string
+	switch m := reHTTPPanicPrev.FindStringSubmatch(block.Prev); {
+	case m != nil:
+		val = m[1]
+	default:
+		m := rePanicPrev.FindStringSubmatch(block.Prev)
+		if m == nil {
+			return nil
+		}
+		val = m[1]
+	}
+	frames := goStanzaFrames(block.Lines, 0)
+	// The stack was captured inside the deferred recover: drop the
+	// recovery frames above runtime's panic() so the crash frame is where
+	// the panic was raised.
+	for i := len(frames) - 1; i >= 0; i-- {
+		if frames[i].Function == "panic" {
+			frames = frames[:i]
+			break
+		}
+	}
+	ex := &Exception{
+		Runtime:    "go",
+		Type:       "panic",
+		Value:      val,
+		Parser:     "gopanic",
+		Handled:    boolPtr(true),
+		Level:      LevelError,
+		Frames:     frames,
+		LineStart:  block.LineStart,
+		LineEnd:    block.LineEnd,
+		ObservedAt: blockTimestamp(block),
+	}
 	return ex
 }

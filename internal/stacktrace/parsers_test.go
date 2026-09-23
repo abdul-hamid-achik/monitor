@@ -139,6 +139,20 @@ exit status 2
 	}
 }
 
+func TestRecoveredPanicDump(t *testing.T) {
+	stanza := "goroutine 9 [running]:\nmain.recoverer.func1()\n\t/repo/app/mw.go:20 +0x40\n" +
+		"panic({0x1, 0x2})\n\t/usr/local/go/src/runtime/panic.go:860 +0x12c\n" +
+		"main.handler(...)\n\t/repo/app/h.go:7\nmain.main()\n\t/repo/app/main.go:3 +0x10\n"
+	assertSummaries(t, Detect("[Recovery] panic recovered: boom\n"+stanza), []string{
+		`gopanic/go error handled panic: boom @main.handler@h.go:7(2)`,
+	})
+	for _, prev := range []string{"", "worker 3 stack:\n", "SIGQUIT: quit\n"} {
+		if exs := Detect(prev + stanza); len(exs) != 0 {
+			t.Errorf("goroutine dump after %q produced events: %s", prev, strings.Join(summarizeAll(exs), " | "))
+		}
+	}
+}
+
 func TestGopanicStopsAtFirstGoroutine(t *testing.T) {
 	text := `fatal error: all goroutines are asleep - deadlock!
 

@@ -69,6 +69,7 @@ var blockRules = []blockRule{
 	pythonSyntaxRule,
 	pythonGroupRule,
 	gopanicRule,
+	goroutineDumpRule,
 	zapConsoleRule,
 	zapJSONRule,
 	rubyLoggerRule,

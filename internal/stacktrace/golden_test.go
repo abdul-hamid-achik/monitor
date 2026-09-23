@@ -219,6 +219,14 @@ var goldenCases = []struct {
 	{"real/deno/uncaught.txt", []string{
 		`js/deno fatal unhandled Error: outer failure @outer@scenarios.mjs:19(2) <= Error: middle failure @middle@scenarios.mjs:12(3) <= Error: root failure @root@scenarios.mjs:6(4)`,
 	}},
+	// A bare goroutine dump (debug.PrintStack) is not an event...
+	{"real/go/debug-stack.txt", []string{}},
+	// ...but net/http's recovered handler panic is: the log line before
+	// the stanza carries the value, and the recovery frames are dropped
+	// so the crash frame is where the panic was raised.
+	{"real/go/http-panic.txt", []string{
+		`gopanic/go error handled panic: runtime error: invalid memory address or nil pointer dereference @example.com/app/internal/svc.(*Server).Handle@svc.go:13(5) [2026-09-23T05:16:04.000Z]`,
+	}},
 	{"real/go/errorf.txt", []string{
 		`gopanic/go fatal unhandled panic: bad input 7 @main.main@main.go:74(1)`,
 	}},
