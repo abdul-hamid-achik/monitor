@@ -1,453 +1,396 @@
-# AGENTS.md - Monitor CLI Development Guide
+# AGENTS.md — Monitor development guide
 
-Local-first observability hub for macOS and Linux. Built with Go, Bubble Tea, and the Charm
-ecosystem. Designed for both human use (TUI) and agent use (JSON CLI + MCP
-server).
+This is the single guide for coding agents (Claude Code, Codex, and others)
+and for people working on this repository. Read it before changing anything.
 
-## Project Overview
+**Monitor** is a local-first, single-binary observability tool for macOS and
+Linux, built for people and for agents. The binary does two jobs:
 
-**Monitor** is an agent-harnessable local observability tool with its fullest
-hardware support on Apple Silicon. It features:
+1. **Local error tracking that points at the line, with no SDK.**
+   - `monitor run -- <cmd>` and `monitor stacktrace parse --record` turn
+     crashes and printed errors from Node, Deno, Bun, Python, Ruby and Go into
+     grouped issues. Each issue gets a culprit `file:line`, a source snippet,
+     chained causes, codemap blast radius and the last local commit that
+     touched the line.
+   - `monitor hot` shows which line inside a function burns CPU, heap or
+     goroutines.
+   - Everything above is exposed through bounded contracts that the CLI and
+     the MCP server share.
+2. **Host and process monitoring.**
+   - Snapshots, `watch` with anomaly rules, history, baselines and diffs,
+     alerts.
+   - `monitor studio`, the Bubble Tea v2 TUI.
+   - Privacy-safe telemetry for Chalupa.
 
-- Interactive Bubble Tea TUI (Nord theme)
-- JSON CLI commands for metrics, processes, diagnosis, grouped issues,
-  incident evidence, history, configuration, and ecosystem health
-- MCP stdio server (read-only + mutating tools; mutating require
-  `confirm: true` in the typed input)
-- Process profiling (pprof HTTP scraping + macOS `sample`)
-- Anomaly detection (CPU spike, RSS growth with linear regression)
-- Durable Run/Event/Issue/Evidence grouping with open/resolved/ignored state
-- Ecosystem integrations: codemap, fcheap, vecgrep, vidtrace, glyphrun,
-  cairntrace, tinyvault, veclite, tmux
-- Bounded veclite log store with shared-read for CLI search
-- Glyphrun behavioral specs
-
-**Platform**: macOS Apple Silicon (M1/M2/M3/M5)
-**Language**: Go 1.25+
-**Module**: `github.com/abdul-hamid-achik/monitor`
-
----
-
-## Quick Reference
-
-### Single-word Taskfile commands
-
-```bash
-task build    # Build to bin/monitor
-task run      # Build and run
-task dev      # Auto-reload on file changes
-task test     # Run all unit tests
-task cover    # Generate HTML coverage
-task bench    # Run benchmarks
-task lint     # go vet ./...
-task fmt      # gofmt -w .
-task tidy     # go mod tidy
-task specs    # Run glyphrun behavioral specs
-task snapshot # Print JSON system snapshot (shortcut)
-task doctor   # Print ecosystem health
-task release  # Build optimized release binary
-task install  # Install to /usr/local/bin
-task remove   # Remove from /usr/local/bin
-task version  # Print Go and module versions
-task info     # Show project info
-task help     # Show all available tasks
-task clean    # Remove build artifacts
-task check    # Full CI pipeline (tidy + lint + test + release)
-task all      # Alias for check
-```
-
-### Direct Go commands
-
-```bash
-go build -o bin/monitor ./cmd/monitor
-go test -v ./...
-go vet ./...
-go mod tidy
-```
+- **Module:** `github.com/abdul-hamid-achik/monitor`
+- **Go:** 1.25+ (see go.mod)
+- **License:** MIT
+- **Design notes:** `~/notes/projects/monitor/` (Obsidian vault). The active goal is
+  `2026-09-22-local-sentry-goal.md`, with its roadmap in
+  `2026-09-22-local-sentry-roadmap.md`.
 
 ---
 
-## File Layout
+## TL;DR for agents
+
+- **Build:**
+  - `go build -o bin/monitor ./cmd/monitor`, or `task build` when the `task`
+    binary works on your machine.
+  - Run the CLI with `./bin/monitor --help`.
+- **Tests:** `go test -race -count=1 ./...`
+- **Lint and format:** `go vet ./...` and `gofmt -l .`. The gofmt command must
+  print nothing.
+- **Specs:** `GLYPH=glyph scripts/specs.sh`. It is the same script local runs,
+  CI and release use, and it exits non-zero on any failure.
+- Read every file before you edit it.
+- Add tests with every change. Add a glyphrun spec for every behavior a user
+  can observe.
+- Never add a dependency without checking the existing patterns first.
+- A PR is done when build, vet, gofmt, `go test -race` and `scripts/specs.sh`
+  are all green. The CI matrix is ubuntu plus macOS for tests, and ubuntu with
+  node, deno, bun, ruby and python provisioned for specs.
+
+---
+
+## Commands
+
+### Taskfile (single words)
+
+| Command | Effect |
+|---|---|
+| `task build` | Build `bin/monitor` |
+| `task release` | Optimized release build with the version injected |
+| `task run` | Build, then launch `monitor studio` |
+| `task dev` | Rebuild and relaunch on file changes |
+| `task test` | `go test -v ./...` |
+| `task cover` | Write an HTML coverage report |
+| `task bench` | Run benchmarks |
+| `task lint` | `go vet ./...` |
+| `task fmt` | `gofmt -w .` |
+| `task tidy` | `go mod tidy` |
+| `task specs` | Run `scripts/specs.sh` |
+| `task docs` | Serve the VitePress site in `docs/` |
+| `task docs-build` | Build the docs site; fails on dead links |
+| `task snapshot` / `task doctor` | Print JSON snapshot / ecosystem health |
+| `task check` | Full pipeline: tidy, lint, test, release build |
+| `task clean` | Remove build artifacts |
+
+### Quick debugging
+
+```bash
+./bin/monitor --help
+./bin/monitor snapshot --json | jq '.cpu'
+./bin/monitor doctor --json                    # ecosystem + codemap/vecgrep health + PATH shadowing
+./bin/monitor run -- node examples/polyglot/js/workload.js   # crash -> issue
+./bin/monitor issues && ./bin/monitor issue latest
+./bin/monitor hot --file internal/profiler/testdata/v8-hot.cpuprofile
+glyph spec verify specs/<name>.yml && glyph run specs/<name>.yml --format md
+```
+
+---
+
+## Package map
 
 ```
-monitor/
-├── cmd/monitor/
-│   └── main.go                  # Entry: dispatches CLI vs TUI based on args
-├── internal/
-│   ├── analyzer/                # anomaly detection (CPU spike, RSS growth)
-│   │   └── analyzer_test.go
-│   ├── cli/                     # cobra subcommands
-│   │   ├── root.go              # Root + subcommand registration
-│   │   ├── snapshot.go          # `monitor snapshot`
-│   │   ├── watch.go             # `monitor watch` (NDJSON)
-│   │   ├── kill.go              # `monitor kill` + `monitor process`
-│   │   ├── profile_logs.go      # `monitor profile`, `monitor logs`, `monitor investigate`
-│   │   ├── doctor.go            # `monitor doctor` + `monitor run`
-│   │   ├── mcp.go               # `monitor mcp serve`
-│   │   ├── studio.go            # `monitor studio` (the TUI; alias `tui`)
-│   │   ├── util.go              # JSON output helpers, context handling
-│   │   └── cli_test.go
-│   ├── collector/               # pub/sub metric collector
-│   │   ├── collector.go         # Collector + Subscribe
-│   │   ├── types.go             # CPUInfo, MemoryInfo, ProcessInfo, etc.
-│   │   ├── ringbuffer.go        # Generic ring buffer
-│   │   ├── collector_test.go
-│   │   ├── ringbuffer_test.go
-│   │   └── types_test.go
-│   ├── config/                  # Settings (JSON at ~/.config/monitor/config.json)
-│   │   ├── config.go
-│   │   └── config_test.go
-│   ├── ecosystem/               # CLI wrappers for codemap/fcheap/vecgrep/etc.
-│   │   ├── registry.go          # Status + TinyvaultRun + RunGlyphrun
-│   │   └── registry_test.go
-│   ├── contextids/              # MONITOR/CHALUPA_CI run correlation
-│   ├── procbind/                # redacted process→runtime/codebase binding
-│   ├── issues/                  # durable Run/Event/Issue/Evidence store
-│   ├── incidents/               # integrity-hashed file.cheap evidence bundles
-│   │   ├── incidents.go         # Capture (bundle + tree-hash + fcheap save)
-│   │   └── incidents_test.go    # tree-hash stability, no-fcheap fallback, bundle round-trip
-│   ├── capture/                 # log capture pipeline
-│   │   ├── capture.go            # Source, Runner, parseLevel, looksLikeLogPath
-│   │   └── capture_test.go       # 9 unit tests
-│   ├── kill/                    # safe process termination
-│   │   ├── kill.go
-│   │   └── kill_test.go
-│   ├── reload/                  # /reload HTTP endpoint for the TUI
-│   │   ├── reload.go            # Reloader, NoopReloader, Server, DefaultAddr
-│   │   └── reload_test.go       # 7 unit tests (healthz, reload, idempotence, ...)
-│   ├── logger/                  # bounded veclite-backed log store
-│   │   ├── store.go
-│   │   └── store_test.go
-│   ├── mcp/                     # MCP stdio server (10 tools: 6 read-only + 4 mutating)
-│   │   ├── server.go            # Service, Server, tool handlers, confirm gate
-│   │   └── server_test.go       # handler unit tests
-│   ├── telemetry/               # bounded identity-free telemetry windows
-│   ├── temperature/             # real SMC temperature via sudo powermetrics
-│   │   ├── temperature.go       # Source, Kind, Reading; streaming subprocess lifecycle
-│   │   └── temperature_test.go  # parser variants, fallback, fake-binary upgrade
-│   ├── profiler/                # pprof + sample + Node inspector profiling
-│   │   ├── profiler.go
-│   │   └── profiler_test.go
-│   ├── ui/studio/               # The TUI (Bubble Tea v2 — charm.land/bubbletea/v2 + lipgloss/v2)
-│   │   ├── model.go             # Model, tea.View, tea.KeyPressMsg, tab router, header, status bar (all 9 tabs)
-│   │   ├── run.go               # entry point (`monitor studio`)
-│   │   ├── cpu.go               # CPU tab
-│   │   ├── memory.go            # Memory tab
-│   │   ├── disk.go              # Disk tab
-│   │   ├── network.go           # Network tab
-│   │   ├── processes.go         # Processes tab (bubbles/v2 table)
-│   │   └── model_test.go        # v2 unit tests
-│   └── widgets/                 # Reusable widgets (sparklines, gauges; lipgloss v2)
-│       ├── gauge.go
-│       └── gauge_test.go
-├── specs/                       # glyphrun behavioral specs (35 currently)
-│   ├── baseline.yml             # save/list/delete + path-traversal guard
-│   ├── cli_help.yml
-│   ├── diff.yml                 # baseline vs live diff
-│   ├── doctor_json.yml
-│   ├── env_detection.yml
-│   ├── history.yml              # query/list on a fresh store
-│   ├── incidents.yml            # incidents --help + graceful w/o fcheap
-│   ├── investigate.yml
-│   ├── kill_safety.yml
-│   ├── logs_capture.yml
-│   ├── logs_search.yml
-│   ├── mcp_handshake.yml
-│   ├── process.yml              # process <pid> incl. unknown-pid error
-│   ├── profile_sample.yml       # (skipped in CI — needs macOS `sample`)
-│   ├── reload.yml
-│   ├── run.yml                  # run --help + missing-spec error
-│   ├── snapshot_json.yml
-│   ├── stash.yml                # (skipped in CI — needs fcheap)
-│   ├── studio_help.yml          # studio TUI help + bare-monitor-shows-help
-│   ├── tree.yml                 # process hierarchy
-│   ├── vault.yml                # vault --help + missing-project error
-│   ├── version.yml
-│   └── watch_tick.yml
-├── Taskfile.yml                 # Single-word commands
-├── AGENTS.md                    # This file
-├── CLAUDE.md                    # Claude Code companion
-├── go.mod
-└── README.md
+cmd/monitor/main.go        entry point: cobra CLI; `monitor studio` launches the TUI
+
+internal/
+  cli/            cobra commands, one file each (run, issues, hot, investigate,
+                  stacktrace, profile_logs, watch, doctor, mcp, ...); root.go
+                  registers them
+  devrun/         `monitor run -- <cmd>`: launch, copy output to the
+                  terminal, detect exceptions, record issues; env, signals,
+                  banners, launch registry
+  stacktrace/     SDK-free stack-trace detection: Joiner and parsers for
+                  V8/Deno/Bun, Python, Ruby, Go panics, zap +
+                  pkg/errors, typescript-logging; InApp;
+                  timestamps; parse checkpoints
+  scrub/          default secret/PII redaction (patterns, emails, Luhn cards,
+                  exact values of secret env vars)
+  project/        one project/service resolver (flag > MONITOR_PROJECT > git
+                  root > marker > service > process)
+  issues/         veclite store: Issue/Occurrence, FingerprintV1 (alerts) and
+                  V2 (exceptions), Culprit, ExceptionInfo, DedupeKey, window
+                  filters, RecordException, short-lived writers
+                  (OpenStoreWait/WithWriter)
+  explain/        monitor.issue_context.v1 builder (snippet, causes, frames,
+                  codemap impact, git "last touched", message culprit,
+                  degraded[], next[])
+  profiler/       CDP inspector (V8 positionTicks), in-process pprof proto
+                  (google/pprof), macOS `sample` tree parser, LoadFile,
+                  BuildHeatmap (monitor.line_heatmap.v1)
+  sourcemap/      dependency-free Source Map v3 decoder/resolver
+  procbind/       process -> runtime/codebase binding (node, bun, deno,
+                  python, ruby, go); process tree + ResolveLeaf (wrapper ->
+                  real child)
+  ecosystem/      one-hop CLI wrappers (codemap, vecgrep, fcheap, glyph,
+                  cairn, tvault, ...), health probes (health.go),
+                  ArtifactRefV1
+  incidents/      integrity-hashed monitor.incident bundles -> fcheap, with a
+                  local resume registry
+  mcp/            MCP stdio server (tools, typed inputs, confirm gate); the
+                  logic lives in cli/mcp.go's Service
+  collector/      host/process metric collection (canonical metric types)
+  analyzer/       anomaly rules + cross-signal diagnosis; NewDefaultEngine is
+                  shared by watch/Studio/MCP
+  capture/        `monitor logs capture` (spawn or tail -> logger store)
+  logger/ history/ baseline/   veclite log store, metric history, labeled
+                  snapshots + diff
+  telemetry/      identity-free host telemetry windows (frozen V1 contract)
+  contextids/     MONITOR_* / CHALUPA_CI_* run correlation
+  notify/ reload/ config/ kill/ cgroup/ temperature/ capability/
+  ui/studio/      the TUI (Bubble Tea v2, charm.land/*)
+  widgets/        sparklines, gauges, CodeFrame (line-heatmap renderer)
+
+examples/polyglot/  js (node/bun/deno), python, ruby, go-pprof, go-plain,
+                    go-crash, go-zap-stdout workloads; WORKLOAD_SECONDS
+                    shortens them
+specs/              glyphrun behavioral specs (run through scripts/specs.sh)
+scripts/specs.sh    the one spec runner (PASS/SKIP/FAIL, skip-list, exit code)
+docs/               VitePress site; docs/contracts/ holds the versioned
+                    JSON contracts
 ```
 
 ---
 
 ## Architecture
 
-### Mode Dispatch (`cmd/monitor/main.go`)
-
-- `monitor studio` (alias `tui`) → launch the TUI (`internal/ui/studio`)
-- Other subcommand → cobra CLI (`internal/cli`)
-- No args / unknown flag → cobra help
-- main.go extracts only the global `--pprof` flag, then hands argv to cobra
-
-### Event Bus (`internal/collector`)
-
-The collector publishes `Event` on every tick. Subscribers receive non-blocking
-callbacks. This decouples collection from presentation:
+### From error to issue
 
 ```
-Collector → [subs] → TUI renderer, analyzer, MCP stream, log capture
+monitor run -- <cmd>          devrun: the copy goroutine writes to the terminal FIRST, then does a
+monitor stacktrace parse      non-blocking send to a bounded channel (drops are counted)
+  --record                    -> stacktrace.Joiner -> Parse -> scrub -> project.Resolve
+                              -> issues.RecordException (FingerprintV2, Culprit, DedupeKey)
+                              -> short-lived writer (issues.WithWriter)
+monitor issues / issue <id>   explain.Build -> monitor.issue_context.v1 (CLI human | --json | --md, MCP brief)
 ```
 
-### Ecosystem Layer (`internal/ecosystem`)
+- **FingerprintV2** hashes the outer exception type, the top 5 in_app frames of
+  the outer exception (`func@relfile`, no line numbers) and the innermost cause
+  type. Service, PID, release, codemap FQNs and sampled symbols never go into
+  it. The **culprit** is the crash frame of the innermost cause when it is
+  in_app, otherwise the crash frame of the outer exception.
+- **Time is the event's time.** A replayed log takes its timestamp from the
+  line, or from the file mtime when the line has none, never from now. Replays
+  are idempotent through per-file checkpoints and a DedupeKey.
+- **Monitoring never slows the monitored process.** Scanned streams use pipes
+  owned by devrun. `cmd.Wait` never closes them, and they drain within a
+  bounded grace period.
 
-Each tool has availability and typed methods. `Probe(ctx)` returns JSON-ready
-aggregate health. `codeintel.go` additionally preserves codemap project binding,
-vecgrep index readiness/warnings, and the strict ArtifactRefV1 contract.
+### From profile to line
 
-### MCP Server (`internal/mcp`)
+```
+CDP positionTicks (node/deno --inspect) | pprof proto (Go) | .cpuprofile (node/bun/deno --cpu-prof) | darwin sample
+  -> profiler -> sourcemap (TS/bundled JS) -> BuildHeatmap -> monitor.line_heatmap.v1 -> widgets.CodeFrame
+```
 
-Standard Model Context Protocol stdio transport. Tools return JSON via the
-shared `result()` helper. Pattern matches codemap's server (one Server struct,
-one Service, NL-JSON-RPC framing).
+`monitor hot` works in three modes:
 
-Read-only tools shipped:
+- `--file`: a `.cpuprofile` or `.pb.gz` on disk;
+- `<pid>`: resolves the leaf process behind a `yarn`, `npm` or `go run`
+  wrapper;
+- `<service>`: looks up the launch registry that `monitor run --name` writes.
 
-- `monitor_snapshot` — full SystemInfo
-- `monitor_processes` — top processes
-- `monitor_doctor` — ecosystem health
-- `monitor_analyze` — bounded cross-signal process diagnosis
-- `monitor_issues` — bounded grouped-issue list
-- `monitor_issue` — one issue with bounded recent occurrences
+The heatmap also marks lines where an issue's culprit sits (errors × heat).
+When a function's time looks JIT-inlined, the output says so; it never
+invents a hot line for an idle or diffuse profile.
 
-Mutating tools (all require `confirm: true` in the typed input):
+### Contracts (`docs/contracts/`)
 
-- `monitor_kill` — terminate a process; safety-checked, refuses protected
-- `monitor_profile_capture` — heap/cpu/goroutine/sample profile
-- `monitor_investigate` — diagnostic pipeline (structured fallback if no service is wired)
-- `monitor_record` — platform screen recording with artifact verification
+- `local-sentry-naming.md`: the naming ADR, environment-variable ownership,
+  dedupe and checkpoint rules.
+- `issue-context-v1.md`: `brief` is at most 4 KB and `standard` at most 16 KB.
+  Every section carries a `status`.
+- `line-heatmap-v1.md`
+- `doctor-v1.md`: the stable presence contract.
+- `monitor-incident-v1.md`: fcheap bundles and ArtifactRefV1.
 
-Two-layer safety: the MCP SDK validates the typed input schema (rejecting
-calls that omit `confirm` outright), and the handlers re-check `confirm`
-so agents that hand-build a request still get a structured refusal payload
-with `refused: true` and a `reason`.
+Keep JSON changes additive. Chalupa and cairntrace parse `investigate --json`,
+and glyphrun procmon parses `monitor profile --json` (`text` and `symbols`
+must stay).
 
-### Logger (`internal/logger`)
+### MCP server (`internal/mcp`)
 
-veclite-backed log store. `monitor logs capture` holds the writer lock; CLI search
-uses `OpenReadOnly` with `WithSharedRead(true)` + `WithReadOnly(true)`, which
-is lock-free (no flock) — concurrent queries never block collection, and the
-writer never blocks a search. Readers see a point-in-time snapshot. The
-`/reload` HTTP endpoint in `internal/reload` (POST /reload on 127.0.0.1:7351)
-injects a refresh into the active Studio model; `monitor studio --reload-server`
-starts it and `monitor reload` posts to it.
+The server speaks stdio and has 10 tools.
 
-Default retention is 7 days and 100,000 FIFO records. Search defaults to 50
-and clamps to 1,000. The default data directory is mode 0700. Capture
-`--max-lines` / `--max-bytes` limits one session; it does not configure durable
-retention.
+- **Read-only:** `monitor_snapshot`, `monitor_processes`, `monitor_doctor`,
+  `monitor_analyze`, `monitor_issues`, `monitor_issue`.
+  - `monitor_issue` accepts `id:"latest"` with `project`, `service` and `kind`
+    filters and returns the issue_context brief.
+- **Mutating, gated by `confirm: true`:** `monitor_kill`,
+  `monitor_profile_capture`, `monitor_investigate`, `monitor_record`.
+  - `monitor_profile_capture` is runtime-aware. It supports `lines:true` for a
+    bounded heatmap, plus `pprof_addr` and `keep`.
 
-### Profiler (`internal/profiler`)
+Confirmation is enforced in two layers. The SDK rejects a call that omits
+`confirm`, and the handlers check it again, so a hand-built request still
+gets a structured `refused: true` payload. Handlers only copy fields; the
+business logic lives in the Service in `internal/cli/mcp.go`. Tool handlers
+take `*mcp.CallToolRequest` as their second argument.
 
-- Go processes: scrape `net/http/pprof` over HTTP
-- Node/Bun/Deno: ownership-verified CDP inspector CPU profile when `--inspect`
-  is detected
-- Any process: macOS `sample <pid> 1 -mayDie`
-- Parses pprof text into `Symbol{Func, File, Line}`
+### Environment variable ownership
 
-### Analyzer (`internal/analyzer`)
+| Variable | Owner |
+|---|---|
+| `MONITOR=1`, `MONITOR_RUN_DIR` | legacy `monitor run <spec.yml>` (glyphrun/cairntrace react to them) |
+| `MONITOR_RUN_ID`, `MONITOR_SERVICE`, `MONITOR_PROJECT`, `CHALUPA_CI_*` | read by `contextids` / `project` |
+| `MONITOR_LAUNCH_ID`, `MONITOR_LAUNCH_SERVICE`, `MONITOR_LAUNCH_ROOT` | exported ONLY by `monitor run -- <cmd>`; `LAUNCH_ROOT` is the outermost launch's ID (nested runs dedupe, siblings don't) |
+| `NODE_OPTIONS`, `BUN_OPTIONS`, `PYTHONUNBUFFERED` | only ever appended to, or set when unset, at launch |
 
-Pluggable rules:
+### Stores
 
-- `CPUSpikeRule` — current CPU versus a rolling per-PID median + absolute floor
-- `RSSGrowthRule` — wall-clock-normalized RSS regression; bytes/second + R²
-- `ZombieRule` — processes observed in state Z
+The logs, history and issues stores are embedded veclite files, pinned at
+v0.22.1.
 
-Engine observes every `collector.Event` and returns fired alerts.
-
-Per-process CPU is computed from consecutive cumulative user+system counters
-divided by wall time. One core is 100%; multithreaded processes can exceed it.
-The first observation, PID reuse, backwards counters, and invalid intervals are
-explicitly unavailable. Full process collection has a 100ms minimum interval.
-
-### Issues and Evidence (`internal/issues`, `internal/incidents`)
-
-`monitor investigate` runs seven steps: identify, snapshot, profile, correlate,
-semantic, stash, issue. `watch --stash` also records an occurrence after the
-evidence capture. Fingerprint V1 groups stable project/service/kind/message/
-symbol identity; run, release, PID, timestamp, tree hash, and artifact identity
-stay on the occurrence. Resolved issues reopen on a later occurrence; ignored
-issues continue accumulating until explicitly reopened.
-
-Incident bundles are flat, private (0700 directories / 0600 files), reject
-symlinks and undeclared/non-regular entries, cap raw profiles at 128 MiB, and
-verify their tree hash before resume. The failed-archive registry keeps the 20
-newest bundles. A tree hash is an integrity/correlation key, not a promise that
-two captures receive the same fcheap stash ID.
-
-### Environment Detection
-
-When monitor launches a child process or spec, it sets:
-
-- `MONITOR=1`
-- `MONITOR_RUN_DIR=<run-dir>`
-
-So child processes can detect they are being observed. Mirrors glyphrun's
-`GLYPHRUN=1` / `GLYPHRUN_RUN_DIR` pattern.
-
-Diagnostic context also reads `MONITOR_*` and Chalupa's
-`CHALUPA_CI_ENVIRONMENT`, `CHALUPA_CI_RUN_ID`, `CHALUPA_CI_STEP_ID`,
-`CHALUPA_CI_SUITE`, and `CHALUPA_CI_ATTEMPT`, with legacy `CHALUPA_*`
-fallbacks. These IDs belong to occurrences/manifests/tags and never enter
-telemetry V1.
+- **Writers are short-lived** (`OpenStoreWait` and `WithWriter`, retrying on
+  `ErrFileLocked`). Readers use `OpenReadOnly`, which is lock-free.
+- **Never** set `WithSharedRead(true)` on a writer; only readers may use it.
+- **Known upstream issue:** veclite v0.22.1 does not persist MemoryConfig.
+  Monitor re-applies its limits on every open. v0.22.1 also has a non-atomic
+  Save. With heavy cross-process write contention, a write can be lost, so a
+  single store never loses data but concurrent writers can race. The fix
+  belongs in veclite (an atomic Save), followed by a measured version bump.
 
 ---
 
-## Coding Conventions
+## Golden rules (do not break)
 
-### Naming
-
-- Files: lowercase, snake_case (`collector.go`, `app.go`)
-- Types: PascalCase, no domain prefix (`CPUInfo`, `ProcessInfo`)
-- Functions: PascalCase exported, camelCase private
-- Constants: PascalCase (`TabOverview`)
-- Variables: camelCase, descriptive
-
-### Style
-
-- Errors returned immediately, early returns
-- Composite struct literals with field names
-- Package-level doc comments on every package
-- Imports: stdlib first, third-party second, local last
-
-### JSON Tags
-
-All metric structs include `json:"snake_case"` tags for stable CLI output.
+- **Never inject into a running process.** No SIGUSR1, `sys.remote_exec`,
+  ptrace or late `--inspect`. Injection happens only at launch, only through
+  the environment, and only by appending.
+- **Never print inspector `ws://` URLs** in the CLI, `--json` or MCP output.
+  Show the port only. The full URL may live only in the registry file, which
+  is mode 0600.
+- **Scrub error text** before persisting it or returning it through MCP or
+  `--md`. Never persist argv, environment variables, local variables, headers
+  or request bodies.
+- **Keep telemetry V1 frozen and identity-free.** Only ArtifactRefV1 refs and
+  closed-schema aggregates go to Chalupa. Chalupa owns those schemas.
+- **Degrade honestly.** A missing or stale codemap, vecgrep index, git or
+  source map becomes `skipped` with a recovery, never invented data. Never
+  recommend `codemap index --reindex` on schema skew; upgrade the binary
+  instead.
+- **Call codemap and vecgrep as one-hop CLIs only.** No MCP→MCP chains. Use
+  vecgrep only in `--mode keyword`, so error text never goes to an embeddings
+  provider.
+- **Everything is propose-only.** Specs, merges, notes, pins and resolves are
+  suggested, never applied automatically.
+- **Do not reintroduce Bubble Tea v1.** Keep each TUI tab's render and keys in
+  `tab_<name>.go`; the model file is only a router.
 
 ---
+
+## Coding conventions
+
+- Put `context.Context` first on IO functions. Return errors immediately,
+  wrapped with `fmt.Errorf("...: %w", err)`.
+- Call `os.Exit` only from `main.go` or a CLI entry point, never from library
+  code.
+- CLI commands switch between human and JSON output with `JSONOutput(cmd)`.
+  Metric structs carry `json:"snake_case"` tags.
+- Name files in lowercase snake_case. Use PascalCase for exported names and
+  camelCase for private ones. Every package has a doc comment. Group imports:
+  stdlib, then third party, then local.
+- Keep pure parsers free of OS build tags, so they are tested on both ubuntu
+  and macOS. Only the system call goes in a `_darwin.go` file.
 
 ## Testing
 
-### Unit tests
+- **Unit tests:**
+  - Every package has `_test.go` files; prefer table-driven tests,
+    `t.TempDir()` and golden fixtures (`testdata/`, `examples/polyglot/`).
+  - **No fixed sleeps for readiness.** Poll for a ready file, a port or a
+    line. Wall-clock budget tests skip under `-race`
+    (`race_on_test.go` / `race_off_test.go`).
+  - **Build fake secrets by concatenation** (`"sk_" + "live_..."`). GitHub push
+    protection blocks provider-shaped literals anywhere in the pushed
+    history.
+  - Tests that need a runtime that is not on PATH call `t.Skip`.
+- **Glyphrun specs:**
+  - Every spec runs through `scripts/specs.sh`. The script accepts
+    `MONITOR_SPECS_SKIP` and file arguments, and the same skip-list applies
+    locally, in CI and in release.
+  - A spec that needs a runtime needs that runtime provisioned in CI.
+    Otherwise add it to the script's skip-list with a reason.
+  - **Set both timeouts on command outcomes.** glyph applies an outcome-level
+    `timeoutMs` and a `verify.command.timeoutMs`, both defaulting to 5s.
+    Set both to the same value.
+  - Keep specs portable: use `python3`, `ruby`, `node`, `bun` and `deno` from
+    PATH, and relative repo paths.
+  - Validate with `glyph spec verify specs/<name>.yml`.
+  - When CI fails, the specs job uploads `.glyphrun/runs/` as the
+    `glyphrun-runs` artifact.
+- **Do not** run the TUI in tests, call `cobra.Execute()` (use
+  `Root().Commands()`), or pass `--version` in tests (it calls `os.Exit`).
 
-Every package has a `_test.go`. Run with:
+## Common tasks
 
-```bash
-task test          # all
-go test ./internal/collector/...
-```
+- **Add a CLI command.**
+  1. Create `internal/cli/<name>.go` with `newXxxCmd()`.
+  2. Register it in `root.go`.
+  3. Add the `--json` branch.
+  4. Write `<name>_test.go` and a spec.
+  5. Check that `./bin/monitor <name> --help` works.
+- **Add an MCP tool.** Add a typed input struct, a handler that only copies
+  fields, a Service method in `cli/mcp.go`, and an in-memory `CallTool` test.
+  A mutating tool also needs `confirm` in its schema and a refusal test.
+- **Add a stack-trace format.**
+  1. Write a parser in `internal/stacktrace` with golden fixtures captured
+     from the real runtime (paths rewritten to `/repo/...`).
+  2. Add clean look-alike fixtures that must produce 0 events.
+  3. Check that frame order is oldest to newest, with the crash frame last.
+- **Add a spec:** copy `specs/version.yml` and adjust the intent, target,
+  steps and outcomes.
+- **Update the protected-process list:** edit `ProtectedProcessNames` in
+  `internal/collector/types.go`.
 
-Test patterns:
+## Gotchas
 
-- Table-driven tests for pure functions
-- `t.TempDir()` for filesystem
-- `context.Background()` for collector; `context.WithCancel` for goroutines
+1. **The CPU-profile line is V8's.** `positionTicks` lines are 1-based.
+   `callFrame.lineNumber` is 0-based and points at the declaration. When
+   TurboFan inlines a function, its time lands on the caller's call line.
+2. **Profile `Symbols` are sampled.** Never fingerprint on them.
+   Investigations group on the dominant in-app function, and only when it
+   holds at least 15% of active samples.
+3. **Process CPU needs two samples.** The first collector observation is
+   unavailable by design. Keep the PID creation-time checks, which catch PID
+   reuse.
+4. **Temperature comes from `sudo powermetrics` when possible.** Otherwise it
+   is an estimate, flagged by `temperature.source`.
+5. **Watch for codemap schema skew.** An older `codemap` binary on PATH
+   cannot read a newer index. `monitor doctor` reports `schema_skew`; the fix
+   is to upgrade the binary, never to reindex.
+6. **Know the Status/Probe pair in `internal/ecosystem`.** Don't confuse the
+   struct `Status` with the function `Probe`.
+7. **fcheap contracts are strict.** ArtifactRefV1 requires `$schema`;
+   validate before returning a ref.
 
-### Glyphrun behavioral specs
+## Docs site (Vercel)
 
-```bash
-task specs                                  # all specs
-~/projects/glyphrun/bin/glyph run specs/version.yml
-```
+- The repo-root `vercel.json` builds **only `main`**. On other branches the
+  `ignoreCommand` exits 0, so Vercel skips the build instead of failing it.
+- On `main` it skips commits that don't touch the docs.
+- Never run `vercel promote`: pushing to `main` is the site release.
+- CLI binaries ship from tags through the release workflow.
+- Local commands: `task docs` and `task docs-build`.
 
-Each spec has:
+## Known limitations
 
-- `intent:` — one-line purpose
-- `target:` — command under test
-- `terminal:` — PTY dimensions
-- `preconditions:` — setup commands
-- `steps:` — interaction sequence
-- `outcomes:` — verifiable assertions (screen / process / command)
-
-Adding a new spec: copy an existing one, adjust intent + target + outcomes.
-
----
-
-## Dependency Plan
-
-| Package | Import |
-|---------|--------|
-| Bubble Tea v2 | `charm.land/bubbletea/v2` (the only TUI runtime) |
-| Bubbles v2 | `charm.land/bubbles/v2` (table widget in the Processes tab) |
-| Lipgloss v2 | `charm.land/lipgloss/v2` (TUI styling + `internal/widgets`) |
-| gopsutil | `github.com/shirou/gopsutil/v4` |
-| Cobra | `github.com/spf13/cobra` |
-| MCP SDK | `github.com/modelcontextprotocol/go-sdk/mcp` |
-| Veclite | `github.com/abdul-hamid-achik/veclite` |
-| Clipboard | `github.com/atotto/clipboard` |
-
-The binary links a single lipgloss (`charm.land/lipgloss/v2`) — both the TUI
-and `internal/widgets` are on v2.
-
----
-
-## Important Gotchas
-
-1. **veclite requires read-only for shared-read** — a writer cannot enable
-   shared-read; only readers do.
-2. **cobra `--version` exits the process** — test via `Root().Version`, not by
-   executing with `--version` (would call `os.Exit`).
-3. **Bubble Tea v2 is a breaking change** — `View()` returns `tea.View`, not
-   `string`; `tea.KeyMsg` becomes `tea.KeyPressMsg`. The TUI lives in
-   `internal/ui/studio/` (launched via `monitor studio`); all 9 tabs are
-   ported with full interactivity.
-4. **MCP tool handlers** need `*mcp.CallToolRequest` as second argument.
-5. **Temperature readings come from `sudo powermetrics` when available**
-   (`internal/temperature`). Falls back to a CPU-load estimate when
-   sudo can't be obtained; the `temperature.source` field on the
-   `SystemInfo` JSON (`"estimated"` or `"powermetrics"`) and the TUI's
-   `● real` / `● est` badge tell the caller which.
-6. **Process CPU needs two samples** — one-shot process surfaces must use
-   `collectFullSnapshot`; the first collector observation is intentionally
-   unavailable. Preserve PID creation time checks to avoid PID-reuse spikes.
-7. **Issue identity excludes occurrence context** — never add PID, run,
-   release, timestamp, tree hash, or artifact ID to Fingerprint V1.
-8. **Incident bundles persist no argv** — `procbind` may inspect argv in
-   memory, but JSON bindings and bundle `process.json` must remain redacted.
-9. **file.cheap contracts are strict** — save/info fields use `source_path`,
-   `total_size`, `file_count`, `files`, and `content_hash`; validate the exact
-   local ArtifactRefV1 before returning it.
-
----
-
-## Common Tasks for Agents
-
-### Add a CLI subcommand
-
-1. Create `internal/cli/<name>.go` with `newXxxCmd()` returning `*cobra.Command`
-2. Register in `internal/cli/root.go`'s `AddCommand` list
-3. Add `JSONOutput(cmd) bool` branch for `--json`
-4. Test manually: `./bin/monitor <name> --help`
-5. Add unit test in `cli_test.go`
-
-### Add an MCP tool
-
-1. Add typed input struct in `internal/mcp/server.go`
-2. Add handler `func (s *Server) handleXxx(ctx, req, in) (*CallToolResult, any, error)`
-3. Register in `register()` via `mcp.AddTool`
-4. Test with an MCP client (Claude Code)
-
-### Add a glyphrun spec
-
-1. Copy an existing spec in `specs/`
-2. Adjust intent, target, steps, outcomes
-3. Validate: `glyph spec verify specs/<name>.yml`
-4. Run: `glyph run specs/<name>.yml --format md`
-
-### Update protected-process list
-
-`internal/collector/types.go` — `ProtectedProcessNames` map.
-
----
-
-## Known Limitations
-
-1. **Load averages on macOS** — always 0 (gopsutil doesn't expose them on
-   macOS); Linux reads real values from `/proc/loadavg`.
-2. **Temperature** — real SMC readings need `sudo powermetrics` (macOS); else a
-   CPU-load estimate, badged `est`. Linux is always the estimate.
-3. **History concurrency** — the recorder holds an exclusive veclite lock, so
-   `monitor history query` can't run while a recorder is active (clear error).
-
----
+- **Hot lines by runtime:**
+  - Live hot lines work for Node and Deno started with `--inspect` (or under
+    `monitor run --inspect`).
+  - Bun has hot lines only at exit, through `monitor run --profile` or
+    `--cpu-prof`, because Bun's inspector speaks JSC, not V8 CDP.
+  - Go needs `net/http/pprof` for exact lines; without it, `sample` is
+    function-level only.
+  - Python and Ruby get errors only; their hot lines need launch-time probes,
+    which are the next epic.
+- **Host metrics:** load averages are always 0 on macOS, because gopsutil
+  does not expose them. Linux temperature is always estimated.
 
 ## References
 
-- Design notes: `~/notes/projects/monitor/`
-- Iteration 1 (Vision & Roadmap): `~/notes/projects/monitor/Rewrite Vision and Roadmap.md`
-- Iteration 2 (Concrete Specs): `~/notes/projects/monitor/Iteration 2 - Concrete Specs and Validated Patterns.md`
+- Goal, roadmap and verified findings: `~/notes/projects/monitor/2026-09-22-local-sentry-*.md`
 - Codemap MCP pattern: `~/projects/codemap/internal/mcp/server.go`
-- Vecgrep Bubble Tea v2 studio: `~/projects/vecgrep/internal/studio/`
 - Glyphrun spec model: `~/projects/glyphrun/docs/verifiers.md`
