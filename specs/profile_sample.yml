@@ -12,7 +12,12 @@ intent: |
   be empty) so the profile always has real, non-idle self time to report.
 
 target:
-  cmd: ["sh", "-c", "TARGET_PID=$(sh -c 'nohup yes >/dev/null 2>&1 & echo $!'); exec ./bin/monitor profile \"$TARGET_PID\" -t sample --json; kill \"$TARGET_PID\" 2>/dev/null"]
+  # No `exec`: exec would replace this shell with monitor, so the `kill`
+  # after it could never run and the detached `yes` (unlike the old
+  # `sleep 30`, it never exits on its own) would leak as an orphan on every
+  # spec run. Capture the exit code explicitly and propagate it after the
+  # kill instead.
+  cmd: ["sh", "-c", "TARGET_PID=$(sh -c 'nohup yes >/dev/null 2>&1 & echo $!'); ./bin/monitor profile \"$TARGET_PID\" -t sample --json; R=$?; kill \"$TARGET_PID\" 2>/dev/null; exit $R"]
   cwd: "."
 
 terminal:
