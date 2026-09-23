@@ -3,7 +3,10 @@ package devrun
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
+	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -346,6 +349,105 @@ func TestRunDoesNotHangBehindAnOrphanedGrandchildHoldingThePipeOpen(t *testing.T
 // carries a real crash, so flushAllPending's bounded, concurrent shutdown
 // flush (not issues.DefaultWriterWait synchronously per pending
 // fingerprint) is what is actually being measured.
+// TestRunRegistersAndCleansUpLaunchRegistry is E3.2's own wiring test
+// (registry.go's write/read functions are covered directly in
+// registry_test.go): a `monitor run --` launch registers itself and
+// removes that registration once the child has exited -- registry.go's
+// "removed on exit" rule (docs/contracts/local-sentry-naming.md §8).
+func TestRunRegistersAndCleansUpLaunchRegistry(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+
+	opts := baseOptions(t, []string{"sh", "-c", "echo child-ran; exit 0"})
+	opts.Name = "svc-x"
+	var stdout, stderr, banner bytes.Buffer
+	opts.Stdout, opts.Stderr, opts.Banner = &stdout, &stderr, &banner
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+	}
+
+	// project.Resolve on this repo's own worktree resolves a real slug;
+	// rather than re-deriving it here, just confirm nothing is left
+	// registered anywhere under the isolated state dir.
+	root := filepath.Join(stateDir, "monitor", "services")
+	var leftover []string
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		leftover = append(leftover, path)
+		return nil
+	})
+	if len(leftover) != 0 {
+		t.Errorf("registry entries left behind after Run() returned: %v", leftover)
+	}
+}
+
+// TestRunInspectRecordsBannerIntoRegistry is E3.3b's own wiring test (the
+// banner-parsing/port-owner logic itself is covered directly in
+// inspect_test.go/portowner_test.go): a `monitor run --inspect` launch
+// records a "Debugger listening on ws://..." banner from the scanned
+// stream into its OWN launch registry entry, mid-run -- while the
+// launched process is still alive, not only after it exits.
+func TestRunInspectRecordsBannerIntoRegistry(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+
+	opts := baseOptions(t, []string{"sh", "-c",
+		"echo 'Debugger listening on ws://127.0.0.1:9229/test-uuid-0001' >&2; sleep 0.4"})
+	opts.Name = "svc-insp"
+	opts.Inspect = true
+	var stdout, stderr, banner bytes.Buffer
+	opts.Stdout, opts.Stderr, opts.Banner = &stdout, &stderr, &banner
+
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := Run(context.Background(), opts)
+		runDone <- err
+	}()
+
+	root := filepath.Join(stateDir, "monitor", "services")
+	var entry RegistryEntry
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		var path string
+		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+			if err == nil && !d.IsDir() {
+				path = p
+			}
+			return nil
+		})
+		if path != "" {
+			data, rerr := os.ReadFile(path)
+			if rerr == nil && json.Unmarshal(data, &entry) == nil && len(entry.Inspectors) > 0 {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := <-runDone; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(entry.Inspectors) != 1 {
+		t.Fatalf("Inspectors = %+v, want exactly 1 recorded banner", entry.Inspectors)
+	}
+	if entry.Inspectors[0].Port != 9229 {
+		t.Errorf("Port = %d, want 9229", entry.Inspectors[0].Port)
+	}
+	if entry.Inspectors[0].WS != "ws://127.0.0.1:9229/test-uuid-0001" {
+		t.Errorf("WS = %q, want the full banner URL preserved", entry.Inspectors[0].WS)
+	}
+	if strings.Contains(banner.String(), "ws://") {
+		t.Error("the ws:// URL must never reach any devrun banner -- only the registry file")
+	}
+}
+
 func TestRunFlushesFailedWritesQuicklyWhenStoreIsLocked(t *testing.T) {
 	storePath := isolatedStore(t)
 	lockHolder, err := issues.OpenStore(storePath)

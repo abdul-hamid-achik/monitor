@@ -75,6 +75,20 @@ type Options struct {
 	NoSourceMaps bool
 	// StorePath overrides issues.ResolvePath's default issue store.
 	StorePath string
+	// Inspect is E3.3b's --inspect: appends --inspect=127.0.0.1:0 to
+	// NODE_OPTIONS (node and deno both honor it; Bun speaks JSC, not V8
+	// CDP, and gets a one-line note instead -- see profile.go) and
+	// records every "Debugger listening on ws://..." banner the scanned
+	// stream(s) print into the launch registry, mapped to its owning pid
+	// via the listening port (see inspect.go and registry.go).
+	Inspect bool
+	// Profile is E3.3b's --profile: node/bun write a V8-format
+	// .cpuprofile at exit (NODE_OPTIONS/BUN_OPTIONS +=
+	// --cpu-prof --cpu-prof-dir=<private dir>, plus an exit shim that
+	// makes a bare Ctrl-C actually reach that exit hook -- see
+	// profile.go). Deno has no env-injectable equivalent (verified live)
+	// and gets a one-line note instead.
+	Profile bool
 
 	// Stdin/Stdout/Stderr are monitor's own terminal streams, overridable
 	// in tests; nil defaults to os.Stdin/os.Stdout/os.Stderr. Stdin is
@@ -111,6 +125,10 @@ type Result struct {
 	// shutdown -- see detector.flushAllPending's bounded budget): counted,
 	// never silently lost, and surfaced in the exit summary.
 	FailedWrites int64
+	// ProfilePath is the newest .cpuprofile --profile wrote (E3.3b), ""
+	// when --profile was not requested, was skipped for this runtime
+	// (Deno), or the process never reached its exit hook.
+	ProfilePath string
 }
 
 // childIOGrace bounds how long Run waits, once the child process ITSELF has
@@ -207,6 +225,17 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	launch := ResolveLaunchIDs(environ, effectiveService)
 	env := BuildEnv(environ, launch, !opts.NoSourceMaps, scanStdout)
 
+	// E3.3b: --inspect/--profile each further augment env (NODE_OPTIONS/
+	// BUN_OPTIONS), independently of BuildEnv above -- see
+	// applyInspectAndProfile's own doc comment for why argv0Base only
+	// gates the two documented, verified limitations (Bun+--inspect,
+	// Deno+--profile) rather than every runtime.
+	augmentation, err := applyInspectAndProfile(env, opts, argv0Base, launch.ID)
+	if err != nil {
+		return Result{}, fmt.Errorf("devrun: %w", err)
+	}
+	env = augmentation.env
+
 	cmd := exec.CommandContext(ctx, opts.Argv[0], opts.Argv[1:]...)
 	cmd.Env = env
 	cmd.Stdin = stdin
@@ -255,6 +284,74 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		cmdText := bannerScrubber.String(renderCommandText(opts.Argv))
 		fmt.Fprintln(banner, StartBanner(cmdText, cmd.Process.Pid, id.Slug, effectiveService, scan))
 	}
+	// applyInspectAndProfile's documented, verified limitation notes
+	// (Bun+--inspect, Deno+--profile) print regardless of --quiet: they
+	// explain why a flag the caller explicitly passed has no effect here,
+	// which is exactly the kind of thing --quiet ("suppress the routine
+	// start/NEW/again banners") is not meant to hide.
+	for _, note := range augmentation.notes {
+		fmt.Fprintln(banner, NoteBanner(note))
+	}
+
+	// E3.2's launch registry (docs/contracts/local-sentry-naming.md §8):
+	// one entry per launch, keyed by (project, effective service), so a
+	// later `monitor hot <service>` can resolve this launch's real pid
+	// (and, under --inspect, its already-discovered inspector) without
+	// re-deriving either. Best-effort: a registry write failure (e.g. an
+	// unwritable state directory) must never abort the launch itself --
+	// `monitor hot <service>` degrades to "unregistered" the same way it
+	// would if this launch had never called WriteRegistryEntry at all.
+	var regPath string
+	var regMu sync.Mutex
+	var regInspectors []RegistryInspector
+	if path, werr := WriteRegistryEntry(RegistryEntry{
+		LaunchID:  launch.ID,
+		PID:       cmd.Process.Pid,
+		Name:      effectiveService,
+		Project:   id.Slug,
+		StartedAt: start,
+		Scan:      scan,
+	}); werr == nil {
+		regPath = path
+		defer RemoveRegistryEntry(regPath)
+	}
+
+	// --inspect's banner-to-registry pipeline: only meaningful when the
+	// STDERR stream is actually being scanned (the default, and where
+	// Node/Deno print their inspector banner) -- when it is not (a bare
+	// `--scan stdout`), monitor has no visibility into stderr's bytes at
+	// all (they are wired straight through to the terminal, never read by
+	// this process), so --inspect can only register a banner it can
+	// actually see; this is the documented "--inspect requires stderr
+	// scanning" limitation, not a bug to work around here.
+	stderrOut := stderr
+	if opts.Inspect && scanStderr {
+		stderrOut = &bannerScanningWriter{
+			Real:    stderr,
+			Ctx:     ctx,
+			FindPID: defaultPortOwner,
+			OnBanner: func(b InspectorBanner) {
+				if regPath == "" {
+					return
+				}
+				regMu.Lock()
+				regInspectors = append(regInspectors, RegistryInspector{PID: b.PID, Port: b.Port, WS: b.WS})
+				snapshot := append([]RegistryInspector(nil), regInspectors...)
+				regMu.Unlock()
+				_, _ = WriteRegistryEntry(RegistryEntry{
+					LaunchID:   launch.ID,
+					PID:        cmd.Process.Pid,
+					Name:       effectiveService,
+					Project:    id.Slug,
+					StartedAt:  start,
+					Scan:       scan,
+					Inspectors: snapshot,
+				})
+			},
+		}
+	} else if opts.Inspect && !scanStderr {
+		fmt.Fprintln(banner, NoteBanner("--inspect needs stderr scanning to see the inspector's startup banner; pass --scan both (or the default --scan stderr) instead of --scan stdout"))
+	}
 
 	var dropped int64
 	lines := make(chan streamLine, linesChanCap)
@@ -263,7 +360,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		pumpWG.Add(1)
 		go func() {
 			defer pumpWG.Done()
-			_ = copyStream(stderr, stderrPipe, streamStderr, lines, &dropped)
+			_ = copyStream(stderrOut, stderrPipe, streamStderr, lines, &dropped)
 		}()
 	}
 	if scanStdout {
@@ -356,6 +453,25 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			Dropped:             dropped,
 			FailedWrites:        result.FailedWrites,
 		}))
+	}
+
+	// --profile's own exit-time summary: printed regardless of --quiet,
+	// the same reasoning as applyInspectAndProfile's notes above -- a
+	// caller who explicitly asked for --profile needs to see where the
+	// profile landed (or an honest reason there is none) even in a quiet
+	// run, since there is no OTHER output that would ever tell them.
+	if augmentation.profileDir != "" {
+		if path, ferr := newestProfileFile(augmentation.profileDir); ferr == nil {
+			result.ProfilePath = path
+			if summary, serr := summarizeProfile(ctx, path); serr == nil {
+				fmt.Fprintln(banner, bannerPrefix+" "+summary)
+			} else {
+				fmt.Fprintf(banner, "%s cpu profile: %s (heatmap unavailable: %s)\n", bannerPrefix, path, serr.Error())
+			}
+			fmt.Fprintf(banner, "next  monitor hot --file %s\n", path)
+		} else {
+			fmt.Fprintln(banner, NoteBanner("--profile requested but no .cpuprofile was written (the process may not have reached its exit hook)"))
+		}
 	}
 
 	return result, nil

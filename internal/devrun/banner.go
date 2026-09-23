@@ -84,6 +84,17 @@ func NewIssueBanner(ev newIssueEvent) string {
 	return fmt.Sprintf("%s NEW %s %s %s %s%s", bannerPrefix, ev.ShortID, level, ev.Title, loc, fnPart)
 }
 
+// NoteBanner is printed for a documented, verified runtime limitation
+// (applyInspectAndProfile's Bun+--inspect / Deno+--profile notes, or
+// --inspect requiring stderr scanning): "monitor > note: <msg>". Unlike
+// StartBanner/NewIssueBanner/AgainBanner, callers print this regardless of
+// --quiet -- it explains why a flag the caller explicitly passed had no
+// effect, which --quiet's "suppress the routine banners" is not meant to
+// hide.
+func NoteBanner(msg string) string {
+	return bannerPrefix + " note: " + msg
+}
+
 // AgainBanner is printed every time a coalescing window flushes a repeat of
 // a fingerprint this run has already reported: "monitor > <short> again
 // (xN)".
