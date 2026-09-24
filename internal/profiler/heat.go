@@ -495,31 +495,6 @@ func isRuntimeInternalCDPFile(file string) bool {
 	return false
 }
 
-// deriveCDPHits returns each node's sample count, keyed by node ID, reading
-// straight from the node's own hitCount when at least one node carries a
-// positive one. Falls back to counting each node id's occurrences in the
-// profile's flat per-tick samples array — the same source hitCount is
-// itself normally derived from — when every node's hitCount is zero: the
-// brief describes a .cpuprofile as "JSON with nodes/samples/timeDeltas,
-// positionTicks", and hitCount is genuinely optional in CDP's own
-// ProfileNode shape, so a capture that has samples but omits hitCount must
-// still produce a usable heatmap instead of reporting "no samples".
-func deriveCDPHits(cp *cdpProfile) map[int64]int64 {
-	hits := make(map[int64]int64, len(cp.Nodes))
-	for i := range cp.Nodes {
-		if cp.Nodes[i].HitCount > 0 {
-			for j := range cp.Nodes {
-				hits[cp.Nodes[j].ID] = cp.Nodes[j].HitCount
-			}
-			return hits
-		}
-	}
-	for _, id := range cp.Samples {
-		hits[id]++
-	}
-	return hits
-}
-
 func newCDPFuncAccum() *cdpFuncAccum {
 	return &cdpFuncAccum{lineSelf: map[int]int64{}, callees: map[heatFuncKey]int64{}}
 }
@@ -563,20 +538,21 @@ func buildFromCDP(cp *cdpProfile, opts HeatOptions) (*Heatmap, error) {
 		return a
 	}
 
-	// hits gives each node's sample count. hitCount is optional in CDP's
-	// own ProfileNode shape (only samples/timeDeltas are guaranteed); when
-	// every node's hitCount is missing/zero, derive it by counting each
-	// node id's occurrences in the flat per-tick samples array instead —
-	// the same source hitCount is itself normally derived from — rather
-	// than reporting "no samples" for a .cpuprofile that legitimately has
-	// some.
-	hits := deriveCDPHits(cp)
+	// hits gives each node's sample count via cdpNodeHits (inspector.go) —
+	// the ONE shared per-node hit rule, also used by flattenCDPProfile:
+	// the node's own hitCount when positive, else its occurrences in the
+	// flat per-tick samples array, else 0. Sharing it is what keeps a live
+	// CDP capture and a file-loaded .cpuprofile attributing the same
+	// numbers for the same data.
+	hits := cdpNodeHits(cp)
 
 	// Pass 1: per-node self attribution, mirroring flattenCDPProfile's own
-	// rules exactly (inspector.go) — positionTicks when present, else the
-	// node's own declaration line with its whole hit count — plus the same
-	// idle/gc/program/root pseudo-frame bookkeeping, so a live CDP capture
-	// and a file-loaded one report identical Stats for the same data.
+	// rules exactly (inspector.go) — the shared cdpNodeHits count for how
+	// many samples each node contributes, positionTicks when present, else
+	// the node's own declaration line with its whole hit count — plus the
+	// same idle/gc/program/root pseudo-frame bookkeeping, so a live CDP
+	// capture and a file-loaded one report identical Stats for the same
+	// data.
 	nodeFunc := make(map[int64]heatFuncKey, len(cp.Nodes)) // absent entry marks a pseudo/excluded/unattributed node
 	var totalHits, idleHits, gcHits, excludedHits int64
 	anyPositionTicks := false
@@ -1338,10 +1314,15 @@ func buildFromPprof(prof *profile.Profile, opts HeatOptions) (*Heatmap, error) {
 		Unit:        unit,
 		Method:      MethodPprofProto,
 		Runtime:     "go",
-		// Samples/ActiveSamples default to the raw value-column total —
-		// right for heap/goroutine (instant snapshots with no idle
-		// concept) — and are overwritten below for a CPU capture whose
-		// real wall-clock duration lets an honest idle share be computed.
+		// Samples/ActiveSamples are the raw value-column total, measured
+		// in Unit — the contract's own rule for the field
+		// (docs/contracts/line-heatmap-v1.md: a pprof CPU source's
+		// `samples` is the nanosecond total across the selected value
+		// column, a heap source's is bytes — never literally a count, and
+		// never the wall-clock window DurationNanos carries). A pprof
+		// proto also has no (idle)/(program)/(GC) pseudo-frames, so
+		// ActiveSamples always equals Samples; an off-CPU share is
+		// reported through IdlePct below instead.
 		Samples:       int(total),
 		ActiveSamples: int(total),
 	}
@@ -1349,6 +1330,12 @@ func buildFromPprof(prof *profile.Profile, opts HeatOptions) (*Heatmap, error) {
 		hm.CaptureDurationNanos = prof.DurationNanos
 	}
 	if idleCapture {
+		// The wall-clock window vs the CPU nanoseconds actually consumed
+		// gives an honest off-CPU share — reported through IdlePct/
+		// IdleMeasured ONLY, never by overwriting Samples/ActiveSamples
+		// with the duration: `samples` used to become DurationNanos here,
+		// so a busy and an idle capture of the same window reported
+		// silently incomparable `samples` magnitudes under one unit.
 		hm.IdleMeasured = true
 		dur := prof.DurationNanos
 		activeNanos := total
@@ -1358,11 +1345,7 @@ func buildFromPprof(prof *profile.Profile, opts HeatOptions) (*Heatmap, error) {
 			// nonsensical negative idle share.
 			activeNanos = dur
 		}
-		hm.Samples = int(dur)
-		hm.ActiveSamples = int(activeNanos)
-		if dur > 0 {
-			hm.IdlePct = float64(dur-activeNanos) / float64(dur) * 100
-		}
+		hm.IdlePct = float64(dur-activeNanos) / float64(dur) * 100
 	}
 
 	for _, k := range funcOrder {

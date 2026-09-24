@@ -380,19 +380,57 @@ type flatKey struct {
 	Line int
 }
 
+// cdpNodeHits is the ONE shared per-node hit rule both CDP consumers —
+// flattenCDPProfile (live `monitor profile`) and buildFromCDP
+// (BuildHeatmap, `monitor hot`) — attribute samples by: the node's own
+// hitCount when it carries a positive one, else — when the profile carries
+// the flat per-tick samples array — the number of samples referencing that
+// node's id, else 0. hitCount is optional in CDP's own ProfileNode shape
+// (only nodes/samples/timeDeltas are guaranteed), and real captures are
+// mixed: a writer may populate hitCount on some nodes only, or on none, so
+// an all-or-nothing rule either drops genuinely-sampled nodes (their
+// positionTicks and their share of Stats vanish) or ignores the samples
+// array entirely. Sharing one helper is also what keeps a live capture and
+// a file-loaded .cpuprofile reporting identical Stats for the same data.
+func cdpNodeHits(prof *cdpProfile) map[int64]int64 {
+	hits := make(map[int64]int64, len(prof.Nodes))
+	var fromSamples map[int64]int64
+	for i := range prof.Nodes {
+		n := &prof.Nodes[i]
+		if n.HitCount > 0 {
+			hits[n.ID] = n.HitCount
+			continue
+		}
+		if len(prof.Samples) == 0 {
+			continue // no hitCount and no samples array: 0 stays 0.
+		}
+		if fromSamples == nil {
+			fromSamples = make(map[int64]int64, len(prof.Samples))
+			for _, id := range prof.Samples {
+				fromSamples[id]++
+			}
+		}
+		hits[n.ID] = fromSamples[n.ID]
+	}
+	return hits
+}
+
 // flattenCDPProfile converts the hierarchical CDP profile into a flat
 // []Symbol carrying genuine statement-level attribution, plus the pseudo-
 // frame breakdown as Stats.
 //
 // V8's per-node hitCount attributes time to the function's declaration line
 // only; the real hot line lives in the node's positionTicks (already
-// 1-based). This aggregates every node's positionTicks by (func, file, line)
-// — merging call-path duplicates — and falls back to
-// (lineNumber+1, hitCount) only for nodes that carry no positionTicks at
-// all (e.g. Bun's native builtins, which have no url/positionTicks but do
-// have a hitCount). (idle)/(program)/(garbage collector)/(root) are excluded
-// from both the output and the weight denominator; their share is reported
-// in Stats instead of being silently folded into "real" code.
+// 1-based). Each node's sample count comes from cdpNodeHits — the shared
+// per-node hit rule buildFromCDP (heat.go) also uses, so a live capture and
+// a file-loaded .cpuprofile report identical Stats. This aggregates every
+// node's positionTicks by (func, file, line) — merging call-path
+// duplicates — and falls back to (lineNumber+1, hits) only for nodes that
+// carry no positionTicks at all (e.g. Bun's native builtins, which have no
+// url/positionTicks but do have a hitCount). (idle)/(program)/(garbage
+// collector)/(root) are excluded from both the output and the weight
+// denominator; their share is reported in Stats instead of being silently
+// folded into "real" code.
 func flattenCDPProfile(prof cdpProfile) ([]Symbol, Stats) {
 	var totalHits, idleHits, gcHits, excludedHits int64
 	totals := make(map[flatKey]int64)
@@ -414,23 +452,26 @@ func flattenCDPProfile(prof cdpProfile) ([]Symbol, Stats) {
 		totals[k] += ticks
 	}
 
+	hits := cdpNodeHits(&prof)
+
 	for _, n := range prof.Nodes {
-		if n.HitCount <= 0 {
+		hc := hits[n.ID]
+		if hc <= 0 {
 			continue
 		}
-		totalHits += n.HitCount
+		totalHits += hc
 		f := n.CallFrame
 		fn := f.FunctionName
 		if fn == "" {
 			fn = "(anonymous)"
 		}
 		if isPseudoCDPFrame(fn) {
-			excludedHits += n.HitCount
+			excludedHits += hc
 			switch fn {
 			case "(idle)":
-				idleHits += n.HitCount
+				idleHits += hc
 			case "(garbage collector)":
-				gcHits += n.HitCount
+				gcHits += hc
 			}
 			continue
 		}
@@ -444,7 +485,7 @@ func flattenCDPProfile(prof cdpProfile) ([]Symbol, Stats) {
 		}
 		// No positionTicks (older V8, or a native frame with no source
 		// lines): fall back to the node's own declaration line.
-		add(fn, file, funcLine, n.HitCount, funcLine)
+		add(fn, file, funcLine, hc, funcLine)
 	}
 
 	if totalHits <= 0 {

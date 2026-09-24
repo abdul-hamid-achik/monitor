@@ -852,6 +852,17 @@ func hotActiveClause(hm *profiler.Heatmap) string {
 	activePct := 0.0
 	if hm.Samples > 0 {
 		activePct = float64(hm.ActiveSamples) / float64(hm.Samples) * 100
+		if hm.ActiveSamples == hm.Samples && hm.IdlePct > 0 {
+			// pprof CPU proto: the value column counts only real frames
+			// (no (idle) pseudo-frames), so ActiveSamples==Samples by
+			// construction and the ratio above is always 100%. The honest
+			// "active" share there is of the WALL CLOCK: whatever the
+			// DurationNanos-derived IdlePct didn't exclude.
+			activePct = 100 - hm.IdlePct
+			if activePct < 0 {
+				activePct = 0
+			}
+		}
 	}
 	// programPct is whatever's left of the excluded share once idle and gc
 	// are subtracted out (root/other negligible pseudo-frames), so the

@@ -1052,12 +1052,12 @@ func TestBuildHeatmapPprofExplicitTypeMismatchErrors(t *testing.T) {
 	}
 }
 
-// TestDeriveCDPHitsFallsBackToSamplesArray is the regression for the
+// TestCDPNodeHitsFallsBackToSamplesArray is the regression for the
 // "hitCount is optional in CDP's ProfileNode" finding: with every node's
-// hitCount at 0 but samples/timeDeltas present, deriveCDPHits (and so
+// hitCount at 0 but samples/timeDeltas present, cdpNodeHits (and so
 // BuildHeatmap) must still produce a usable heatmap, counting each node
 // id's occurrences in the samples array instead of reporting "no samples".
-func TestDeriveCDPHitsFallsBackToSamplesArray(t *testing.T) {
+func TestCDPNodeHitsFallsBackToSamplesArray(t *testing.T) {
 	raw := `{
 		"nodes": [
 			{"id":1,"callFrame":{"functionName":"(root)","url":"","lineNumber":-1},"hitCount":0,"children":[2]},
@@ -1082,6 +1082,160 @@ func TestDeriveCDPHitsFallsBackToSamplesArray(t *testing.T) {
 	// count (3) on the node's own declaration line (lineNumber 4 -> line 5).
 	if len(f.Lines) != 1 || f.Lines[0].Self != 3 || f.Lines[0].Line != 5 {
 		t.Errorf("Lines = %+v, want a single line-5 entry with Self=3", f.Lines)
+	}
+}
+
+// TestFlattenCDPProfileAndBuildHeatmapAgreeOnPartialHitCountProfile is the
+// regression for the "two CDP hit rules diverged" finding:
+// flattenCDPProfile (live `monitor profile`) used to skip any node with
+// hitCount <= 0 outright while buildFromCDP derived hits all-or-nothing
+// (samples[] counted only when NO node carried a hitCount), so a
+// .cpuprofile whose nodes carry hitCount only PARTIALLY — some nodes have
+// it, others appear only in the flat samples array — yielded different
+// Stats and symbols from the two paths. Both now share cdpNodeHits, so a
+// synthetic partial profile must agree on both.
+func TestFlattenCDPProfileAndBuildHeatmapAgreeOnPartialHitCountProfile(t *testing.T) {
+	raw := `{
+		"nodes": [
+			{"id":1,"callFrame":{"functionName":"(root)","url":"","lineNumber":-1},"hitCount":0,"children":[2,4]},
+			{"id":2,"callFrame":{"functionName":"main","url":"file:///repo/app.js","lineNumber":0},"hitCount":3,"children":[3],"positionTicks":[{"line":5,"ticks":3}]},
+			{"id":3,"callFrame":{"functionName":"worker","url":"file:///repo/lib.js","lineNumber":9},"hitCount":0,"children":[],"positionTicks":[{"line":12,"ticks":4}]},
+			{"id":4,"callFrame":{"functionName":"(idle)","url":"","lineNumber":-1},"hitCount":0,"children":[]}
+		],
+		"samples": [2,2,3,3,3,3,4,4,4,4],
+		"startTime": 0, "endTime": 1000
+	}`
+	var cp cdpProfile
+	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
+		t.Fatal(err)
+	}
+	syms, stats := flattenCDPProfile(cp)
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp},
+		HeatOptions{NoCodemap: true, NoSourcemaps: true, NoReadCode: true})
+	if err != nil {
+		t.Fatalf("BuildHeatmap: %v", err)
+	}
+
+	// Shared rule: main keeps its own hitCount (3); worker and (idle) —
+	// hitCount 0 — fall back to their occurrences in samples[] (4 each);
+	// root stays 0. Stats must read 11 total / 7 active / ~36.4% idle on
+	// BOTH paths (the old flatten dropped worker and (idle) entirely,
+	// reporting 3/3/0%).
+	if stats.Samples != 11 || stats.ActiveSamples != 7 {
+		t.Fatalf("flatten Stats = %+v, want Samples=11 ActiveSamples=7 (main 3 + worker 4 + idle 4)", stats)
+	}
+	if hm.Samples != stats.Samples || hm.ActiveSamples != stats.ActiveSamples {
+		t.Fatalf("Stats disagree: flatten %+v vs heatmap Samples=%d ActiveSamples=%d", stats, hm.Samples, hm.ActiveSamples)
+	}
+	for _, c := range []struct {
+		name string
+		a, b float64
+	}{
+		{"IdlePct", stats.IdlePct, hm.IdlePct},
+		{"GCPct", stats.GCPct, hm.GCPct},
+	} {
+		if d := c.a - c.b; d < -0.01 || d > 0.01 {
+			t.Errorf("%s disagrees: flatten %.2f vs heatmap %.2f", c.name, c.a, c.b)
+		}
+	}
+
+	// Per-line symbols: flatten reports each (func,file,line)'s share of
+	// ACTIVE samples; BuildHeatmap's Lines carry the same statement's raw
+	// self ticks. worker must appear in BOTH — it was the headline drop.
+	type key struct {
+		fn, file string
+		line     int
+	}
+	flatPct := map[key]float64{}
+	for _, s := range syms {
+		flatPct[key{s.Func, s.File, s.Line}] = s.Weight
+	}
+	if _, ok := flatPct[key{"worker", "/repo/lib.js", 12}]; !ok {
+		t.Errorf("flatten symbols = %+v, want worker:/repo/lib.js:12 (hitCount 0 but 4 samples[] entries)", syms)
+	}
+	heatPct := map[key]float64{}
+	for _, f := range hm.Functions {
+		for _, l := range f.Lines {
+			heatPct[key{f.Name, f.File, l.Line}] = float64(l.Self) / float64(hm.ActiveSamples) * 100
+		}
+	}
+	if len(flatPct) != len(heatPct) {
+		t.Fatalf("symbol sets disagree: flatten %d vs heatmap %d entries (%v vs %v)", len(flatPct), len(heatPct), flatPct, heatPct)
+	}
+	for k, want := range flatPct {
+		got, ok := heatPct[k]
+		if !ok {
+			t.Fatalf("heatmap has no line for flatten symbol %v (heatmap lines: %v)", k, heatPct)
+		}
+		if d := want - got; d < -0.01 || d > 0.01 {
+			t.Errorf("line %v: flatten weight %.2f%% vs heatmap %.2f%% of active samples", k, want, got)
+		}
+	}
+}
+
+// TestBuildHeatmapPprofIdleSamplesAreColumnTotalNeverDuration is the
+// regression for the "idle branch wrote DurationNanos into Samples"
+// finding: `samples`/`unit` are measured in whatever `unit` says
+// (docs/contracts/line-heatmap-v1.md) — for a pprof CPU source that is the
+// NANOSECOND TOTAL across the selected value column, never literally a
+// count and never the wall-clock window — so an idle capture must not
+// report the duration in that field (a busy and an idle capture of the
+// same window would otherwise show silently incomparable `samples`
+// magnitudes under one unit). The wall-clock span belongs to
+// CaptureDurationNanos; the off-CPU share to IdlePct.
+func TestBuildHeatmapPprofIdleSamplesAreColumnTotalNeverDuration(t *testing.T) {
+	fn := &gpprof.Function{ID: 1, Name: "main.f", Filename: "main.go"}
+	loc := &gpprof.Location{ID: 1, Line: []gpprof.Line{{Function: fn, Line: 5}}}
+
+	// Fully idle: a real capture duration, an empty sample list.
+	idle := &gpprof.Profile{
+		SampleType:    []*gpprof.ValueType{{Type: "cpu", Unit: "nanoseconds"}},
+		PeriodType:    &gpprof.ValueType{Type: "cpu", Unit: "nanoseconds"},
+		Period:        1000000,
+		DurationNanos: 10 * int64(time.Second),
+	}
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourcePprof, Pprof: idle}, HeatOptions{NoCodemap: true, NoReadCode: true})
+	if err != nil {
+		t.Fatalf("BuildHeatmap (fully idle): %v (a CPU proto with a real duration must render, not error)", err)
+	}
+	if hm.Samples != len(idle.Sample) || hm.Samples != 0 {
+		t.Errorf("Samples = %d, want 0 (an empty sample list's column total; never DurationNanos=%d)", hm.Samples, idle.DurationNanos)
+	}
+	if hm.ActiveSamples != 0 {
+		t.Errorf("ActiveSamples = %d, want 0", hm.ActiveSamples)
+	}
+	if hm.IdlePct != 100 || !hm.IdleMeasured {
+		t.Errorf("IdlePct = %.1f IdleMeasured = %v, want 100/true (nothing consumed CPU in the window)", hm.IdlePct, hm.IdleMeasured)
+	}
+	if hm.CaptureDurationNanos != idle.DurationNanos {
+		t.Errorf("CaptureDurationNanos = %d, want %d (the wall-clock window lives in its own field)", hm.CaptureDurationNanos, idle.DurationNanos)
+	}
+
+	// Mostly idle: 1s of CPU nanoseconds in a 10s window. Samples must be
+	// the value-column total (1e9) — not the sample count (1) and not the
+	// wall-clock window (1e10).
+	mostly := &gpprof.Profile{
+		SampleType:    []*gpprof.ValueType{{Type: "cpu", Unit: "nanoseconds"}},
+		PeriodType:    &gpprof.ValueType{Type: "cpu", Unit: "nanoseconds"},
+		Period:        1000000,
+		DurationNanos: 10 * int64(time.Second),
+		Location:      []*gpprof.Location{loc},
+		Function:      []*gpprof.Function{fn},
+		Sample:        []*gpprof.Sample{{Value: []int64{int64(time.Second)}, Location: []*gpprof.Location{loc}}},
+	}
+	hm2, err := BuildHeatmap(context.Background(), &Source{Kind: SourcePprof, Pprof: mostly}, HeatOptions{NoCodemap: true, NoReadCode: true})
+	if err != nil {
+		t.Fatalf("BuildHeatmap (mostly idle): %v", err)
+	}
+	if hm2.Samples != int(time.Second) || hm2.Samples == int(mostly.DurationNanos) {
+		t.Errorf("Samples = %d, want %d (the selected column's nanosecond total, never DurationNanos=%d nor the sample count 1)",
+			hm2.Samples, int64(time.Second), mostly.DurationNanos)
+	}
+	if hm2.ActiveSamples != hm2.Samples {
+		t.Errorf("ActiveSamples = %d, want = Samples (%d): a pprof proto has no pseudo-frames to exclude", hm2.ActiveSamples, hm2.Samples)
+	}
+	if hm2.IdlePct != 90 {
+		t.Errorf("IdlePct = %.1f, want 90 (1s of CPU in a 10s window)", hm2.IdlePct)
 	}
 }
 

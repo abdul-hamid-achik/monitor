@@ -556,6 +556,35 @@ func TestHotActiveClauseSaysNotMeasuredInsteadOfFakingIdleZero(t *testing.T) {
 	}
 }
 
+func TestHotActiveClausePprofCPUActiveIsWallClockShareNotAlways100(t *testing.T) {
+	// A pprof CPU proto's value column counts only real frames (no (idle)
+	// pseudo-frames), so the heatmap carries ActiveSamples == Samples by
+	// construction. The clause must report the wall-clock active share
+	// (100 - idle), never a contradictory "active 100% (idle 90% excluded)".
+	hm := &profiler.Heatmap{
+		ProfileType:   profiler.HeatCPU,
+		IdleMeasured:  true,
+		Samples:       1_000_000_000,
+		ActiveSamples: 1_000_000_000,
+		IdlePct:       90,
+	}
+	got := hotActiveClause(hm)
+	if got != "active 10% (idle 90% excluded)" {
+		t.Errorf("hotActiveClause(pprof cpu) = %q, want %q", got, "active 10% (idle 90% excluded)")
+	}
+	// A CDP-shaped heatmap (idle ticks inside Samples) keeps the ratio rule.
+	cdp := &profiler.Heatmap{
+		ProfileType:   profiler.HeatCPU,
+		IdleMeasured:  true,
+		Samples:       40,
+		ActiveSamples: 26,
+		IdlePct:       35,
+	}
+	if got := hotActiveClause(cdp); got != "active 65% (idle 35% excluded)" {
+		t.Errorf("hotActiveClause(cdp cpu) = %q, want %q", got, "active 65% (idle 35% excluded)")
+	}
+}
+
 func TestHotFileJSONOutputIsLineHeatmapV1(t *testing.T) {
 	cmd := newHotCmd()
 	cmd.SetArgs([]string{"--file", v8HotFixture, "--json"})
