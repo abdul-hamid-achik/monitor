@@ -36,6 +36,8 @@ func newRunCmd() *cobra.Command {
 		redactEnv    []string
 		noSourceMaps bool
 		store        string
+		inspect      bool
+		profile      bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run <glyphrun-spec> | run [flags] -- <cmd> [args...]",
@@ -73,7 +75,29 @@ is present:
       or --scan both set PYTHONUNBUFFERED=1 to counter it for Python;
       Ruby has no equivalent env var, so a scanned Ruby stdout may be
       delayed in the terminal until its buffer fills or the process
-      exits).`,
+      exits).
+
+      --inspect opens a debugger inspector (NODE_OPTIONS=--inspect for
+      node and deno -- verified live, deno 2.9 honors NODE_OPTIONS the
+      same way node does; a no-op for Bun, which speaks JSC rather than
+      V8's CDP, printing a one-line note instead). Every "Debugger
+      listening on ws://..." banner the scanned stream(s) print --
+      including one from each wrapper that re-execs into its own node
+      child (yarn, npm, ...) -- is recorded, mapped to its owning pid via
+      the listening port, into the launch registry for a later
+      "monitor hot <service>" (never printed: the ws:// URL's UUID is
+      the inspector protocol's only bearer-token-shaped secret; only the
+      port is ever shown). Requires --scan to include stderr (the
+      default), since that is where the banner is printed.
+
+      --profile writes a V8-format .cpuprofile at exit (node and bun via
+      NODE_OPTIONS/BUN_OPTIONS' --cpu-prof --cpu-prof-dir=<private dir>;
+      not yet available for Deno, which has no env-injectable
+      equivalent -- use --inspect + "monitor hot <service>" for live
+      Deno profiling instead). An exit shim (loaded via --require/
+      --preload) makes even a bare Ctrl-C reach that exit hook, but only
+      when cmd registers no SIGINT/SIGTERM handler of its own -- an app
+      with its own handler is left completely alone.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if cmd.ArgsLenAtDash() < 0 {
 				return cobra.ExactArgs(1)(cmd, args)
@@ -116,6 +140,8 @@ is present:
 				RedactEnvNames: redactEnv,
 				NoSourceMaps:   noSourceMaps,
 				StorePath:      store,
+				Inspect:        inspect,
+				Profile:        profile,
 			})
 			if err != nil {
 				return err
@@ -141,5 +167,7 @@ is present:
 	cmd.Flags().StringSliceVar(&redactEnv, "redact-env", nil, "additional environment variable NAMEs to redact from recorded exception text")
 	cmd.Flags().BoolVar(&noSourceMaps, "no-source-maps", false, "do not append --enable-source-maps to NODE_OPTIONS")
 	cmd.Flags().StringVar(&store, "store", "", "issue store path (default: $MONITOR_ISSUES_STORE or XDG data dir)")
+	cmd.Flags().BoolVar(&inspect, "inspect", false, "open a debugger inspector (node/deno via NODE_OPTIONS; no-op for Bun, which speaks JSC, not V8 CDP) and register it for 'monitor hot <service>'")
+	cmd.Flags().BoolVar(&profile, "profile", false, "write a CPU profile at exit (node/bun; not yet available for Deno) via an exit shim that makes even Ctrl-C flush one, unless the app installs its own SIGINT/SIGTERM handler")
 	return cmd
 }

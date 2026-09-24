@@ -84,6 +84,17 @@ func NewIssueBanner(ev newIssueEvent) string {
 	return fmt.Sprintf("%s NEW %s %s %s %s%s", bannerPrefix, ev.ShortID, level, ev.Title, loc, fnPart)
 }
 
+// NoteBanner is printed for a documented, verified runtime limitation
+// (applyInspectAndProfile's Bun+--inspect / Deno+--profile notes, or
+// --inspect requiring stderr scanning): "monitor > note: <msg>". Unlike
+// StartBanner/NewIssueBanner/AgainBanner, callers print this regardless of
+// --quiet -- it explains why a flag the caller explicitly passed had no
+// effect, which --quiet's "suppress the routine banners" is not meant to
+// hide.
+func NoteBanner(msg string) string {
+	return bannerPrefix + " note: " + msg
+}
+
 // AgainBanner is printed every time a coalescing window flushes a repeat of
 // a fingerprint this run has already reported: "monitor > <short> again
 // (xN)".
@@ -98,13 +109,14 @@ type ExitSummaryInfo struct {
 	Duration    time.Duration
 	NewIssueIDs []string
 	// FirstNewIssueFullID is the first NEW issue's full "ISS-..." id this
-	// run (Result.FirstNewIssueFullID). The "next:" hint below uses this,
-	// not NewIssueIDs[0]: that display id is only the first 4 hex
-	// characters (docs/contracts/issue-context-v1.md's short_id), and no
-	// command can resolve a bare short id until E2.5's prefix resolution
-	// lands -- `monitor issue <shortid>` today just prints the `issues`
-	// group's help and exits 0, a silent dead end. The full id resolves
-	// today via `monitor issue show <fullid>`.
+	// run (Result.FirstNewIssueFullID); kept for callers that need the
+	// unambiguous full id (e.g. a future --json summary), but the "next:"
+	// hint below deliberately does NOT print it (see ExitSummary's doc
+	// comment): now that `monitor issue <id|short-prefix|latest>` exists
+	// (internal/cli/issues.go's newIssueCmd, E2.5), the short, lowercase
+	// display id (NewIssueIDs[0]) IS a working, copy-pasteable command on
+	// its own, and is what every other "next" hint in the codebase already
+	// points at (see internal/cli/issues.go's writeIssuesListFooter).
 	FirstNewIssueFullID string
 	Dropped             int64
 	// FailedWrites is how many detected exceptions could not be recorded
@@ -118,12 +130,18 @@ type ExitSummaryInfo struct {
 
 // ExitSummary is the one line printed once the child has exited: "monitor
 // > <cmd> exited <code> after <dur> · <n> new issues (<short ids>) · <d>
-// lines dropped · next: monitor issue show <full id>" -- honest under
+// lines dropped · next: monitor issue <short id>" -- honest under
 // pressure: when lines were actually dropped, it says so and notes the
 // terminal output stayed intact (the golden rule this whole package exists
-// to keep). The short ids in the "new issues (...)" part are
-// display-only; the "next:" hint deliberately uses the FULL id instead
-// (see FirstNewIssueFullID) so copy-pasting it actually resolves today.
+// to keep). The "next:" hint uses the same lowercase short id
+// (NewIssueIDs[0]) the "new issues (...)" clause already displays
+// (uppercased there for legibility, lowercased here to match `monitor
+// issue`'s own convention -- see internal/cli/issues.go's
+// writeIssuesListFooter): `monitor issue <id|short-prefix|latest>` (E2.5)
+// resolves an unambiguous short prefix directly, so this is a real,
+// copy-pasteable "next" command today, not merely a display label. This
+// used to print "monitor issue show <FULL id>" instead, back when `monitor
+// issue <shortid>` had no meaning of its own yet.
 func ExitSummary(info ExitSummaryInfo) string {
 	issuesPart := pluralCount(len(info.NewIssueIDs), "new issue")
 	if len(info.NewIssueIDs) > 0 {
@@ -147,8 +165,8 @@ func ExitSummary(info ExitSummaryInfo) string {
 		}
 		line += fmt.Sprintf(" · %d %s not recorded (store busy)", info.FailedWrites, noun)
 	}
-	if info.FirstNewIssueFullID != "" {
-		line += " · next: monitor issue show " + info.FirstNewIssueFullID
+	if info.FirstNewIssueFullID != "" && len(info.NewIssueIDs) > 0 {
+		line += " · next: monitor issue " + strings.ToLower(info.NewIssueIDs[0])
 	}
 	return line
 }

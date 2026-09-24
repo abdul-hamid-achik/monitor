@@ -631,21 +631,22 @@ func TestHotNumericPositionalTargetIsPIDMode(t *testing.T) {
 	}
 }
 
-// TestHotSymbolicPositionalTargetStillNotImplemented: a NON-numeric
-// positional argument is a symbolic <service> name, which still needs the
-// launch registry (a later wave per E3.2's own scope) — this must keep
-// refusing clearly rather than being silently swallowed as an invalid pid.
-func TestHotSymbolicPositionalTargetStillNotImplemented(t *testing.T) {
-	cmd := newHotCmd()
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"workload"})
-	err := cmd.Execute()
-	if err == nil {
-		t.Fatal("expected an error for a symbolic service target")
-	}
-	if !strings.Contains(err.Error(), "not implemented yet") {
-		t.Errorf("error = %q, want it to say <service> is not implemented yet", err.Error())
+// TestHotSymbolicPositionalTargetIsServiceMode is E3.2's own regression for
+// the OTHER half of TestHotNumericPositionalTargetIsPIDMode above: a
+// NON-numeric positional argument is now a symbolic <service> name
+// (parsePID fails on it, exactly like the old "not implemented yet" branch
+// checked), dispatched to runHotService (hot_service.go) instead of that
+// placeholder. An unregistered service name's actual error path calls
+// os.Exit(2) (see printUnknownService's own doc comment and
+// resolve_test.go's identical convention for procbind's ambiguous-leaf
+// exit-2 path), so it is deliberately NOT exercised by executing the
+// cobra command in-process here -- see hot_service_test.go for
+// printUnknownService/resolveHotServiceProject/etc. unit-tested directly,
+// and specs/hot_service.yml for the real, out-of-process exit-code
+// behavior end to end.
+func TestHotSymbolicPositionalTargetIsServiceMode(t *testing.T) {
+	if _, err := parsePID("workload"); err == nil {
+		t.Fatal("test precondition: \"workload\" must not parse as a pid, or newHotCmd's dispatch would never reach runHotService for it")
 	}
 }
 

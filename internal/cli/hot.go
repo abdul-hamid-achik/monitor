@@ -31,15 +31,16 @@ import (
 // saved .cpuprofile or pprof proto); E3.2 adds a numeric <pid> target,
 // resolved to its real runtime leaf process (skipping a shell/yarn/npm/
 // `go run` wrapper) and captured live via the same runtime-aware dispatch
-// `monitor profile` uses. A symbolic <service> name needs the launch
-// registry (a later wave), so it still gets a clear "not yet" error instead
-// of silently doing nothing.
+// `monitor profile` uses. A symbolic <service> name (also E3.2) is looked
+// up in the launch registry a `monitor run --name <service>` invocation
+// wrote and dispatched to runHotService (hot_service.go), which resolves
+// and captures through that same shared pipeline.
 func newHotCmd() *cobra.Command {
-	var file, funcName, ptype, export, pprofAddr string
+	var file, funcName, ptype, export, pprofAddr, hotProject string
 	var top int
 	var duration time.Duration
 	cmd := &cobra.Command{
-		Use:   "hot [pid]",
+		Use:   "hot [pid|service]",
 		Short: "Show the hot line inside a function (CPU, heap, or goroutine)",
 		Long: `monitor hot answers "which LINE inside this function", not just
 "which function" — combining stack samples (V8 positionTicks or a pprof
@@ -49,15 +50,20 @@ proto) with a per-function CodeFrame.
 (.pb / .pb.gz, gzip auto-detected). A numeric pid instead captures live,
 resolving the real runtime leaf process under it (skipping a shell/yarn/npm/
 ` + "`go run`" + ` wrapper — ambiguous, exits 2 listing candidates). A symbolic
-<service> name needs the launch registry, a later wave.`,
+<service> name (E3.2) looks up that name in the launch registry a
+` + "`monitor run --name <service>`" + ` invocation wrote
+($XDG_STATE_HOME/monitor/services/<project>/<name>.json, --project
+overrides the project resolved from the current directory), then
+resolves and captures the SAME way the numeric-pid path does — preferring
+an already-registered --inspect inspector for a Node/Deno leaf over
+rediscovering one from scratch. An unregistered/stale service exits 2
+listing every service currently registered for that project.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
 				pid, perr := parsePID(args[0])
 				if perr != nil {
-					return fmt.Errorf(
-						"monitor hot <service> is not implemented yet (needs the launch registry); "+
-							"pass a numeric pid or --file <path> instead (got %q)", args[0])
+					return runHotService(cmd, args[0], hotProject, funcName, ptype, export, pprofAddr, top, duration)
 				}
 				return runHotPID(cmd, pid, funcName, ptype, export, pprofAddr, top, duration)
 			}
@@ -144,6 +150,7 @@ resolving the real runtime leaf process under it (skipping a shell/yarn/npm/
 	cmd.Flags().StringVar(&pprofAddr, "pprof-addr", "localhost:6060",
 		"host:port of the target's net/http/pprof server, for a live <pid> Go target (ignored for --file and for a Node/Bun/Deno target's own inspector); "+
 			"passing this flag explicitly asserts the endpoint belongs to the target pid and skips the ownership check")
+	cmd.Flags().StringVar(&hotProject, "project", "", "project to look a <service> name up under in the launch registry (default: resolved from the current directory); ignored for a numeric pid or --file")
 	return cmd
 }
 

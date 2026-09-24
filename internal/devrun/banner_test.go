@@ -93,6 +93,9 @@ func TestExitSummaryNoIssuesNoDrops(t *testing.T) {
 	}
 }
 
+// TestExitSummaryWithNewIssuesSuggestsNext is FIX 2: the "next:" hint uses
+// `monitor issue <short>` (E2.5's short-prefix resolution), not the old
+// `monitor issue show <full ISS-... id>`.
 func TestExitSummaryWithNewIssuesSuggestsNext(t *testing.T) {
 	line := ExitSummary(ExitSummaryInfo{
 		CmdName:             "node",
@@ -104,12 +107,11 @@ func TestExitSummaryWithNewIssuesSuggestsNext(t *testing.T) {
 	if !strings.Contains(line, "2 new issues (A07E, 5C1D)") {
 		t.Errorf("ExitSummary = %q, want the (display-only, short) issue ids listed", line)
 	}
-	// The hint must be the FULL id, not the short display id: no command
-	// can resolve a bare short id until E2.5's prefix resolution lands
-	// (see FirstNewIssueFullID's doc comment), so a hint built from the
-	// short id would be a dead end.
-	if !strings.Contains(line, "next: monitor issue show ISS-A07E1234567890AB") {
-		t.Errorf("ExitSummary = %q, want a next hint using the FULL id that resolves today", line)
+	if !strings.Contains(line, "next: monitor issue a07e") {
+		t.Errorf("ExitSummary = %q, want a next hint using `monitor issue <short>` (lowercase), not `monitor issue show <full id>`", line)
+	}
+	if strings.Contains(line, "issue show") {
+		t.Errorf("ExitSummary = %q, must not use the retired `monitor issue show <full id>` hint", line)
 	}
 }
 
