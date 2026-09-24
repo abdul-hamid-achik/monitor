@@ -446,6 +446,100 @@ func TestStacktraceRecordFromStartDoesNotDuplicateViaDedupeKey(t *testing.T) {
 	}
 }
 
+// TestStacktraceRecordRotationResumesAndDoesNotDoubleCount is CC-2's core
+// end-to-end claim: logrotate's default rename rotation (`mv app.log
+// app.log.1`) preserves the file's device/inode, so --record'ing the tail
+// under its new name must resume at the checkpoint's saved offset instead
+// of replaying the whole file and counting the same crash a second time.
+func TestStacktraceRecordRotationResumesAndDoesNotDoubleCount(t *testing.T) {
+	store := recordEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "app.log")
+	content := "Error: flakyParse: boom\n    at flakyParse (/repo/app/workload.js:31:11)\n"
+	writeSettledFixture(t, path, content)
+
+	first := runRecord(t, "--record", "--file", path, "--project", "acme")
+	if !strings.Contains(first, "1 occurrences written") {
+		t.Fatalf("first run summary = %q, want 1 occurrence written", first)
+	}
+
+	// logrotate's default rotation: rename the file (same inode) and
+	// create a fresh, empty one at the old path.
+	rotated := filepath.Join(dir, "app.log.1")
+	if err := os.Rename(path, rotated); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("create fresh app.log: %v", err)
+	}
+
+	// Catch up on the tail written before rotation, --record'ing the SAME
+	// physical file under its NEW name.
+	second := runRecord(t, "--record", "--file", rotated, "--project", "acme")
+	if !strings.Contains(second, "0 new blocks") || !strings.Contains(second, "0 occurrences written") {
+		t.Fatalf("rotated-file summary = %q, want 0 new blocks and 0 occurrences written (checkpoint must resume across the rename)", second)
+	}
+
+	db := openIssuesForTest(t, store)
+	list, err := db.List(issues.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].OccurrenceCount != 1 {
+		t.Fatalf("issues = %+v, want exactly 1 issue with occurrence_count 1 (rotation must not double-count)", list)
+	}
+}
+
+// TestStacktraceRecordDetectsInPlaceRewriteSameInode is CC-1's core
+// end-to-end claim: `cmd 2> app.log` restarted against the same redirect
+// target truncates and rewrites the file WITHOUT ever unlinking it (same
+// inode, offset/size-only checks cannot tell this apart from steady
+// growth), and the new content must be detected and recorded, not silently
+// skipped as "0 new blocks" because the old checkpoint's offset still
+// looks satisfied.
+func TestStacktraceRecordDetectsInPlaceRewriteSameInode(t *testing.T) {
+	store := recordEnv(t)
+	path := filepath.Join(t.TempDir(), "app.log")
+	first := "Error: flakyParse: boom\n    at flakyParse (/repo/app/workload.js:31:11)\n"
+	writeSettledFixture(t, path, first)
+
+	firstOut := runRecord(t, "--record", "--file", path, "--project", "acme", "--root", "/repo")
+	if !strings.Contains(firstOut, "1 occurrences written") {
+		t.Fatalf("first run summary = %q, want 1 occurrence written", firstOut)
+	}
+
+	// A restarted process overwriting its own redirect target IN PLACE:
+	// os.WriteFile on an EXISTING path truncates and rewrites that same
+	// inode, exactly like `cmd 2> app.log` re-run against the same shell
+	// redirect.
+	second := "Error: detonate: kaboom\n    at detonate (/repo/app/workload.js:49:5)\n"
+	if err := os.WriteFile(path, []byte(second), 0o644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	// A settled mtime strictly later than the first (backdated by
+	// writeSettledFixture to -1h): both old enough that --record does not
+	// hold the trailing block back, but observably advanced so CC-1's
+	// mtime check has something real to compare.
+	mtime := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	secondOut := runRecord(t, "--record", "--file", path, "--project", "acme", "--root", "/repo")
+	if !strings.Contains(secondOut, "1 new blocks") || !strings.Contains(secondOut, "1 occurrences written") {
+		t.Fatalf("in-place-rewrite summary = %q, want 1 new block and 1 occurrence written (the rewrite must be detected, not skipped)", secondOut)
+	}
+
+	db := openIssuesForTest(t, store)
+	list, err := db.List(issues.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("issues = %+v, want 2 (the original flakyParse crash and the new detonate crash from the rewritten file)", list)
+	}
+}
+
 func TestStacktraceRecordObservedAtFallsBackToFileMtimeNeverNow(t *testing.T) {
 	store := recordEnv(t)
 	path := filepath.Join(t.TempDir(), "app.log")

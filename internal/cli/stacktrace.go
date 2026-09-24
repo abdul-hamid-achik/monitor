@@ -397,16 +397,18 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 	}
 	defer f.Close()
 
-	inode, size, err := stacktrace.StatInode(f)
+	start, cp, err := stacktrace.ResolveOffset(f, absPath, opts.fromStart)
 	if err != nil {
 		return fmt.Errorf("stat %s: %w", opts.file, err)
 	}
-	mtime := time.Now()
-	if info, statErr := f.Stat(); statErr == nil {
-		mtime = info.ModTime()
-	}
-
-	start, cp := stacktrace.ResolveOffset(absPath, inode, size, opts.fromStart)
+	// mtime is the file's mtime AT THE START of this run (ResolveOffset's
+	// own stat, via cp.MtimeNs) -- the ObservedAt fallback for every block
+	// this run processes (see recordParsedException), same as before CC-1
+	// added Checkpoint.MtimeNs. The checkpoint SAVED at the end of this run
+	// stamps a separately re-stat'd, later mtime (see fileSettled below),
+	// not this one -- so the NEXT run's CC-1 rewrite check compares against
+	// what this run actually left the file at.
+	mtime := time.Unix(0, cp.MtimeNs)
 	if start > 0 {
 		if _, err := f.Seek(start, io.SeekStart); err != nil {
 			return fmt.Errorf("seek %s: %w", opts.file, err)
@@ -440,7 +442,7 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 	// lineOffsets[n] is the byte offset of the n-th line fed to j this run
 	// (1-based, matching Block.LineStart/LineEnd) -- index 0 is unused.
 	lineOffsets := []int64{0}
-	summary := recordSummary{CheckpointInode: inode}
+	summary := recordSummary{CheckpointInode: cp.Inode}
 
 	process := func(blocks []stacktrace.Block) error {
 		for _, b := range blocks {
@@ -453,7 +455,7 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 			if b.LineStart > 0 && b.LineStart < len(lineOffsets) {
 				blockOffset = lineOffsets[b.LineStart]
 			}
-			deduped, err := recordParsedException(ctx, opts.storePath, absPath, inode, blockOffset, b, ex, id, run, scrubber, mtime)
+			deduped, err := recordParsedException(ctx, opts.storePath, cp.Dev, cp.Inode, cp.Generation, blockOffset, b, ex, id, run, scrubber, mtime)
 			if err != nil {
 				return err
 			}
@@ -497,7 +499,8 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 	}
 
 	finalOffset := safeOffset
-	if fileSettled(f, mtime) {
+	settled, endMtime := fileSettled(f, mtime)
+	if settled {
 		if err := process(j.Flush()); err != nil {
 			return err
 		}
@@ -505,7 +508,14 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 	}
 
 	cp.Offset = finalOffset
-	if err := stacktrace.SaveCheckpoint(absPath, cp); err != nil {
+	// Stamp the checkpoint with THIS run's own end-of-read mtime/content
+	// fingerprint (not the start-of-run mtime `mtime` still holds -- that
+	// one remains the ObservedAt fallback above), so the NEXT run's CC-1
+	// rewrite check (ResolveOffset) compares against what this run
+	// actually left the file at.
+	cp.MtimeNs = endMtime.UnixNano()
+	cp.PrefixHash = stacktrace.PrefixHash(f, finalOffset)
+	if err := stacktrace.SaveCheckpointByKey(stacktrace.CheckpointKey{Dev: cp.Dev, Inode: cp.Inode}, cp); err != nil {
 		return fmt.Errorf("save checkpoint: %w", err)
 	}
 	summary.CheckpointOffset = cp.Offset
@@ -518,16 +528,20 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 // snapshot taken before reading -- a writer that appended WHILE this run
 // was reading must still be caught) already predates stacktrace.
 // SettleWindow, i.e. nothing has written to it recently enough to still be
-// mid-trace. A Stat failure fails OPEN (returns true, the pre-existing
-// always-flush behavior) rather than silently never finishing a
-// legitimately complete log because of an unrelated stat error.
-func fileSettled(f *os.File, fallback time.Time) bool {
+// mid-trace, and also returns that current mtime (or fallback, on a Stat
+// failure) for the caller to stamp onto the checkpoint it is about to save
+// (CC-1: the NEXT run's rewrite check needs THIS run's own end-of-read
+// mtime, not the one observed when this run started). A Stat failure fails
+// OPEN (returns true, the pre-existing always-flush behavior) rather than
+// silently never finishing a legitimately complete log because of an
+// unrelated stat error.
+func fileSettled(f *os.File, fallback time.Time) (settled bool, mtime time.Time) {
 	info, err := f.Stat()
-	mtime := fallback
+	mtime = fallback
 	if err == nil {
 		mtime = info.ModTime()
 	}
-	return err != nil || time.Since(mtime) >= stacktrace.SettleWindow
+	return err != nil || time.Since(mtime) >= stacktrace.SettleWindow, mtime
 }
 
 // recordParsedException applies the git root, scrubs the exception's text,
@@ -538,7 +552,19 @@ func fileSettled(f *os.File, fallback time.Time) bool {
 // false, so a --from-start replay (or any other reprocess that lands on an
 // already-retained DedupeKey) reports the truth instead of claiming N
 // occurrences written when the store actually deduped every one of them.
-func recordParsedException(ctx context.Context, storePath, absPath string, inode uint64, blockOffset int64, block stacktrace.Block, ex *stacktrace.Exception, id project.Identity, run contextids.IDs, scrubber *scrub.Scrubber, mtime time.Time) (deduped bool, err error) {
+//
+// dev/inode/generation (CC-2, CC-1) replace the file's absPath in the
+// DedupeKey seed: a path breaks across a logrotate-style rename (the same
+// physical file, same dev/inode, gets a NEW path) and across two spellings
+// of the same file (a symlinked root, CC-4), either of which used to
+// double-count every occurrence already recorded under the old path.
+// generation -- ResolveOffset's Checkpoint.Generation, bumped on every
+// detected rotation/truncation/rewrite -- keeps a genuinely rewritten
+// file's occurrences from silently deduping against a PREVIOUS
+// generation's occurrence recorded at the same byte offset, while two
+// --from-start replays of the SAME (unrotated) generation still dedupe
+// against each other correctly.
+func recordParsedException(ctx context.Context, storePath string, dev, inode uint64, generation int, blockOffset int64, block stacktrace.Block, ex *stacktrace.Exception, id project.Identity, run contextids.IDs, scrubber *scrub.Scrubber, mtime time.Time) (deduped bool, err error) {
 	stacktrace.ApplyGitRoot(ex, id.GitRoot)
 	scrubException(scrubber, ex)
 
@@ -547,7 +573,7 @@ func recordParsedException(ctx context.Context, storePath, absPath string, inode
 		observedAt = mtime
 	}
 
-	dedupeSeed := fmt.Sprintf("%d:%s:%d:%s", inode, absPath, blockOffset, stacktrace.HashBlock(block.Text()))
+	dedupeSeed := fmt.Sprintf("%d:%d:%d:%d:%s", dev, inode, generation, blockOffset, stacktrace.HashBlock(block.Text()))
 	sum := sha256.Sum256([]byte(dedupeSeed))
 
 	result, err := issues.RecordException(ctx, storePath, issues.DefaultWriterWait, *ex, id, run, issues.RecordExceptionOptions{
