@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	veclite "github.com/abdul-hamid-achik/veclite"
 )
 
 func TestFingerprintV1StableAndExcludesOccurrenceContext(t *testing.T) {
@@ -1043,4 +1045,30 @@ func contains(value, part string) bool {
 		}
 	}
 	return false
+}
+
+// TestIsCorruptedError documents IsCorruptedError's substring heuristic
+// (CC-6's secondary fix: distinguish "store busy" from "store corrupted" so
+// a caller like devrun's detector -- see internal/devrun/detector.go's
+// classification of RecordException failures -- never tells a user to
+// simply retry a write that a retry can never fix).
+func TestIsCorruptedError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"lock contention", veclite.ErrFileLocked, false},
+		{"ordinary io error", errors.New("open issue store: permission denied"), false},
+		{"checksum mismatch", fmt.Errorf("open read-only issue store: %w", errors.New("veclite: storage validate checksum: veclite: checksum mismatch")), true},
+		{"corrupt marker uppercase", errors.New("veclite: STORAGE CORRUPT"), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsCorruptedError(tc.err); got != tc.want {
+				t.Fatalf("IsCorruptedError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
 }

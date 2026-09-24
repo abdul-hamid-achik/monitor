@@ -41,6 +41,12 @@ type Store struct {
 	db       *veclite.DB
 	path     string
 	readOnly bool
+	// writerLock is monitor's own cross-process advisory lock (see
+	// writer.go's crossProcessLock doc comment), held for this Store's
+	// whole lifetime when it was opened via OpenStoreWait, released (but
+	// never removed) in Close. Always nil for a Store opened directly via
+	// OpenStore/OpenReadOnly.
+	writerLock *os.File
 }
 
 // DefaultPath returns the per-user issue store and ensures its private parent
@@ -74,19 +80,32 @@ func ResolvePath(override string) (string, error) {
 	return DefaultPath()
 }
 
-// OpenStore opens a writable issue store, creating its parent directory and
-// collections when necessary.
-func OpenStore(path string) (*Store, error) {
+// resolveStorePath validates path, resolves it to an absolute path, and
+// ensures its parent directory exists (mode 0700). OpenStore and
+// OpenStoreWait (writer.go, which needs the absolute path BEFORE it opens
+// veclite at all, to place the cross-process ".writer.lock" file next to
+// it) share this instead of each re-deriving it.
+func resolveStorePath(path string) (string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return nil, errors.New("open issue store: path is required")
+		return "", errors.New("open issue store: path is required")
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("resolve issue store path: %w", err)
+		return "", fmt.Errorf("resolve issue store path: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
-		return nil, fmt.Errorf("create issue store directory: %w", err)
+		return "", fmt.Errorf("create issue store directory: %w", err)
+	}
+	return abs, nil
+}
+
+// OpenStore opens a writable issue store, creating its parent directory and
+// collections when necessary.
+func OpenStore(path string) (*Store, error) {
+	abs, err := resolveStorePath(path)
+	if err != nil {
+		return nil, err
 	}
 	db, err := veclite.Open(abs)
 	if err != nil {
@@ -762,6 +781,16 @@ func (s *Store) Close() error {
 	readOnly := s.readOnly
 	err := s.db.Close()
 	s.db = nil
+	// Release the cross-process lock only AFTER veclite's own Close has
+	// fully completed (including its own internal unlock/unlink of ITS
+	// ".lock" file): that ordering is the entire point of this lock --
+	// see writer.go's crossProcessLock doc comment -- so the next
+	// acquirer, once it gets our lock, never finds veclite's own file
+	// still mid-release.
+	if s.writerLock != nil {
+		releaseCrossProcessLock(s.writerLock)
+		s.writerLock = nil
+	}
 	if err != nil {
 		return fmt.Errorf("close issue store: %w", err)
 	}
@@ -981,6 +1010,36 @@ func normalizeOccurrenceSlices(occurrence *Occurrence) {
 		// every occurrence represents at least one raw event.
 		occurrence.Count = 1
 	}
+}
+
+// corruptedStoreMarkers are substrings veclite's own error text uses for a
+// damaged store file (a checksum mismatch, a bad header, a truncated
+// snapshot) -- as opposed to veclite.ErrFileLocked (lock contention) or an
+// ordinary I/O error. IsCorruptedError lets a caller like devrun's detector
+// tell "the store is busy, try again" apart from "the store is damaged, a
+// retry will not help" (see writer.go's crossProcessLock doc comment:
+// before CC-6's own cross-process lock, two writers racing veclite's own
+// broken file lock could produce exactly this kind of damage; the lock
+// prevents the race, but a store already damaged by an older binary, or by
+// unrelated disk corruption, can still surface one of these).
+var corruptedStoreMarkers = []string{"checksum", "corrupt"}
+
+// IsCorruptedError reports whether err's text names a damaged store rather
+// than ordinary lock contention. It is a substring heuristic over veclite's
+// own wrapped error text (veclite has no exported sentinel for this), so it
+// only ever adds information -- a caller that ignores it keeps its
+// pre-CC-6 behavior of treating every RecordException failure the same way.
+func IsCorruptedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range corruptedStoreMarkers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func randomID(prefix string) string {

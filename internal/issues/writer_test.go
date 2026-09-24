@@ -339,30 +339,21 @@ func TestCrossProcessWriterHelperProcess(t *testing.T) {
 // contends on the real OS-level flock the way separate `monitor` invocations
 // do in production.
 //
-// This is deliberately NOT "100/100 successes required, fail on any other
-// error": that would assert something the branch's own measurements show is
-// false. A real cross-process burst of this size (100 concurrent
-// `bin/monitor issues resolve` processes against one store, measured
-// separately from this test) saw 0 ErrFileLocked but anywhere from 0 to 98
-// non-ErrFileLocked storage errors across repeated runs, from the SAME
-// pre-existing veclite v0.22.1 unlink/rename race described on
-// TestConcurrentWithWriterUpsertsNeverSeeFileLocked's doc comment (also
-// reproducible against the unmodified base binary, just as ErrFileLocked
-// instead). Asserting 100/100 here would make this test flake on an
-// upstream defect this package cannot fix (E1.8a, out of scope) rather than
-// verify OpenStoreWait's own contract. That contract -- and the one thing
-// this test hard-fails on -- is zero ErrFileLocked: OpenStoreWait's retry
-// loop must absorb real cross-process lock contention, full stop.
-//
-// The same upstream race can also make the final occurrence_count disagree
-// with successCount in EITHER direction: it can silently drop an already-
-// reported-successful write (a later writer's full-snapshot Save overwrites
-// an earlier one's, per writer.go's package doc), or -- observed directly
-// while writing this test -- credit a write whose OWN call reported
-// failure, when its multi-step Save (write .tmp, rename old->.bak, rename
-// .tmp->final) partially interleaves with a concurrent writer's. Neither
-// direction is OpenStoreWait's contract to uphold, so both are logged, not
-// failed.
+// CC-6: before acquireCrossProcessLock existed, this test's own doc comment
+// (see git history) recorded that a real cross-process burst of this size
+// saw anywhere from 0 to 98 non-ErrFileLocked storage errors, and the final
+// occurrence_count could disagree with successCount in either direction --
+// from the pre-existing veclite v0.22.1 unlink/rename race described on
+// TestConcurrentWithWriterUpsertsNeverSeeFileLocked's doc comment: two
+// processes racing veclite's OWN (unlinked-on-close) file lock could both
+// end up holding LOCK_EX at once. acquireCrossProcessLock (writer.go) closes
+// that race by making every OpenStoreWait caller take monitor's own,
+// never-unlinked ".writer.lock" file BEFORE veclite.Open is ever attempted,
+// so no two processes are ever inside veclite's own open->close cycle
+// concurrently -- this test now asserts that strictly: zero ErrFileLocked
+// (OpenStoreWait's retry loop must absorb real cross-process lock
+// contention), zero other errors, and occurrence_count == successCount
+// exactly.
 func TestConcurrentCrossProcessWritersNeverSeeFileLocked(t *testing.T) {
 	if os.Getenv(crossProcessWriterHelperEnv) == "1" {
 		t.Skip("re-exec helper process; see TestCrossProcessWriterHelperProcess")
@@ -420,7 +411,7 @@ func TestConcurrentCrossProcessWritersNeverSeeFileLocked(t *testing.T) {
 			}
 		case strings.HasPrefix(r.out, crossProcessWriterHelperErrPrefix):
 			otherCount++
-			t.Logf("helper %d hit a non-ErrFileLocked storage error under real cross-process contention (tracked upstream veclite issue, see TestConcurrentWithWriterUpsertsNeverSeeFileLocked's doc comment): %s", r.idx, r.out)
+			t.Errorf("helper %d hit a non-ErrFileLocked storage error under real cross-process contention (acquireCrossProcessLock should make this impossible now -- see CC-6): %s", r.idx, r.out)
 		default:
 			t.Fatalf("helper %d produced unexpected output %q", r.idx, r.out)
 		}
@@ -428,39 +419,20 @@ func TestConcurrentCrossProcessWritersNeverSeeFileLocked(t *testing.T) {
 	if lockedCount != 0 {
 		t.Fatalf("%d/%d cross-process writers saw ErrFileLocked, want 0: OpenStoreWait's retry loop must absorb real cross-process flock contention", lockedCount, n)
 	}
-	if successCount == 0 {
-		t.Fatal("every cross-process writer failed; expected at least some to succeed")
-	}
-	if otherCount > 0 {
-		t.Logf("%d/%d cross-process writers hit the tracked upstream veclite storage race instead of succeeding (0 saw ErrFileLocked)", otherCount, n)
+	if successCount != n {
+		t.Fatalf("%d/%d cross-process writers succeeded, want all %d (CC-6: acquireCrossProcessLock must fully serialize concurrent writers, not just avoid ErrFileLocked)", successCount, n, n)
 	}
 
-	// Reading the store back afterward is best-effort, NOT part of
-	// OpenStoreWait's contract: under enough real cross-process contention
-	// the same known upstream veclite race can leave the store file itself
-	// unopenable (observed directly while writing this test: a run with a
-	// high failure rate above left a store that failed to even Open,
-	// matching local-sentry finding "store sano" is not met for bursts this
-	// size -- tracked, E1.8a, out of scope here). OpenStoreWait's own
-	// contract (zero ErrFileLocked) was already asserted above and does not
-	// depend on any of this succeeding.
 	reader, err := OpenStore(path)
 	if err != nil {
-		t.Logf("could not reopen the store afterward (%v): the known upstream veclite race, logged not failed (see above)", err)
-		return
+		t.Fatalf("reopen store after %d cross-process writers: %v (CC-6: the store must never be left corrupted by concurrent writers)", n, err)
 	}
 	defer reader.Close()
 	issue, err := reader.Get(issueID)
 	if err != nil {
-		t.Logf("could not read back issue %s afterward (%v): the known upstream veclite race, logged not failed (see above)", issueID, err)
-		return
+		t.Fatalf("read back issue %s: %v", issueID, err)
 	}
 	if issue.OccurrenceCount != int64(successCount) {
-		// The known upstream veclite Save/rename race can go either way
-		// under real cross-process contention: it can silently drop an
-		// already-reported-successful write, or credit a write whose OWN
-		// call reported failure. Neither direction is OpenStoreWait's
-		// contract to uphold, so both are logged, not failed.
-		t.Logf("occurrence_count = %d, successCount (writers that reported success) = %d: the known upstream veclite Save/rename race (E1.8a, out of scope here) either dropped a successful write or credited a reported-failed one", issue.OccurrenceCount, successCount)
+		t.Fatalf("occurrence_count = %d, want %d (every one of the %d cross-process writers that reported success must be reflected -- CC-6: no occurrence may be silently lost)", issue.OccurrenceCount, successCount, successCount)
 	}
 }

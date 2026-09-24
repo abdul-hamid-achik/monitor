@@ -2,6 +2,7 @@ package devrun
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -214,7 +215,61 @@ func TestDetectorCountsFailedWritesWhenStoreLockedAtShutdown(t *testing.T) {
 	if det.failedWrites != 1 {
 		t.Errorf("failedWrites = %d, want 1 (the store lock is held for the whole run)", det.failedWrites)
 	}
+	if det.failedWritesCorrupted != 0 {
+		t.Errorf("failedWritesCorrupted = %d, want 0: lock contention is not corruption", det.failedWritesCorrupted)
+	}
 	if len(det.newIssueIDs) != 0 {
 		t.Errorf("newIssueIDs = %v, want none: the write never succeeded", det.newIssueIDs)
+	}
+}
+
+// TestDetectorClassifiesCorruptedStoreSeparatelyFromBusy is CC-6's secondary
+// fix: a damaged store file (here, a flipped byte past veclite's own
+// checksummed payload -- see internal/storage/file.go's Load) must be
+// counted as failedWritesCorrupted, not just failedWrites, so a future
+// caller can report "store corrupted" instead of the misleading "store
+// busy, try again" (see failedWritesCorrupted's doc comment for the
+// ExitSummary wiring this still needs, outside this package's ownership).
+func TestDetectorClassifiesCorruptedStoreSeparatelyFromBusy(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "issues.veclite")
+	seed, err := issues.OpenStore(store)
+	if err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+	if _, _, err := seed.UpsertOccurrence(issues.OccurrenceInput{Project: "p", Message: "seed"}); err != nil {
+		t.Fatalf("seed UpsertOccurrence: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("seed Close: %v", err)
+	}
+	corruptLastByte(t, store)
+
+	det := newDetector(detectorOptions{storePath: store, launch: LaunchIDs{Root: "/repo"}, id: testProjectIdentity()})
+	runDetectorOverLines(t, det, stderrLines(goCrashPanicText))
+
+	if det.failedWrites != 1 {
+		t.Fatalf("failedWrites = %d, want 1", det.failedWrites)
+	}
+	if det.failedWritesCorrupted != 1 {
+		t.Errorf("failedWritesCorrupted = %d, want 1: a checksum-mismatched store must be classified as corrupted, not merely failed", det.failedWritesCorrupted)
+	}
+}
+
+// corruptLastByte flips the final byte of path on disk, landing inside
+// veclite's checksummed payload (well past its fixed header) and so
+// producing storage.ErrChecksumMismatch ("veclite: checksum mismatch") on
+// the next Load -- exactly the text issues.IsCorruptedError matches on.
+func corruptLastByte(t *testing.T, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read store for corruption: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("store file is empty, cannot corrupt it")
+	}
+	data[len(data)-1] ^= 0xFF
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write corrupted store: %v", err)
 	}
 }
