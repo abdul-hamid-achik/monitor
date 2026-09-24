@@ -75,6 +75,26 @@ type CodeFrame struct {
 	// whether stdout is a TTY and whether NO_COLOR is set; CodeFrame itself
 	// never inspects the environment.
 	Color bool
+
+	// HideMetrics renders this frame with NO per-line percentages, bars, or
+	// '>' hot-line marker at all — for a SECONDARY frame whose numbers
+	// would be actively misleading rather than merely absent (e.g. a
+	// JIT-inlined callee's own source, shown purely for context, where
+	// every line's Percent/CumPercent is meaningless zero-value data, not
+	// a real measurement). Without this mode, Render's own hottestLine
+	// fallback marks the FIRST line '>' whenever every percentage ties at
+	// zero — the callee's declaration line, not its actual hot statement —
+	// and the header prints a fabricated-looking "0.0% self", both of
+	// which the review's "the secondary 'inlined callee' frame claims
+	// things that are not true" finding called out by name. When true, the
+	// header also drops the usual "N.N% self"/"cum N.N% flat N.N%"
+	// headline in favor of Subtitle, shown in parentheses right after
+	// FuncName.
+	HideMetrics bool
+	// Subtitle is HideMetrics' own header annotation (e.g. "inlined
+	// callee, no per-line data"), rendered as "FuncName (Subtitle) · loc
+	// ----". Ignored when HideMetrics is false.
+	Subtitle string
 }
 
 // DefaultCodeFrameWidth is the fixed column width `monitor hot`'s golden
@@ -114,18 +134,35 @@ func (f CodeFrame) Render() string {
 		return f.style(frameDimStyle, "(no lines to show)")
 	}
 
+	var b strings.Builder
+	b.WriteString(f.renderHeader(width))
+	lineNumWidth := f.lineNumWidth()
+
+	if f.HideMetrics {
+		// No hot-line marker, no percentage/bar columns at all — see
+		// HideMetrics' own doc comment: every one of those would be
+		// fabricated data for a frame whose Lines carry no real
+		// measurement.
+		for _, l := range f.Lines {
+			b.WriteByte('\n')
+			b.WriteString(f.renderHideMetricsLine(l, lineNumWidth, width))
+		}
+		if f.Footer != "" {
+			b.WriteByte('\n')
+			b.WriteString(f.style(frameDimStyle, "     "+f.Footer))
+		}
+		return b.String()
+	}
+
 	hotLine := f.HotLine
 	if !f.hasLine(hotLine) {
 		hotLine = f.hottestLine()
 	}
 
-	var b strings.Builder
-	b.WriteString(f.renderHeader(width))
 	if f.ShowCum {
 		b.WriteByte('\n')
 		b.WriteString(f.renderColumnHeader())
 	}
-	lineNumWidth := f.lineNumWidth()
 	for _, l := range f.Lines {
 		b.WriteByte('\n')
 		b.WriteString(f.renderLine(l, l.Line == hotLine, lineNumWidth, width))
@@ -139,6 +176,20 @@ func (f CodeFrame) Render() string {
 		b.WriteString(f.style(frameDimStyle, "     "+f.Footer))
 	}
 	return b.String()
+}
+
+// renderHideMetricsLine renders one HideMetrics-mode line: marker column
+// (always blank — never a fabricated '>' on zero-value data), line number,
+// and the code itself, truncated (never padded — there is no column after
+// it to keep aligned) to fit the remaining width.
+func (f CodeFrame) renderHideMetricsLine(l CodeFrameLine, lineNumWidth, width int) string {
+	numStr := fmt.Sprintf("%*d", lineNumWidth, l.Line)
+	prefix := fmt.Sprintf("  %s | ", numStr)
+	code := expandTabs(l.Code, codeTabWidth)
+	if avail := width - ansi.StringWidth(prefix); avail > 0 && ansi.StringWidth(code) > avail {
+		code = ansi.Truncate(code, avail, "…")
+	}
+	return prefix + code
 }
 
 // hasIssues reports whether any line carries an E3.4 issue overlay, so
@@ -212,13 +263,22 @@ func (f CodeFrame) renderHeader(width int) string {
 			loc = fmt.Sprintf("%s:%d", f.File, f.StartLine)
 		}
 	}
-	var headline string
-	if f.ShowCum {
-		headline = fmt.Sprintf("cum %.1f%% · flat %.1f%%", f.CumPct, f.SelfPct)
+	var prefix string
+	if f.HideMetrics {
+		name := f.FuncName
+		if f.Subtitle != "" {
+			name = fmt.Sprintf("%s (%s)", f.FuncName, f.Subtitle)
+		}
+		prefix = fmt.Sprintf("-- %s · %s ", name, loc)
 	} else {
-		headline = fmt.Sprintf("%.1f%% self", f.SelfPct)
+		var headline string
+		if f.ShowCum {
+			headline = fmt.Sprintf("cum %.1f%% · flat %.1f%%", f.CumPct, f.SelfPct)
+		} else {
+			headline = fmt.Sprintf("%.1f%% self", f.SelfPct)
+		}
+		prefix = fmt.Sprintf("-- %s · %s · %s ", f.FuncName, loc, headline)
 	}
-	prefix := fmt.Sprintf("-- %s · %s · %s ", f.FuncName, loc, headline)
 	pad := width - len([]rune(prefix))
 	if pad < 0 {
 		pad = 0

@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -115,6 +116,18 @@ type Heatmap struct {
 
 	Warnings    []string `json:"warnings,omitempty"`
 	Limitations []string `json:"limitations,omitempty"`
+
+	// InlinedCallees is additive to monitor.line_heatmap.v1 (a new field,
+	// never a rename or a schema break -- see docs/contracts/
+	// line-heatmap-v1.md's compatibility rule): one entry per (caller,
+	// callee) pair addInliningWarnings flagged as likely JIT-inlined. Each
+	// entry's own one-line summary is ALSO appended to Warnings (so a
+	// consumer that only reads Warnings still sees the finding); this field
+	// exists so a renderer that wants the callee's own source as a
+	// secondary frame (the roadmap polish note's "if the callee's source is
+	// readable, optionally show its body") doesn't have to re-parse
+	// Warnings' free text to get the caller/callee/line back out.
+	InlinedCallees []InlinedCallee `json:"inlined_callees,omitempty"`
 
 	// DefaultTarget is the function CodeFrame renders by default when the
 	// caller (monitor hot) is given no --func: whichever function has the
@@ -218,6 +231,29 @@ type HeatLineIssue struct {
 	ShortID string `json:"short_id"`
 	Count   int    `json:"count"`
 	Status  string `json:"status"`
+}
+
+// InlinedCallee is one entry in Heatmap.InlinedCallees — see
+// addInliningWarnings' own doc comment for the heuristic that produces it.
+type InlinedCallee struct {
+	// Caller/Callee/Line identify the finding: Caller's own hottest line
+	// (Line) is textually a call to Callee, which this profile never
+	// sampled separately (or sampled with ~0 self of its own).
+	Caller string `json:"caller"`
+	Callee string `json:"callee"`
+	Line   int    `json:"line"`
+	// File is the caller's own resolved File — the OPTIONAL secondary-frame
+	// lookup (buildInlinedCallee) only ever scans this same file for
+	// Callee's declaration, never the whole profile/repo, so File also
+	// documents that scope for a consumer of this field.
+	File string `json:"file,omitempty"`
+	// Body is Callee's own source, read live from disk, when
+	// buildInlinedCallee could find a declaration-shaped line naming Callee
+	// in File. nil/empty — never an error — when File couldn't be read or
+	// no such line was found: this secondary frame is explicitly optional
+	// (see addInliningWarnings), so its absence is not a degradation.
+	Body      []string `json:"body,omitempty"`
+	BodyStart int      `json:"body_start,omitempty"`
 }
 
 // HeatCallee is one function this HeatFunction called, and how much
@@ -334,6 +370,12 @@ func BuildHeatmap(ctx context.Context, src *Source, opts HeatOptions) (*Heatmap,
 	// pick monitor hot's default CodeFrame target) from whatever sliver of
 	// functions survived filtering, not the real profile.
 	addWarnings(hm)
+	// addInliningWarnings, like addWarnings just above, must run on the
+	// FULL function list before finalizeFunctions filters/caps it — a
+	// caller's hottest line can only be judged "textually a call to a
+	// function this profile never sampled" against every function
+	// BuildHeatmap actually found, not whatever slice --top left visible.
+	addInliningWarnings(hm)
 	finalizeFunctions(hm, opts)
 	return hm, nil
 }
@@ -1574,4 +1616,367 @@ func nonEmpty(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+// ---------------------------------------------------------------------------
+// JIT-inlining honesty heuristic (polish wave)
+// ---------------------------------------------------------------------------
+
+// inlineHotLineThresholdPct/inlineCalleeSelfThresholdPct are
+// addInliningWarnings' own honesty thresholds: a caller's own line has to
+// dominate its function almost completely (inlineHotLineThresholdPct) —
+// the same order of magnitude the dogfood evidence showed (99.9% on one
+// call-site line) — before this heuristic even looks at it, and a callee
+// that DOES appear with real self time of its own
+// (inlineCalleeSelfThresholdPct or more) is treated as genuinely,
+// separately sampled, not inlined away.
+const (
+	inlineHotLineThresholdPct    = 90.0
+	inlineCalleeSelfThresholdPct = 1.0
+	// inlineCallerMinSelfPct/inlineCallerMinSelfSamples are the minimum
+	// evidence addInliningWarnings requires from the CALLER's own line
+	// before treating a "no separately-sampled callee" shape as anything
+	// worth flagging at all — see the polish-wave review (heat.go:1773): a
+	// dispatcher/wrapper whose call line only ever received a handful of
+	// samples reaches PctOfFunction>=inlineHotLineThresholdPct trivially
+	// (it's the only line that function ever self-sampled at all), which is
+	// not evidence of inlining, just of a thin sample. A caller passes this
+	// gate when EITHER its own self share of the whole profile OR the raw
+	// sample count on that one line clears a real minimum.
+	inlineCallerMinSelfPct     = 5.0
+	inlineCallerMinSelfSamples = int64(5)
+	// inlineCalleeCumRatioGuard is the other half of that same review
+	// finding: a callee that already carries real CUMULATIVE weight under
+	// THIS caller (HeatCallee.Cum — meaning it has its own node in the
+	// sampled call tree, with real subtree weight flowing through it) is
+	// positive evidence it was NOT inlined away, however small its own
+	// SELF time is. "Comparable to or larger than the caller's self on this
+	// line" is approximated as at least half of it.
+	inlineCalleeCumRatioGuard = 0.5
+)
+
+// InlineWarningPrefix is the fixed lead-in every addInliningWarnings message
+// starts with — exported so a renderer (monitor hot's renderHeatBody) can
+// recognize and re-route these specific Warnings entries (it renders them
+// under the CodeFrame, alongside the optional InlinedCallees secondary
+// frame, rather than in the generic top-of-output warnings block) without
+// hard-coding the whole message text a second time in a different package.
+const InlineWarningPrefix = "likely JIT-inlined:"
+
+// maxInlinedCalleeBodyLines caps how many lines of a located callee's own
+// source the OPTIONAL secondary frame (InlinedCallee.Body) carries. This is
+// a plain text scan, not a real function-range resolution (no codemap
+// symbol-at call here — see buildInlinedCallee), so it is deliberately a
+// small, fixed window rather than an attempt to find the callee's real
+// closing brace.
+const maxInlinedCalleeBodyLines = 12
+
+// inlineCallRe matches a bare-identifier call expression — "heavyStringify("
+// in "return heavyStringify(items);" — but deliberately NOT a property/
+// method call such as "JSON.stringify(" or "'x'.repeat(": requiring the
+// character immediately before the identifier to be neither '.' nor a word
+// character nor '$' excludes exactly that case, since a real property
+// access always has one of those immediately before the method name.
+var inlineCallRe = regexp.MustCompile(`(?:^|[^.\w$])([A-Za-z_$][A-Za-z0-9_$]*)\s*\(`)
+
+// inlineCallExcluded is calleeCallOnLine's denylist: JS control-flow
+// keywords (which this regex would otherwise mistake for a bare call —
+// "if (", "for (", "catch (" all match the same shape) and a short list of
+// well-known globals/builtins that are never the user's own in-app
+// function, so flagging them as "likely inlined" would be pure noise, not
+// a finding.
+var inlineCallExcluded = map[string]bool{
+	"if": true, "for": true, "while": true, "switch": true, "catch": true,
+	"function": true, "return": true, "typeof": true, "new": true, "do": true,
+	"else": true, "await": true, "yield": true, "in": true, "of": true,
+	"JSON": true, "Math": true, "Array": true, "Object": true, "console": true,
+	"parseInt": true, "parseFloat": true, "Number": true, "String": true,
+	"Boolean": true, "Promise": true, "RegExp": true, "Map": true, "Set": true,
+	"Date": true, "Error": true, "TypeError": true, "RangeError": true,
+	"setTimeout": true, "setInterval": true, "clearTimeout": true, "clearInterval": true,
+	"require": true, "module": true, "exports": true, "Buffer": true,
+	"process": true, "isNaN": true, "isFinite": true,
+	"encodeURIComponent": true, "decodeURIComponent": true,
+	"structuredClone": true, "fetch": true, "Symbol": true, "WeakMap": true,
+	"WeakSet": true, "Proxy": true, "Reflect": true,
+	// Additional keywords the regex's shape ("identifier followed by an
+	// optionally-whitespace-separated '(') would otherwise mistake for a
+	// bare call -- "async (x) =>", "super(...)", "import(...)",
+	// "void 0", "delete obj[k]" (never parenthesized like this in real
+	// code, but excluded defensively), "throw(...)"-shaped macros, and a
+	// "case (" style guard clause -- see the polish-wave review's blocker
+	// finding (heat.go:1688).
+	"async": true, "super": true, "import": true, "void": true,
+	"delete": true, "throw": true, "case": true,
+}
+
+// inlineNewCallRe matches a bare "new" keyword immediately (only whitespace
+// between) preceding the point calleeCallOnLine is about to treat as a
+// function-call identifier — "new Uint8Array(" — so a constructor
+// invocation is never mistaken for the caller-inlines-callee shape this
+// heuristic targets: a typed-array or other well-known constructor can't
+// all be enumerated in inlineCallExcluded by name, but "preceded by new" is
+// a single, general rule that catches all of them.
+var inlineNewCallRe = regexp.MustCompile(`\bnew\s*$`)
+
+// calleeCallOnLine returns the first bare-identifier function-call name on
+// code that survives inlineCallExcluded's denylist and isn't a `new X(...)`
+// constructor call, or "" when the line has no such call at all (a plain
+// assignment, a loop header with no call, a property access only, a
+// constructor call, ...). code is stripped of `//`/`/* */` comments and
+// string/template-literal contents first — see stripJSCommentsAndStrings —
+// so a trailing comment or a string literal that happens to LOOK like a
+// call (the polish-wave review's exact false-positive: a "// HOT LINE (line
+// 16)" comment on a real hot line matched "LINE(" as a bogus callee name)
+// can never be mistaken for real code.
+func calleeCallOnLine(code string) string {
+	code = stripJSCommentsAndStrings(code)
+	for _, m := range inlineCallRe.FindAllStringSubmatchIndex(code, -1) {
+		name := code[m[2]:m[3]]
+		if inlineCallExcluded[name] {
+			continue
+		}
+		if inlineNewCallRe.MatchString(code[:m[2]]) {
+			continue // `new Name(...)`: a constructor call, not a plain function call.
+		}
+		return name
+	}
+	return ""
+}
+
+// stripJSCommentsAndStrings returns code with every `//...` line comment,
+// `/*...*/` block comment, and single/double/backtick string or template
+// literal's CONTENTS removed — a small, line-local (never multi-line) text
+// scan, not a real JS tokenizer, but enough for calleeCallOnLine's own
+// purpose: it must never mistake a word inside a comment or a string for a
+// real function-call identifier. An unterminated string or block comment on
+// this one line (the rest having already been cut off elsewhere, e.g. by
+// HeatLine.Code's own truncation) just drops everything from that point on,
+// rather than misinterpreting whatever follows as code.
+func stripJSCommentsAndStrings(code string) string {
+	var b strings.Builder
+	var quote byte
+	n := len(code)
+	for i := 0; i < n; i++ {
+		c := code[i]
+		if quote != 0 {
+			if c == '\\' && i+1 < n {
+				i++ // skip the escaped character too, so \" doesn't end the string early.
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch {
+		case c == '\'' || c == '"' || c == '`':
+			quote = c
+		case c == '/' && i+1 < n && code[i+1] == '/':
+			return b.String() // the rest of the line is a line comment.
+		case c == '/' && i+1 < n && code[i+1] == '*':
+			if end := strings.Index(code[i+2:], "*/"); end >= 0 {
+				i += 2 + end + 1 // skip past the closing "*/".
+				continue
+			}
+			return b.String() // unterminated block comment: drop the rest.
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// hottestLineOf returns f's own hottest line by PctOfFunction (ties broken
+// by Self, then the first occurrence) — the exact line monitor hot's own
+// CodeFrame would mark '>' for this function, so the heuristic below judges
+// the same line a person actually sees.
+func hottestLineOf(f *HeatFunction) (HeatLine, bool) {
+	if len(f.Lines) == 0 {
+		return HeatLine{}, false
+	}
+	best := f.Lines[0]
+	for _, l := range f.Lines[1:] {
+		if l.PctOfFunction > best.PctOfFunction || (l.PctOfFunction == best.PctOfFunction && l.Self > best.Self) {
+			best = l
+		}
+	}
+	return best, true
+}
+
+// addInliningWarnings is the polish-wave JIT-inlining honesty heuristic:
+// live V8/Bun CPU profiles routinely attribute almost all of a wrapper
+// function's self time to its OWN call-site line once TurboFan inlines the
+// function it calls there — positionTicks then lands on the call, not
+// inside the callee, because the callee's own frame never existed in the
+// sampled call tree at all. The dogfood evidence: examples/polyglot/js/
+// workload.js's processBatch (line 26, "return heavyStringify(items);")
+// shows ~99% self time on that one line, with heavyStringify itself
+// completely absent from the profile's own Functions — not because it
+// didn't run (it clearly did — that's where the CPU time went), but
+// because it was inlined into processBatch before V8 ever sampled it.
+// Without this warning, a person reading only the per-line CodeFrame would
+// see line 26 marked as the hot line with no indication that the real work
+// is actually inside a different, unlisted function.
+//
+// This is a heuristic over TEXT, not a fact V8's own profile format
+// records (a .cpuprofile carries no "this frame was inlined" bit at all):
+// it fires only when ALL of the following hold —
+//
+//  1. one line already accounts for inlineHotLineThresholdPct+ of its own
+//     function's weight (hottestLineOf);
+//  2. that line's source, already read from disk by readCode, is
+//     (textually) a bare call to another named function — not a keyword,
+//     not a well-known global/builtin, and not a property/method access
+//     (calleeCallOnLine);
+//  3. that named function is not this function itself (excludes ordinary,
+//     correctly-attributed recursion);
+//  4. it either never got a Functions row of its own anywhere in this
+//     SAME profile (the common, fully-inlined case) or got one with
+//     essentially zero self time of its own (inlineCalleeSelfThresholdPct)
+//     — SELF time specifically, not cum: a real dogfood capture routinely
+//     still shows a thin trickle of genuinely-sampled cum for the callee
+//     (JIT warmup, an occasional deopt) even while TurboFan inlines the
+//     overwhelming majority of calls, so cum alone would under-fire on
+//     exactly the shape this heuristic exists to catch.
+//
+// Runs only for a CDP-sourced Heatmap (buildFromCDP's own Method values —
+// v8_position_ticks or the no-positionTicks cpuprofile_file fallback): a
+// pprof-sourced one already resolves Go's inlining through the binary's own
+// debug info (see MethodPprofProto's "inlining-aware" label — its Location
+// list already carries one Line entry per inlined frame), so this
+// heuristic would have nothing to add there and could only misfire on Go's
+// very different call-expression syntax.
+//
+// Never asserts certainty — every message this produces says "likely": the
+// exact same shape (one dominant line calling a function with no separate
+// entry of its own) is also just what a single, genuinely expensive
+// statement looks like, and a .cpuprofile alone cannot distinguish the two.
+func addInliningWarnings(hm *Heatmap) {
+	if hm.Method != MethodV8PositionTicks && hm.Method != MethodCPUProfileFile {
+		return
+	}
+	selfPctByName := make(map[string]float64, len(hm.Functions))
+	for _, f := range hm.Functions {
+		selfPctByName[f.Name] = f.SelfPct
+	}
+	for i := range hm.Functions {
+		f := &hm.Functions[i]
+		line, ok := hottestLineOf(f)
+		if !ok || line.PctOfFunction < inlineHotLineThresholdPct || strings.TrimSpace(line.Code) == "" {
+			continue
+		}
+		// Minimum caller evidence (the review's "no minimum on the
+		// caller's own self time" finding): a caller whose own self share
+		// of the WHOLE profile is negligible AND whose hot line's raw
+		// sample count is negligible hasn't earned a confident-looking
+		// finding just because it's the only line that function ever
+		// self-sampled at all -- see inlineCallerMinSelfPct's own doc
+		// comment for the false-positive shape this guards against (a
+		// 1-sample dispatcher whose call line trivially "dominates" its
+		// own function).
+		if f.SelfPct < inlineCallerMinSelfPct && line.Self < inlineCallerMinSelfSamples {
+			continue
+		}
+		callee := calleeCallOnLine(line.Code)
+		if callee == "" || callee == f.Name {
+			continue
+		}
+		if selfPct, present := selfPctByName[callee]; present && selfPct >= inlineCalleeSelfThresholdPct {
+			continue // a real, separately-sampled function -- not inlined away.
+		}
+		// Ratio guard (the same review finding's other half): a callee
+		// that already carries real CUMULATIVE weight under THIS caller —
+		// meaning it has its own node in the sampled call tree at all,
+		// with real subtree weight flowing through it — is positive
+		// evidence it was NOT inlined away, however small its own SELF
+		// time is (a genuinely inlined callee has NO node of its own at
+		// all, so its Cum here is exactly 0 — see
+		// TestAddInliningWarningsDetectsFullyInlinedCallee — while a real,
+		// separately-sampled-but-mostly-callee-bound function like the
+		// review's run()/work() dispatcher example carries substantial
+		// cum despite ~0 self).
+		if calleeCum := calleeCumUnderCaller(f, callee); calleeCum > 0 &&
+			float64(calleeCum) >= float64(line.Self)*inlineCalleeCumRatioGuard {
+			continue
+		}
+		// Hard precondition (the review's other blocker half): the callee
+		// must have a READABLE DECLARATION in the caller's own in-app
+		// file, via the exact same lookup the optional secondary frame
+		// uses (buildInlinedCallee) — never just "some bare identifier
+		// followed by a paren". Without this, an imported function
+		// (`import { transform } from './lib'`), a builtin the denylist
+		// doesn't happen to enumerate, or any other name that merely LOOKS
+		// like an in-app call gets silently, falsely flagged. When no
+		// declaration is found, this heuristic has nothing left to stand
+		// on and stays silent rather than guessing.
+		ic := buildInlinedCallee(f, callee, line.Line)
+		if len(ic.Body) == 0 {
+			continue
+		}
+		hm.Warnings = append(hm.Warnings, fmt.Sprintf(
+			"%s %s() was inlined into %s; the time on line %d is spent inside %s",
+			InlineWarningPrefix, callee, nonEmpty(f.Name, "(unknown)"), line.Line, callee))
+		hm.InlinedCallees = append(hm.InlinedCallees, ic)
+	}
+}
+
+// calleeCumUnderCaller returns name's own Cum entry within f's Callees (0
+// when name never appears there at all) — see addInliningWarnings' ratio
+// guard, which reads this as evidence a "no separately-sampled callee"
+// finding is actually wrong: real, non-zero cum under THIS specific caller
+// means the callee DID get its own node in the sampled call tree.
+func calleeCumUnderCaller(f *HeatFunction, name string) int64 {
+	for _, c := range f.Callees {
+		if c.Func == name {
+			return c.Cum
+		}
+	}
+	return 0
+}
+
+// inlineCalleeDeclPattern builds buildInlinedCallee's own declaration-line
+// regex for one specific callee name: "function NAME(", "NAME = function",
+// "NAME = async function", or "NAME = (...) =>"/"NAME = async (...) =>" —
+// the common ways a JS/TS source declares a named function, in whatever
+// order a real file happens to declare processBatch and heavyStringify in
+// (see the naming ADR fixture: both live in one file, callee declared
+// AFTER its caller).
+func inlineCalleeDeclPattern(callee string) *regexp.Regexp {
+	name := regexp.QuoteMeta(callee)
+	return regexp.MustCompile(`(?:\bfunction\s+` + name + `\s*\(|\b` + name + `\s*=\s*(?:async\s+)?(?:function\b|\())`)
+}
+
+// buildInlinedCallee is addInliningWarnings' OPTIONAL secondary-frame
+// lookup: a best-effort text scan of the CALLER's own file (never the
+// whole repo — see InlinedCallee.File's own doc comment) for a
+// declaration-shaped line naming callee, reading up to
+// maxInlinedCalleeBodyLines lines from there. Returns a Body-less
+// InlinedCallee — never an error — when File is empty, unreadable, or no
+// such declaration is found: the primary warning above already carries the
+// whole finding; this secondary body is explicitly optional, so its
+// absence degrades silently rather than failing anything.
+func buildInlinedCallee(f *HeatFunction, callee string, line int) InlinedCallee {
+	ic := InlinedCallee{Caller: f.Name, Callee: callee, Line: line, File: f.File}
+	if f.File == "" {
+		return ic
+	}
+	lines, err := readFileLines(f.File)
+	if err != nil {
+		return ic
+	}
+	decl := inlineCalleeDeclPattern(callee)
+	for i, l := range lines {
+		if !decl.MatchString(l) {
+			continue
+		}
+		end := i + maxInlinedCalleeBodyLines
+		if end > len(lines) {
+			end = len(lines)
+		}
+		ic.BodyStart = i + 1
+		ic.Body = append([]string(nil), lines[i:end]...)
+		return ic
+	}
+	return ic
 }

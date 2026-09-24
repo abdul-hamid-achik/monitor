@@ -1,0 +1,161 @@
+version: 1
+name: monitor_hot_inlined
+
+intent: |
+  monitor hot's JIT-inlining honesty heuristic (polish wave,
+  addInliningWarnings in internal/profiler/heat.go): a committed synthetic
+  .cpuprofile (testdata/inlined-caller.cpuprofile) reproduces the exact
+  shape a REAL `node --inspect` capture of examples/polyglot/js/workload.js
+  shows — processBatch's own call-site line (26, "return
+  heavyStringify(items);") carries ~100% of its own self time because
+  TurboFan inlined heavyStringify into it, so heavyStringify never got a
+  Functions row of its own in this capture at all (positionTicks land on
+  the call site, not inside the callee — the callee's own frame never
+  existed in the sampled call tree). Without this heuristic, a person
+  reading only the per-line CodeFrame would see line 26 marked as the hot
+  line with no indication that the real work is happening somewhere else
+  entirely.
+
+  `monitor hot` must:
+  - warn "likely JIT-inlined: heavyStringify() was inlined into
+    processBatch; the time on line 26 is spent inside heavyStringify" —
+    UNDER processBatch's own CodeFrame, not in the generic top-of-output
+    warnings block (where idle/diffuse warnings print) — since this
+    finding is specifically about the function currently shown;
+  - never claim certainty: the wording always says "likely", never
+    "was inlined" as a bare fact;
+  - show the callee's real body (read live from examples/polyglot/js/
+    workload.js, the fixture's own committed source — the OPTIONAL half
+    of the heuristic) as a secondary frame labelled "inlined callee, no
+    per-line data", since here the callee's source genuinely IS readable —
+    rendered with NO '>' hot-line marker and NO percentage column at all
+    (CodeFrame's HideMetrics mode), since there is no real per-line data
+    for this secondary frame to measure;
+  - keep --json additive only: monitor.line_heatmap.v1's existing
+    warnings[] still carries the same one-line message, and the new
+    inlined_callees[] field carries the same finding structured (caller,
+    callee, line, file, body);
+  - never fire on a REAL, non-inlined capture (v8-hot.cpuprofile), where
+    heavyStringify's own hot line is a genuine JSON.stringify call inside
+    its own body, not a bare call to another in-app function.
+
+target:
+  cmd: ["./bin/monitor", "hot", "--file", "internal/profiler/testdata/inlined-caller.cpuprofile"]
+  cwd: "."
+  env:
+    NO_COLOR: "1"
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "test -f internal/profiler/testdata/inlined-caller.cpuprofile"
+      timeoutMs: 5000
+    - run: "test -f examples/polyglot/js/workload.js"
+      timeoutMs: 5000
+    - run: "test -f internal/profiler/testdata/v8-hot.cpuprofile"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: warns_likely_never_certain
+    description: >-
+      the exact "likely JIT-inlined" message names the callee, the caller,
+      and the line — and always says "likely", never asserting the
+      inlining as a bare fact
+    verify:
+      command:
+        run: >-
+          ./bin/monitor hot --file internal/profiler/testdata/inlined-caller.cpuprofile |
+          grep -q 'likely JIT-inlined: heavyStringify() was inlined into processBatch; the time on line 26 is spent inside heavyStringify'
+
+  - id: warning_printed_under_codeframe_not_at_top
+    description: >-
+      the warning line number is AFTER the TOTAL/SELF/FUNCTION table (and
+      therefore after processBatch's own CodeFrame too), not ahead of it in
+      the generic top-of-output warnings block
+    verify:
+      command:
+        run: |
+          ./bin/monitor hot --file internal/profiler/testdata/inlined-caller.cpuprofile > /tmp/monitor-spec-hot-inlined.txt
+          TABLE_LINE=$(grep -n '^TOTAL' /tmp/monitor-spec-hot-inlined.txt | head -1 | cut -d: -f1)
+          WARN_LINE=$(grep -n 'likely JIT-inlined' /tmp/monitor-spec-hot-inlined.txt | head -1 | cut -d: -f1)
+          test -n "$TABLE_LINE" && test -n "$WARN_LINE" && test "$WARN_LINE" -gt "$TABLE_LINE"
+
+  - id: secondary_frame_shows_real_callee_body
+    description: >-
+      the callee's real, committed source (examples/polyglot/js/
+      workload.js) is shown as a secondary frame labelled "inlined callee,
+      no per-line data", since the fixture's own file: url resolves to
+      that real, on-disk file from the repo root -- with no '>' marker and
+      no fabricated "0.0% self" headline (CodeFrame's HideMetrics mode)
+    verify:
+      command:
+        run: |
+          OUT=$(./bin/monitor hot --file internal/profiler/testdata/inlined-caller.cpuprofile)
+          echo "$OUT" | grep -q 'inlined callee, no per-line data' || exit 1
+          echo "$OUT" | grep -q 'function heavyStringify(items) {' || exit 1
+          SECONDARY=$(echo "$OUT" | awk '/inlined callee, no per-line data/{found=1} found{print}')
+          # HideMetrics mode: no percentage figure anywhere in the secondary
+          # frame (a bare "grep -q '0.0%'" would false-positive on the
+          # PRIMARY frame's real "100.0% self" headline, which contains
+          # "0.0%" as a plain substring), and no '>' hot-line marker.
+          echo "$SECONDARY" | grep -q '%' && exit 1
+          echo "$SECONDARY" | grep -qE '^>' && exit 1
+          exit 0
+
+  - id: json_additive_inlined_callees_field
+    description: >-
+      --json carries the new inlined_callees[] field additively (caller,
+      callee, line, file, body), alongside the plain warnings[] entry —
+      never replacing or renaming an existing field
+    verify:
+      command:
+        run: >-
+          JSON=$(./bin/monitor hot --file internal/profiler/testdata/inlined-caller.cpuprofile --json) &&
+          echo "$JSON" | grep -q '"schema":[[:space:]]*"monitor.line_heatmap.v1"' &&
+          echo "$JSON" | grep -q '"inlined_callees"' &&
+          echo "$JSON" | grep -q '"caller":[[:space:]]*"processBatch"' &&
+          echo "$JSON" | grep -q '"callee":[[:space:]]*"heavyStringify"' &&
+          echo "$JSON" | grep -q 'likely JIT-inlined'
+
+  - id: real_inlining_names_the_hot_line_honestly
+    description: >-
+      the CodeFrame itself still honestly marks line 26 (the call site) as
+      the hot line — the warning ADDS context, it does not hide or replace
+      the real per-line data
+    verify:
+      command:
+        run: >-
+          ./bin/monitor hot --file internal/profiler/testdata/inlined-caller.cpuprofile |
+          grep -qE '^>[[:space:]]+26[[:space:]]*\|'
+
+  - id: no_false_warning_when_not_inlined
+    description: >-
+      a REAL, non-inlined capture (testdata/v8-hot.cpuprofile, where
+      heavyStringify's own hot line is a JSON.stringify property call with
+      real self time on its own -- not a bare call to another in-app
+      function) must never print a "likely JIT-inlined" warning: the
+      heuristic's own negative case, so a passing hot_inlined.yml can't be
+      hiding a heuristic that fires on everything
+    verify:
+      command:
+        run: >-
+          ! ./bin/monitor hot --file internal/profiler/testdata/v8-hot.cpuprofile --func heavyStringify |
+          grep -q 'likely JIT-inlined'
+
+  - id: clean_exit
+    description: the binary exits cleanly
+    verify:
+      command:
+        run: "./bin/monitor hot --file internal/profiler/testdata/inlined-caller.cpuprofile >/dev/null"

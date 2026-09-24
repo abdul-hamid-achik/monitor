@@ -348,3 +348,78 @@ func TestCodeFrameIssueOverlayInDualColumnView(t *testing.T) {
 		t.Errorf("dual-column output missing the E marker:\n%s", out)
 	}
 }
+
+// --- HideMetrics mode (polish-wave review: "the secondary 'inlined callee'
+// frame claims things that are not true") -----------------------------------
+
+func hideMetricsFixture() CodeFrame {
+	return CodeFrame{
+		FuncName:    "heavyStringify",
+		File:        "js/workload.js",
+		StartLine:   11,
+		EndLine:     13,
+		HideMetrics: true,
+		Subtitle:    "inlined callee, no per-line data",
+		Width:       100,
+		Lines: []CodeFrameLine{
+			{Line: 11, Code: "function heavyStringify(items) {"},
+			{Line: 12, Code: "  return items.length;"},
+			{Line: 13, Code: "}"},
+		},
+	}
+}
+
+// TestCodeFrameHideMetricsOmitsHotLineMarker is the direct regression: with
+// every line's Percent/CumPercent left at their zero-value default (no real
+// per-line data exists), the OLD unconditional hottestLine() fallback would
+// mark the FIRST line -- the declaration -- '>', fabricating a "hot line"
+// that was never measured. HideMetrics must print no '>' marker at all.
+func TestCodeFrameHideMetricsOmitsHotLineMarker(t *testing.T) {
+	out := hideMetricsFixture().Render()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, ">") {
+			t.Errorf("HideMetrics output must never print a '>' hot-line marker: %q\nfull output:\n%s", line, out)
+		}
+	}
+}
+
+// TestCodeFrameHideMetricsOmitsPercentColumn asserts no percentage figure
+// (fabricated "0.0%" or otherwise) appears anywhere in a HideMetrics frame.
+func TestCodeFrameHideMetricsOmitsPercentColumn(t *testing.T) {
+	out := hideMetricsFixture().Render()
+	if strings.Contains(out, "%") {
+		t.Errorf("HideMetrics output must contain no percentage figures at all:\n%s", out)
+	}
+}
+
+// TestCodeFrameHideMetricsHeaderUsesSubtitleNotSelfPct asserts the header
+// shows "FuncName (Subtitle) · loc" -- never the ordinary "N.N%% self"
+// headline, which for a HideMetrics frame would always read a fabricated
+// "0.0%% self" (the zero-value SelfPct a caller never bothered to set,
+// because there IS no real self percentage here).
+func TestCodeFrameHideMetricsHeaderUsesSubtitleNotSelfPct(t *testing.T) {
+	f := hideMetricsFixture()
+	f.SelfPct = 0 // explicit: this must never reach the rendered header.
+	out := f.Render()
+	header := strings.Split(out, "\n")[0]
+	if !strings.Contains(header, "heavyStringify (inlined callee, no per-line data)") {
+		t.Errorf("header = %q, want it to name FuncName and Subtitle together", header)
+	}
+	if strings.Contains(header, "self") {
+		t.Errorf("header = %q, want no fabricated \"N.N%% self\" headline", header)
+	}
+}
+
+// TestCodeFrameHideMetricsStillTruncatesLongLines guards the one thing this
+// mode still owes width: a pathologically long line must not blow the frame
+// out past its configured Width.
+func TestCodeFrameHideMetricsStillTruncatesLongLines(t *testing.T) {
+	f := hideMetricsFixture()
+	f.Lines = []CodeFrameLine{{Line: 1, Code: strings.Repeat("x", 500)}}
+	out := f.Render()
+	for _, line := range strings.Split(out, "\n") {
+		if got := len([]rune(line)); got > f.Width {
+			t.Errorf("line %q is %d runes, want at most Width=%d", line, got, f.Width)
+		}
+	}
+}
