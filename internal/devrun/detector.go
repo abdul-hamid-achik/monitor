@@ -116,6 +116,18 @@ type detector struct {
 	// itself is never fabricated or retried past that point, but it must
 	// never be silently swallowed either -- see ExitSummaryInfo.FailedWrites.
 	failedWrites int64
+	// failedWritesCorrupted is the subset of failedWrites whose error
+	// matched issues.IsCorruptedError (a damaged store, e.g. a checksum
+	// mismatch) rather than ordinary lock contention (CC-6's secondary
+	// fix: "store busy" is misleading -- and tells a user to just retry --
+	// for a failure a retry can never fix). NOT currently surfaced in
+	// ExitSummary: Result and ExitSummaryInfo are defined in devrun.go,
+	// outside this package's file ownership for this change; wiring a
+	// FailedWritesCorrupted field through Run (around its `result :=
+	// Result{...}` and ExitSummaryInfo{...} construction) so ExitSummary
+	// can print "store corrupted" instead of "store busy" for these is a
+	// one-line follow-up left to whoever owns devrun.go.
+	failedWritesCorrupted int64
 
 	// flushWG tracks every coalesceWindow timer's flush goroutine
 	// (started in observe) so run's final flushAllPending can wait out one
@@ -331,9 +343,16 @@ func (d *detector) record(ctx context.Context, fingerprint string, entry *coales
 		// alone the monitored child (there is nowhere else to report it
 		// synchronously -- the detector never writes to logs.veclite by
 		// design); it is counted here so the exit summary can say so
-		// honestly instead of silently losing the crash.
+		// honestly instead of silently losing the crash. issues.
+		// IsCorruptedError separately flags a damaged store (see
+		// failedWritesCorrupted's doc comment) so a future exit-summary
+		// wiring can tell a user "store corrupted" apart from "store
+		// busy, try again".
 		d.mu.Lock()
 		d.failedWrites++
+		if issues.IsCorruptedError(err) {
+			d.failedWritesCorrupted++
+		}
 		d.mu.Unlock()
 		return
 	}
