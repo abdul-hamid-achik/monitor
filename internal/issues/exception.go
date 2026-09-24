@@ -298,6 +298,10 @@ type RecordExceptionOptions struct {
 	// into the existing occurrence instead of inserting a duplicate row
 	// (the naming ADR §5); see UpsertResult.Deduped.
 	DedupeKey string
+	// DedupeAliases are extra keys checked against the issue's retained
+	// occurrences before inserting a new one (see OccurrenceInput.
+	// DedupeAliases); the primary DedupeKey is what gets retained.
+	DedupeAliases []string
 	// Count is how many raw events this call represents (a coalesced
 	// burst). <=0 defaults to 1.
 	Count int64
@@ -396,6 +400,7 @@ func RecordException(ctx context.Context, storePath string, wait time.Duration, 
 		Culprit:            culpritFor(ex),
 		Level:              ex.Level,
 		DedupeKey:          opts.DedupeKey,
+		DedupeAliases:      opts.DedupeAliases,
 	}
 
 	var result UpsertResult

@@ -223,9 +223,30 @@ func (s *Store) upsertOccurrenceLocked(input OccurrenceInput) (UpsertResult, err
 			return UpsertResult{}, fmt.Errorf("decode issue %d: %w", issueRecord.ID, err)
 		}
 		normalizeIssueSlices(&issue)
-		if deduped, ok, err := s.findDedupedOccurrence(issue.ID, input.DedupeKey); err != nil {
+		deduped, ok, err := s.findDedupedOccurrence(issue.ID, input.DedupeKey)
+		if err != nil {
 			return UpsertResult{}, err
-		} else if ok {
+		}
+		if !ok {
+			// DedupeAliases (CC-3): a nested `monitor run` pair observes
+			// the same block from two detectors whose wall-clock times can
+			// straddle a 1-second bucket boundary; the primary key's
+			// neighbor buckets are checked as aliases before inserting a
+			// duplicate row. Only the primary key is ever retained.
+			for _, alias := range input.DedupeAliases {
+				if alias == input.DedupeKey {
+					continue
+				}
+				deduped, ok, err = s.findDedupedOccurrence(issue.ID, alias)
+				if err != nil {
+					return UpsertResult{}, err
+				}
+				if ok {
+					break
+				}
+			}
+		}
+		if ok {
 			return UpsertResult{Issue: issue, Occurrence: deduped, Deduped: true}, nil
 		}
 		// previousLastSeen is captured BEFORE laterTime below advances

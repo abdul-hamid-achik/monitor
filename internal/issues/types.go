@@ -280,6 +280,12 @@ type OccurrenceInput struct {
 	// occurrences before inserting a new one -- see UpsertResult.Deduped
 	// and the naming ADR §5.
 	DedupeKey string
+	// DedupeAliases are extra keys that fold into the same occurrence as
+	// DedupeKey. CC-3: two detectors observing one event can land on
+	// either side of a 1-second bucket boundary, so the caller passes the
+	// neighbor buckets as aliases; only the primary DedupeKey is retained
+	// on the occurrence.
+	DedupeAliases []string
 }
 
 // UpsertResult is UpsertOccurrence's richer sibling return
