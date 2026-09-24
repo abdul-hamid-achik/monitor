@@ -59,6 +59,24 @@ func (e *issueCommandError) Error() string {
 
 func (e *issueCommandError) Unwrap() error { return e.err }
 
+// silenceOwnErrors sets SilenceErrors on cmd only (root.go's own
+// SilenceErrors stays false — every other command keeps cobra's default
+// printing) and returns cmd, so every issue/issues subcommand can opt out
+// of the double-print in one line at its own construction site. Without
+// it, a RunE error printed TWICE: once from cobra's own ExecuteC
+// (SilenceErrors false on both the resolved subcommand and root) and once
+// more from cli.Execute()'s own "Error: %v" — see internal/cli/hot.go's
+// newHotCmd, which established this exact one-command-at-a-time pattern
+// for the same finding (the polish review's "errors are printed twice"
+// finding named `monitor issue zzzzzz` printing twice as one of its own
+// pieces of evidence). Relies on cobra's own rule that an error is only
+// printed when NEITHER the resolved command NOR root has SilenceErrors
+// set, so this is a per-command opt-out, never a global behavior change.
+func silenceOwnErrors(cmd *cobra.Command) *cobra.Command {
+	cmd.SilenceErrors = true
+	return cmd
+}
+
 func newIssuesCmd() *cobra.Command {
 	var storePath string
 	cmd := &cobra.Command{
@@ -71,6 +89,7 @@ func newIssuesCmd() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 	}
+	silenceOwnErrors(cmd)
 	cmd.PersistentFlags().StringVar(&storePath, "store", "", "issue store path (default: $MONITOR_ISSUES_STORE or XDG data dir)")
 	listCmd := newIssuesListCmd(&storePath)
 	// Bare `monitor issues [flags]` behaves exactly like
@@ -215,7 +234,7 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 	cmd.Flags().StringVar(&at, "at", "", "list issues whose culprit is inside the function containing, or exactly at, this file:line")
 	cmd.Flags().StringVar(&root, "root", "", "git/codebase root for --at's codemap lookup (default: discovered from the working directory)")
 	cmd.Flags().Bool("json", false, "emit JSON output")
-	return cmd
+	return silenceOwnErrors(cmd)
 }
 
 func newIssuesShowCmd(storePath *string) *cobra.Command {
@@ -272,7 +291,7 @@ func newIssuesShowCmd(storePath *string) *cobra.Command {
 	}
 	cmd.Flags().IntVar(&occurrenceLimit, "occurrences", defaultOccurrenceListLimit, "maximum occurrences to return (1-200)")
 	cmd.Flags().Bool("json", false, "emit JSON output")
-	return cmd
+	return silenceOwnErrors(cmd)
 }
 
 func newIssueStatusCmd(storePath *string, action string, status issues.Status) *cobra.Command {
@@ -323,7 +342,7 @@ func newIssueStatusCmd(storePath *string, action string, status issues.Status) *
 		},
 	}
 	cmd.Flags().Bool("json", false, "emit JSON output")
-	return cmd
+	return silenceOwnErrors(cmd)
 }
 
 func issueStatusShort(action string) string {
@@ -417,7 +436,26 @@ const (
 	// maxWhereLen/maxTitleLen truncate the human table's widest free-text
 	// columns so one long title or a deeply nested path never blows out
 	// every other column's alignment in a real terminal width.
-	maxTitleLen = 55
+	//
+	// maxTitleLen is narrowed from 55 by the polish review's "issues list
+	// at 137 columns" finding: with the NEW/REGRESSED + severity prefix
+	// folded into the TITLE cell (statusCell, up to ~11 runes: "NEW
+	// warning"/"REGRESSED"), the old 55 let one real row reach 137
+	// columns; 20 brings that same shape down to ~103.
+	//
+	// maxWhereLen stays at its original 40, NOT narrowed to fit 100 the
+	// way the review's own text suggests ("narrow the WHERE column, or
+	// make it project-relative"): specs/issues_context.yml's
+	// issues_list_shows_short_id_activity_and_where outcome hard-asserts
+	// the FULL, untruncated "examples/polyglot/js/workload.js:31" (35
+	// runes) appears in this exact column for a real seeded issue -- a
+	// cap below ~35, or a project-relative rewrite that drops the
+	// "examples/polyglot/" prefix, both make that committed, must-pass
+	// spec fail. 40 keeps that contract intact while
+	// truncatePathDisplay's own tail-preserving cut (see below) still
+	// improves the genuinely pathological case (a monorepo path deeper
+	// than 40 runes) that used to render in full, unbounded.
+	maxTitleLen = 20
 	maxWhereLen = 40
 )
 
@@ -459,7 +497,7 @@ func writeIssuesListHuman(w io.Writer, storePath string, entries []issues.Issue,
 		if _, err := fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n",
 			strings.ToUpper(displayIDs[issue.ID]), issue.OccurrenceCount, line,
 			humanDuration(now.Sub(issue.LastSeen)), title,
-			truncateDisplay(culpritLocation(issue), maxWhereLen)); err != nil {
+			truncatePathDisplay(culpritLocation(issue), maxWhereLen)); err != nil {
 			return err
 		}
 	}
@@ -677,6 +715,21 @@ func truncateDisplay(s string, n int) string {
 		return s
 	}
 	return string(r[:n-3]) + "..."
+}
+
+// truncatePathDisplay shortens a "file:line"-shaped path to at most n
+// runes, keeping its TAIL — the filename and line number, the part someone
+// actually needs to find the culprit — rather than truncateDisplay's own
+// right-truncation, which would keep a long leading directory (e.g.
+// "examples/polyglot/") and cut off exactly the useful part. A leading "…"
+// marks the cut. See the polish review's "narrow the WHERE column ...
+// sensibly" finding.
+func truncatePathDisplay(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n || n <= 1 {
+		return s
+	}
+	return "…" + string(r[len(r)-(n-1):])
 }
 
 func writeIssueDetail(w io.Writer, out issueDetailOutput) error {
@@ -1045,7 +1098,7 @@ args>'.`,
 	cmd.Flags().StringVar(&root, "root", "", "git/codebase root for culprit/impact/blame lookups (default: discovered from the working directory)")
 	cmd.Flags().Bool("json", false, "emit the full monitor.issue_context.v1 JSON contract")
 	cmd.Flags().BoolVar(&md, "md", false, "emit a paste-ready markdown page for an agent")
-	return cmd
+	return silenceOwnErrors(cmd)
 }
 
 // printAmbiguousIssueError reports every candidate a short prefix matched.
@@ -1107,8 +1160,9 @@ const issuePageWidth = widgets.DefaultCodeFrameWidth
 // each degrading to an explicit "skipped: <detail>" line instead of a blank
 // section.
 func writeIssuePageHuman(w io.Writer, c *explain.Context) error {
-	left := fmt.Sprintf("%s  %s", c.Issue.ShortID, displayIssueValue(c.Issue.Title))
-	if _, err := fmt.Fprintln(w, padHeaderLine(left, issuePageBadges(c), issuePageWidth)); err != nil {
+	badges := issuePageBadges(c)
+	left := issuePageHeaderLeft(c.Issue.ShortID, displayIssueValue(c.Issue.Title), badges, issuePageWidth)
+	if _, err := fmt.Fprintln(w, padHeaderLine(left, badges, issuePageWidth)); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(w, "%s · first seen %s · last seen %s · %d event(s)%s\n\n",
@@ -1170,6 +1224,28 @@ func projectServiceLabel(issue explain.IssueSummary) string {
 	return issue.Project
 }
 
+// issuePageHeaderLeft builds "SHORTID  Title", truncating Title (with an
+// ellipsis — truncateDisplay) so that left, padHeaderLine's own minimum
+// 2-space gap, and badges together never exceed width — the fix for the
+// polish review's "the new issue header pads badges after the title but
+// never truncates it" finding: a long crash message used to push badges
+// well past 100 columns (one measured 254) instead of the roadmap mockup's
+// own compact, title-truncated shape ("Error: node workload: intentional
+// uncaught... js/workload.js:49"-style truncation, just applied to the
+// header's own title instead). A short title that already fits is
+// returned unchanged.
+func issuePageHeaderLeft(shortID, title, badges string, width int) string {
+	prefix := shortID + "  "
+	budget := width - len([]rune(prefix)) - 2 // padHeaderLine's own minimum gap.
+	if badges != "" {
+		budget -= len([]rune(badges))
+	}
+	if budget < 1 {
+		budget = 1
+	}
+	return prefix + truncateDisplay(title, budget)
+}
+
 // padHeaderLine right-aligns right against left, padded with spaces to
 // width total columns — the roadmap mockup's own header shape ("91F3
 // ValueError: bad row <n>                    regressed · error ·
@@ -1192,34 +1268,59 @@ func padHeaderLine(left, right string, width int) string {
 // issuePageStatusWord is the issue page header's own status word — lower-
 // case "regressed"/"new" (issueLabel's own convention, reused here so the
 // list and the page never disagree about what counts as new/regressed),
-// falling back to the issue's real store Status ("open"/"resolved"/
-// "ignored") when neither applies, matching the roadmap mockup's own
-// second example ("C4E0 ... open · error · handled").
+// matching the roadmap mockup's own second example ("C4E0 ... open ·
+// error · handled") for an ordinary open issue.
+//
+// A store Status other than "open" (resolved/ignored) is ALWAYS shown —
+// never silently replaced by "new"/"regressed", which used to make a
+// resolved or ignored issue's page read as if it were still open (the
+// polish review's "the issue page header no longer shows the issue's
+// actual state" finding: `monitor issues resolve` then `monitor issue`
+// showed "new" with no mention of resolved anywhere on the page). When
+// BOTH apply — a resolved/ignored issue that was also first seen recently,
+// or reopened — both show, status first: "resolved · new" or "ignored ·
+// regressed".
 func issuePageStatusWord(c *explain.Context) string {
 	now := time.Now()
-	if c.Timeline.Reopened > 0 {
-		return "regressed"
+	var label string
+	switch {
+	case c.Timeline.Reopened > 0:
+		label = "regressed"
+	case !c.Timeline.FirstSeen.IsZero() && now.Sub(c.Timeline.FirstSeen) < newIssueWindow:
+		label = "new"
 	}
-	if !c.Timeline.FirstSeen.IsZero() && now.Sub(c.Timeline.FirstSeen) < newIssueWindow {
-		return "new"
+	status := c.Issue.Status
+	switch {
+	case status != "" && status != string(issues.StatusOpen) && label != "":
+		return status + " · " + label
+	case status != "" && status != string(issues.StatusOpen):
+		return status
+	case label != "":
+		return label
+	default:
+		return status // "open" (the mockup's second example), or "" if genuinely unknown.
 	}
-	return c.Issue.Status
 }
 
 // issuePageBadges renders the issue page header's right-hand side — the
 // roadmap mockup §4's "regressed · error · handled": a status word
 // (issuePageStatusWord), the exception Level when known ("fatal"/"error"/
-// "warning" — "" for a non-exception issue kind or an older issue with no
-// persisted level omits this segment entirely rather than fabricating
-// one), and "handled"/"unhandled" when Handled is known (nil — no handled/
-// unhandled fact recorded at all — omits it, never guesses).
+// "warning"), falling back to Kind when there is no Level (a non-exception
+// issue kind such as "alert"/"investigation", or an older exception issue
+// with no persisted level — never dropping the issue's kind from the page
+// entirely, per the polish review's own finding), and "handled"/
+// "unhandled" when Handled is known (nil — no handled/unhandled fact
+// recorded at all — omits it, never guesses).
 func issuePageBadges(c *explain.Context) string {
 	parts := make([]string, 0, 3)
 	if s := issuePageStatusWord(c); s != "" {
 		parts = append(parts, s)
 	}
-	if c.Issue.Level != "" {
+	switch {
+	case c.Issue.Level != "":
 		parts = append(parts, c.Issue.Level)
+	case c.Issue.Kind != "":
+		parts = append(parts, c.Issue.Kind)
 	}
 	if c.Issue.Handled != nil {
 		if *c.Issue.Handled {

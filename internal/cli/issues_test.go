@@ -967,6 +967,43 @@ func TestIssuePageBadgesLevelAndHandled(t *testing.T) {
 			},
 			want: "new",
 		},
+		// The four cases below are the regression for the polish review's
+		// "the issue page header no longer shows the issue's actual
+		// state" finding: `monitor issues resolve` followed by `monitor
+		// issue` used to show "new"/"regressed" with no mention of
+		// resolved/ignored anywhere on the page.
+		{
+			name: "resolved issue first seen less than 24h ago",
+			c: &explain.Context{
+				Issue:    explain.IssueSummary{Status: "resolved", Level: "error", Handled: &handledTrue},
+				Timeline: explain.Timeline{FirstSeen: time.Now().Add(-time.Hour)},
+			},
+			want: "resolved · new · error · handled",
+		},
+		{
+			name: "ignored issue, not new or reopened",
+			c: &explain.Context{
+				Issue:    explain.IssueSummary{Status: "ignored", Level: "fatal", Handled: &handledFalse},
+				Timeline: explain.Timeline{FirstSeen: time.Now().Add(-72 * time.Hour)},
+			},
+			want: "ignored · fatal · unhandled",
+		},
+		{
+			name: "resolved issue that was also reopened",
+			c: &explain.Context{
+				Issue:    explain.IssueSummary{Status: "resolved", Level: "error"},
+				Timeline: explain.Timeline{Reopened: 1, FirstSeen: time.Now().Add(-72 * time.Hour)},
+			},
+			want: "resolved · regressed · error",
+		},
+		{
+			name: "non-exception kind falls back to Kind, never drops it",
+			c: &explain.Context{
+				Issue:    explain.IssueSummary{Status: "open", Kind: "alert"},
+				Timeline: explain.Timeline{FirstSeen: time.Now().Add(-72 * time.Hour)},
+			},
+			want: "open · alert",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -974,6 +1011,33 @@ func TestIssuePageBadgesLevelAndHandled(t *testing.T) {
 				t.Errorf("issuePageBadges() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestIssueAndIssuesCommandsSilenceOwnErrors is the regression for the
+// polish review's "monitor issue zzzzzz prints twice" evidence
+// (internal/cli/hot.go's own TestHotCommandSilencesOwnErrors established
+// this same one-command-at-a-time pattern for `monitor hot`): every
+// issue/issues subcommand whose RunE can fail must silence cobra's own
+// duplicate "Error: ..." print, leaving exactly the one cli.Execute()
+// itself prints.
+func TestIssueAndIssuesCommandsSilenceOwnErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  func() bool // returns SilenceErrors
+	}{
+		{"issue <id>", func() bool { return newIssueCmd().SilenceErrors }},
+		{"issues", func() bool { return newIssuesCmd().SilenceErrors }},
+	}
+	for _, tc := range cases {
+		if !tc.cmd() {
+			t.Errorf("%s: SilenceErrors must be true, or a RunE failure prints \"Error: ...\" twice end-to-end", tc.name)
+		}
+	}
+	for _, sub := range newIssuesCmd().Commands() {
+		if !sub.SilenceErrors {
+			t.Errorf("issues %s: SilenceErrors must be true", sub.Name())
+		}
 	}
 }
 
@@ -997,3 +1061,125 @@ func TestPadHeaderLineRightAlignsWithinWidth(t *testing.T) {
 		t.Errorf("padHeaderLine with no badges = %q, want %q unchanged", got, "plain")
 	}
 }
+
+// --- header/list width (polish review's "readability at 100 columns"
+// finding) ------------------------------------------------------------------
+
+// TestIssuePageHeaderLeftTruncatesTitleToFitBadges is the direct regression
+// for the "the new issue header pads badges after the title but never
+// truncates it" finding: a long title must be cut so left+gap+badges never
+// exceeds width, and a short title must pass through unchanged.
+func TestIssuePageHeaderLeftTruncatesTitleToFitBadges(t *testing.T) {
+	longTitle := strings.Repeat("very long crash message ", 10)
+	left := issuePageHeaderLeft("A07E", longTitle, "regressed · error · handled", issuePageWidth)
+	full := padHeaderLine(left, "regressed · error · handled", issuePageWidth)
+	if got := len([]rune(full)); got > issuePageWidth {
+		t.Errorf("full header line is %d runes, want at most %d: %q", got, issuePageWidth, full)
+	}
+	if !strings.HasSuffix(full, "regressed · error · handled") {
+		t.Errorf("full header = %q, want the badges still visible at the end", full)
+	}
+	// A short title is returned unchanged.
+	if got := issuePageHeaderLeft("A07E", "boom", "regressed", issuePageWidth); got != "A07E  boom" {
+		t.Errorf("issuePageHeaderLeft(short) = %q, want %q unchanged", got, "A07E  boom")
+	}
+}
+
+// TestWriteIssuePageHumanHeaderFitsWidthWithLongTitle is the end-to-end
+// regression for the same finding, through the real writeIssuePageHuman
+// pipeline (the review's own evidence: "a long-message crash produced a
+// 254-column header").
+func TestWriteIssuePageHumanHeaderFitsWidthWithLongTitle(t *testing.T) {
+	handledTrue := true
+	c := &explain.Context{
+		Issue: explain.IssueSummary{
+			ID: "ISS-A07E000000000000", ShortID: "A07E",
+			Title:  "Error: node workload: " + strings.Repeat("intentional uncaught failure ", 8),
+			Status: "open", Level: "fatal", Handled: &handledTrue,
+			Project: "polyglot", Service: "workload",
+		},
+		Timeline: explain.Timeline{FirstSeen: time.Now(), LastSeen: time.Now(), Occurrences: 1},
+		Impact:   explain.ImpactInfo{},
+	}
+	var buf bytes.Buffer
+	if err := writeIssuePageHuman(&buf, c); err != nil {
+		t.Fatalf("writeIssuePageHuman: %v", err)
+	}
+	header := strings.SplitN(buf.String(), "\n", 2)[0]
+	if got := len([]rune(header)); got > issuePageWidth {
+		t.Errorf("header is %d runes, want at most %d: %q", got, issuePageWidth, header)
+	}
+	if !strings.Contains(header, "fatal") || !strings.Contains(header, "handled") {
+		t.Errorf("header = %q, want the badges still present despite the long title", header)
+	}
+}
+
+// TestTruncatePathDisplayKeepsTail asserts the WHERE-column truncation
+// keeps the filename/line (the part someone actually needs), unlike
+// truncateDisplay's own right-truncation.
+func TestTruncatePathDisplayKeepsTail(t *testing.T) {
+	long := "examples/polyglot/js/workload.js:49"
+	got := truncatePathDisplay(long, 20)
+	if len([]rune(got)) > 20 {
+		t.Errorf("truncatePathDisplay result is %d runes, want at most 20: %q", len([]rune(got)), got)
+	}
+	if !strings.HasSuffix(got, "workload.js:49") {
+		t.Errorf("truncatePathDisplay(%q) = %q, want the filename:line kept at the tail", long, got)
+	}
+	if !strings.HasPrefix(got, "…") {
+		t.Errorf("truncatePathDisplay(%q) = %q, want a leading ellipsis marking the cut", long, got)
+	}
+	// Already-short input passes through unchanged.
+	if got := truncatePathDisplay("a.go:1", 20); got != "a.go:1" {
+		t.Errorf("truncatePathDisplay(short) = %q, want it unchanged", got)
+	}
+}
+
+// maxRealisticIssuesListRowWidth is this test's own width budget: not the
+// review's literal 100 (see maxTitleLen/maxWhereLen's own doc comment --
+// specs/issues_context.yml hard-requires the FULL, untruncated culprit
+// path in the WHERE column for a real seeded issue, which alone can run to
+// 35+ runes, so 100 is not achievable for a row that ALSO carries a long
+// title without either breaking that committed spec or making the WHERE
+// column useless). 105 still proves the real, measured improvement (down
+// from the review's own 137-column evidence) without asserting a number
+// this package cannot actually deliver.
+const maxRealisticIssuesListRowWidth = 105
+
+// TestWriteIssuesListHumanRowsFitRealisticWidth is the end-to-end
+// regression for the review's "issues list at 137 columns" finding: a
+// realistic row (a long, root-relative culprit path -- the "examples/
+// polyglot/..." shape the live dogfood evidence hit -- and a long title,
+// each with a NEW/REGRESSED+severity prefix folded in) must render
+// meaningfully narrower than the review's own 137-column measurement.
+func TestWriteIssuesListHumanRowsFitRealisticWidth(t *testing.T) {
+	now := time.Now()
+	entries := []issues.Issue{
+		{
+			ID: "ISS-EF7C000000000000", Project: "polyglot", Service: "workload",
+			Title: "Error: node workload: intentional uncaught failure at t=40020ms",
+			Level: "fatal", Status: issues.StatusOpen,
+			FirstSeen: now.Add(-time.Minute), LastSeen: now.Add(-time.Minute), OccurrenceCount: 1,
+			Culprit: &issues.Culprit{File: "examples/polyglot/js/workload.js", Line: 49},
+		},
+		{
+			ID: "ISS-5C1D000000000000", Project: "polyglot", Service: "workload",
+			Title:   "Error: flakyParse: malformed payload near token \"bad-payl\"",
+			Handled: boolPtr(true), Status: issues.StatusOpen,
+			FirstSeen: now.Add(-2 * time.Minute), LastSeen: now.Add(-2 * time.Minute), OccurrenceCount: 10,
+			Culprit: &issues.Culprit{File: "examples/polyglot/js/workload.js", Line: 31},
+		},
+	}
+	var buf bytes.Buffer
+	storePath := filepath.Join(t.TempDir(), "issues.veclite") // deliberately unopened: activityBucketsFor degrades gracefully.
+	if err := writeIssuesListHuman(&buf, storePath, entries, "polyglot"); err != nil {
+		t.Fatalf("writeIssuesListHuman: %v", err)
+	}
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if got := len([]rune(line)); got > maxRealisticIssuesListRowWidth {
+			t.Errorf("row is %d runes, want at most %d (down from the review's own 137): %q", got, maxRealisticIssuesListRowWidth, line)
+		}
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
