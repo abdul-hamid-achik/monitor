@@ -1633,6 +1633,26 @@ func nonEmpty(s, fallback string) string {
 const (
 	inlineHotLineThresholdPct    = 90.0
 	inlineCalleeSelfThresholdPct = 1.0
+	// inlineCallerMinSelfPct/inlineCallerMinSelfSamples are the minimum
+	// evidence addInliningWarnings requires from the CALLER's own line
+	// before treating a "no separately-sampled callee" shape as anything
+	// worth flagging at all — see the polish-wave review (heat.go:1773): a
+	// dispatcher/wrapper whose call line only ever received a handful of
+	// samples reaches PctOfFunction>=inlineHotLineThresholdPct trivially
+	// (it's the only line that function ever self-sampled at all), which is
+	// not evidence of inlining, just of a thin sample. A caller passes this
+	// gate when EITHER its own self share of the whole profile OR the raw
+	// sample count on that one line clears a real minimum.
+	inlineCallerMinSelfPct     = 5.0
+	inlineCallerMinSelfSamples = int64(5)
+	// inlineCalleeCumRatioGuard is the other half of that same review
+	// finding: a callee that already carries real CUMULATIVE weight under
+	// THIS caller (HeatCallee.Cum — meaning it has its own node in the
+	// sampled call tree, with real subtree weight flowing through it) is
+	// positive evidence it was NOT inlined away, however small its own
+	// SELF time is. "Comparable to or larger than the caller's self on this
+	// line" is approximated as at least half of it.
+	inlineCalleeCumRatioGuard = 0.5
 )
 
 // InlineWarningPrefix is the fixed lead-in every addInliningWarnings message
@@ -1679,19 +1699,92 @@ var inlineCallExcluded = map[string]bool{
 	"encodeURIComponent": true, "decodeURIComponent": true,
 	"structuredClone": true, "fetch": true, "Symbol": true, "WeakMap": true,
 	"WeakSet": true, "Proxy": true, "Reflect": true,
+	// Additional keywords the regex's shape ("identifier followed by an
+	// optionally-whitespace-separated '(') would otherwise mistake for a
+	// bare call -- "async (x) =>", "super(...)", "import(...)",
+	// "void 0", "delete obj[k]" (never parenthesized like this in real
+	// code, but excluded defensively), "throw(...)"-shaped macros, and a
+	// "case (" style guard clause -- see the polish-wave review's blocker
+	// finding (heat.go:1688).
+	"async": true, "super": true, "import": true, "void": true,
+	"delete": true, "throw": true, "case": true,
 }
 
+// inlineNewCallRe matches a bare "new" keyword immediately (only whitespace
+// between) preceding the point calleeCallOnLine is about to treat as a
+// function-call identifier — "new Uint8Array(" — so a constructor
+// invocation is never mistaken for the caller-inlines-callee shape this
+// heuristic targets: a typed-array or other well-known constructor can't
+// all be enumerated in inlineCallExcluded by name, but "preceded by new" is
+// a single, general rule that catches all of them.
+var inlineNewCallRe = regexp.MustCompile(`\bnew\s*$`)
+
 // calleeCallOnLine returns the first bare-identifier function-call name on
-// code that survives inlineCallExcluded's denylist, or "" when the line has
-// no such call at all (a plain assignment, a loop header with no call, a
-// property access only, ...).
+// code that survives inlineCallExcluded's denylist and isn't a `new X(...)`
+// constructor call, or "" when the line has no such call at all (a plain
+// assignment, a loop header with no call, a property access only, a
+// constructor call, ...). code is stripped of `//`/`/* */` comments and
+// string/template-literal contents first — see stripJSCommentsAndStrings —
+// so a trailing comment or a string literal that happens to LOOK like a
+// call (the polish-wave review's exact false-positive: a "// HOT LINE (line
+// 16)" comment on a real hot line matched "LINE(" as a bogus callee name)
+// can never be mistaken for real code.
 func calleeCallOnLine(code string) string {
-	for _, m := range inlineCallRe.FindAllStringSubmatch(code, -1) {
-		if name := m[1]; !inlineCallExcluded[name] {
-			return name
+	code = stripJSCommentsAndStrings(code)
+	for _, m := range inlineCallRe.FindAllStringSubmatchIndex(code, -1) {
+		name := code[m[2]:m[3]]
+		if inlineCallExcluded[name] {
+			continue
 		}
+		if inlineNewCallRe.MatchString(code[:m[2]]) {
+			continue // `new Name(...)`: a constructor call, not a plain function call.
+		}
+		return name
 	}
 	return ""
+}
+
+// stripJSCommentsAndStrings returns code with every `//...` line comment,
+// `/*...*/` block comment, and single/double/backtick string or template
+// literal's CONTENTS removed — a small, line-local (never multi-line) text
+// scan, not a real JS tokenizer, but enough for calleeCallOnLine's own
+// purpose: it must never mistake a word inside a comment or a string for a
+// real function-call identifier. An unterminated string or block comment on
+// this one line (the rest having already been cut off elsewhere, e.g. by
+// HeatLine.Code's own truncation) just drops everything from that point on,
+// rather than misinterpreting whatever follows as code.
+func stripJSCommentsAndStrings(code string) string {
+	var b strings.Builder
+	var quote byte
+	n := len(code)
+	for i := 0; i < n; i++ {
+		c := code[i]
+		if quote != 0 {
+			if c == '\\' && i+1 < n {
+				i++ // skip the escaped character too, so \" doesn't end the string early.
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch {
+		case c == '\'' || c == '"' || c == '`':
+			quote = c
+		case c == '/' && i+1 < n && code[i+1] == '/':
+			return b.String() // the rest of the line is a line comment.
+		case c == '/' && i+1 < n && code[i+1] == '*':
+			if end := strings.Index(code[i+2:], "*/"); end >= 0 {
+				i += 2 + end + 1 // skip past the closing "*/".
+				continue
+			}
+			return b.String() // unterminated block comment: drop the rest.
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // hottestLineOf returns f's own hottest line by PctOfFunction (ties broken
@@ -1773,6 +1866,18 @@ func addInliningWarnings(hm *Heatmap) {
 		if !ok || line.PctOfFunction < inlineHotLineThresholdPct || strings.TrimSpace(line.Code) == "" {
 			continue
 		}
+		// Minimum caller evidence (the review's "no minimum on the
+		// caller's own self time" finding): a caller whose own self share
+		// of the WHOLE profile is negligible AND whose hot line's raw
+		// sample count is negligible hasn't earned a confident-looking
+		// finding just because it's the only line that function ever
+		// self-sampled at all -- see inlineCallerMinSelfPct's own doc
+		// comment for the false-positive shape this guards against (a
+		// 1-sample dispatcher whose call line trivially "dominates" its
+		// own function).
+		if f.SelfPct < inlineCallerMinSelfPct && line.Self < inlineCallerMinSelfSamples {
+			continue
+		}
 		callee := calleeCallOnLine(line.Code)
 		if callee == "" || callee == f.Name {
 			continue
@@ -1780,11 +1885,54 @@ func addInliningWarnings(hm *Heatmap) {
 		if selfPct, present := selfPctByName[callee]; present && selfPct >= inlineCalleeSelfThresholdPct {
 			continue // a real, separately-sampled function -- not inlined away.
 		}
+		// Ratio guard (the same review finding's other half): a callee
+		// that already carries real CUMULATIVE weight under THIS caller —
+		// meaning it has its own node in the sampled call tree at all,
+		// with real subtree weight flowing through it — is positive
+		// evidence it was NOT inlined away, however small its own SELF
+		// time is (a genuinely inlined callee has NO node of its own at
+		// all, so its Cum here is exactly 0 — see
+		// TestAddInliningWarningsDetectsFullyInlinedCallee — while a real,
+		// separately-sampled-but-mostly-callee-bound function like the
+		// review's run()/work() dispatcher example carries substantial
+		// cum despite ~0 self).
+		if calleeCum := calleeCumUnderCaller(f, callee); calleeCum > 0 &&
+			float64(calleeCum) >= float64(line.Self)*inlineCalleeCumRatioGuard {
+			continue
+		}
+		// Hard precondition (the review's other blocker half): the callee
+		// must have a READABLE DECLARATION in the caller's own in-app
+		// file, via the exact same lookup the optional secondary frame
+		// uses (buildInlinedCallee) — never just "some bare identifier
+		// followed by a paren". Without this, an imported function
+		// (`import { transform } from './lib'`), a builtin the denylist
+		// doesn't happen to enumerate, or any other name that merely LOOKS
+		// like an in-app call gets silently, falsely flagged. When no
+		// declaration is found, this heuristic has nothing left to stand
+		// on and stays silent rather than guessing.
+		ic := buildInlinedCallee(f, callee, line.Line)
+		if len(ic.Body) == 0 {
+			continue
+		}
 		hm.Warnings = append(hm.Warnings, fmt.Sprintf(
 			"%s %s() was inlined into %s; the time on line %d is spent inside %s",
 			InlineWarningPrefix, callee, nonEmpty(f.Name, "(unknown)"), line.Line, callee))
-		hm.InlinedCallees = append(hm.InlinedCallees, buildInlinedCallee(f, callee, line.Line))
+		hm.InlinedCallees = append(hm.InlinedCallees, ic)
 	}
+}
+
+// calleeCumUnderCaller returns name's own Cum entry within f's Callees (0
+// when name never appears there at all) — see addInliningWarnings' ratio
+// guard, which reads this as evidence a "no separately-sampled callee"
+// finding is actually wrong: real, non-zero cum under THIS specific caller
+// means the callee DID get its own node in the sampled call tree.
+func calleeCumUnderCaller(f *HeatFunction, name string) int64 {
+	for _, c := range f.Callees {
+		if c.Func == name {
+			return c.Cum
+		}
+	}
+	return 0
 }
 
 // inlineCalleeDeclPattern builds buildInlinedCallee's own declaration-line

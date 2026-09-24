@@ -1451,6 +1451,224 @@ func TestAddInliningWarningsNeverAppliesToPprofSource(t *testing.T) {
 	}
 }
 
+// --- calleeCallOnLine / stripJSCommentsAndStrings unit tests (polish-wave
+// blocker: false JIT-inlining positives) ------------------------------------
+
+// TestCalleeCallOnLineStripsTrailingLineComment is the EXACT regression for
+// the review's blocker: examples/polyglot/js/workload.js's real hot line 17
+// ("s += JSON.stringify({...}); // HOT LINE (line 16)") used to match
+// "LINE(" out of the trailing comment as a bogus callee name.
+func TestCalleeCallOnLineStripsTrailingLineComment(t *testing.T) {
+	code := `s += JSON.stringify({ i, item, doubled, pad: 'x'.repeat(64) }); // HOT LINE (line 16)`
+	if got := calleeCallOnLine(code); got != "" {
+		t.Errorf("calleeCallOnLine(%q) = %q, want \"\" (LINE is inside a trailing comment, and JSON.stringify/repeat are property calls)", code, got)
+	}
+}
+
+func TestCalleeCallOnLineStripsBlockComment(t *testing.T) {
+	code := `return /* call helper(x) here */ items.length;`
+	if got := calleeCallOnLine(code); got != "" {
+		t.Errorf("calleeCallOnLine(%q) = %q, want \"\" (helper is inside a block comment)", code, got)
+	}
+}
+
+func TestCalleeCallOnLineStripsStringLiteralContents(t *testing.T) {
+	code := `const msg = "retry(x) will happen";`
+	if got := calleeCallOnLine(code); got != "" {
+		t.Errorf("calleeCallOnLine(%q) = %q, want \"\" (retry is inside a string literal)", code, got)
+	}
+}
+
+// TestCalleeCallOnLineSkipsAsyncArrow is the regression for the review's
+// "async (x) =>" false-positive case (items.map(async (x) => ...)): with
+// "async" now denylisted, calleeCallOnLine must not report it as a callee.
+func TestCalleeCallOnLineSkipsAsyncArrow(t *testing.T) {
+	code := `items.map(async (x) => x);`
+	if got := calleeCallOnLine(code); got != "" {
+		t.Errorf("calleeCallOnLine(%q) = %q, want \"\" (map is a property call, async is a keyword)", code, got)
+	}
+}
+
+// TestCalleeCallOnLineSkipsNewConstructorCall is the regression for the
+// review's "new Uint8Array(n)" false-positive case: a `new X(...)`
+// constructor call must never be reported as an inlinable callee, for any
+// X -- not just the specific names inlineCallExcluded happens to enumerate.
+func TestCalleeCallOnLineSkipsNewConstructorCall(t *testing.T) {
+	for _, code := range []string{
+		`const buf = new Uint8Array(n);`,
+		`return new Map(entries);`,
+	} {
+		if got := calleeCallOnLine(code); got != "" {
+			t.Errorf("calleeCallOnLine(%q) = %q, want \"\" (a `new X(...)` constructor call)", code, got)
+		}
+	}
+}
+
+// TestAddInliningWarningsIgnoresLineCommentEndToEnd is the BuildHeatmap-level
+// version of TestCalleeCallOnLineStripsTrailingLineComment, reading the
+// REAL examples/polyglot/js/workload.js file (the exact file the blocker's
+// live-capture evidence used) so a fix that only worked in the narrower
+// unit test wouldn't be missed here: heavyStringify's own hot line 17
+// carries the same "// HOT LINE (line 16)" trailing comment, and this is
+// its OWN function's hot line (not inlined at all -- heavyStringify is
+// self-sampled directly), so no warning must ever fire for it.
+func TestAddInliningWarningsIgnoresLineCommentEndToEnd(t *testing.T) {
+	jsPath, err := filepath.Abs("../../examples/polyglot/js/workload.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(jsPath); err != nil {
+		t.Skipf("fixture not found (repo layout changed?): %v", err)
+	}
+	raw := `{
+		"nodes": [
+			{"id":1,"callFrame":{"functionName":"(root)","url":"","lineNumber":-1},"hitCount":0,"children":[2]},
+			{"id":2,"callFrame":{"functionName":"heavyStringify","url":"file://` + jsPath + `","lineNumber":10},"hitCount":99,"positionTicks":[{"line":17,"ticks":99}]}
+		],
+		"samples": [2],
+		"startTime": 0, "endTime": 1000
+	}`
+	var cp cdpProfile
+	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
+		t.Fatal(err)
+	}
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true})
+	if err != nil {
+		t.Fatalf("BuildHeatmap: %v", err)
+	}
+	for _, w := range hm.Warnings {
+		if strings.HasPrefix(w, InlineWarningPrefix) {
+			t.Errorf("unexpected inlining warning %q from a trailing line comment on heavyStringify's own real hot line: %v", w, hm.Warnings)
+		}
+	}
+}
+
+// TestAddInliningWarningsSkipsWhenCalleeHasNoDeclarationInCallerFile is the
+// hard-precondition regression: a callee that's only IMPORTED, never
+// declared, in the caller's own file must never be flagged, however much it
+// looks like a bare in-app call textually.
+func TestAddInliningWarningsSkipsWhenCalleeHasNoDeclarationInCallerFile(t *testing.T) {
+	dir := t.TempDir()
+	jsPath := filepath.Join(dir, "app.js")
+	src := "import { transform } from './lib';\n\nfunction run(items) {\n  return transform(items);\n}\n"
+	if err := os.WriteFile(jsPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{
+		"nodes": [
+			{"id":1,"callFrame":{"functionName":"(root)","url":"","lineNumber":-1},"hitCount":0,"children":[2]},
+			{"id":2,"callFrame":{"functionName":"run","url":"file://` + jsPath + `","lineNumber":2},"hitCount":99,"positionTicks":[{"line":4,"ticks":99}]}
+		],
+		"samples": [2],
+		"startTime": 0, "endTime": 1000
+	}`
+	var cp cdpProfile
+	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
+		t.Fatal(err)
+	}
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true})
+	if err != nil {
+		t.Fatalf("BuildHeatmap: %v", err)
+	}
+	for _, w := range hm.Warnings {
+		if strings.HasPrefix(w, InlineWarningPrefix) {
+			t.Errorf("unexpected inlining warning %q: transform is only imported, never declared, in app.js", w)
+		}
+	}
+	if len(hm.InlinedCallees) != 0 {
+		t.Errorf("InlinedCallees = %+v, want none (no readable declaration found)", hm.InlinedCallees)
+	}
+}
+
+// --- addInliningWarnings' min-self / ratio-guard tests (major review
+// finding: heat.go:1773, "no minimum on the caller's own self time") -------
+
+// TestAddInliningWarningsSkipsLowSelfCaller is the review's exact
+// reproduction: main has a SINGLE self tick on its own call line ("return
+// run(cfg);"), trivially reaching 100% of its own (tiny) function total --
+// not real evidence of anything. run has 0 self of its own; work (further
+// down the call tree) carries the real weight.
+func TestAddInliningWarningsSkipsLowSelfCaller(t *testing.T) {
+	dir := t.TempDir()
+	jsPath := filepath.Join(dir, "app.js")
+	src := "function work(cfg) {\n  return 1;\n}\n\nfunction run(cfg) {\n  return work(cfg);\n}\n\nfunction main(cfg) {\n  return run(cfg);\n}\n"
+	if err := os.WriteFile(jsPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{
+		"nodes": [
+			{"id":1,"callFrame":{"functionName":"(root)","url":"","lineNumber":-1},"hitCount":0,"children":[2]},
+			{"id":2,"callFrame":{"functionName":"main","url":"file://` + jsPath + `","lineNumber":8},"hitCount":1,"children":[3],"positionTicks":[{"line":10,"ticks":1}]},
+			{"id":3,"callFrame":{"functionName":"run","url":"file://` + jsPath + `","lineNumber":4},"hitCount":0,"children":[4]},
+			{"id":4,"callFrame":{"functionName":"work","url":"file://` + jsPath + `","lineNumber":0},"hitCount":99,"positionTicks":[{"line":2,"ticks":99}]}
+		],
+		"samples": [2],
+		"startTime": 0, "endTime": 1000
+	}`
+	var cp cdpProfile
+	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
+		t.Fatal(err)
+	}
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true})
+	if err != nil {
+		t.Fatalf("BuildHeatmap: %v", err)
+	}
+	main := findHeatFunc(t, hm, "main")
+	if main.SelfPct >= inlineCallerMinSelfPct {
+		t.Fatalf("test setup: main.SelfPct = %.1f, want it under %v to exercise the low-self guard", main.SelfPct, inlineCallerMinSelfPct)
+	}
+	for _, w := range hm.Warnings {
+		if strings.HasPrefix(w, InlineWarningPrefix) {
+			t.Errorf("unexpected inlining warning %q: main's own self share (1 sample) is too small to be evidence of anything", w)
+		}
+	}
+}
+
+// TestAddInliningWarningsSkipsWhenCalleeHasRealCumUnderCaller isolates the
+// ratio guard specifically: main's own self share is well above the min-self
+// gate (so that guard alone would NOT save this case), but "run" -- the
+// callee main's hot line calls -- carries substantial cum under main (a
+// real node in the sampled call tree, via a further child), which is
+// positive evidence it was not inlined away despite 0% self of its own.
+func TestAddInliningWarningsSkipsWhenCalleeHasRealCumUnderCaller(t *testing.T) {
+	dir := t.TempDir()
+	jsPath := filepath.Join(dir, "app.js")
+	src := "function work(cfg) {\n  return 1;\n}\n\nfunction run(cfg) {\n  return work(cfg);\n}\n\nfunction main(cfg) {\n  return run(cfg);\n}\n"
+	if err := os.WriteFile(jsPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{
+		"nodes": [
+			{"id":1,"callFrame":{"functionName":"(root)","url":"","lineNumber":-1},"hitCount":0,"children":[2]},
+			{"id":2,"callFrame":{"functionName":"main","url":"file://` + jsPath + `","lineNumber":8},"hitCount":10,"children":[3],"positionTicks":[{"line":10,"ticks":10}]},
+			{"id":3,"callFrame":{"functionName":"run","url":"file://` + jsPath + `","lineNumber":4},"hitCount":0,"children":[4]},
+			{"id":4,"callFrame":{"functionName":"work","url":"file://` + jsPath + `","lineNumber":0},"hitCount":50,"positionTicks":[{"line":2,"ticks":50}]}
+		],
+		"samples": [2],
+		"startTime": 0, "endTime": 1000
+	}`
+	var cp cdpProfile
+	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
+		t.Fatal(err)
+	}
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true})
+	if err != nil {
+		t.Fatalf("BuildHeatmap: %v", err)
+	}
+	main := findHeatFunc(t, hm, "main")
+	if main.SelfPct < inlineCallerMinSelfPct {
+		t.Fatalf("test setup: main.SelfPct = %.1f, want it >= %v so the min-self guard alone can't explain a skip here", main.SelfPct, inlineCallerMinSelfPct)
+	}
+	if calleeCumUnderCaller(&main, "run") <= 0 {
+		t.Fatalf("test setup: run must carry real cum under main (via its child work) for this test to isolate the ratio guard")
+	}
+	for _, w := range hm.Warnings {
+		if strings.HasPrefix(w, InlineWarningPrefix) {
+			t.Errorf("unexpected inlining warning %q: run carries real cum under main (a genuine node in the call tree), not inlined away", w)
+		}
+	}
+}
+
 func copyTestdataFile(t *testing.T, src, dst string) {
 	t.Helper()
 	data, err := os.ReadFile(src)
