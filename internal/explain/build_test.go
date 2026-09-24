@@ -517,3 +517,79 @@ func TestBuildFitsBriefBudgetWithOversizedMessage(t *testing.T) {
 		t.Fatalf("standard size = %d bytes, want <= %d", len(data2), standardMaxBytes)
 	}
 }
+
+// TestBuildRedactScrubsEnvSecretInLiveSnippet guards the read-side
+// defense-in-depth pass (Options.Redact) against secret ENV VALUES, not
+// just secret shapes: the culprit snippet is read LIVE from disk, so a
+// secret that leaked into the source file was never seen by the
+// ingest-time scrubber, and redactContext must carry the current
+// process's secret env values (scrub.WithValues) for exactly this case.
+func TestBuildRedactScrubsEnvSecretInLiveSnippet(t *testing.T) {
+	// Deliberately shapeless (no Bearer/JWT/AKIA/sk_live/... shape): a
+	// value a shape detector already recognizes would be redacted even
+	// without the WithValues wiring under test. Built by concatenation
+	// per AGENTS.md so no provider-shaped literal is pushed.
+	secret := "env_" + "plainopaque-4a7f19c3"
+	t.Setenv("FAKE_API_TOKEN", secret)
+
+	root := newGitRepo(t, map[string]string{
+		"src/app.go": "package app\n\nfunc doWork() {\n\tpanic(\"boom\") // token=" + secret + "\n}\n",
+	})
+	setToolPATH(t, t.TempDir()) // no codemap/vecgrep -- honest degradation; git stays real
+
+	storePath := newTestStore(t)
+	abs := filepath.Join(root, "src/app.go")
+	ex := stacktrace.Exception{
+		Runtime: "go", Type: "panic", Value: "boom", Parser: "gopanic", Level: "fatal",
+		Frames: []stacktrace.Frame{{Function: "doWork", AbsPath: abs, Filename: abs, Lineno: 4}},
+	}
+	id := project.Identity{Slug: "polyglot", Service: "workload", Root: root, GitRoot: root}
+	res, err := issues.RecordException(context.Background(), storePath, issues.DefaultWriterWait, ex, id, contextids.IDs{}, issues.RecordExceptionOptions{ObservedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("RecordException: %v", err)
+	}
+
+	store, err := issues.OpenReadOnly(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Redact:false (the human-terminal default): no second pass runs, so
+	// the live snippet keeps the secret verbatim -- that output stays on
+	// the user's own machine.
+	plain, err := Build(context.Background(), store, res.Issue.ID, Options{Budget: BudgetStandard, Root: root})
+	if err != nil {
+		t.Fatalf("Build (Redact:false): %v", err)
+	}
+	if plain.Culprit == nil || plain.Culprit.Snippet == nil || len(plain.Culprit.Snippet.Lines) == 0 {
+		t.Fatalf("precondition failed: no snippet to redact: %+v", plain.Culprit)
+	}
+	plainJoined := strings.Join(plain.Culprit.Snippet.Lines, "\n")
+	if !strings.Contains(plainJoined, secret) {
+		t.Errorf("Redact:false must keep the env secret visible, snippet = %q", plainJoined)
+	}
+	if plain.Privacy.Scrubbed != 0 {
+		t.Errorf("Privacy.Scrubbed = %d, want 0 when Redact is false", plain.Privacy.Scrubbed)
+	}
+
+	// Redact:true (MCP / --md): the exact env value is replaced even
+	// though no shape detector could ever recognize it.
+	redacted, err := Build(context.Background(), store, res.Issue.ID, Options{Budget: BudgetStandard, Root: root, Redact: true})
+	if err != nil {
+		t.Fatalf("Build (Redact:true): %v", err)
+	}
+	if redacted.Culprit == nil || redacted.Culprit.Snippet == nil || len(redacted.Culprit.Snippet.Lines) == 0 {
+		t.Fatalf("precondition failed: no snippet rendered: %+v", redacted.Culprit)
+	}
+	redactedJoined := strings.Join(redacted.Culprit.Snippet.Lines, "\n")
+	if strings.Contains(redactedJoined, secret) {
+		t.Errorf("Redact:true leaked the env secret into the snippet: %q", redactedJoined)
+	}
+	if !strings.Contains(redactedJoined, "[redacted]") {
+		t.Errorf("Redact:true snippet does not carry the [redacted] token: %q", redactedJoined)
+	}
+	if redacted.Privacy.Scrubbed < 1 {
+		t.Errorf("Privacy.Scrubbed = %d, want >= 1 (the snippet line)", redacted.Privacy.Scrubbed)
+	}
+}

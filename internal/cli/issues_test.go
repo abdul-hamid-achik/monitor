@@ -551,6 +551,37 @@ func TestIssueCommandHumanJSONAndMarkdown(t *testing.T) {
 	}
 }
 
+// TestIssueCommandMarkdownRedactsEnvSecretInSnippet is the --md-level
+// guard for the read-side scrub gap internal/explain's
+// TestBuildRedactScrubsEnvSecretInLiveSnippet covers at the Build level:
+// `monitor issue --md` emits a paste-ready page for an agent (AGENTS.md's
+// golden rule: scrub error text before returning it through --md), and
+// the culprit snippet is read LIVE from disk -- a secret env value that
+// leaked into the source file was never scrubbed at ingest, so this
+// path's explain.Options{Redact: true} must catch it.
+func TestIssueCommandMarkdownRedactsEnvSecretInSnippet(t *testing.T) {
+	noExternalToolsPATH(t)
+	// Shapeless and concatenated for the same reasons as explain's twin
+	// test: a detector-shaped value would pass even without the env-value
+	// wiring under test, and no provider-shaped literal is pushed.
+	secret := "env_" + "plainopaque-4a7f19c3"
+	t.Setenv("FAKE_API_TOKEN", secret)
+	root := newCLIRoot(t, "src/app.go", "package app\n\nfunc doWork() {\n\tpanic(\"boom\") // token="+secret+"\n}\n")
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	issue := seedCLIException(t, storePath, root, "src/app.go", 4, "doWork", time.Now().UTC())
+
+	md, err := executeIssueCommand(t, storePath, root, shortIssueID(issue.ID), "--md")
+	if err != nil {
+		t.Fatalf("issue --md: %v\n%s", err, md)
+	}
+	if strings.Contains(md, secret) {
+		t.Errorf("--md page leaked the env secret in the snippet:\n%s", md)
+	}
+	if !strings.Contains(md, "[redacted]") {
+		t.Errorf("--md snippet does not carry the [redacted] token:\n%s", md)
+	}
+}
+
 // TestIssueCommandHumanHeaderWording is the CLI-level regression for the
 // polish review's issue-page wording findings: "first seen just now · last
 // seen just now" (not the old "first now ago · last now ago"), the header

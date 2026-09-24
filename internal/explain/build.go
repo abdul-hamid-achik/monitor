@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -46,8 +47,14 @@ type Options struct {
 	// persisted. This catches text that could never have been scrubbed at
 	// ingest: the culprit snippet is read LIVE from disk, not from anything
 	// monitor ever wrote to the store. Defaults to false (normalizeOptions
-	// does NOT set it): every production caller (the CLI's `monitor issue`,
-	// MCP's monitor_issue) passes Redact: true explicitly; a caller that
+	// does NOT set it) because the human-terminal read needs no second
+	// pass: that output never leaves the user's own machine, and ingest
+	// already scrubbed the persisted exception. Every surface where the
+	// text DOES leave that machine -- an MCP response, an --md page an
+	// agent will paste elsewhere (AGENTS.md's golden rule: scrub error
+	// text before returning it through MCP or --md) -- must opt in, and
+	// every production caller (the CLI's `monitor issue`, MCP's
+	// monitor_issue) passes Redact: true explicitly; a caller that
 	// forgets to must not silently get scrubbing it didn't ask for, and
 	// nothing here infers "true" from context the way Budget/Now do.
 	Redact bool
@@ -349,7 +356,7 @@ func culpritInfoFor(ctx context.Context, root string, issue issues.Issue, degrad
 			info = &CulpritInfo{
 				File: result.File, Line: result.Line,
 				// mapping: "inferred" is fixed for EVERY message_search
-				// culprit (docs/contracts/local-sentry-naming.md §7: "siempre
+				// culprit (the naming ADR §7: "siempre
 				// marcado mapping: inferred") -- it reuses stacktrace.Frame's
 				// shared source-map confidence enum as the vocabulary for
 				// "this location was not read directly off a real frame".
@@ -485,9 +492,18 @@ func sortDegraded(d []Degraded) {
 
 // redactContext runs a defense-in-depth scrub pass over every free-text
 // field this read assembled from disk or the store (see Options.Redact's
-// doc comment), returning how many values it redacted.
+// doc comment), returning how many values it redacted. The scrubber also
+// carries the exact values of the CURRENT process's secret env vars
+// (scrub.SecretEnvValues over os.Environ), mirroring the ingest-side
+// scrubbers (devrun's detector, `stacktrace parse --record`): an opaque
+// secrets-manager value that leaked into a live-read snippet line has no
+// shape a detector can recognize, so only its literal value catches it.
+// The env at explain time may differ from the env at ingest time (a
+// replay read from another shell misses values, and picks up new ones) --
+// this pass is defense-in-depth on top of the ingest-time gate, never a
+// replacement for it.
 func redactContext(c *Context) int {
-	s := scrub.New()
+	s := scrub.New(scrub.WithValues(scrub.SecretEnvValues(os.Environ(), nil)))
 	c.Issue.Title = s.String(c.Issue.Title)
 	if c.Culprit != nil && c.Culprit.Snippet != nil {
 		for i, line := range c.Culprit.Snippet.Lines {
