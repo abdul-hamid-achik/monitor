@@ -146,7 +146,14 @@ func TestRecoveredPanicDump(t *testing.T) {
 	assertSummaries(t, Detect("[Recovery] panic recovered: boom\n"+stanza), []string{
 		`gopanic/go error handled panic: boom @main.handler@h.go:7(2)`,
 	})
-	for _, prev := range []string{"", "worker 3 stack:\n", "SIGQUIT: quit\n"} {
+	// log.Printf's timestamped "panic: <value>" still reports the panic
+	// (and its timestamp becomes ObservedAt, read here in testZone).
+	assertSummaries(t, detectIn("2026/09/22 10:00:00 panic: worker nil map write\n"+stanza, testZone), []string{
+		`gopanic/go error handled panic: worker nil map write @main.handler@h.go:7(2) [2026-09-22T16:00:00.000Z]`,
+	})
+	// Prose that merely contains the word "panic" does not: the dump
+	// below it stays a bare (SIGQUIT-like) thread dump.
+	for _, prev := range []string{"", "worker 3 stack:\n", "SIGQUIT: quit\n", "panic button pressed: deployment 42\n", "Press panic: red alert\n"} {
 		if exs := Detect(prev + stanza); len(exs) != 0 {
 			t.Errorf("goroutine dump after %q produced events: %s", prev, strings.Join(summarizeAll(exs), " | "))
 		}
@@ -272,6 +279,12 @@ func TestPythonHandledSignals(t *testing.T) {
 			`python/python error handled ValueError: bad @<module>@main.py:3(1) [2026-09-22T16:04:37.123Z]`},
 		{"flask-style logger line before", "ERROR in app: Exception on /items [GET]\n" + moduleTrace,
 			`python/python error handled ValueError: bad @<module>@main.py:3(1)`},
+		// The level word in prose or source code is not a logger record:
+		// the traceback stays unhandled/fatal at module top level.
+		{"prose level word before", "no ERROR here\n" + moduleTrace,
+			`python/python fatal unhandled ValueError: bad @<module>@main.py:3(1)`},
+		{"printed level word before", "print('ERROR: diagnostic')\n" + moduleTrace,
+			`python/python fatal unhandled ValueError: bad @<module>@main.py:3(1)`},
 		{"thread crash", "Exception in thread Thread-1 (worker):\n" + strings.Replace(moduleTrace, "<module>", "run", 1),
 			`python/python fatal unhandled ValueError: bad @run@main.py:3(1)`},
 		{"caught below the top level", strings.Replace(moduleTrace, "<module>", "handler", 1),

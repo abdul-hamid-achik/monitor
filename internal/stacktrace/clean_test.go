@@ -12,7 +12,10 @@ import (
 // no stack, Bun-like "N |" gutters (rustc, psql, markdown), JSON error lines
 // from non-Go loggers (winston, pino, bunyan, structlog, ECS), info-level
 // zap/tslog/Ruby Logger/Python logging records, Python warnings, Go test
-// failures and "panic" in the middle of a line.
+// failures, "panic" in the middle of a line, and prose "panic ...:" lines
+// (e.g. "panic button pressed: deployment 42") right before a SIGQUIT-style
+// goroutine dump: the word alone is not a panic report, so the dump is not
+// an event.
 func TestCleanLogsProduceNoEvents(t *testing.T) {
 	dir := filepath.Join("testdata", "clean")
 	entries, err := os.ReadDir(dir)

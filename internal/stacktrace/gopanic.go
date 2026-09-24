@@ -255,7 +255,15 @@ func goStanzaFrames(lines []string, header int) []Frame {
 // before it reports a panic; a bare dump (debug.PrintStack, SIGQUIT) is not.
 var (
 	reHTTPPanicPrev = regexp.MustCompile(`panic serving \S+: (.*)$`)
-	rePanicPrev     = regexp.MustCompile(`(?i)\bpanic(?:ked|king)?\b[^:]*?:\s+(.*)$`)
+	// rePanicPrev matches the panic report a recovering server logs just
+	// before a goroutine dump: the runtime prints "panic: <value>" at line
+	// start, log.Printf puts its timestamp in front ("2026/09/22 10:00:00
+	// panic: <value>"), and gin-style middleware adds a tag ("[Recovery]
+	// panic recovered: <value>"). The colon has to sit directly on the
+	// panic word: "panic button pressed: deployment 42" is prose that
+	// mentions a panic, not a panic report, and must not turn the thread
+	// dump below it into an event.
+	rePanicPrev = regexp.MustCompile(`(?i)^(?:(?:\[[^\]]*\]|\d[\d:,./+T-]*|[\w./-]+\.\w+:\d+:?)\s+)*(?:panic|panicked|panicking)(?:\s+recovered)?:\s+(.*)$`)
 )
 
 var goroutineDumpRule = blockRule{

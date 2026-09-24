@@ -49,9 +49,13 @@ var (
 	// The segment's closing "Type: message" (or bare "Type") line; a class
 	// defined in a function prints as "make.<locals>.LocalErr".
 	rePyClosingLine = regexp.MustCompile(`^[A-Za-z_][\w.<>]*(?::(?: .*)?)?$`)
-	// A log record with a warning-or-worse level on the line before a
-	// traceback: "2026-09-22 10:04:37,123 ERROR app: ...", "ERROR in app:".
-	rePyLogRecordPrev = regexp.MustCompile(`\b(ERROR|CRITICAL|EXCEPTION|FATAL|WARNING)\b`)
+	// A logger-shaped record with a warning-or-worse level on the line
+	// before a traceback: Python logging's formats put the level right
+	// after the leading asctime ("2026-09-22 10:04:37,123 ERROR app: ...")
+	// or at the start of the line (Flask's "ERROR in app: ..."). The level
+	// word in any other position is prose or source code ("no ERROR here",
+	// "print('ERROR: ...')") and must not mark the traceback handled.
+	rePyLogRecordPrev = regexp.MustCompile(`^(?:\d{4}-\d{2}-\d{2}[T ][\d:,.+TZ-]*\s+)?(ERROR|CRITICAL|EXCEPTION|FATAL|WARNING)(?::|\s)`)
 	// A line of an ExceptionGroup rendering ("  | ...", "  +-+----").
 	rePyGroupLine = regexp.MustCompile(`^\s+[|+]`)
 )

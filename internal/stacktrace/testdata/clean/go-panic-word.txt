@@ -1,0 +1,10 @@
+panic button pressed: deployment 42
+goroutine 1 [running]:
+main.main()
+	/repo/app/main.go:52 +0x98
+
+goroutine 18 [chan receive]:
+main.worker(...)
+	/repo/app/main.go:20
+created by main.main in goroutine 1
+	/repo/app/main.go:10 +0x24
