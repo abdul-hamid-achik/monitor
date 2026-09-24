@@ -388,6 +388,46 @@ func TestRunRegistersAndCleansUpLaunchRegistry(t *testing.T) {
 	}
 }
 
+// TestRunProfilePrunesEmptyProfileDirWhenNothingWasWritten is the minor
+// regression test for profileOutputDir's own doc comment: --profile
+// creates its private profiles/<launch-id>/ directory unconditionally
+// (NODE_OPTIONS/BUN_OPTIONS must be applied before the eventual leaf
+// runtime is known -- see applyInspectAndProfile), so a launch whose
+// target never reads either (a plain `sh` here, standing in for any
+// non-node/bun/deno target such as `go run .`) never writes a .cpuprofile
+// into it at all. That per-launch directory must not linger empty under
+// $XDG_STATE_HOME forever once Run has already reported "no .cpuprofile
+// was written" for it.
+func TestRunProfilePrunesEmptyProfileDirWhenNothingWasWritten(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", stateDir)
+
+	opts := baseOptions(t, []string{"sh", "-c", "echo child-ran; exit 0"})
+	opts.Profile = true
+	var stdout, stderr, banner bytes.Buffer
+	opts.Stdout, opts.Stderr, opts.Banner = &stdout, &stderr, &banner
+
+	result, err := Run(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.ProfilePath != "" {
+		t.Fatalf("ProfilePath = %q, want empty (a plain sh target never writes a .cpuprofile)", result.ProfilePath)
+	}
+	if !strings.Contains(banner.String(), "no .cpuprofile was written") {
+		t.Errorf("banner = %q, want the honest no-profile note", banner.String())
+	}
+
+	profilesRoot := filepath.Join(stateDir, "monitor", "profiles")
+	entries, err := os.ReadDir(profilesRoot)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", profilesRoot, err)
+	}
+	for _, e := range entries {
+		t.Errorf("leftover empty profile directory %s was not pruned", filepath.Join(profilesRoot, e.Name()))
+	}
+}
+
 // TestRunInspectRecordsBannerIntoRegistry is E3.3b's own wiring test (the
 // banner-parsing/port-owner logic itself is covered directly in
 // inspect_test.go/portowner_test.go): a `monitor run --inspect` launch

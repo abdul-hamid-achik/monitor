@@ -301,6 +301,9 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	// unwritable state directory) must never abort the launch itself --
 	// `monitor hot <service>` degrades to "unregistered" the same way it
 	// would if this launch had never called WriteRegistryEntry at all.
+	// ErrServiceNameInUse specifically (another, still-live launch already
+	// owns this project/name) gets its own one-line note instead of
+	// silently registering nothing with no explanation.
 	var regPath string
 	var regMu sync.Mutex
 	var regInspectors []RegistryInspector
@@ -313,7 +316,11 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		Scan:      scan,
 	}); werr == nil {
 		regPath = path
-		defer RemoveRegistryEntry(regPath)
+		defer RemoveRegistryEntry(regPath, launch.ID)
+	} else if errors.Is(werr, ErrServiceNameInUse) && !opts.Quiet {
+		fmt.Fprintln(banner, NoteBanner(fmt.Sprintf(
+			"service name %q is already registered by another running launch for project %q; `monitor hot %s` will resolve to THAT launch, not this one -- pass a different --name to register this one separately",
+			effectiveService, id.Slug, effectiveService)))
 	}
 	// bannerWG (see bannerScanningWriter's own doc comment) must be waited
 	// out BEFORE the RemoveRegistryEntry deferred above runs -- deferred
@@ -343,10 +350,19 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 				if regPath == "" {
 					return
 				}
+				// The whole read-modify-write (snapshot the accumulated
+				// inspectors list, then persist it) stays under regMu for
+				// its ENTIRE duration, not just the snapshot: two banners
+				// detected close together (e.g. a wrapper AND its node
+				// child each printing their own) run OnBanner concurrently
+				// on separate goroutines (see bannerScanningWriter's own
+				// doc comment), and releasing the lock between building
+				// the snapshot and writing it let whichever goroutine
+				// snapshotted FEWER inspectors still win the write race,
+				// silently dropping the other one from the persisted file.
 				regMu.Lock()
+				defer regMu.Unlock()
 				regInspectors = append(regInspectors, RegistryInspector{PID: b.PID, Port: b.Port, WS: b.WS})
-				snapshot := append([]RegistryInspector(nil), regInspectors...)
-				regMu.Unlock()
 				_, _ = WriteRegistryEntry(RegistryEntry{
 					LaunchID:   launch.ID,
 					PID:        cmd.Process.Pid,
@@ -354,7 +370,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 					Project:    id.Slug,
 					StartedAt:  start,
 					Scan:       scan,
-					Inspectors: snapshot,
+					Inspectors: append([]RegistryInspector(nil), regInspectors...),
 				})
 			},
 		}
@@ -470,7 +486,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	// profile landed (or an honest reason there is none) even in a quiet
 	// run, since there is no OTHER output that would ever tell them.
 	if augmentation.profileDir != "" {
-		if path, ferr := newestProfileFile(augmentation.profileDir); ferr == nil {
+		if path, ferr := bestProfileFile(ctx, augmentation.profileDir); ferr == nil {
 			result.ProfilePath = path
 			if summary, serr := summarizeProfile(ctx, path); serr == nil {
 				fmt.Fprintln(banner, bannerPrefix+" "+summary)
@@ -480,6 +496,20 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			fmt.Fprintf(banner, "next  monitor hot --file %s\n", path)
 		} else {
 			fmt.Fprintln(banner, NoteBanner("--profile requested but no .cpuprofile was written (the process may not have reached its exit hook)"))
+			// Best-effort: this launch's own private profiles/<launch-id>
+			// directory (profileOutputDir) was created unconditionally the
+			// moment --profile was requested, since NODE_OPTIONS/
+			// BUN_OPTIONS must be applied before the eventual leaf runtime
+			// is known (see applyInspectAndProfile's own doc comment) --
+			// nothing was ever written into it here, so os.Remove (not
+			// RemoveAll: it must only ever succeed on a directory that is
+			// actually still empty, never sweep away a file this package
+			// does not recognize) prevents an empty directory from
+			// lingering under $XDG_STATE_HOME forever. A failure (e.g. the
+			// directory is not actually empty, or was already removed) is
+			// silently ignored, matching every other best-effort cleanup
+			// on this exit path.
+			_ = os.Remove(augmentation.profileDir)
 		}
 	}
 
