@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -145,8 +146,10 @@ func TestApplyInspectAndProfileNodeProfileSetsUpShimAndDir(t *testing.T) {
 }
 
 // TestApplyInspectAndProfileSkipsBunWhenStatePathHasASpace is the MAJOR
-// regression test for the space-path bug (docs/contracts/
-// local-sentry-naming.md's review): a $XDG_STATE_HOME containing a space
+//
+//	regression test for the space-path bug (naming ADR's review): a $XDG_STATE_HOME containing a
+//
+// space
 // must never break Bun outright. NODE_OPTIONS still gets a working, quoted
 // profile; BUN_OPTIONS is left completely untouched (not even a broken
 // attempt) and a one-line note explains why.
@@ -241,6 +244,54 @@ func TestExitShimPathIsIdempotent(t *testing.T) {
 	}
 	if string(data) != exitShimScript {
 		t.Error("shim file content does not match exitShimScript")
+	}
+}
+
+// TestWriteExitShimConcurrent launches N goroutines all writing the shim
+// against the same target directory/path at once (two concurrent
+// `monitor run --profile` launches do exactly this). The fixed
+// "<name>.tmp" temp name this path used to write through let two writers
+// interleave truncate/write on the same temp file and commit a corrupted
+// shim; with per-writer os.CreateTemp names, every goroutine must succeed
+// and leave exactly one complete, valid shim behind -- no stray temp
+// files surviving in the directory.
+func TestWriteExitShimConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, exitShimFileName)
+	const n = 32
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := writeExitShim(dir, path); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("writeExitShim: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read shim: %v", err)
+	}
+	if string(data) != exitShimScript {
+		t.Errorf("shim file content corrupted after concurrent writes: %q", data)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != exitShimFileName {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("directory should hold only %q, found %v", exitShimFileName, names)
 	}
 }
 

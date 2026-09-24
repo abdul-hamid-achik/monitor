@@ -41,7 +41,7 @@ import (
 // always called process.exit() unconditionally would override an
 // application's OWN SIGINT/SIGTERM handler (e.g. one that drains
 // in-flight requests before exiting), which is exactly the kind of
-// unrequested behavior change docs/contracts/local-sentry-naming.md's "no
+// unrequested behavior change the naming ADR's "no
 // se inyecta ... salvo por entorno y en modo append" golden rule forbids.
 //
 // A naive "am I the ONLY listener" check (process.listeners(sig).length
@@ -129,15 +129,45 @@ func exitShimPath() (string, error) {
 	if data, err := os.ReadFile(path); err == nil && string(data) == exitShimScript {
 		return path, nil
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(exitShimScript), 0o600); err != nil {
-		return "", fmt.Errorf("write exit shim: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return "", fmt.Errorf("commit exit shim: %w", err)
+	if err := writeExitShim(dir, path); err != nil {
+		return "", err
 	}
 	return path, nil
+}
+
+// writeExitShim atomically writes exitShimScript to path inside dir:
+// os.CreateTemp in that same directory (never a single fixed
+// "<name>.tmp" name, which two concurrent `monitor run --profile`
+// launches would race on and could interleave truncate/write into a
+// corrupted shim that then fails --require for every subsequent launch
+// -- the same pattern WriteRegistryEntry uses), write, close, chmod to
+// the 0600 the shim needs (os.CreateTemp defaults to 0600 already, but
+// state it explicitly so a future permission change is deliberate),
+// rename over the target, and remove the temp file on every error path.
+func writeExitShim(dir, path string) error {
+	tmp, err := os.CreateTemp(dir, exitShimFileName+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create exit shim temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, werr := tmp.Write([]byte(exitShimScript)); werr != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write exit shim: %w", werr)
+	}
+	if cerr := tmp.Close(); cerr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("write exit shim: %w", cerr)
+	}
+	if perr := os.Chmod(tmpPath, 0o600); perr != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("chmod exit shim: %w", perr)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("commit exit shim: %w", err)
+	}
+	return nil
 }
 
 // profileOutputDir returns (creating it, mode 0700) this launch's private
