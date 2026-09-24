@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -528,11 +529,30 @@ func heatmapFunctionNames(hm *profiler.Heatmap) []string {
 	if hm == nil {
 		return nil
 	}
+	seen := make(map[string]bool, len(hm.Functions))
 	names := make([]string, 0, len(hm.Functions))
 	for _, f := range hm.Functions {
+		// isPlaceholderFuncName excludes V8's own anonymous-closure
+		// stand-in and similar parenthesized labels: several unrelated
+		// closures in one profile all share this exact name, so it's both
+		// a duplicate AND not a name --func can ever target unambiguously
+		// — see the polish review's "--func-miss suggestion list ...
+		// includes placeholders that cannot be targeted" finding.
+		if isPlaceholderFuncName(f.Name) || seen[f.Name] {
+			continue
+		}
+		seen[f.Name] = true
 		names = append(names, f.Name)
 	}
 	return names
+}
+
+// isPlaceholderFuncName reports whether name is one of the parenthesized
+// stand-ins a profiler substitutes for a function with no name of its own
+// (V8's "(anonymous)", or a pseudo-frame label like "(program)"/"(root)"),
+// never a real, addressable identifier a person could pass to --func.
+func isPlaceholderFuncName(name string) bool {
+	return strings.HasPrefix(name, "(") && strings.HasSuffix(name, ")")
 }
 
 // funcNotFoundError builds monitor hot's own --func-miss error: which name
@@ -643,7 +663,7 @@ func renderHotLiveHuman(w io.Writer, header string, hm *profiler.Heatmap, wantFu
 func hotLiveSummaryLine(hm *profiler.Heatmap) string {
 	parts := []string{hotProfileTypeLabel(hm.ProfileType)}
 	if hm.CaptureDurationNanos > 0 && hm.Unit != "nanoseconds" {
-		parts = append(parts, time.Duration(hm.CaptureDurationNanos).String())
+		parts = append(parts, formatHeatDuration(time.Duration(hm.CaptureDurationNanos)))
 	}
 	parts = append(parts, formatHeatQuantity(hm.Samples, hm.Unit))
 	if clause := hotActiveClause(hm); clause != "" {
@@ -759,7 +779,15 @@ func renderHeatBody(w io.Writer, hm *profiler.Heatmap, wantFunc, next string) er
 		}
 		fmt.Fprintf(w, "! likely JIT-inlined: %s() was inlined into %s; the time on line %d is spent inside %s\n",
 			ic.Callee, ic.Caller, ic.Line, ic.Callee)
-		if len(ic.Body) > 0 {
+		if calleeFn, ok := findHeatFunctionByName(hm, ic.Callee); ok && len(calleeFn.Lines) > 0 {
+			// The callee DID get a real (if small — addInliningWarnings'
+			// own "trickle" tolerance, JIT warmup/deopt samples) per-line
+			// row of its own somewhere in this profile: show THAT real
+			// CodeFrame, with its real percentages, rather than the
+			// body-only placeholder below — see the review's "real
+			// per-line data is dropped" finding.
+			fmt.Fprintln(w, codeFrameForFunction(hm, calleeFn).Render())
+		} else if len(ic.Body) > 0 {
 			fmt.Fprintln(w, renderInlinedCalleeFrame(ic))
 		}
 	}
@@ -789,7 +817,7 @@ func hotHeaderLine(path string, hm *profiler.Heatmap) string {
 	// quantity — formatHeatQuantity renders it as one below — so adding
 	// CaptureDurationNanos too would just print the same duration twice.
 	if hm.CaptureDurationNanos > 0 && hm.Unit != "nanoseconds" {
-		parts = append(parts, time.Duration(hm.CaptureDurationNanos).String())
+		parts = append(parts, formatHeatDuration(time.Duration(hm.CaptureDurationNanos)))
 	}
 	parts = append(parts, formatHeatQuantity(hm.Samples, hm.Unit))
 	if clause := hotActiveClause(hm); clause != "" {
@@ -902,14 +930,52 @@ func exportViewerHint(m profiler.HeatMethod) string {
 func formatHeatQuantity(n int, unit string) string {
 	switch unit {
 	case "nanoseconds":
-		return time.Duration(n).String()
+		return formatHeatDuration(time.Duration(n))
 	case "bytes":
 		return collector.FormatBytes(uint64(n))
 	case "samples", "":
-		return fmt.Sprintf("%d samples", n)
+		return fmt.Sprintf("%s samples", formatThousands(n))
 	default:
-		return fmt.Sprintf("%d %s", n, unit)
+		return fmt.Sprintf("%s %s", formatThousands(n), unit)
 	}
+}
+
+// formatHeatDuration renders a capture duration the way the roadmap
+// mockup's own header does ("CPU 5.0s"): rounded to one decimal place once
+// it reaches a full second, never time.Duration.String()'s raw sub-second
+// precision ("2.013349s") — see the polish review's "unrounded duration"
+// finding, which measured a live header blown out to 112+ columns partly
+// because of this. Sub-second durations keep time.Duration's own
+// millisecond-rounded String() (there is no "N.Ns" reading of "230ms" that
+// reads better).
+func formatHeatDuration(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return fmt.Sprintf("%.1fs", d.Seconds())
+}
+
+// formatThousands renders n with comma thousands separators ("4,871") — the
+// roadmap mockup's own "CPU 5.0s · 4,871 samples" formatting, which a plain
+// "%d" doesn't provide (see the polish review's "unrounded duration ...
+// where mockup shows 'CPU 5.0s · 4,871 samples'" finding).
+func formatThousands(n int) string {
+	s := strconv.Itoa(n)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	var b strings.Builder
+	for i, r := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(r)
+	}
+	if neg {
+		return "-" + b.String()
+	}
+	return b.String()
 }
 
 func heatLocation(f profiler.HeatFunction) string {
@@ -938,15 +1004,39 @@ func displayHeatPath(path string) string {
 	if path == "" || !filepath.IsAbs(path) {
 		return path
 	}
-	root, ok := findGitRoot(filepath.Dir(path))
-	if !ok {
+	if root, ok := findGitRoot(filepath.Dir(path)); ok {
+		if rel, err := filepath.Rel(root, path); err == nil && !strings.HasPrefix(rel, "..") {
+			return rel
+		}
+	}
+	// No git root at all (a live capture's own tempfile under /private/tmp
+	// or /var/folders, a dependency under node_modules, ...), or one the
+	// path falls outside of: still shorten it rather than printing the
+	// full absolute path unchanged — see the polish review's "paths
+	// outside a git root untruncated (about 190 columns)" finding.
+	return middleTruncatePath(path, maxDisplayPathRunes)
+}
+
+// maxDisplayPathRunes caps how long a displayHeatPath fallback (no
+// discoverable git root, or a path outside one) prints before truncating.
+const maxDisplayPathRunes = 60
+
+// middleTruncatePath shortens path to at most n runes by dropping a chunk
+// out of its MIDDLE — never its tail, which is where the filename (and any
+// ":line" suffix heatLocation appends) lives, the one part someone actually
+// needs to find the culprit. "" or a path already within n runes is
+// returned unchanged.
+func middleTruncatePath(path string, n int) string {
+	r := []rune(path)
+	if len(r) <= n || n <= 1 {
 		return path
 	}
-	rel, err := filepath.Rel(root, path)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return path
+	headLen := n / 3
+	tailLen := n - headLen - 1 // -1 for the "…" rune itself.
+	if tailLen < 1 {
+		tailLen = 1
 	}
-	return rel
+	return string(r[:headLen]) + "…" + string(r[len(r)-tailLen:])
 }
 
 // hottestBySelf returns the function with the highest SelfPct — "which
@@ -1043,22 +1133,40 @@ func codeFrameForFunction(hm *profiler.Heatmap, f profiler.HeatFunction) widgets
 	return cf
 }
 
+// findHeatFunctionByName returns hm's own Functions entry named name (the
+// same, possibly --func/--top-finalized list renderHeatBody's own TOTAL/
+// SELF table renders), and whether it was found — used to prefer a
+// JIT-inlined callee's REAL per-line data (when this profile happens to
+// have some — see the "trickle" case) over the body-only placeholder frame.
+func findHeatFunctionByName(hm *profiler.Heatmap, name string) (profiler.HeatFunction, bool) {
+	for _, f := range hm.Functions {
+		if f.Name == name {
+			return f, true
+		}
+	}
+	return profiler.HeatFunction{}, false
+}
+
 // renderInlinedCalleeFrame renders addInliningWarnings' OPTIONAL secondary
-// frame (profiler.InlinedCallee.Body): the located callee's own source,
-// via the same widgets.CodeFrame widget the primary CodeFrame above it
-// uses, but with every line left at 0% — there IS no per-line sample data
-// for a fully-inlined callee, which is the whole point of the finding — and
-// Footer naming that fact explicitly instead of a CodeFrame that looks like
-// it has real percentages when it doesn't.
+// frame (profiler.InlinedCallee.Body): the located callee's own source, via
+// the same widgets.CodeFrame widget the primary CodeFrame above it uses,
+// but in HideMetrics mode — there IS no per-line sample data for a
+// fully-inlined callee, which is the whole point of the finding, so this
+// must never render a '>' marker or a percentage column that LOOKS
+// measured but isn't (see the review's "claims things that are not true"
+// finding: the old unconditional CodeFrame fell back to marking the
+// FIRST line — the declaration — hot, and printed a fabricated "0.0%
+// self").
 func renderInlinedCalleeFrame(ic profiler.InlinedCallee) string {
 	cf := widgets.CodeFrame{
-		FuncName:  ic.Callee,
-		File:      displayHeatPath(ic.File),
-		StartLine: ic.BodyStart,
-		EndLine:   ic.BodyStart + len(ic.Body) - 1,
-		Color:     wantColor(os.Stdout),
-		Width:     widgets.DefaultCodeFrameWidth,
-		Footer:    "inlined callee (no per-line data)",
+		FuncName:    ic.Callee,
+		File:        displayHeatPath(ic.File),
+		StartLine:   ic.BodyStart,
+		EndLine:     ic.BodyStart + len(ic.Body) - 1,
+		Color:       wantColor(os.Stdout),
+		Width:       widgets.DefaultCodeFrameWidth,
+		HideMetrics: true,
+		Subtitle:    "inlined callee, no per-line data",
 	}
 	for i, code := range ic.Body {
 		cf.Lines = append(cf.Lines, widgets.CodeFrameLine{Line: ic.BodyStart + i, Code: code})

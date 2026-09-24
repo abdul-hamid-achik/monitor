@@ -304,7 +304,7 @@ func TestHotFileInlinedFixtureWarnsUnderCodeFrame(t *testing.T) {
 	tableIdx := strings.Index(text, "TOTAL")
 	codeFrameIdx := strings.Index(text, "-- processBatch")
 	warnIdx := strings.Index(text, "likely JIT-inlined: heavyStringify() was inlined into processBatch; the time on line 7 is spent inside heavyStringify")
-	secondaryIdx := strings.Index(text, "inlined callee (no per-line data)")
+	secondaryIdx := strings.Index(text, "inlined callee, no per-line data")
 	if tableIdx < 0 || codeFrameIdx < 0 || warnIdx < 0 || secondaryIdx < 0 {
 		t.Fatalf("missing an expected section in:\n%s", text)
 	}
@@ -314,6 +314,69 @@ func TestHotFileInlinedFixtureWarnsUnderCodeFrame(t *testing.T) {
 	}
 	if !strings.Contains(text, "function heavyStringify(items)") {
 		t.Errorf("secondary frame missing heavyStringify's own body:\n%s", text)
+	}
+	// Regression for the review's "the secondary frame claims things that
+	// are not true" finding: with no real per-line data for the inlined
+	// callee, the secondary frame must never mark a '>' hot line (the OLD
+	// unconditional CodeFrame fell back to the declaration line) or print a
+	// fabricated "0.0% self" header.
+	secondary := text[secondaryIdx:]
+	for _, line := range strings.Split(secondary, "\n") {
+		if strings.HasPrefix(line, ">") {
+			t.Errorf("secondary frame must never mark a hot line (no real per-line data exists): %q\nfull output:\n%s", line, text)
+		}
+	}
+	if strings.Contains(secondary, "0.0% self") {
+		t.Errorf("secondary frame must not print a fabricated self%% headline:\n%s", secondary)
+	}
+}
+
+// TestHotFileInlinedFixtureUsesRealCalleeDataWhenAvailable is the regression
+// for the review's "when the callee does have a row of its own ... that
+// real per-line data is dropped" finding: a genuine V8 capture can still
+// show a tiny, genuinely-sampled trickle of the "inlined" callee (JIT
+// warmup, an occasional deopt — see profiler.TestAddInliningWarningsFires
+// DespiteTrickleOfRealCalleeSamples). When that real data exists in THIS
+// profile, the secondary frame must show it — with its own real
+// percentages — instead of the body-only, no-data placeholder.
+func TestHotFileInlinedFixtureUsesRealCalleeDataWhenAvailable(t *testing.T) {
+	dir := t.TempDir()
+	jsPath := filepath.Join(dir, "workload.js")
+	src := "function heavyStringify(items) {\n  return items.length;\n}\n\nfunction processBatch(n) {\n  const items = [];\n  return heavyStringify(items);\n}\n"
+	if err := os.WriteFile(jsPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cpPath := filepath.Join(dir, "inlined-trickle.cpuprofile")
+	raw := `{
+		"nodes": [
+			{"id":1,"callFrame":{"functionName":"(root)","url":"","lineNumber":-1,"columnNumber":-1},"hitCount":0,"children":[2]},
+			{"id":2,"callFrame":{"functionName":"processBatch","url":"file://` + jsPath + `","lineNumber":4,"columnNumber":9},"hitCount":990,"children":[3],"positionTicks":[{"line":7,"ticks":990}]},
+			{"id":3,"callFrame":{"functionName":"heavyStringify","url":"file://` + jsPath + `","lineNumber":0,"columnNumber":9},"hitCount":1,"positionTicks":[{"line":2,"ticks":1}]}
+		],
+		"samples": [2],
+		"startTime": 0, "endTime": 1000000
+	}`
+	if err := os.WriteFile(cpPath, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newHotCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--file", cpPath})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "likely JIT-inlined: heavyStringify() was inlined into processBatch") {
+		t.Fatalf("missing the inlining warning:\n%s", text)
+	}
+	if strings.Contains(text, "no per-line data") {
+		t.Errorf("expected heavyStringify's REAL per-line data (a genuine, if tiny, sample), not the no-data placeholder:\n%s", text)
+	}
+	if !strings.Contains(text, "-- heavyStringify ·") {
+		t.Errorf("expected heavyStringify's own real CodeFrame (with a real headline, not HideMetrics' subtitle form):\n%s", text)
 	}
 }
 
@@ -326,6 +389,133 @@ func TestHumanMethodLabel(t *testing.T) {
 		if got := humanMethodLabel(m); got != want {
 			t.Errorf("humanMethodLabel(%q) = %q, want %q", m, got, want)
 		}
+	}
+}
+
+// --- heatmapFunctionNames dedup/placeholder filtering (polish review's
+// "--func-miss suggestion list is not deduplicated and includes
+// placeholders" minor finding) -----------------------------------------
+
+func TestHeatmapFunctionNamesDropsPlaceholdersAndDedupes(t *testing.T) {
+	hm := &profiler.Heatmap{Functions: []profiler.HeatFunction{
+		{Name: "processBatch"},
+		{Name: "(anonymous)"},
+		{Name: "heavyStringify"},
+		{Name: "(anonymous)"},
+		{Name: "(program)"},
+		{Name: "heavyStringify"},
+	}}
+	got := heatmapFunctionNames(hm)
+	want := []string{"processBatch", "heavyStringify"}
+	if len(got) != len(want) {
+		t.Fatalf("heatmapFunctionNames = %v, want %v", got, want)
+	}
+	for i, name := range want {
+		if got[i] != name {
+			t.Errorf("heatmapFunctionNames[%d] = %q, want %q (got=%v)", i, got[i], name, got)
+		}
+	}
+}
+
+func TestIsPlaceholderFuncName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"(anonymous)": true, "(program)": true, "(root)": true, "(idle)": true,
+		"heavyStringify": false, "main.processBatch": false, "": false,
+	} {
+		if got := isPlaceholderFuncName(name); got != want {
+			t.Errorf("isPlaceholderFuncName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// --- displayHeatPath middle-truncation outside a git root (polish review's
+// "LOCATION paths outside a git root untruncated" finding) -----------------
+
+func TestDisplayHeatPathMiddleTruncatesOutsideGitRoot(t *testing.T) {
+	// /tmp (or /var/folders/... on macOS) is not inside a git repo, so
+	// this exercises the no-git-root fallback directly regardless of where
+	// the test binary itself happens to run from.
+	long := "/private/tmp/some/very/deeply/nested/profiler-tmp-dir/that/keeps/going/on/and/on/workload.js"
+	got := displayHeatPath(long)
+	if got == long {
+		t.Fatalf("displayHeatPath did not truncate a %d-rune path outside any git root", len([]rune(long)))
+	}
+	if got2 := len([]rune(got)); got2 > maxDisplayPathRunes {
+		t.Errorf("displayHeatPath result is %d runes, want at most %d: %q", got2, maxDisplayPathRunes, got)
+	}
+	if !strings.HasSuffix(got, "workload.js") {
+		t.Errorf("displayHeatPath = %q, want the FILENAME preserved at the tail, not truncated away", got)
+	}
+}
+
+func TestMiddleTruncatePathKeepsFilenameAtTail(t *testing.T) {
+	path := "/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/u/v/w/x/y/z/final.go"
+	got := middleTruncatePath(path, 30)
+	if len([]rune(got)) > 30 {
+		t.Errorf("middleTruncatePath result is %d runes, want at most 30: %q", len([]rune(got)), got)
+	}
+	if !strings.HasSuffix(got, "final.go") {
+		t.Errorf("middleTruncatePath = %q, want it to keep the filename at the tail", got)
+	}
+	if !strings.Contains(got, "…") {
+		t.Errorf("middleTruncatePath = %q, want an ellipsis marking the cut", got)
+	}
+	// A path already within n runes is returned unchanged.
+	if got := middleTruncatePath("short.go", 30); got != "short.go" {
+		t.Errorf("middleTruncatePath(short) = %q, want it unchanged", got)
+	}
+}
+
+// --- duration rounding / thousands separators (polish review's "unrounded
+// duration ... where mockup shows 'CPU 5.0s · 4,871 samples'" finding) -----
+
+func TestFormatHeatDurationRoundsToOneDecimal(t *testing.T) {
+	if got := formatHeatDuration(2013349 * time.Microsecond); got != "2.0s" {
+		t.Errorf("formatHeatDuration(2.013349s) = %q, want %q", got, "2.0s")
+	}
+	if got := formatHeatDuration(5 * time.Second); got != "5.0s" {
+		t.Errorf("formatHeatDuration(5s) = %q, want %q", got, "5.0s")
+	}
+	// Sub-second durations keep time.Duration's own millisecond-rounded
+	// String() -- there's no better "N.Ns" reading of "230ms".
+	if got := formatHeatDuration(230 * time.Millisecond); got != "230ms" {
+		t.Errorf("formatHeatDuration(230ms) = %q, want %q", got, "230ms")
+	}
+}
+
+func TestFormatThousandsAddsCommaSeparators(t *testing.T) {
+	cases := map[int]string{
+		0: "0", 5: "5", 42: "42", 999: "999",
+		1000: "1,000", 4871: "4,871", 1234567: "1,234,567", -2500: "-2,500",
+	}
+	for n, want := range cases {
+		if got := formatThousands(n); got != want {
+			t.Errorf("formatThousands(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+// TestHotLiveSummaryLineFitsAtHundredColumns is a direct width assertion
+// for the polish review's "CPU/loaded header is 112-143 columns" finding,
+// mirroring the roadmap mockup's own §5 shape (CPU, a rounded duration,
+// thousands-separated samples, and a plain idle-only active clause, no
+// gc/program breakdown) — the exact shape the mockup itself measures at
+// 100 columns.
+func TestHotLiveSummaryLineFitsAtHundredColumns(t *testing.T) {
+	hm := &profiler.Heatmap{
+		ProfileType: profiler.HeatCPU, Unit: "samples", Method: profiler.MethodV8PositionTicks,
+		CaptureDurationNanos: int64(5 * time.Second), Samples: 4871, ActiveSamples: 3117,
+		IdlePct: 36, IdleMeasured: true,
+	}
+	line := hotLiveSummaryLine(hm) + "      method: " + humanMethodLabel(hm.Method)
+	if got := len([]rune(line)); got > 100 {
+		t.Errorf("live summary line is %d runes, want at most 100: %q", got, line)
+	}
+	if !strings.Contains(line, "5.0s") {
+		t.Errorf("line = %q, want the rounded duration 5.0s", line)
+	}
+	if !strings.Contains(line, "4,871") {
+		t.Errorf("line = %q, want the thousands-separated sample count", line)
 	}
 }
 
@@ -662,22 +852,35 @@ func TestDisplayHeatPathShortensAbsolutePathsInsideGitRoot(t *testing.T) {
 	if got := displayHeatPath(""); got != "" {
 		t.Errorf("displayHeatPath(\"\") = %q, want \"\"", got)
 	}
-	// Outside any git root: returned unchanged rather than guessing.
+	// Outside any git root: middle-truncated (never left unchanged, and
+	// never right-truncated away from the filename) rather than printing
+	// the full absolute path -- see the polish review's "paths outside a
+	// git root untruncated" follow-up finding, and
+	// TestDisplayHeatPathMiddleTruncatesOutsideGitRoot for the dedicated
+	// coverage of that behavior itself.
 	outside := filepath.Join(t.TempDir(), "elsewhere.js")
-	if got := displayHeatPath(outside); got != outside {
-		t.Errorf("displayHeatPath(outside any git root) = %q, want it unchanged (%q)", got, outside)
+	if got := displayHeatPath(outside); got == outside || !strings.HasSuffix(got, "elsewhere.js") {
+		t.Errorf("displayHeatPath(outside any git root) = %q, want it middle-truncated but still end in elsewhere.js (from %q)", got, outside)
 	}
 }
 
 func TestFormatHeatQuantity(t *testing.T) {
-	if got := formatHeatQuantity(1750000000, "nanoseconds"); got != "1.75s" {
-		t.Errorf("nanoseconds = %q, want 1.75s", got)
+	// Rounded to one decimal (formatHeatDuration), not time.Duration's raw
+	// sub-second precision -- see the polish review's "unrounded duration"
+	// finding.
+	if got := formatHeatQuantity(1750000000, "nanoseconds"); got != "1.8s" {
+		t.Errorf("nanoseconds = %q, want 1.8s", got)
 	}
 	if got := formatHeatQuantity(1024, "bytes"); !strings.Contains(got, "1.0") {
 		t.Errorf("bytes = %q, want a human byte size", got)
 	}
+	// Thousands-separated -- see formatThousands and the same finding's
+	// "CPU 5.0s · 4,871 samples" mockup wording.
 	if got := formatHeatQuantity(930, "samples"); got != "930 samples" {
 		t.Errorf("samples = %q, want %q", got, "930 samples")
+	}
+	if got := formatHeatQuantity(4871, "samples"); got != "4,871 samples" {
+		t.Errorf("samples(4871) = %q, want %q", got, "4,871 samples")
 	}
 }
 
