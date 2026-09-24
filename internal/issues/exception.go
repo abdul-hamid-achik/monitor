@@ -335,6 +335,33 @@ type RecordExceptionOptions struct {
 // It also never calls codemap: Culprit.FQN is always left empty here,
 // filled in later by a codemap-aware reader (internal/explain, E2.5).
 func RecordException(ctx context.Context, storePath string, wait time.Duration, ex stacktrace.Exception, id project.Identity, run contextids.IDs, opts RecordExceptionOptions) (UpsertResult, error) {
+	input := recordExceptionInput(ex, id, run, opts)
+
+	var result UpsertResult
+	err := WithWriter(ctx, storePath, wait, func(store *Store) error {
+		var writeErr error
+		result, writeErr = store.UpsertOccurrenceResult(input)
+		return writeErr
+	})
+	return result, err
+}
+
+// RecordExceptionOnStore is RecordException's single-writer sibling
+// (LUX-10): it derives the exact same OccurrenceInput and upserts it into
+// an ALREADY-OPEN store, so a replay recording many blocks opens one
+// writer for its whole batch instead of acquiring and releasing the
+// cross-process lock (and re-reading the whole store) per block. The
+// caller owns the WithWriter scope, and therefore the checkpoint commits
+// that must follow each committed batch.
+func RecordExceptionOnStore(store *Store, ex stacktrace.Exception, id project.Identity, run contextids.IDs, opts RecordExceptionOptions) (UpsertResult, error) {
+	return store.UpsertOccurrenceResult(recordExceptionInput(ex, id, run, opts))
+}
+
+// recordExceptionInput applies the git root to its own deep copy of ex
+// (see cloneExceptionForGitRoot) and derives everything a durable
+// occurrence needs: title/message/symbols, the V2 fingerprint, the
+// bounded ExceptionInfo and the chain culprit.
+func recordExceptionInput(ex stacktrace.Exception, id project.Identity, run contextids.IDs, opts RecordExceptionOptions) OccurrenceInput {
 	ex = cloneExceptionForGitRoot(ex)
 	stacktrace.ApplyGitRoot(&ex, id.GitRoot)
 
@@ -375,7 +402,7 @@ func RecordException(ctx context.Context, storePath string, wait time.Duration, 
 		}
 	}
 
-	input := OccurrenceInput{
+	return OccurrenceInput{
 		ObservedAt:         observedAt,
 		Project:            id.Slug,
 		Service:            service,
@@ -402,14 +429,6 @@ func RecordException(ctx context.Context, storePath string, wait time.Duration, 
 		DedupeKey:          opts.DedupeKey,
 		DedupeAliases:      opts.DedupeAliases,
 	}
-
-	var result UpsertResult
-	err := WithWriter(ctx, storePath, wait, func(store *Store) error {
-		var writeErr error
-		result, writeErr = store.UpsertOccurrenceResult(input)
-		return writeErr
-	})
-	return result, err
 }
 
 // cloneExceptionForGitRoot deep-copies ex's Frames and Chained (and every
