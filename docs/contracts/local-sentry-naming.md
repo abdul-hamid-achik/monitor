@@ -85,7 +85,7 @@ Rules that follow from the table:
   against the same repo — two sibling terminal tabs each running `monitor
   run -- node worker.js`, say — got the *same* `MONITOR_LAUNCH_ROOT` merely
   by being co-located, and §5's live DedupeKey is seeded from
-  `MONITOR_LAUNCH_ROOT` plus a short (±3s-class) time bucket: if both
+  `MONITOR_LAUNCH_ROOT` plus a short (1-second) time bucket: if both
   workers happened to crash with textually identical output within that
   window (a real scenario for two replicas of the same worker, or two
   people hitting the same bug at the same time), their occurrences silently
@@ -96,8 +96,15 @@ Rules that follow from the table:
   non-nested launches now always mint two different IDs, and therefore two
   different roots, so they can never collapse into each other — while a
   genuinely nested launch still shares one root, because only the
-  inheritance branch above ever overrides it, and only the innermost
-  launch's own detector actually watches its output for the crash.
+  inheritance branch above ever overrides it. A nested launch's OUTER
+  detector is not blind to the crash either — it scans its own child's
+  (the inner `monitor run --`) stderr, which itself is the inner launch's
+  own passthrough of the actual crasher's raw text — so BOTH the outer's
+  and the inner's detector independently observe and would each record the
+  identical text; sharing one root (and therefore one live DedupeKey) is
+  exactly what folds that second, outer-detector write into the inner's
+  first one instead of double-counting (see §5, and its own noted residual
+  boundary case).
 - **Known gotcha**: `internal/cli/watch.go` has a package-level `init()` that
   unconditionally calls `os.Setenv("MONITOR", "1")` in the *current process*
   whenever `MONITOR_RUN_DIR` is empty — this runs for every `monitor`
@@ -146,10 +153,25 @@ happened to read it:
 Two independent idempotency mechanisms cover the two entry points:
 
 - **Live occurrences** (`monitor run --`) use
-  `DedupeKey = sha256(MONITOR_LAUNCH_ROOT + hash(exception block))`, matched
-  within a ±3s window. This keeps a `monitor run --` that wraps another
-  `monitor run --` (a nested launch, e.g. a supervisor script) from recording
-  the same crash twice — once from each launch's detector.
+  `DedupeKey = sha256(MONITOR_LAUNCH_ROOT + hash(exception block) +
+  floor(ObservedAt.Unix() / 1s))`: a plain 1-second wall-clock bucket, NOT a
+  real ±3s sliding window (an earlier draft of this ADR said "±3s"; that was
+  aspirational, not what the code implements — see
+  `internal/devrun/detector.go`'s `dedupeBucketSeconds`, whose own doc
+  comment explains why the bucket must stay strictly narrower than the 2s
+  coalesce window). This keeps a `monitor run --` that wraps another
+  `monitor run --` (a nested launch, e.g. a supervisor script) from
+  recording the same crash twice — once from each launch's detector, since
+  both observe the identical text within milliseconds of each other in
+  practice. **Known residual case**: because this is a hard floor, not a
+  window, two detectors observing the identical text on OPPOSITE sides of a
+  one-second boundary (e.g. `12:00:00.998` vs `12:00:01.002`) land in
+  different buckets and are NOT deduped — a real, if rare (observed live at
+  roughly 1 run in 40), double-count for a nested launch. Closing this
+  fully would require the store's own dedupe lookup to check neighboring
+  buckets too (`internal/issues`, not `internal/devrun`); until that lands,
+  `specs/run_nested.yml`'s nested-dedupe outcome tolerates it by retrying
+  rather than asserting a single run is flake-free.
 - **Reprocessed occurrences** (`monitor stacktrace parse --record`) use
   `DedupeKey = sha256(inode + path + offset + hash(exception block))`, paired
   with the per-file checkpoint from §1 (`{inode, size, offset}`). Re-running
@@ -304,17 +326,38 @@ having to know or re-derive its pid:
   and every entry file `0600` — the same private-by-default posture as the
   parse checkpoints and the incident registry. Nothing about a launch's
   command line (argv) is ever written into it.
-- **Written atomically**: a temp file in the same directory, then
-  `os.Rename` into place — a process killed mid-write must never leave a
-  half-written, corrupt registry entry for a reader to trip over, the same
-  rule `stacktrace.SaveCheckpoint` already follows.
+- **Written atomically**: `os.CreateTemp` in the SAME directory (never a
+  single fixed `<name>.json.tmp` name, which two concurrent writers for the
+  same project/name would race on and could corrupt — verified live: a
+  fixed temp name corrupted an entry in 7 of 300 concurrent-write rounds),
+  then `os.Rename` into place — a process killed mid-write must never leave
+  a half-written, corrupt registry entry for a reader to trip over, the
+  same rule `stacktrace.SaveCheckpoint` already follows.
+- **Collision guard**: a write for `(project, name)` is refused
+  (`ErrServiceNameInUse`) when an entry already exists for that
+  project/name, its `launch_id` differs from the write's own, AND its
+  recorded `pid` is still alive — two DIFFERENT, concurrently-running
+  launches must never silently collide on the same service name, one
+  overwriting the other's registration out from under it (verified live:
+  a second `--name w` launch, started while the first was still running,
+  otherwise left `monitor hot w` resolving only the second one, with no
+  way to reach the first). This never blocks the SAME launch updating its
+  own entry (e.g. adding a freshly discovered `--inspect` inspector), and
+  never blocks replacing a stale (dead-`pid`) entry, which is exactly as
+  unregistered as a missing one (see below).
 - **Removed on exit**: `monitor run --` deletes its own entry once the
   child has exited (best-effort; a killed-by-SIGKILL `monitor` process
-  cannot clean up after itself). A **stale entry** — its recorded `pid` is
-  no longer alive — is therefore an expected, ordinary case, not corruption:
-  every reader (`monitor hot <service>`) checks liveness itself and treats a
-  dead-pid entry exactly like a missing one (with a recovery naming the
-  service as unregistered), rather than erroring.
+  cannot clean up after itself), and ONLY when the file's own recorded
+  `launch_id` still matches this launch's — a narrow write/write race (two
+  launches both finding no existing entry at nearly the same instant, one
+  of them still winning past the collision guard above) could otherwise
+  let the loser's exit delete the winner's still-live entry. A **stale
+  entry** — its recorded `pid` is no longer alive — is therefore an
+  expected, ordinary case, not corruption: every reader (`monitor hot
+  <service>`) checks liveness itself, treats a dead-`pid` entry exactly
+  like a missing one (with a recovery naming the service as unregistered)
+  rather than erroring, and opportunistically removes it so a service
+  killed by SIGKILL does not linger in the registry forever.
 - **Shape**: `{schema, launch_id, pid, name, project, started_at, scan,
   inspectors: [{pid, port, ws}]}`. `pid` is the **launched** process
   (`cmd.Process.Pid` from `devrun.Run`), not any later-resolved runtime
@@ -325,7 +368,10 @@ having to know or re-derive its pid:
   actually launched and keeps leaf resolution as the one thing that decides
   which descendant is the "real" application process, rather than
   duplicating that logic into the write path too.
-- **`inspectors[]`**: populated only under `--inspect` (E3.3b, below); each
+- **`inspectors[]`**: populated only under `--inspect` (E3.3b — see
+  `internal/devrun/inspect.go` and `internal/devrun/profile.go`'s own doc
+  comments for the implementation, since this ADR's own sections end here);
+  each
   entry is one parsed "Debugger listening on ws://host:port/uuid" banner,
   with `pid` resolved from the banner's **port**, by asking which live
   process owns that listening TCP socket (never trusted from the banner
@@ -345,9 +391,13 @@ having to know or re-derive its pid:
 - **`monitor hot <service> [--project P]`**: resolves `<project>` from the
   current working directory by default (`project.Resolve`'s ordinary rule),
   reads that project's `<name>.json`, and:
-  - prefers a registered `inspectors[]` entry whose `pid` equals (or is an
-    ancestor of) the resolved leaf, for a Node/Deno target — this skips
-    re-discovering the inspector port from scratch, and is what makes
+  - prefers a registered `inspectors[]` entry whose `pid` equals the
+    resolved leaf's, for a Node/Deno target (`registeredInspectAddr` in
+    `internal/cli/hot_service.go` — an equality check only, not an
+    ancestor-of relationship, since the recorded `pid` already IS the
+    banner's own owning process, resolved once by
+    `procbind.FindListenerPID` at record time) — this skips re-discovering
+    the inspector port from scratch, and is what makes
     `monitor run --name w --inspect -- yarn start` then `monitor hot w`
     profile the real `node` child (via its own already-recorded inspector),
     not `yarn`;

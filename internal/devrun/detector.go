@@ -100,12 +100,12 @@ type detector struct {
 
 	newIssueIDs []string
 	// firstNewIssueFullID is the first NEW issue's full "ISS-..." id
-	// recorded this run, set once (see record). The short id in
-	// newIssueIDs is display-only and cannot be resolved by any command
-	// yet (E2.5's prefix resolution has not landed -- see shortIssueID's
-	// doc comment), so the exit summary's "next:" hint (banner.go) needs
-	// the full id to point at a command that actually works today:
-	// `monitor issue show ISS-...`, not `monitor issue <shortid>`.
+	// recorded this run, set once (see record). Kept for a caller that
+	// needs the unambiguous full id (e.g. a future --json summary); the
+	// exit summary's own "next:" hint (banner.go's ExitSummary, FIX 2) no
+	// longer needs it, now that `monitor issue <id|short-prefix|latest>`
+	// (E2.5) resolves the short, lowercase display id in newIssueIDs
+	// directly -- see shortIssueID's own doc comment.
 	firstNewIssueFullID string
 	occurrences         int64
 	// failedWrites counts every issues.RecordException call that returned
