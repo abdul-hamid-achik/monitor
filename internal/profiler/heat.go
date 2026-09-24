@@ -1349,19 +1349,48 @@ func buildFromPprof(prof *profile.Profile, opts HeatOptions) (*Heatmap, error) {
 		hm.CaptureDurationNanos = prof.DurationNanos
 	}
 	if idleCapture {
-		hm.IdleMeasured = true
-		dur := prof.DurationNanos
-		activeNanos := total
-		if activeNanos > dur {
-			// Multi-core CPU time can exceed one wall-clock window's
-			// worth of nanoseconds; report full utilization instead of a
-			// nonsensical negative idle share.
-			activeNanos = dur
+		// CC-11: idle math needs `total` expressed as a real nanosecond
+		// duration before it can be compared against DurationNanos. A
+		// "nanoseconds" value column already IS one (periodNanos=1 below
+		// is a no-op conversion). A "count" column — the documented
+		// HeatCPU fallback for a pprof proto whose only column is
+		// samples/count (see heatFindValueIndex/detectPprofProfileType)
+		// — only converts when the profile's own PeriodType says the
+		// sampling period is itself nanoseconds and Period is set
+		// (activeNanos = count*Period). Any other unit (bytes, or a count
+		// column with no nanosecond period) has no honest conversion, so
+		// idle math is skipped entirely and Samples/ActiveSamples keep
+		// reporting the raw total set above — never treating a bare
+		// count as if it were already nanoseconds, which used to make a
+		// fully-busy samples/count capture (100 samples over a 10ms
+		// period = 1s of real CPU in a 1s window) look ~100% idle.
+		var periodNanos int64
+		switch {
+		case total <= 0:
+			// Zero of anything is zero active time, regardless of unit —
+			// no conversion needed to call this honestly idle.
+			periodNanos = 1
+		case unit == "nanoseconds":
+			periodNanos = 1
+		case unit == "count" && prof.PeriodType != nil && prof.PeriodType.Unit == "nanoseconds" && prof.Period > 0:
+			periodNanos = prof.Period
 		}
-		hm.Samples = int(dur)
-		hm.ActiveSamples = int(activeNanos)
-		if dur > 0 {
-			hm.IdlePct = float64(dur-activeNanos) / float64(dur) * 100
+		if periodNanos > 0 {
+			dur := prof.DurationNanos
+			capacity := dur / periodNanos
+			active := total
+			if active > capacity {
+				// Multi-core CPU time can exceed one wall-clock window's
+				// worth of capacity; report full utilization instead of a
+				// nonsensical negative idle share.
+				active = capacity
+			}
+			hm.IdleMeasured = true
+			hm.Samples = int(capacity)
+			hm.ActiveSamples = int(active)
+			if capacity > 0 {
+				hm.IdlePct = float64(capacity-active) / float64(capacity) * 100
+			}
 		}
 	}
 

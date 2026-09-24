@@ -467,6 +467,70 @@ func TestBuildHeatmapEmptyPprofErrors(t *testing.T) {
 	}
 }
 
+// TestBuildHeatmapPprofCountColumnIdleUsesPeriod is CC-11: a CPU proto whose
+// only sample column is samples/count (the documented HeatCPU fallback —
+// see heatFindValueIndex/detectPprofProfileType) must not have its idle
+// math treat the raw sample COUNT as if it were already nanoseconds. This
+// profile is fully busy — 100 samples at a 10ms period is 1s of real CPU
+// inside a 1s capture window — so IdlePct must come out near 0, not near
+// 100 (the pre-fix bug: comparing a bare count of 100 directly against
+// DurationNanos=1e9 as if 100 already meant "100 nanoseconds active").
+func TestBuildHeatmapPprofCountColumnIdleUsesPeriod(t *testing.T) {
+	fn := &gpprof.Function{ID: 1, Name: "main.busy", Filename: "main.go"}
+	loc := &gpprof.Location{ID: 1, Line: []gpprof.Line{{Function: fn, Line: 10}}}
+	const periodNanos = int64(10 * time.Millisecond)
+	const durationNanos = int64(time.Second)
+	prof := &gpprof.Profile{
+		SampleType:    []*gpprof.ValueType{{Type: "samples", Unit: "count"}},
+		PeriodType:    &gpprof.ValueType{Type: "cpu", Unit: "nanoseconds"},
+		Period:        periodNanos,
+		DurationNanos: durationNanos,
+		Location:      []*gpprof.Location{loc},
+		Function:      []*gpprof.Function{fn},
+		Sample:        []*gpprof.Sample{{Value: []int64{100}, Location: []*gpprof.Location{loc}}},
+	}
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourcePprof, Pprof: prof}, HeatOptions{NoCodemap: true, NoReadCode: true, ProfileType: HeatCPU})
+	if err != nil {
+		t.Fatalf("BuildHeatmap: %v", err)
+	}
+	if !hm.IdleMeasured {
+		t.Fatalf("IdleMeasured = false, want true (period lets count convert to nanoseconds)")
+	}
+	if hm.IdlePct > 5 {
+		t.Errorf("IdlePct = %.5f, want ~0 for a fully-busy capture (100 samples * 10ms period == 1s window)", hm.IdlePct)
+	}
+	if hm.MostlyIdle() {
+		t.Errorf("MostlyIdle() = true for a fully-busy capture, want false")
+	}
+}
+
+// TestBuildHeatmapPprofCountColumnNoPeriodLeavesIdleUnmeasured is CC-11's
+// other half: a count column with no nanosecond PeriodType has no honest
+// conversion to active time at all, so idle must stay unmeasured (never
+// silently treat the raw count as nanoseconds) and Samples/ActiveSamples
+// must keep reporting the raw count.
+func TestBuildHeatmapPprofCountColumnNoPeriodLeavesIdleUnmeasured(t *testing.T) {
+	fn := &gpprof.Function{ID: 1, Name: "main.busy", Filename: "main.go"}
+	loc := &gpprof.Location{ID: 1, Line: []gpprof.Line{{Function: fn, Line: 10}}}
+	prof := &gpprof.Profile{
+		SampleType:    []*gpprof.ValueType{{Type: "samples", Unit: "count"}},
+		DurationNanos: int64(time.Second),
+		Location:      []*gpprof.Location{loc},
+		Function:      []*gpprof.Function{fn},
+		Sample:        []*gpprof.Sample{{Value: []int64{100}, Location: []*gpprof.Location{loc}}},
+	}
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourcePprof, Pprof: prof}, HeatOptions{NoCodemap: true, NoReadCode: true, ProfileType: HeatCPU})
+	if err != nil {
+		t.Fatalf("BuildHeatmap: %v", err)
+	}
+	if hm.IdleMeasured {
+		t.Errorf("IdleMeasured = true, want false: no PeriodType/Period to convert count to nanoseconds")
+	}
+	if hm.Samples != 100 || hm.ActiveSamples != 100 {
+		t.Errorf("Samples=%d ActiveSamples=%d, want the raw count 100/100 when idle can't be measured", hm.Samples, hm.ActiveSamples)
+	}
+}
+
 // TestBuildHeatmapFuncFilterAndTop exercises HeatOptions.Func and .Top.
 func TestBuildHeatmapFuncFilterAndTop(t *testing.T) {
 	src, err := LoadFile("testdata/v8-hot.cpuprofile")
