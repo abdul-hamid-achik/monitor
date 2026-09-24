@@ -22,7 +22,7 @@ func withIsolatedHotServiceRegistry(t *testing.T) {
 }
 
 func TestResolveHotServiceProjectPrefersExplicitFlag(t *testing.T) {
-	if got := resolveHotServiceProject("  acme  "); got != "acme" {
+	if got := resolveHotServiceProject("  acme  ", "w"); got != "acme" {
 		t.Errorf("resolveHotServiceProject(explicit) = %q, want acme (trimmed)", got)
 	}
 }
@@ -36,12 +36,69 @@ func TestResolveHotServiceProjectPrefersExplicitFlag(t *testing.T) {
 // run from the very directory a service was registered from still failed
 // to find it).
 func TestResolveHotServiceProjectFallsBackToWorkingDirNotHost(t *testing.T) {
-	got := resolveHotServiceProject("")
+	got := resolveHotServiceProject("", "w")
 	if got == "host" {
-		t.Error(`resolveHotServiceProject("") = "host", want the working directory's real git-root-derived slug (PID<=0 must not short-circuit this)`)
+		t.Error(`resolveHotServiceProject("", "w") = "host", want the working directory's real git-root-derived slug (PID<=0 must not short-circuit this)`)
 	}
 	if got == "" {
-		t.Error(`resolveHotServiceProject("") = "", want a non-empty slug when run from inside a real git checkout`)
+		t.Error(`resolveHotServiceProject("", "w") = "", want a non-empty slug when run from inside a real git checkout`)
+	}
+}
+
+// TestResolveHotServiceProjectMatchesRunOutsideAGitOrMarkerRoot is the
+// MAJOR regression test for the "hot resolves a different project than
+// run wrote" bug: from a plain, non-git, no-manifest scratch directory (so
+// project.Resolve's git-root/marker rules both find nothing), `monitor run
+// --name w -- <cmd>` resolves project "w" via rule 5 (ExplicitService).
+// resolveHotServiceProject("", "w") must resolve the SAME "w", never
+// "local" -- verified live before this fix: `monitor hot w` run from the
+// exact same scratch directory printed `no service named "w" is
+// registered for project "local"` even though the registry held an entry
+// under project "w".
+func TestResolveHotServiceProjectMatchesRunOutsideAGitOrMarkerRoot(t *testing.T) {
+	dir := t.TempDir() // no .git, no package.json/go.mod/... here
+	restore := chdir(t, dir)
+	defer restore()
+
+	got := resolveHotServiceProject("", "w")
+	if got != "w" {
+		t.Errorf(`resolveHotServiceProject("", "w") in a plain scratch dir = %q, want "w" (matching how "monitor run --name w" itself resolves its project there)`, got)
+	}
+}
+
+// chdir changes the working directory for the duration of the test,
+// restoring it via the returned func.
+func chdir(t *testing.T, dir string) func() {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir(%s): %v", dir, err)
+	}
+	return func() { _ = os.Chdir(old) }
+}
+
+// TestServiceRecoveryHintRewritesInspectAddrForServiceTarget is the minor
+// regression test: `monitor hot <service>` has no --inspect-addr flag (only
+// `monitor profile`/`monitor investigate` do), so a shared step.Recovery
+// mentioning it must be rewritten to something that actually works for a
+// service target -- relaunching registered with --inspect.
+func TestServiceRecoveryHintRewritesInspectAddrForServiceTarget(t *testing.T) {
+	got := serviceRecoveryHint("w", "start it with --inspect=127.0.0.1:<port> (the CLI also accepts --inspect-addr to override auto-detection)")
+	if !strings.Contains(got, "monitor run --name w --inspect") {
+		t.Errorf("serviceRecoveryHint = %q, want it to suggest relaunching with --name w --inspect", got)
+	}
+	if strings.Contains(got, "--inspect-addr") {
+		t.Errorf("serviceRecoveryHint = %q, still mentions the nonexistent --inspect-addr flag", got)
+	}
+}
+
+func TestServiceRecoveryHintPassesThroughUnrelatedRecovery(t *testing.T) {
+	const other = "use type:sample / -t sample instead"
+	if got := serviceRecoveryHint("w", other); got != other {
+		t.Errorf("serviceRecoveryHint = %q, want it unchanged for a recovery that does not mention --inspect-addr", got)
 	}
 }
 

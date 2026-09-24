@@ -45,7 +45,7 @@ func runHotService(cmd *cobra.Command, name, projectFlag, funcName, ptypeFlag, e
 		return fmt.Errorf("--duration must be greater than zero and at most 2m")
 	}
 
-	projectSlug := resolveHotServiceProject(projectFlag)
+	projectSlug := resolveHotServiceProject(projectFlag, name)
 
 	entry, err := devrun.ReadRegistryEntry(projectSlug, name)
 	if err != nil || !pidIsAlive(entry.PID) {
@@ -90,8 +90,8 @@ func runHotService(cmd *cobra.Command, name, projectFlag, funcName, ptypeFlag, e
 		}
 		if step.Status != stepOK {
 			msg := step.Limitation
-			if step.Recovery != "" {
-				msg = fmt.Sprintf("%s (%s)", msg, step.Recovery)
+			if recovery := serviceRecoveryHint(name, step.Recovery); recovery != "" {
+				msg = fmt.Sprintf("%s (%s)", msg, recovery)
 			}
 			return fmt.Errorf("%s", msg)
 		}
@@ -152,19 +152,41 @@ func runHotService(cmd *cobra.Command, name, projectFlag, funcName, ptypeFlag, e
 // resolveHotServiceProject resolves the project a <service> name is
 // looked up under: --project when given, else project.Resolve applied to
 // the current working directory -- the SAME resolution devrun.go's Run
-// performs when it WRITES the registry entry in the first place (down to
-// the PID:1 hint; project.Hints.PID<=0 means "a host-wide event with no
-// process attached", which would otherwise skip the git-root/marker walk
-// entirely and always resolve to project "host" regardless of Dir/
-// UseWorkingDir -- verified live: without this, `monitor hot <service>`
-// run from the exact same directory a service was registered from still
-// failed to find it, because Resolve short-circuited to "host" before
-// ever looking at the working directory).
-func resolveHotServiceProject(explicit string) string {
+// performs when it WRITES the registry entry in the first place, down to
+// two hints that both matter here:
+//
+//   - PID: 1. project.Hints.PID<=0 means "a host-wide event with no
+//     process attached", which would otherwise skip the git-root/marker
+//     walk entirely and always resolve to project "host" regardless of
+//     Dir/UseWorkingDir (verified live: without this, `monitor hot
+//     <service>` run from the exact same directory a service was
+//     registered from still failed to find it, because Resolve
+//     short-circuited to "host" before ever looking at the working
+//     directory).
+//   - ExplicitService: name. Inside a directory with no git root and no
+//     package manifest (project.Resolve's rules 3/4 both find nothing),
+//     rule 5 falls back to project.Hints.ExplicitService VERBATIM --
+//     project.Resolve's own doc comment calls this out explicitly. Since
+//     `monitor run --name w -- <cmd>` passes its OWN --name as
+//     ExplicitService when it resolves the SAME identity to write the
+//     registry entry, project there resolves to "w" too in that exact
+//     shape (no git/marker root). Leaving this hint out here (as an
+//     earlier version of this function did) reproduces a DIFFERENT bug
+//     than the PID one above -- not "always host", but "always local":
+//     `monitor run --name w -- <cmd>` from a plain, non-git scratch
+//     directory registers project "w", while `monitor hot w` from that
+//     same directory (with no --name of its own to pass) resolved
+//     project "local" instead and never found it (verified live). Passing
+//     the SAME name being looked up as ExplicitService here closes that
+//     gap exactly: it only ever takes effect once rules 1-4 (explicit
+//     --project, $MONITOR_PROJECT, git root, marker root) have all
+//     already found nothing, so a git-rooted or manifest-rooted project
+//     (the common case) is completely unaffected.
+func resolveHotServiceProject(explicit, name string) string {
 	if p := strings.TrimSpace(explicit); p != "" {
 		return p
 	}
-	return project.Resolve(project.Hints{UseWorkingDir: true, PID: 1}).Slug
+	return project.Resolve(project.Hints{UseWorkingDir: true, PID: 1, ExplicitService: name}).Slug
 }
 
 // pidIsAlive reports whether pid names a currently-running process --
@@ -202,7 +224,12 @@ func printUnknownService(cmd *cobra.Command, projectSlug, name string) {
 // liveRegisteredServiceNames is ListRegisteredServiceNames filtered to
 // entries whose pid is still alive -- a stale (dead-pid) entry is exactly
 // as unregistered as one that was never written, so it must not appear in
-// an "unknown service" error's candidate list either.
+// an "unknown service" error's candidate list either. It also opportunistically
+// removes every stale entry it finds (docs/contracts/local-sentry-naming.md
+// §8's "ignored/cleaned by readers" rule): a launch killed by SIGKILL can
+// never clean up its own registry entry on the way out, so without this a
+// dead service accumulates in the registry forever, silently outliving
+// every process that ever wrote one.
 func liveRegisteredServiceNames(projectSlug string) []string {
 	names := devrun.ListRegisteredServiceNames(projectSlug)
 	live := make([]string, 0, len(names))
@@ -213,6 +240,10 @@ func liveRegisteredServiceNames(projectSlug string) []string {
 		}
 		if pidIsAlive(entry.PID) {
 			live = append(live, n)
+			continue
+		}
+		if path, perr := devrun.RegistryPath(projectSlug, n); perr == nil {
+			devrun.RemoveRegistryEntry(path, entry.LaunchID)
 		}
 	}
 	return live
@@ -234,6 +265,27 @@ func registeredInspectAddr(entry devrun.RegistryEntry, leafPID int32) (string, b
 		}
 	}
 	return "", false
+}
+
+// serviceRecoveryHint adapts captureRuntimeAwareProfile's shared
+// step.Recovery text (investigate.go) for the service-name path: that
+// text is written for `monitor profile`/`monitor investigate`, both of
+// which have their own `--inspect-addr` flag to override auto-detection --
+// `monitor hot <service>` has no such flag (it resolves the inspector from
+// the launch registry instead, see registeredInspectAddr), so surfacing
+// that text verbatim here points the caller at a flag that does not exist
+// on this command (verified live: `monitor hot x` on an un-inspected node
+// service printed "...the CLI also accepts --inspect-addr..." twice, and
+// following it was a dead end). name is the registered leaf's kind of
+// thing to relaunch: --inspect only helps a Node/Deno target, so the
+// rewritten hint always names the ACTUAL fix for a service target --
+// relaunching registered with --inspect -- rather than a CLI flag that
+// belongs to a different command.
+func serviceRecoveryHint(name, recovery string) string {
+	if strings.Contains(recovery, "--inspect-addr") || strings.Contains(recovery, "--inspect=") {
+		return fmt.Sprintf("relaunch it with `monitor run --name %s --inspect -- <cmd>` so `monitor hot %s` can find its inspector", name, name)
+	}
+	return recovery
 }
 
 // hotServiceHeaderLine renders the roadmap mockup's own `monitor hot
