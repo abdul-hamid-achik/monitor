@@ -315,6 +315,14 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		regPath = path
 		defer RemoveRegistryEntry(regPath)
 	}
+	// bannerWG (see bannerScanningWriter's own doc comment) must be waited
+	// out BEFORE the RemoveRegistryEntry deferred above runs -- deferred
+	// AFTER it, so LIFO ordering runs this Wait() FIRST: otherwise a
+	// banner detected right as the child exits could still be mid-write
+	// to the registry file the moment it gets deleted, resurrecting it
+	// with nothing left to clean it up again.
+	var bannerWG sync.WaitGroup
+	defer bannerWG.Wait()
 
 	// --inspect's banner-to-registry pipeline: only meaningful when the
 	// STDERR stream is actually being scanned (the default, and where
@@ -330,6 +338,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			Real:    stderr,
 			Ctx:     ctx,
 			FindPID: defaultPortOwner,
+			WG:      &bannerWG,
 			OnBanner: func(b InspectorBanner) {
 				if regPath == "" {
 					return

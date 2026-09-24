@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"sync"
 
 	"github.com/abdul-hamid-achik/monitor/internal/procbind"
 )
@@ -60,11 +61,29 @@ const bannerScanCarryMax = 4096
 // detector's bounded channel happened to be full at that exact moment, so
 // this scans directly off the same bytes being written to the terminal,
 // independent of the detector's channel entirely.
+//
+// FindPID and OnBanner are both called on a SEPARATE goroutine (see
+// scanLine), never inline within Write: FindPID (production: procbind.
+// FindListenerPID) enumerates the host's TCP connection table, which on
+// macOS gopsutil implements by shelling out to lsof (internal/profiler/
+// ownership.go's own listTCPConnections doc comment says as much) --
+// tens of milliseconds of subprocess/syscall latency this package's own
+// golden rule ("monitoring must never be able to make the monitored
+// process slower") cannot pay for on the copy goroutine's hot path, the
+// exact same reasoning detector.go's own record/flush already keeps off
+// the line-consuming loop via its independent goroutine. WG, when set,
+// is used to let a caller (devrun.go's Run) wait out every still-running
+// banner-handling goroutine before doing anything that assumes they have
+// all finished (removing the launch registry entry on exit, in
+// particular -- without this, a banner detected right as the child exits
+// could still be mid-write to a file Run's own cleanup just deleted,
+// resurrecting it with no one left to clean it up again).
 type bannerScanningWriter struct {
 	Real     io.Writer
 	OnBanner func(InspectorBanner)
 	FindPID  portOwnerFunc
 	Ctx      context.Context
+	WG       *sync.WaitGroup
 
 	carry []byte
 }
@@ -99,17 +118,24 @@ func (w *bannerScanningWriter) scanLine(line []byte) {
 	if m == nil {
 		return
 	}
-	banner := InspectorBanner{WS: string(m[1])}
-	if port, ok := parseWSPort(banner.WS); ok {
-		banner.Port = port
-		if w.FindPID != nil {
+	ws := string(m[1])
+	port, _ := parseWSPort(ws) // 0 when unparseable; still reported below
+	if w.WG != nil {
+		w.WG.Add(1)
+	}
+	go func() {
+		if w.WG != nil {
+			defer w.WG.Done()
+		}
+		banner := InspectorBanner{WS: ws, Port: port}
+		if port > 0 && w.FindPID != nil {
 			if pid, ok := w.FindPID(w.Ctx, port); ok {
 				banner.PID = pid
 				banner.PIDKnown = true
 			}
 		}
-	}
-	w.OnBanner(banner)
+		w.OnBanner(banner)
+	}()
 }
 
 // parseWSPort extracts the port from an inspector ws:// URL
