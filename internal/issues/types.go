@@ -295,6 +295,11 @@ type OccurrenceInput struct {
 type UpsertResult struct {
 	Issue      Issue
 	Occurrence Occurrence
+
+	// Reopened is true when this write flipped a resolved issue back to
+	// open (the reopen branch above): a caller watching for regressions
+	// (LUX-14's REGRESSED banner) reports it instead of "again".
+	Reopened bool
 	// Deduped is true when OccurrenceInput.DedupeKey already matched one of
 	// the issue's retained occurrences: that existing occurrence is
 	// returned unchanged -- no new row, no OccurrenceCount increment, no

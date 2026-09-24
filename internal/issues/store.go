@@ -214,6 +214,7 @@ func (s *Store) upsertOccurrenceLocked(input OccurrenceInput) (UpsertResult, err
 	}
 
 	now := input.ObservedAt
+	reopened := false
 	var issue Issue
 	isNewIssue := issueRecord == nil
 	if isNewIssue {
@@ -262,6 +263,7 @@ func (s *Store) upsertOccurrenceLocked(input OccurrenceInput) (UpsertResult, err
 			issue.Status = StatusOpen
 			issue.ResolvedAt = nil
 			issue.ReopenedCount++
+			reopened = true
 		}
 		// Culprit/LatestException track the issue's LATEST occurrence BY
 		// ObservedAt (see their doc comments), unlike Title/Message/
@@ -315,7 +317,7 @@ func (s *Store) upsertOccurrenceLocked(input OccurrenceInput) (UpsertResult, err
 	if err := s.syncAndSecure(); err != nil {
 		return UpsertResult{}, err
 	}
-	return UpsertResult{Issue: issue, Occurrence: occurrence}, nil
+	return UpsertResult{Issue: issue, Occurrence: occurrence, Reopened: reopened}, nil
 }
 
 // findDedupedOccurrence looks up dedupeKey among issueID's retained
