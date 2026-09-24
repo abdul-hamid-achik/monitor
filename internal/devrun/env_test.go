@@ -16,8 +16,9 @@ func envValue(t *testing.T, environ []string, name string) (string, bool) {
 	return "", false
 }
 
-// TestResolveLaunchIDsFreshLaunchRootEqualsOwnID is FIX 1 (docs/contracts/
-// local-sentry-naming.md §2): an OUTERMOST launch's MONITOR_LAUNCH_ROOT is
+//	TestResolveLaunchIDsFreshLaunchRootEqualsOwnID is FIX 1 (naming ADR §2): an OUTERMOST
+//
+// launch's MONITOR_LAUNCH_ROOT is
 // its own freshly minted MONITOR_LAUNCH_ID, never a directory -- so two
 // independent sibling launches (see
 // TestResolveLaunchIDsTwoIndependentLaunchesGetDistinctRoots below) never

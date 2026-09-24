@@ -5,9 +5,9 @@
 > drafted). Resolving a live `<pid|service>` target — the `hot <pid>` /
 > `hot <service>` forms the naming ADR also documents — is E3.2, a later
 > wave; today's `--file`-only CLI gives that combination a clear
-> "not implemented yet" error rather than doing nothing silently. See the
-> [naming ADR](./local-sentry-naming) for `monitor hot`'s full command
-> shape.
+> "not implemented yet" error rather than doing nothing silently. The full
+> `monitor hot <pid|service|--file>` command shape is specified by the
+> internal naming ADR (see the repo's AGENTS.md), not this document.
 
 ## Why this exists
 
@@ -156,9 +156,8 @@ caller's own `callees`, by name, with its real cumulative weight.
   `mapping` is the LEAST certain of the group's own mappings (claiming the
   group's best-case certainty would overstate how precisely it was
   actually located), and its `stale` is the OR of the group's.
-- **`mapping`** is the *same* enum as a stack `Frame`'s `Mapping` field —
-  defined once, in the [naming ADR](./local-sentry-naming#_1-naming-map)'s
-  `Frame.Mapping` row, and reused here rather than redeclared: `exact`
+- **`mapping`** is the *same* enum as a stack `Frame`'s `Mapping` field
+  (defined once and reused here rather than redeclared): `exact`
   (source map resolved this line precisely), `ambiguous` (multiple candidate
   mappings), `transpiled` (mapped through a build step without a source
   map), `inferred` (no source map at all; the location was guessed), or

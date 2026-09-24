@@ -1,7 +1,7 @@
 // Package explain builds monitor.issue_context.v1: the single, bounded "why
 // did it fail" answer shared by `monitor issue <id>` (human, --json, --md)
 // and MCP's monitor_issue. See docs/contracts/issue-context-v1.md for the
-// full shape and docs/contracts/local-sentry-naming.md for the rules this
+// full shape and the naming ADR for the rules this
 // package reads (Culprit's Source/exception-chain selection, ObservedAt).
 //
 // Build always opens the issue store read-only (issues.OpenReadOnly, never
@@ -102,7 +102,7 @@ type Timeline struct {
 	Runs        []string  `json:"runs,omitempty"`
 	// TimeSource is "line" (a replayed log's own timestamp), "mtime" (the
 	// log file's mtime fallback), "live" (monitor run -- read it as it
-	// happened), or "unknown" -- see docs/contracts/local-sentry-naming.md
+	// happened), or "unknown" -- see the naming ADR
 	// §4. Neither issues.Issue nor issues.Occurrence currently PERSIST which
 	// of the three produced an occurrence's ObservedAt (that provenance
 	// belongs to the E2.1/E2.4 producers -- internal/stacktrace's --record
@@ -135,7 +135,7 @@ type CulpritInfo struct {
 	Confidence string `json:"confidence"`
 	// Mapping reuses stacktrace.Frame's shared source-map confidence enum
 	// (exact|ambiguous|transpiled|inferred|"") rather than a second,
-	// incompatible one (docs/contracts/local-sentry-naming.md's `Frame.
+	// incompatible one (the naming ADR's `Frame.
 	// Mapping` row) -- a message_search culprit is always "inferred" (§7:
 	// "siempre marcado mapping: inferred"); a stack culprit leaves this
 	// empty (omitted), since it was read directly off a real parsed frame,

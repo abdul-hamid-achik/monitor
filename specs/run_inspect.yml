@@ -146,7 +146,7 @@ outcomes:
         timeoutMs: 15000
 
   - id: registry_entry_removed_after_run_exits
-    description: the launch registry entry is removed once `monitor run` itself exits (docs/contracts/local-sentry-naming.md §8's "removed on exit" rule)
+    description: the launch registry entry is removed once `monitor run` itself exits (the naming ADR §8's "removed on exit" rule)
     timeoutMs: 15000
     verify:
       command:

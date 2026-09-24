@@ -249,7 +249,7 @@ func TestRunNestedLaunchInheritsOnlyRootAndHonorsAnInnerName(t *testing.T) {
 }
 
 func TestRunChildEnvironmentOnlyExportsLaunchVars(t *testing.T) {
-	// The golden rule (docs/contracts/local-sentry-naming.md §2): run --
+	// The golden rule (the naming ADR §2): run --
 	// exports ONLY MONITOR_LAUNCH_*, never MONITOR, MONITOR_RUN_DIR,
 	// MONITOR_SERVICE, or MONITOR_RUN_ID.
 	opts := baseOptions(t, []string{"sh", "-c", "env | grep ^MONITOR | sort"})
@@ -353,7 +353,7 @@ func TestRunDoesNotHangBehindAnOrphanedGrandchildHoldingThePipeOpen(t *testing.T
 // (registry.go's write/read functions are covered directly in
 // registry_test.go): a `monitor run --` launch registers itself and
 // removes that registration once the child has exited -- registry.go's
-// "removed on exit" rule (docs/contracts/local-sentry-naming.md §8).
+// "removed on exit" rule (the naming ADR §8).
 func TestRunRegistersAndCleansUpLaunchRegistry(t *testing.T) {
 	stateDir := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", stateDir)

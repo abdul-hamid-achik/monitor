@@ -13,7 +13,7 @@ import (
 
 // StdinIsTTY reports whether monitor's own stdin is a terminal -- the
 // signal `monitor run --` uses to decide its process-group strategy
-// (docs/contracts/local-sentry-naming.md's E2.4 "process group" rule).
+// (the naming ADR's E2.4 "process group" rule).
 func StdinIsTTY() bool {
 	return term.IsTerminal(os.Stdin.Fd())
 }
@@ -35,8 +35,7 @@ func configureProcessGroup(cmd *exec.Cmd, ttyShared bool) {
 }
 
 // forwardSignals relays signals received by monitor itself to the child
-// process for as long as done is open (docs/contracts/
-// local-sentry-naming.md's E2.4 "process group" rule):
+// process for as long as done is open (naming ADR's E2.4 "process group" rule):
 //
 //   - SIGTERM and SIGHUP are ALWAYS forwarded, regardless of ttyShared:
 //     `kill <monitor-pid>` targets only monitor's own PID, never the child,

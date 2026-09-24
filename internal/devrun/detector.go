@@ -18,8 +18,10 @@ import (
 )
 
 // coalesceWindow batches repeats of the identical fingerprint into a single
-// store write with an aggregated Count (docs/contracts/
-// local-sentry-naming.md, "coalescing de 2 s de fingerprints idénticos"),
+//
+//	store write with an aggregated Count (naming ADR, "coalescing de 2 s de fingerprints
+//
+// idénticos"),
 // so a tight error loop in the monitored process costs at most one store
 // write every coalesceWindow instead of one per raw event.
 const coalesceWindow = 2 * time.Second
@@ -78,7 +80,7 @@ type detectorOptions struct {
 
 // detector runs the Joiner -> Parse -> scrub -> coalesce -> RecordException
 // pipeline over the scanned stream(s), one stacktrace.Joiner per stream
-// (docs/contracts/local-sentry-naming.md's "Joiner por stream" rule -- see
+// (the naming ADR's "Joiner por stream" rule -- see
 // streamLine.stream) so a line interleaved from one stream can never split
 // a block being accumulated on another. It never writes to logs.veclite,
 // and every store write goes through issues.WithWriter's own bounded wait
@@ -376,8 +378,9 @@ func (d *detector) record(ctx context.Context, fingerprint string, entry *coales
 	}
 }
 
-// liveDedupeKey implements the live DedupeKey rule (docs/contracts/
-// local-sentry-naming.md §5): sha256(MONITOR_LAUNCH_ROOT + hash(exception
+//	liveDedupeKey implements the live DedupeKey rule (naming ADR §5): sha256(MONITOR_LAUNCH_ROOT
+//
+// + hash(exception
 // block)), bucketed by dedupeBucketSeconds so two detectors independently
 // parsing the identical raw text at nearly the same wall-clock instant (a
 // `monitor run --` nested inside another one) land on the same key and the
@@ -440,7 +443,7 @@ func culpritFunc(c *issues.Culprit) string {
 // scrubException redacts ex's Type/Value and every frame's Function text,
 // recursively through Chained, using scrubber -- the golden rule that error
 // text is untrusted data and must be redacted before it is persisted or
-// printed (docs/contracts/local-sentry-naming.md's "Scrub por defecto").
+// printed (the naming ADR's "Scrub por defecto").
 // Filename/AbsPath are left alone: they are resolved, checked paths (see
 // stacktrace.ApplyGitRoot), not attacker- or user-controlled message text.
 func scrubException(scrubber *scrub.Scrubber, ex *stacktrace.Exception) {

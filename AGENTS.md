@@ -169,8 +169,11 @@ monitor issues / issue <id>   explain.Build -> monitor.issue_context.v1 (CLI hum
 - **FingerprintV2** hashes the outer exception type, the top 5 in_app frames of
   the outer exception (`func@relfile`, no line numbers) and the innermost cause
   type. Service, PID, release, codemap FQNs and sampled symbols never go into
-  it. The **culprit** is the crash frame of the innermost cause when it is
-  in_app, otherwise the crash frame of the outer exception.
+  it. The **culprit** is the innermost cause's last in-app frame, walking
+  back from its crash frame (the crash frame itself when in-app, otherwise
+  the nearest in-app caller); if the innermost cause has none, the outer
+  exception's last in-app frame; nil only when no frame in the chain is
+  in-app.
 - **Time is the event's time.** A replayed log takes its timestamp from the
   line, or from the file mtime when the line has none, never from now. Replays
   are idempotent through per-file checkpoints and a DedupeKey.
@@ -198,8 +201,11 @@ invents a hot line for an idle or diffuse profile.
 
 ### Contracts (`docs/contracts/`)
 
-- `local-sentry-naming.md`: the naming ADR, environment-variable ownership,
-  dedupe and checkpoint rules.
+- The naming ADR (launch verbs, environment-variable ownership, dedupe and
+  checkpoint rules, the full fingerprint/culprit rule) lives in the
+  Obsidian vault: `~/notes/projects/monitor/2026-09-22-local-sentry-naming-adr.md`.
+  Code and specs cite it as "naming ADR §N"; it is NOT part of the docs
+  site.
 - `issue-context-v1.md`: `brief` is at most 4 KB and `standard` at most 16 KB.
   Every section carries a `status`.
 - `line-heatmap-v1.md`

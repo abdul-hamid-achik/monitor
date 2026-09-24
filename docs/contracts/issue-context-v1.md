@@ -6,9 +6,9 @@
 > **is** this bounded schema (its own small `issue` summary included) — see
 > "Compatibility" below for the opt-in legacy `{issue, occurrences,
 > occurrences_truncated}` shape and how it interacts with this one.
-> Studio and cortex are still later work. See the
-> [naming ADR](./local-sentry-naming) for the rules this schema encodes
-> (fingerprint/culprit, `ObservedAt`, `--scan`). A few shape details were
+> Studio and cortex are still later work. The rules this schema encodes
+> (fingerprint/culprit, `ObservedAt`, `--scan`) are specified by the
+> internal naming ADR (see the repo's AGENTS.md). A few shape details were
 > settled during implementation and are called out inline below, since the
 > draft explicitly left them open.
 
@@ -18,11 +18,12 @@ Before E2.5, `monitor issues show <id>` returned whatever the `issues` store
 held verbatim (see [Local Issues](/guide/issues)), and `internal/cli/
 issues.go` registered `issue` only as a cobra **alias** of `issues`, so
 `monitor issue list|show|resolve|reopen|ignore ...` behaved exactly like
-`monitor issues list|show|resolve|reopen|ignore ...`, but a bare `monitor
-issue <id>` (a real id, not one of those subcommand names) had no meaning of
-its own — cobra had nothing to dispatch "an id" to, so it fell through to
-usage/help rather than the enriched page below. E2.5 gave `monitor issue
-<id>` its own command, taking over that alias (see the naming ADR's `issue`/
+`monitor issues list|show|resolve|reopen|ignore ...`, but a bare
+`monitor issue <id>` (a real id, not one of those subcommand names) had no
+meaning of its own — cobra had nothing to dispatch "an id" to, so it fell
+through to usage/help rather than the enriched page below. E2.5 gave
+`monitor issue <id>` its own command, taking over that alias (see the
+naming ADR's `issue`/
 `issues` collision row); `monitor issue list|show|resolve|reopen|ignore ...`
 keeps working during the deprecation by delegating to the matching `issues`
 subcommand (with a deprecation note on stderr) rather than being removed

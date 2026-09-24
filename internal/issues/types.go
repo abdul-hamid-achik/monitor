@@ -23,8 +23,10 @@ const (
 const FingerprintVersionV1 = "v1"
 
 // FingerprintVersionV2 marks issues grouped by FingerprintV2Exception (the
-// exception-chain rule; see fingerprint.go and docs/contracts/
-// local-sentry-naming.md §6). Existing FingerprintVersionV1 issues
+//
+//	exception-chain rule; see fingerprint.go and naming ADR §6). Existing FingerprintVersionV1
+//
+// issues
 // (investigate's dominant in-app function, watch's alert rules) are
 // untouched by this scheme and keep hashing under v1.
 const FingerprintVersionV2 = "v2"
@@ -66,8 +68,11 @@ type Issue struct {
 	// TestIssueOccurrenceDecodeV1_15Unchanged).
 
 	// Culprit is the exception-chain rule's pick (docs/contracts/
-	// local-sentry-naming.md §6): the innermost cause's crash frame when
-	// it's in_app, else the outer exception's crash frame, else nil.
+	// the naming ADR §6; see culpritFor/lastInAppFrame in
+	// exception.go): the innermost cause's last in-app frame, walking
+	// backward from its crash frame; when the innermost cause has no
+	// in-app frame at all, the outer exception's last in-app frame (same
+	// walk); nil only when no frame anywhere in the chain is in-app.
 	// Tracks the ISSUE'S LATEST occurrence (like LatestException below),
 	// not necessarily the occurrence that first opened the issue.
 	Culprit *Culprit `json:"culprit,omitempty"`
@@ -106,8 +111,12 @@ type Issue struct {
 }
 
 // Culprit is the single frame a reader (the CLI, MCP, and later
-// internal/explain) blames as the most actionable line for an issue. See
-// docs/contracts/local-sentry-naming.md §6 (the selection rule) and §7
+// internal/explain) blames as the most actionable line for an issue: the
+// innermost cause's last in-app frame (walking backward from its crash
+// frame), falling back to the outer exception's last in-app frame, and
+// nil only when no frame anywhere in the chain is in-app -- the walk-back
+// rule culpritFor/lastInAppFrame implement. See
+// the naming ADR §6 (the selection rule) and §7
 // (Source).
 type Culprit struct {
 	Function string `json:"function,omitempty"`
@@ -125,7 +134,9 @@ type Culprit struct {
 }
 
 // CauseInfo is one entry in ExceptionInfo.Causes: a chain link's type and,
-// when its own crash frame is in_app, that cause's own culprit.
+// when that cause has any in-app frame, its own culprit -- the same
+// walk-back rule the issue-level Culprit uses (lastInAppFrame), not a
+// crash-frame-only pick.
 type CauseInfo struct {
 	Type    string   `json:"type,omitempty"`
 	Culprit *Culprit `json:"culprit,omitempty"`
@@ -204,7 +215,7 @@ type Occurrence struct {
 	// relies on Issue.LatestException for the current shape.
 	Exception *ExceptionInfo `json:"exception,omitempty"`
 	// DedupeKey identifies the exact raw event this occurrence represents
-	// (docs/contracts/local-sentry-naming.md §5: a live launch's ±3s window
+	// (the naming ADR §5: a live launch's ±3s window
 	// key, or a replay's inode+offset key). When a later
 	// OccurrenceInput.DedupeKey matches one already retained for the same
 	// issue, the store folds the repeat into this existing row instead of
@@ -267,7 +278,7 @@ type OccurrenceInput struct {
 	Level string
 	// DedupeKey, when non-empty, is checked against the issue's retained
 	// occurrences before inserting a new one -- see UpsertResult.Deduped
-	// and docs/contracts/local-sentry-naming.md §5.
+	// and the naming ADR §5.
 	DedupeKey string
 }
 
@@ -320,7 +331,7 @@ type ListOptions struct {
 	// Kind filters by Issue.Kind: "" or "any" matches every kind,
 	// "exception" and "investigation" match Issue.Kind exactly, "alert"
 	// matches any Issue.Kind with the "monitor.alert." prefix watch.go
-	// writes (see docs/contracts/local-sentry-naming.md's Issue.Kind row).
+	// writes (see the naming ADR's Issue.Kind row).
 	// Any other value is rejected the same way an invalid Statuses entry
 	// is.
 	Kind  string

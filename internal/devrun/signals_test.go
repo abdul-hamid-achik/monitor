@@ -152,7 +152,7 @@ func TestForwardSignalsAlwaysRelaysSigterm(t *testing.T) {
 }
 
 // TestForwardSignalsSkipsSigintWhenTTYShared verifies the other half of the
-// TTY rule: with ttyShared true (docs/contracts/local-sentry-naming.md's
+// TTY rule: with ttyShared true (the naming ADR's
 // "the kernel already delivers SIGINT to both processes directly, monitor
 // must not forward it a second time"), forwardSignals must NOT call
 // cmd.Process.Signal for a SIGINT it receives -- the child must still be

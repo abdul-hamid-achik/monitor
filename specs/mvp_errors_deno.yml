@@ -2,7 +2,7 @@ version: 1
 name: monitor_mvp_errors_deno
 
 intent: |
-  Golden-table coverage (docs/contracts/local-sentry-naming.md,
+  Golden-table coverage (the naming ADR,
   "deno 10 -> 2"): `monitor run -- deno run --allow-env
   examples/polyglot/js/workload.js` must group the repeated handled
   flakyParse errors into ONE issue and the single uncaught detonate()

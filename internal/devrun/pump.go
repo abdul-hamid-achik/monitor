@@ -6,8 +6,9 @@ import (
 	"sync/atomic"
 )
 
-// linesChanCap bounds the detector's line channel (docs/contracts/
-// local-sentry-naming.md §3): the copy goroutine's send is always
+//	linesChanCap bounds the detector's line channel (naming ADR §3): the copy goroutine's send
+//
+// is always
 // non-blocking, so a full channel drops the line and counts it rather than
 // ever applying back-pressure to the child.
 const linesChanCap = 1024
@@ -21,7 +22,7 @@ const pumpReadBufSize = 32 * 1024
 // streamKind identifies which of the child's scanned streams a streamLine
 // came from. `--scan both` runs one copy goroutine per stream, each with
 // its own streamKind, so the detector can keep one stacktrace.Joiner PER
-// STREAM (docs/contracts/local-sentry-naming.md's "Joiner por stream"
+// STREAM (the naming ADR's "Joiner por stream"
 // rule): a heartbeat line interleaved on stdout must never be able to split
 // a traceback being accumulated on stderr, or vice versa.
 type streamKind uint8
@@ -44,8 +45,9 @@ type streamLine struct {
 	gap bool
 }
 
-// copyStream is the "golden rule" goroutine (docs/contracts/
-// local-sentry-naming.md §3, "No dejar que la copia de stderr/stdout espere
+//	copyStream is the "golden rule" goroutine (naming ADR §3, "No dejar que la copia de
+//
+// stderr/stdout espere
 // al detector"): it copies raw bytes from in to out AS SOON AS THEY ARRIVE,
 // with no line buffering or detector-driven delay, and only THEN extracts
 // whatever complete lines that chunk finished into a non-blocking send on

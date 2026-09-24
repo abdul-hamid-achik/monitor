@@ -12,8 +12,7 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
 )
 
-// newRunCmd is `monitor run`, in dual dispatch (docs/contracts/
-// local-sentry-naming.md's "launch verb" row; E2.4):
+// newRunCmd is `monitor run`, in dual dispatch (naming ADR's "launch verb" row; E2.4):
 //
 //   - `monitor run <spec.yml>` (no `--`): the LEGACY glyphrun spec runner,
 //     unchanged -- it alone shells out to `glyph run` and exports MONITOR=1
@@ -148,7 +147,7 @@ is present:
 			}
 			// devrun.Run already wrote every banner/passthrough byte
 			// directly to the real terminal streams; propagate the CHILD's
-			// own exit code (docs/contracts/local-sentry-naming.md's "se
+			// own exit code (the naming ADR's "se
 			// propaga el exit code" rule) rather than cobra's default
 			// "any non-nil error becomes exit 1" -- matching the existing
 			// os.Exit(N)-from-RunE precedent in internal/cli/resolve.go

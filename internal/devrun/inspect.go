@@ -1,6 +1,6 @@
 // inspect.go implements E3.3b's `monitor run --inspect`: appending
 // --inspect=127.0.0.1:0 to NODE_OPTIONS (node and deno both honor it --
-// verified live, see docs/contracts/local-sentry-naming.md §8) and
+// verified live, see the naming ADR §8) and
 // watching the scanned stream(s) for every "Debugger listening on
 // ws://host:port/uuid" banner it produces, mapping each one to its owning
 // pid via the listening port (never trusted from the banner text itself,

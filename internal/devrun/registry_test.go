@@ -177,8 +177,7 @@ func TestWriteRegistryEntrySameLaunchUpdatesFreely(t *testing.T) {
 
 // TestWriteRegistryEntryReplacesAStaleDeadPidEntry: a previous launch's
 // entry whose pid is no longer alive must never block a new registration
-// -- it is exactly as unregistered as a missing entry (docs/contracts/
-// local-sentry-naming.md §8's "stale entries" rule).
+// -- it is exactly as unregistered as a missing entry (naming ADR §8's "stale entries" rule).
 func TestWriteRegistryEntryReplacesAStaleDeadPidEntry(t *testing.T) {
 	withIsolatedRegistry(t)
 	if _, err := WriteRegistryEntry(RegistryEntry{Name: "w", Project: "acme", PID: deadPID(t), LaunchID: "launch-dead"}); err != nil {

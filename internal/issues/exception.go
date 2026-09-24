@@ -21,8 +21,9 @@ const (
 	maxExceptionInfoBytes = 2048
 )
 
-// culpritFor implements the exception-chain Culprit rule (docs/contracts/
-// local-sentry-naming.md §6): the innermost cause's own LAST IN-APP frame if
+//	culpritFor implements the exception-chain Culprit rule (naming ADR §6): the innermost
+//
+// cause's own LAST IN-APP frame if
 // it has one; otherwise the outer exception's own last in-app frame;
 // otherwise nil. "Last in-app frame" is the crash frame itself when that
 // frame happens to be in-app, but it is not required to be: an exception
@@ -79,7 +80,7 @@ func crashFrame(ex stacktrace.Exception) (stacktrace.Frame, bool) {
 // function that in-app code called (Node's fs.readFileSync ENOENT,
 // Python's json.loads JSONDecodeError, ...) still has a real in-app caller
 // a little further up ex's own Frames, and the naming ADR's Culprit rule
-// (docs/contracts/local-sentry-naming.md §6) wants that caller, not nil.
+// (the naming ADR §6) wants that caller, not nil.
 func lastInAppFrame(ex stacktrace.Exception) (stacktrace.Frame, bool) {
 	for i := len(ex.Frames) - 1; i >= 0; i-- {
 		if ex.Frames[i].InApp {
@@ -124,7 +125,7 @@ func buildExceptionInfo(ex stacktrace.Exception) *ExceptionInfo {
 // selectCauses picks at most max entries from chained (outer to innermost)
 // for ExceptionInfo.Causes, always keeping the LAST entry: chained's
 // innermost cause is what Issue.Culprit and FingerprintV2Exception's
-// innermost.Type both come from (docs/contracts/local-sentry-naming.md §6),
+// innermost.Type both come from (the naming ADR §6),
 // so it must never be the one a length cap drops. When chained is longer
 // than max, this keeps its first max-1 (outermost) entries plus the very
 // last (innermost) one, dropping only the middle.
@@ -279,7 +280,7 @@ func exceptionSymbols(ex stacktrace.Exception) []string {
 // run correlation IDs. Every field is optional.
 type RecordExceptionOptions struct {
 	// ObservedAt is the event's own time (docs/contracts/
-	// local-sentry-naming.md §4): a live caller (monitor run --) passes
+	// the naming ADR §4): a live caller (monitor run --) passes
 	// wall-clock "now" at read time; a replaying caller (stacktrace parse
 	// --record) passes the log line's own timestamp or the file's mtime.
 	// Falls back to ex.ObservedAt, then to time.Now().UTC() when both are
@@ -295,7 +296,7 @@ type RecordExceptionOptions struct {
 	Metadata     map[string]string
 	// DedupeKey, when non-empty, folds a repeat of the exact same raw event
 	// into the existing occurrence instead of inserting a duplicate row
-	// (docs/contracts/local-sentry-naming.md §5); see UpsertResult.Deduped.
+	// (the naming ADR §5); see UpsertResult.Deduped.
 	DedupeKey string
 	// Count is how many raw events this call represents (a coalesced
 	// burst). <=0 defaults to 1.
@@ -313,17 +314,22 @@ type RecordExceptionOptions struct {
 // makes ApplyGitRoot safe to call even when a caller already ran it, AND
 // guarantees RecordException never mutates the Exception the caller handed
 // it), computes FingerprintV2Exception and the exception-chain Culprit
-// (docs/contracts/local-sentry-naming.md §6), builds the bounded
+// (the naming ADR §6), builds the bounded
 // ExceptionInfo, and performs the WithWriter upsert. `monitor run --` and
 // `monitor stacktrace parse --record` (both later slices) are meant to
 // share this single implementation instead of each re-deriving the
 // fingerprint/culprit rule.
 //
 // RecordException does NOT scrub ex -- callers must scrub before calling
-// this (docs/contracts/local-sentry-naming.md's "error text is untrusted
-// data" rule; see internal/scrub). It also never calls codemap: Culprit.FQN
-// is always left empty here, filled in later by a codemap-aware reader
-// (internal/explain, E2.5).
+// this (the naming ADR's "error text is untrusted
+// data" rule; see internal/scrub). The same contract covers the occurrence
+// context around the exception: opts.Metadata, opts.Evidence/EvidenceRefs
+// and the run correlation fields (RunID, Release, and the Run block built
+// from the run argument) are persisted VERBATIM, with no scrubbing of
+// their own -- callers must never put argv, environment variables or
+// other secret material in them, only already-scrubbed bounded labels.
+// It also never calls codemap: Culprit.FQN is always left empty here,
+// filled in later by a codemap-aware reader (internal/explain, E2.5).
 func RecordException(ctx context.Context, storePath string, wait time.Duration, ex stacktrace.Exception, id project.Identity, run contextids.IDs, opts RecordExceptionOptions) (UpsertResult, error) {
 	ex = cloneExceptionForGitRoot(ex)
 	stacktrace.ApplyGitRoot(&ex, id.GitRoot)

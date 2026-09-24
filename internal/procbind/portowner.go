@@ -18,7 +18,7 @@ var listTCPListeners = func(ctx context.Context) ([]gnet.ConnectionStat, error) 
 // FindListenerPID reports which live process owns the TCP LISTEN socket at
 // port, on any local address (127.0.0.1, ::1, 0.0.0.0, ...) -- E3.3b's
 // "map every inspector banner to its pid via the listening-port owner"
-// rule (docs/contracts/local-sentry-naming.md §8). An inspector's startup
+// rule (the naming ADR §8). An inspector's startup
 // banner ("Debugger listening on ws://host:port/uuid") names a port but no
 // pid at all, so this is the ONLY source of truth for which process it
 // belongs to -- the same "prove it by the socket's owner, never by

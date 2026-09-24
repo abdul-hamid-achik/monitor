@@ -422,7 +422,7 @@ func writeIssueJSON(w io.Writer, value any) error {
 }
 
 // activityWindow/activityBuckets size the human list's 24h sparkline column
-// (docs/contracts/local-sentry-naming.md's UX mockup section 3: a 10-char
+// (the naming ADR's UX mockup section 3: a 10-char
 // ".........#"-style column).
 const (
 	activityWindow  = 24 * time.Hour

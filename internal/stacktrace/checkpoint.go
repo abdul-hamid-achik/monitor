@@ -13,7 +13,7 @@ import (
 )
 
 // Checkpoint is one file's saved `stacktrace parse --record` progress
-// (docs/contracts/local-sentry-naming.md §5): the inode and size observed
+// (the naming ADR §5): the inode and size observed
 // the last time the file was read, and the byte offset reading stopped at.
 type Checkpoint struct {
 	Inode  uint64 `json:"inode"`
@@ -125,8 +125,10 @@ func StatInode(f *os.File) (inode uint64, size int64, err error) {
 }
 
 // ResolveOffset decides the byte offset `stacktrace parse --record` should
-// seek absPath to before reading, applying the reset rule (docs/contracts/
-// local-sentry-naming.md §5): start over from 0 when fromStart is set, when
+//
+//	seek absPath to before reading, applying the reset rule (naming ADR §5): start over from 0
+//
+// when fromStart is set, when
 // the file's current inode no longer matches the saved checkpoint's
 // (rotation), or when the file's current size is smaller than the saved
 // offset (truncation) -- both signal a new file at the same path rather
@@ -165,7 +167,7 @@ const SettleWindow = DefaultIdle
 // HashBlock returns a stable hex-encoded sha256 of a detected block's raw
 // text, the "hash(exception block)" component both live (monitor run --)
 // and reprocessed (stacktrace parse --record) DedupeKeys are built from
-// (docs/contracts/local-sentry-naming.md §5). Hashing the raw, pre-parse
+// (the naming ADR §5). Hashing the raw, pre-parse
 // text rather than the parsed Exception keeps the key independent of
 // anything scrub or ApplyGitRoot later change.
 func HashBlock(text string) string {

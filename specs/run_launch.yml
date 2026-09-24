@@ -25,12 +25,12 @@ intent: |
   launch, working around a real bug: MONITOR_LAUNCH_ROOT used to default to
   a directory -- the launch's git root/cwd -- so 7 sibling launches sharing
   one repo also shared one root and could collapse into each other via the
-  live DedupeKey). Since docs/contracts/local-sentry-naming.md §2's
+  live DedupeKey). Since the naming ADR §2's
   ROOT-semantics fix, an unnested `monitor run --` seeds its own
   MONITOR_LAUNCH_ROOT from its own freshly-minted MONITOR_LAUNCH_ID, so 7
   independent launches already get 7 distinct roots for free, with nothing
   for this spec to set up. The live DedupeKey itself
-  (docs/contracts/local-sentry-naming.md §5) is still
+  (the naming ADR §5) is still
   sha256(MONITOR_LAUNCH_ROOT + block hash) within a short bucket -- see
   internal/devrun/detector.go's dedupeBucketSeconds -- specifically so a
   NESTED `monitor run --` still folds together with its own parent's launch,
@@ -114,7 +114,7 @@ outcomes:
       command:
         run: "/tmp/monitor-spec-run-launch/check_single.sh"
   - id: seven_concurrent_runs_no_file_locked
-    description: 7 concurrent, independent `monitor run --` launches (each seeding its own distinct MONITOR_LAUNCH_ROOT automatically, per docs/contracts/local-sentry-naming.md §2) against the same store produce zero ErrFileLocked / failed writes, and the total occurrence_count across the (at most 2) resulting issues is exactly 7
+    description: 7 concurrent, independent `monitor run --` launches (each seeding its own distinct MONITOR_LAUNCH_ROOT automatically, per the naming ADR §2) against the same store produce zero ErrFileLocked / failed writes, and the total occurrence_count across the (at most 2) resulting issues is exactly 7
     verify:
       command:
         run: "/tmp/monitor-spec-run-launch/concurrent.sh"

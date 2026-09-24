@@ -58,11 +58,11 @@ func normalizeMessage(value string) string {
 }
 
 // maxFingerprintFrames is the exception-chain fingerprint's "top-5 in_app
-// frames" cap; see docs/contracts/local-sentry-naming.md §6.
+// frames" cap; see the naming ADR §6.
 const maxFingerprintFrames = 5
 
 // FingerprintV2Exception is the exception-chain fingerprint rule
-// (docs/contracts/local-sentry-naming.md §6):
+// (the naming ADR §6):
 //
 //	sha256("v2", "exception", project, outer.Type, outerFrames, innermost.Type)
 //

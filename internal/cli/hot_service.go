@@ -21,7 +21,7 @@ import (
 
 // runHotService is `monitor hot <service>` (E3.2): a symbolic name is
 // looked up in the launch registry a `monitor run --name <service> --
-// <cmd>` invocation wrote (docs/contracts/local-sentry-naming.md §8),
+// <cmd>` invocation wrote (the naming ADR §8),
 // resolved to its real runtime leaf process (procbind.ResolveLeaf, from
 // the registered LAUNCHED pid), and captured live through the exact same
 // captureRuntimeAwareProfile + BuildHeatmap + renderHotLiveHuman pipeline
@@ -202,7 +202,7 @@ func pidIsAlive(pid int) bool {
 }
 
 // printUnknownService is `monitor hot <service>`'s "never guess" error
-// path (docs/contracts/local-sentry-naming.md §8): an unregistered or
+// path (the naming ADR §8): an unregistered or
 // stale service name exits 2 (the caller does this; see runHotService)
 // after listing every service CURRENTLY registered AND alive for
 // projectSlug, the same posture procbind.AmbiguousLeafError's candidate
@@ -225,7 +225,7 @@ func printUnknownService(cmd *cobra.Command, projectSlug, name string) {
 // entries whose pid is still alive -- a stale (dead-pid) entry is exactly
 // as unregistered as one that was never written, so it must not appear in
 // an "unknown service" error's candidate list either. It also opportunistically
-// removes every stale entry it finds (docs/contracts/local-sentry-naming.md
+// removes every stale entry it finds (the naming ADR
 // §8's "ignored/cleaned by readers" rule): a launch killed by SIGKILL can
 // never clean up its own registry entry on the way out, so without this a
 // dead service accumulates in the registry forever, silently outliving

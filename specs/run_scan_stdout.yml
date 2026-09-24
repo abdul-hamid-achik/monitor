@@ -4,7 +4,7 @@ name: monitor_run_scan_stdout
 intent: |
   `monitor run --scan both -- <cmd>` (E2.4) also scans stdout, which real
   zap setups need: some configurations point OutputPaths/ErrorOutputPaths
-  at stdout instead of stderr (docs/contracts/local-sentry-naming.md §3).
+  at stdout instead of stderr (the naming ADR §3).
   This spec runs the go-zap-stdout polyglot example (examples/polyglot/
   go-zap-stdout), which prints a zap-style console ERROR entry followed by
   a pkg/errors-shaped "%+v" stack dump, all to stdout. --scan both must:

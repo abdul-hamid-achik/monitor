@@ -106,7 +106,7 @@ func TestNewRunCmdDashModeLaunchesAndSucceedsOnExitZero(t *testing.T) {
 const monitorRunSubprocessEnv = "MONITOR_RUN_TEST_DASH_MODE_SUBPROCESS"
 
 // TestNewRunCmdDashModePropagatesNonZeroExitCode proves newRunCmd's
-// os.Exit(result.ExitCode) branch (docs/contracts/local-sentry-naming.md's
+// os.Exit(result.ExitCode) branch (the naming ADR's
 // "se propaga el exit code" rule) actually fires for a non-zero code, not
 // just the (already covered) implicit `return nil` on success. os.Exit
 // cannot be called from an ordinary in-process test without killing the

@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Launch environment variable names (docs/contracts/local-sentry-naming.md
+// Launch environment variable names (the naming ADR
 // §2): the ONLY variables `monitor run -- <cmd>` may export for run
 // correlation. MONITOR, MONITOR_RUN_DIR, MONITOR_RUN_ID and MONITOR_SERVICE
 // are owned by the legacy `monitor run <spec>` / internal/contextids and
@@ -26,7 +26,7 @@ const (
 // every package init() before main() runs for every monitor invocation, not
 // just `watch`, os.Environ() already carries MONITOR=1 by the time `run --`
 // builds the child's environment, unless it is explicitly stripped here
-// (docs/contracts/local-sentry-naming.md §2's "known gotcha"). Passing
+// (the naming ADR §2's "known gotcha"). Passing
 // os.Environ() straight through as cmd.Env would silently violate the "run
 // -- only exports MONITOR_LAUNCH_*" rule.
 var legacyRunEnvNames = map[string]bool{
@@ -51,7 +51,7 @@ type LaunchIDs struct {
 // a non-empty MONITOR_LAUNCH_ROOT -- this monitor process is itself running
 // as the child of another `monitor run -- <cmd>` -- ONLY that root carries
 // through, unchanged, so the whole chain shares one identity for the live
-// DedupeKey's sake (docs/contracts/local-sentry-naming.md §5: without this,
+// DedupeKey's sake (the naming ADR §5: without this,
 // parent and child would see the same underlying text and double-count the
 // occurrence). ID and Service are always computed fresh for THIS launch:
 // an inner `--name web-api` must take effect as MONITOR_LAUNCH_SERVICE
@@ -59,7 +59,7 @@ type LaunchIDs struct {
 // replaced by whatever the OUTER launch happened to be named -- E3.2's
 // per-service launch registry depends on that too.
 //
-// ROOT semantics (docs/contracts/local-sentry-naming.md §2, the
+// ROOT semantics (the naming ADR §2, the
 // dogfooding fix formerly tracked as "FIX 1"): when there is nothing to
 // inherit -- environ carries no non-empty MONITOR_LAUNCH_ROOT, i.e. this is
 // an OUTERMOST launch, not a nested one -- ROOT is this launch's own
@@ -132,15 +132,17 @@ func newLaunchID() string {
 //   - sets MONITOR_LAUNCH_ID/SERVICE/ROOT from launch;
 //   - when appendSourceMaps is true, appends " --enable-source-maps" to
 //     NODE_OPTIONS -- creating it if unset, but always APPENDING to an
-//     existing value, never overwriting it (docs/contracts/
-//     local-sentry-naming.md's "never overwrite NODE_OPTIONS/BUN_OPTIONS/.../
-//     always append, or set only if unset" rule). appendSourceMaps false
-//     (--no-source-maps) leaves any existing NODE_OPTIONS completely alone;
-//   - when scanStdout is true and PYTHONUNBUFFERED is not already set in
-//     environ, sets it to "1" -- a scanned stdout becomes a pipe, and CPython
-//     fully block-buffers stdout (rather than line-buffering it) once it is
-//     not a tty, which would otherwise delay the detector seeing anything
-//     until the pipe's buffer fills or the process exits.
+//     existing value, never overwriting it (naming ADR's "never overwrite
+//
+// NODE_OPTIONS/BUN_OPTIONS/.../
+//
+//	  always append, or set only if unset" rule). appendSourceMaps false
+//	  (--no-source-maps) leaves any existing NODE_OPTIONS completely alone;
+//	- when scanStdout is true and PYTHONUNBUFFERED is not already set in
+//	  environ, sets it to "1" -- a scanned stdout becomes a pipe, and CPython
+//	  fully block-buffers stdout (rather than line-buffering it) once it is
+//	  not a tty, which would otherwise delay the detector seeing anything
+//	  until the pipe's buffer fills or the process exits.
 func BuildEnv(environ []string, launch LaunchIDs, appendSourceMaps, scanStdout bool) []string {
 	out := make([]string, 0, len(environ)+4)
 	haveNodeOptions := false

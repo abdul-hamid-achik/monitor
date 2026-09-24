@@ -101,7 +101,7 @@ func TestLiveDedupeKeyFoldsNearSimultaneousWindowsAcrossDetectors(t *testing.T) 
 }
 
 // TestDetectorKeepsSeparateJoinerPerStream is the --scan both regression
-// test (docs/contracts/local-sentry-naming.md's "Joiner por stream"): a
+// test (the naming ADR's "Joiner por stream"): a
 // zap-shaped stdout log line -- a hard block boundary (isBoundary) -- is
 // interleaved between every line of a stderr panic. With one Joiner per
 // stream, the stdout lines never reach the stderr Joiner at all, and the
@@ -132,7 +132,7 @@ func TestDetectorKeepsSeparateJoinerPerStream(t *testing.T) {
 }
 
 // TestDetectorDiscardsBlockSpanningAGap is pump.go's gap contract
-// (docs/contracts/local-sentry-naming.md, extended): a drop must lose an
+// (the naming ADR, extended): a drop must lose an
 // event, never fabricate a wrong one. The block's final line (the crash
 // frame) arrives flagged gap:true; the whole in-progress block must be
 // discarded, not recorded as a phantom, wrongly-shaped issue. A second,

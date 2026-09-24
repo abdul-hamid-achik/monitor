@@ -2,7 +2,7 @@ version: 1
 name: monitor_run_nested
 
 intent: |
-  docs/contracts/local-sentry-naming.md §2/§5's nesting rule, and its own
+  the naming ADR §2/§5's nesting rule, and its own
   FIX (MONITOR_LAUNCH_ROOT is seeded from the launch's own ID when NOT
   nested, never a shared directory): a NESTED `monitor run -- monitor run
   -- <crasher>` must still fold into exactly ONE occurrence (the inner

@@ -2,7 +2,7 @@ version: 1
 name: monitor_mvp_errors_go
 
 intent: |
-  Golden-table coverage (docs/contracts/local-sentry-naming.md,
+  Golden-table coverage (the naming ADR,
   "go: 1 panic"): `monitor run -- <go-crash binary>` records exactly one
   issue for the panic, with the correct culprit file:line, and
   propagates the compiled binary's own panic exit code (2 -- a `go run`

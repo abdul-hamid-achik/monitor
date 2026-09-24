@@ -2,7 +2,7 @@ version: 1
 name: monitor_mvp_errors_node
 
 intent: |
-  Golden-table coverage (docs/contracts/local-sentry-naming.md,
+  Golden-table coverage (the naming ADR,
   "node 10 -> 2"): `monitor run -- node examples/polyglot/js/workload.js`
   must group workload.js's repeated handled flakyParse errors into ONE
   issue and its single uncaught detonate() crash into a SECOND, each with

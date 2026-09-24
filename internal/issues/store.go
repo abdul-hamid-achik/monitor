@@ -279,7 +279,7 @@ func (s *Store) upsertOccurrenceLocked(input OccurrenceInput) (UpsertResult, err
 }
 
 // findDedupedOccurrence looks up dedupeKey among issueID's retained
-// occurrences (docs/contracts/local-sentry-naming.md §5). An empty
+// occurrences (the naming ADR §5). An empty
 // dedupeKey always misses -- most callers never set OccurrenceInput.
 // DedupeKey, and an empty key must never accidentally match another empty-
 // keyed occurrence.
@@ -850,8 +850,7 @@ func validStatus(status Status) bool {
 }
 
 // alertKindPrefix is the literal watch.go writes for every alert-derived
-// Issue.Kind ("monitor.alert.<rule>"); see docs/contracts/
-// local-sentry-naming.md's Issue.Kind row.
+// Issue.Kind ("monitor.alert.<rule>"); see naming ADR's Issue.Kind row.
 const alertKindPrefix = "monitor.alert."
 
 // validKindFilter reports whether kind (already lower-cased and trimmed) is

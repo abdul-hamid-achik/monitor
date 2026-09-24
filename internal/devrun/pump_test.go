@@ -82,7 +82,7 @@ func TestCopyStreamTrimsCarriageReturn(t *testing.T) {
 }
 
 // TestCopyStreamTagsEveryLineWithItsStream is the per-stream-Joiner
-// prerequisite (docs/contracts/local-sentry-naming.md's "Joiner por
+// prerequisite (the naming ADR's "Joiner por
 // stream"): the detector can only keep separate Joiners per stream if every
 // streamLine actually carries the stream it came from.
 func TestCopyStreamTagsEveryLineWithItsStream(t *testing.T) {
@@ -100,7 +100,7 @@ func TestCopyStreamTagsEveryLineWithItsStream(t *testing.T) {
 }
 
 // TestCopyStreamNeverBlocksOnAFullChannel is pump.go's core contract
-// (docs/contracts/local-sentry-naming.md §3): a full lines channel must
+// (the naming ADR §3): a full lines channel must
 // drop and count, never apply back-pressure to the read/write loop. This
 // feeds far more lines than the channel can hold and a slow/absent reader,
 // and asserts copyStream still finishes quickly and every byte still
@@ -154,7 +154,7 @@ func TestSendLineDropsOnFullChannelWithoutBlocking(t *testing.T) {
 }
 
 // TestSendLineTagsTheLineAfterADropWithGap is the other half of the
-// drop-must-lose-not-fabricate rule (docs/contracts/local-sentry-naming.md,
+// drop-must-lose-not-fabricate rule (the naming ADR,
 // extended for --scan both): the first line that successfully lands after
 // one or more drops must say so, and the flag must clear again once it has
 // been consumed by one delivered line.

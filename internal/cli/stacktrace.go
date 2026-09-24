@@ -531,8 +531,10 @@ func fileSettled(f *os.File, fallback time.Time) bool {
 }
 
 // recordParsedException applies the git root, scrubs the exception's text,
-// derives ObservedAt and the reprocess DedupeKey (docs/contracts/
-// local-sentry-naming.md §4-5), and writes one occurrence via
+//
+//	derives ObservedAt and the reprocess DedupeKey (naming ADR §4-5), and writes one occurrence
+//
+// via
 // issues.RecordException. The returned bool is UpsertResult.Deduped: the
 // caller only counts a write toward "occurrences written" when it is
 // false, so a --from-start replay (or any other reprocess that lands on an
@@ -560,7 +562,7 @@ func recordParsedException(ctx context.Context, storePath, absPath string, inode
 // scrubException redacts ex's Type/Value and every frame's Function text,
 // recursively through Chained, using scrubber -- the golden rule that error
 // text is untrusted data and must be redacted before it is persisted or
-// printed (docs/contracts/local-sentry-naming.md's "Scrub por defecto").
+// printed (the naming ADR's "Scrub por defecto").
 // Filename/AbsPath are left alone: they are resolved, checked paths (see
 // stacktrace.ApplyGitRoot), not attacker- or user-controlled message text.
 func scrubException(scrubber *scrub.Scrubber, ex *stacktrace.Exception) {

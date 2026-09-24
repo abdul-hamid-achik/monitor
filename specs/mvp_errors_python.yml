@@ -2,7 +2,7 @@ version: 1
 name: monitor_mvp_errors_python
 
 intent: |
-  Golden-table coverage (docs/contracts/local-sentry-naming.md,
+  Golden-table coverage (the naming ADR,
   "python 11 -> 2"): `monitor run -- python3 examples/polyglot/python/
   workload.py` must group the repeated handled ValueError (flaky_parse)
   tracebacks into ONE issue and the single uncaught RuntimeError

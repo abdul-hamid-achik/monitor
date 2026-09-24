@@ -1,5 +1,5 @@
 // registry.go implements E3.2's launch service registry
-// (`monitor.run-service.v1`, docs/contracts/local-sentry-naming.md §8):
+// (`monitor.run-service.v1`, the naming ADR §8):
 // `monitor run --name <n> -- <cmd>` writes one entry so a later `monitor
 // hot <service>` can find the launch's real pid (and, under --inspect, its
 // already-discovered inspector port) without the caller re-deriving
@@ -18,8 +18,9 @@ import (
 	"time"
 )
 
-// RegistrySchema is the launch registry's contract tag (docs/contracts/
-// local-sentry-naming.md §1's "Registro de servicios" row).
+//	RegistrySchema is the launch registry's contract tag (naming ADR §1's "Registro de
+//
+// servicios" row).
 const RegistrySchema = "monitor.run-service.v1"
 
 // RegistryInspector is one recorded "Debugger listening on ws://..."
@@ -27,7 +28,7 @@ const RegistrySchema = "monitor.run-service.v1"
 // inspector protocol's only bearer-token-shaped secret -- is written to
 // this registry file and this file ONLY: it must never be copied into any
 // `monitor run`/`monitor hot` banner, --json output, or MCP payload, all
-// of which report Port alone (docs/contracts/local-sentry-naming.md §8).
+// of which report Port alone (the naming ADR §8).
 type RegistryInspector struct {
 	// PID is the pid FindListenerPID resolved as Port's owner; 0 when no
 	// live listener could be attributed to it (see InspectorBanner.PIDKnown).
@@ -243,7 +244,7 @@ func WriteRegistryEntry(entry RegistryEntry) (string, error) {
 // --` calls this on its own exit path, which must never fail or delete
 // SOMEONE ELSE's entry just because this launch's own file is already
 // gone (or was never successfully created) -- best-effort by design, per
-// docs/contracts/local-sentry-naming.md §8's "removed on exit" rule.
+// the naming ADR §8's "removed on exit" rule.
 //
 // The launch_id re-check closes a narrow window WriteRegistryEntry's own
 // collision guard cannot: two launches racing to register the exact same

@@ -2,7 +2,7 @@ version: 1
 name: monitor_mvp_errors_ruby
 
 intent: |
-  Golden-table coverage (docs/contracts/local-sentry-naming.md,
+  Golden-table coverage (the naming ADR,
   "ruby: 1 fatal + 9 handled"): `monitor run -- ruby examples/polyglot/
   ruby/workload.rb` must group the repeated handled flaky_parse
   rescue-printed backtraces into ONE issue and the single uncaught

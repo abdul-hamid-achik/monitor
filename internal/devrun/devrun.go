@@ -8,8 +8,10 @@
 //
 // The one rule every other rule in this package serves: monitoring must
 // never be able to make the monitored process slower, let alone block it.
-// See pump.go's non-blocking channel send and docs/contracts/
-// local-sentry-naming.md, which this package implements section by
+//
+//	See pump.go's non-blocking channel send and naming ADR, which this package implements
+//
+// section by
 // section.
 package devrun
 
@@ -31,8 +33,7 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/scrub"
 )
 
-// Scan stream selectors for Options.Scan (docs/contracts/
-// local-sentry-naming.md §3).
+// Scan stream selectors for Options.Scan (naming ADR §3).
 const (
 	ScanStderr = "stderr"
 	ScanStdout = "stdout"
@@ -246,7 +247,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	// contextids.FromEnv must be computed BEFORE BuildEnv exports
-	// MONITOR_LAUNCH_* (docs/contracts/local-sentry-naming.md's "Occurrence
+	// MONITOR_LAUNCH_* (the naming ADR's "Occurrence
 	// run context = contextids.FromEnv() computed BEFORE exporting" rule;
 	// see watch.go:378's same ordering) -- it never reads MONITOR_LAUNCH_*
 	// itself, but computing it from THIS process's inbound environment
@@ -257,7 +258,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	// ResolveLaunchIDs takes no directory: MONITOR_LAUNCH_ROOT is this
 	// launch's own ID when it is not nested inside another `run --`, never
 	// id.GitRoot/cwd -- see ResolveLaunchIDs' doc comment (docs/contracts/
-	// local-sentry-naming.md §2's ROOT-semantics fix).
+	// the naming ADR §2's ROOT-semantics fix).
 	launch := ResolveLaunchIDs(environ, effectiveService)
 	env := BuildEnv(environ, launch, !opts.NoSourceMaps, scanStdout)
 
@@ -360,7 +361,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		fmt.Fprintln(banner, NoteBanner(note))
 	}
 
-	// E3.2's launch registry (docs/contracts/local-sentry-naming.md §8):
+	// E3.2's launch registry (the naming ADR §8):
 	// one entry per launch, keyed by (project, effective service), so a
 	// later `monitor hot <service>` can resolve this launch's real pid
 	// (and, under --inspect, its already-discovered inspector) without

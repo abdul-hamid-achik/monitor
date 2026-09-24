@@ -4,7 +4,7 @@ name: monitor_stacktrace_replay_idempotent
 intent: |
   `monitor stacktrace parse --record` (E2.1 PR3) must be idempotent:
   replaying the same log a second time must not inflate occurrence counts
-  (docs/contracts/local-sentry-naming.md §5's per-file checkpoint +
+  (the naming ADR §5's per-file checkpoint +
   DedupeKey). This spec uses internal/stacktrace's own golden dogfood
   fixture (internal/stacktrace/testdata/dogfood/python.stderr.txt): 10
   handled `ValueError: flaky_parse: ...` occurrences (the same
