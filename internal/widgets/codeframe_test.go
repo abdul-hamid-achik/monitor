@@ -3,6 +3,8 @@ package widgets
 import (
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 func selfOnlyFixture() CodeFrame {
@@ -420,6 +422,79 @@ func TestCodeFrameHideMetricsStillTruncatesLongLines(t *testing.T) {
 	for _, line := range strings.Split(out, "\n") {
 		if got := len([]rune(line)); got > f.Width {
 			t.Errorf("line %q is %d runes, want at most Width=%d", line, got, f.Width)
+		}
+	}
+}
+
+// TestCodeFrameHeaderCountsCJKByDisplayWidth asserts the header's trailing
+// dashes are padded by display cells (ansi.StringWidth), not rune count: a
+// wide CJK func name renders 2 cells per rune, so a rune-counting pad leaves
+// the header's rule short of every row's width (misaligned) or, with a
+// HideMetrics Subtitle, past it entirely.
+func TestCodeFrameHeaderCountsCJKByDisplayWidth(t *testing.T) {
+	f := CodeFrame{
+		FuncName:  "処理する",
+		File:      "js/workload.js",
+		StartLine: 11,
+		EndLine:   22,
+		SelfPct:   60.8,
+		Lines: []CodeFrameLine{
+			{Line: 13, Code: "  for (const item of items) {", Percent: 0.1},
+			{Line: 17, Code: "      s += JSON.stringify({ i, item });", Percent: 99.9},
+		},
+		Width: 60,
+	}
+	lines := strings.Split(f.Render(), "\n")
+	header := lines[0]
+	if got := ansi.StringWidth(header); got != f.Width {
+		t.Errorf("header display width = %d, want %d: %q", got, f.Width, header)
+	}
+	for i, ln := range lines {
+		if got := ansi.StringWidth(ln); got > f.Width {
+			t.Errorf("line %d display width = %d, want <= %d: %q", i, got, f.Width, ln)
+		}
+	}
+	// The rule must still reach the same column the rows fill: 60 cells of
+	// '-' after the prefix, with the CJK name counted at 2 cells per rune.
+	if !strings.HasSuffix(strings.TrimRight(header, "-"), " ") {
+		t.Errorf("header = %q, want the dashes to start after the prefix text", header)
+	}
+}
+
+// TestCodeFrameHeaderHideMetricsCJKSubtitleFitsInWidth is the HideMetrics
+// half of the same finding: a CJK Subtitle used to pad by rune count and
+// overflow the caller's Width on the header line.
+func TestCodeFrameHeaderHideMetricsCJKSubtitleFitsInWidth(t *testing.T) {
+	f := hideMetricsFixture()
+	f.FuncName = "処理する"
+	f.Subtitle = "インライン"
+	f.Width = 40
+	for i, ln := range strings.Split(f.Render(), "\n") {
+		if got := ansi.StringWidth(ln); got > f.Width {
+			t.Errorf("line %d display width = %d, want <= %d: %q", i, got, f.Width, ln)
+		}
+	}
+}
+
+// TestCodeFrameNarrowWidthMetricsNeverOverflows asserts the metrics path
+// degrades its code column (like HideMetrics already did) instead of
+// emitting the full 58-column code field past a caller-chosen Width: at
+// Width 40 every line of both layouts fits within Width.
+func TestCodeFrameNarrowWidthMetricsNeverOverflows(t *testing.T) {
+	for _, showCum := range []bool{false, true} {
+		f := CodeFrame{
+			FuncName: "main.heavyStringify", File: "go-pprof/main.go", StartLine: 14, EndLine: 22,
+			SelfPct: 0.0, CumPct: 74.8, ShowCum: showCum, Width: 40,
+			Lines: []CodeFrameLine{
+				{Line: 18, Code: "for i := 0; i < n; i++ {", Percent: 0.0, CumPercent: 0.4},
+				{Line: 19, Code: "b, _ := json.Marshal(rows[i])", Percent: 0.0, CumPercent: 74.1},
+			},
+			Footer: "narrow-width check",
+		}
+		for i, ln := range strings.Split(f.Render(), "\n") {
+			if got := ansi.StringWidth(ln); got > f.Width {
+				t.Errorf("ShowCum=%v line %d display width = %d, want <= %d: %q", showCum, i, got, f.Width, ln)
+			}
 		}
 	}
 }

@@ -252,8 +252,10 @@ func (f CodeFrame) lineNumWidth() int {
 }
 
 // renderHeader builds the "-- Func · File · headline ----" title bar,
-// padded with '-' to exactly width runes (never more: a long func/file name
-// truncates the trailing dashes to zero rather than overflowing width).
+// padded with '-' to exactly width display cells (measured via
+// ansi.StringWidth, so a wide CJK func name counts as it renders — never
+// more: a long func/file name truncates the trailing dashes to zero rather
+// than overflowing width).
 func (f CodeFrame) renderHeader(width int) string {
 	loc := f.File
 	if f.StartLine > 0 {
@@ -279,7 +281,10 @@ func (f CodeFrame) renderHeader(width int) string {
 		}
 		prefix = fmt.Sprintf("-- %s · %s · %s ", f.FuncName, loc, headline)
 	}
-	pad := width - len([]rune(prefix))
+	if ansi.StringWidth(prefix) > width {
+		prefix = ansi.Truncate(prefix, width, "")
+	}
+	pad := width - ansi.StringWidth(prefix)
 	if pad < 0 {
 		pad = 0
 	}
@@ -324,8 +329,6 @@ func (f CodeFrame) renderLine(l CodeFrameLine, isHot bool, lineNumWidth, width i
 		marker = f.style(frameHotStyle, marker)
 		numStr = f.style(frameHotStyle, numStr)
 	}
-
-	code := padCode(l.Code, codeColumnWidth)
 	issueSuffix := f.renderIssueSuffix(l)
 	// The suffix's own display width, measured on the PLAIN text (never
 	// f.style's ANSI-escaped form, whose byte length has nothing to do with
@@ -335,12 +338,31 @@ func (f CodeFrame) renderLine(l CodeFrameLine, isHot bool, lineNumWidth, width i
 	// used to render 17+ runes past every other row).
 	issueSuffixWidth := ansi.StringWidth(f.issueSuffixText(l))
 
+	// Degrade the code column first when the caller-chosen width is tighter
+	// than gutter + pct + the default code column — the same policy the
+	// HideMetrics path already uses — so a metrics row never overflows
+	// width; only the bar degrades after that (barWidth clamps to 0).
+	// Every fixed column except the code itself: gutter (marker, space,
+	// line number, " | ") plus whatever percentage columns this layout
+	// carries, plus the space before the issue suffix.
+	fixedWithoutCode := 1 + 1 + lineNumWidth + 3 + issueSuffixWidth
 	if f.ShowCum {
-		// Fixed (non-bar) columns: marker(1) space num(lineNumWidth)
-		// " | "(3) FLAT(7) sep(1) CUM(7) " | "(3) code(codeColumnWidth)
-		// " "(1) issueSuffix(issueSuffixWidth) — whatever's left of width
+		fixedWithoutCode += pctFieldWidth + len(dualColumnSep) + pctFieldWidth + 3 + 1
+	} else {
+		fixedWithoutCode += 1 + 6 + 2
+	}
+	codeWidth := codeColumnWidth
+	if avail := width - fixedWithoutCode; codeWidth > avail {
+		codeWidth = max(avail, 0)
+	}
+	code := padCode(l.Code, codeWidth)
+
+	if f.ShowCum {
+		// Fixed (non-code) columns: marker(1) space num(lineNumWidth)
+		// " | "(3) FLAT(7) sep(1) CUM(7) " | "(3) code(codeWidth) " "(1)
+		// issueSuffix(issueSuffixWidth) — whatever's left of width
 		// goes to the bar.
-		fixed := 1 + 1 + lineNumWidth + 3 + pctFieldWidth + len(dualColumnSep) + pctFieldWidth + 3 + codeColumnWidth + 1 + issueSuffixWidth
+		fixed := 1 + 1 + lineNumWidth + 3 + pctFieldWidth + len(dualColumnSep) + pctFieldWidth + 3 + codeWidth + 1 + issueSuffixWidth
 		// A bar sized by SELF would be empty on exactly the rows CUM makes
 		// interesting: a pprof wrapper's SELF is routinely ~0 (see
 		// profiler_test.go's TestSymbolsFromPprofWrapperHasZeroFlatButFullCum).
@@ -350,9 +372,9 @@ func (f CodeFrame) renderLine(l CodeFrameLine, isHot bool, lineNumWidth, width i
 			marker, numStr, pctFieldWidth-1, l.Percent, dualColumnSep, pctFieldWidth-1, l.CumPercent, code, cumBar, issueSuffix)
 	}
 
-	// Fixed (non-bar) columns: marker(1) space num(lineNumWidth) " | "(3)
-	// code(codeColumnWidth) " "(1) pct(6) " |"(2) issueSuffix(issueSuffixWidth).
-	fixed := 1 + 1 + lineNumWidth + 3 + codeColumnWidth + 1 + 6 + 2 + issueSuffixWidth
+	// Fixed (non-code) columns: marker(1) space num(lineNumWidth) " | "(3)
+	// code(codeWidth) " "(1) pct(6) " |"(2) issueSuffix(issueSuffixWidth).
+	fixed := 1 + 1 + lineNumWidth + 3 + codeWidth + 1 + 6 + 2 + issueSuffixWidth
 	pctStr := fmt.Sprintf("%5.1f%%", l.Percent)
 	barStr := f.style(frameBarStyle, bar(l.Percent, barWidth(width, fixed)))
 	return fmt.Sprintf("%s %s | %s %s |%s%s", marker, numStr, code, pctStr, barStr, issueSuffix)
