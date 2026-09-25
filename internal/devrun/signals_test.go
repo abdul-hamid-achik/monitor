@@ -85,6 +85,42 @@ func waitForPIDFile(t *testing.T, path string) int {
 	return 0
 }
 
+// killSelfUntilExit delivers sig to this process -- exactly what the
+// forwardSignals goroutine under test listens for -- and waits for cmd to
+// exit, REPEATING the delivery every 100ms until it does or timeout
+// elapses. A single Kill can land before forwardSignals has had its first
+// timeslice: a CI load spike can deschedule the whole test process between
+// the `go forwardSignals` statement and the Kill while the (separately
+// scheduled) shell still wins its own race to the pidfile, and with
+// nothing registered yet that one signal is silently swallowed (the
+// package-level TestMain guard keeps it from killing the binary, but the
+// test would still time out asserting nothing). Retrying keeps the
+// assertion end-to-end -- a genuinely broken forwarder still trips the
+// deadline -- while tolerating arbitrarily slow registration. Reports
+// whether the child exited; the caller owns the timeout path (SIGKILL
+// cleanup plus its test-specific failure message).
+func killSelfUntilExit(t *testing.T, cmd *exec.Cmd, sig syscall.Signal, timeout time.Duration) bool {
+	t.Helper()
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(os.Getpid(), sig); err != nil {
+			t.Fatalf("Kill(self, %v): %v", sig, err)
+		}
+		remaining := time.Until(deadline)
+		if remaining > 100*time.Millisecond {
+			remaining = 100 * time.Millisecond
+		}
+		select {
+		case <-waitDone:
+			return true
+		case <-time.After(remaining):
+		}
+	}
+	return false
+}
+
 // trapScript builds the shell script the forwarding tests use: a shell
 // that backgrounds a sleep and waits on it, with a TERM trap that reports
 // and exits 7 -- proving the forwarded signal reached the shell itself,
@@ -192,15 +228,7 @@ func TestForwardSignalsAlwaysRelaysSigterm(t *testing.T) {
 			go forwardSignals(cmd, ttyShared, done)
 
 			waitForPIDFile(t, pidFile) // the shell is armed once the pidfile lands
-			if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-				t.Fatalf("Kill(self, SIGTERM): %v", err)
-			}
-
-			waitDone := make(chan error, 1)
-			go func() { waitDone <- cmd.Wait() }()
-			select {
-			case <-waitDone:
-			case <-time.After(5 * time.Second):
+			if !killSelfUntilExit(t, cmd, syscall.SIGTERM, 5*time.Second) {
 				_ = cmd.Process.Kill()
 				close(done)
 				t.Fatal("child did not exit within 5s of SIGTERM -- forwardSignals likely failed to relay it")
@@ -239,26 +267,25 @@ func TestForwardSignalsSkipsSigintWhenTTYShared(t *testing.T) {
 	defer close(done)
 
 	waitForPIDFile(t, pidFile) // the shell is armed once the pidfile lands
-	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
-		t.Fatalf("Kill(self, SIGINT): %v", err)
-	}
 	// Negative-observation window, not readiness: a (broken) forwarded
 	// SIGINT needs time to arrive and kill the child, so absence can
-	// only be asserted after waiting.
-	time.Sleep(300 * time.Millisecond)
+	// only be asserted after waiting. The SIGINT is repeated across the
+	// window (rather than sent once) so that a forwardSignals goroutine
+	// that registers late still observes -- and must skip -- at least
+	// one of them; unobserved ones are harmless either way.
+	intDeadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(intDeadline) {
+		if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+			t.Fatalf("Kill(self, SIGINT): %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 
 	if cmd.Process.Signal(syscall.Signal(0)) != nil {
 		t.Fatal("child exited after SIGINT under ttyShared=true; forwardSignals must not forward SIGINT in this case")
 	}
 
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-		t.Fatalf("Kill(self, SIGTERM): %v", err)
-	}
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- cmd.Wait() }()
-	select {
-	case <-waitDone:
-	case <-time.After(5 * time.Second):
+	if !killSelfUntilExit(t, cmd, syscall.SIGTERM, 5*time.Second) {
 		_ = cmd.Process.Kill()
 		t.Fatal("child did not exit after SIGTERM either -- forwardSignals appears broken, not just correctly skipping SIGINT")
 	}
@@ -291,15 +318,7 @@ func TestForwardSignalsReachesWholeProcessGroupWhenNotTTYShared(t *testing.T) {
 
 	grandchildPID := waitForPIDFile(t, pidFile)
 
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-		t.Fatalf("Kill(self, SIGTERM): %v", err)
-	}
-
-	waitDone := make(chan error, 1)
-	go func() { waitDone <- cmd.Wait() }()
-	select {
-	case <-waitDone:
-	case <-time.After(5 * time.Second):
+	if !killSelfUntilExit(t, cmd, syscall.SIGTERM, 5*time.Second) {
 		_ = cmd.Process.Kill()
 		close(done)
 		t.Fatal("the direct child did not exit within 5s of the forwarded SIGTERM")
@@ -359,15 +378,7 @@ func TestForwardSignalsTtySharedReachesDescendants(t *testing.T) {
 
 			// Exactly what a user's `kill <monitor-pid>` does: only
 			// monitor's own pid, never the shared group.
-			if err := syscall.Kill(os.Getpid(), tc.sig); err != nil {
-				t.Fatalf("Kill(self, %v): %v", tc.sig, err)
-			}
-
-			waitDone := make(chan error, 1)
-			go func() { waitDone <- cmd.Wait() }()
-			select {
-			case <-waitDone:
-			case <-time.After(5 * time.Second):
+			if !killSelfUntilExit(t, cmd, tc.sig, 5*time.Second) {
 				_ = cmd.Process.Kill()
 				close(done)
 				t.Fatalf("the direct child did not exit within 5s of the forwarded %v", tc.sig)
