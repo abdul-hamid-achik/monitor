@@ -153,10 +153,15 @@ outcomes:
       darwin-only `sample` fallback). Asserts the exact planted hot line
       (examples/polyglot/go-pprof/main.go:19, the json.Marshal call inside
       main.heavyStringify -- the same value specs/profile_go_pprof.yml
-      already pins for this identical fixture) actually carries
-      self-time, the same "not just present, but actually hot"
-      technique specs/hot_pid.yml/specs/run_inspect.yml use for their own
-      fixture.
+      already pins for this identical fixture) is the MAX-CUM line of its
+      function -- "not just present, but actually hot", measured the way
+      the product itself measures pprof/Go heat: the `>` marker rule is
+      cum-based for pprof sources (widgets.CodeFrame's ShowCum
+      hottestLine), because in Go the expensive work is routinely
+      cum-only (LUX-1). A self-time assertion flakes here (observed
+      live: line 19 at 94.7% cum with self 0 across a whole 2s
+      capture); the Node/CDP specs keep their max-self technique
+      because V8 positionTicks genuinely are self-time.
     timeoutMs: 25000
     verify:
       command:
@@ -174,11 +179,8 @@ outcomes:
           assert d['schema'] == 'monitor.line_heatmap.v1', d.get('schema')
           hs = next((f for f in d['functions'] if f['name'] == 'main.heavyStringify'), None)
           assert hs, [f['name'] for f in d['functions']]
-          found = False
-          for line in hs['lines']:
-              if line['line'] == 19 and line.get('self', 0) > 0:
-                  found = True
-          assert found, hs['lines']
+          best = max(hs['lines'], key=lambda l: l.get('cum', 0))
+          assert best['line'] == 19, hs['lines']
           "
         timeoutMs: 25000
 

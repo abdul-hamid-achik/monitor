@@ -23,9 +23,13 @@ intent: |
     (heap)" comment — line 96 as of this fixture's current shape; verified
     live against a real capture, not assumed from source alone), must be
     the named hot line, not main.go:99's cheaper map-insertion line. This
-    is checked via python3's max-self selection (not an assumed line
-    order), matching specs/hot_pid.yml and specs/mcp_profile_lines.yml's
-    own technique.
+    is checked via python3's max-CUM selection (not max-self, and not an
+    assumed line order): for pprof sources the product's own `>`
+    marker is cum-based (widgets.CodeFrame's ShowCum hottestLine rule),
+    because in Go the expensive work is routinely cum-only (LUX-1) — a
+    max-self selection flakes whenever sampling attributes the bytes to
+    the line's callees instead (observed live: line 96 at 46MB cum with
+    self 0 while line 99 held 4MB self).
 
   The pprof port (127.0.0.1:6069) is hardcoded, matching
   specs/hot_file.yml's own real-pprof-capture outcome for the same fixture
@@ -83,8 +87,10 @@ outcomes:
   - id: names_allocation_line_96_json
     description: |
       the JSON heatmap's main.buildIndex names line 96 (the composite
-      literal doing the actual retained allocation) as its MAX-SELF line,
-      not line 99 (the cheaper map-insertion append).
+      literal doing the actual retained allocation) as its MAX-CUM line,
+      not line 99 (the cheaper map-insertion append) — the same
+      cum-based rule the product's own `>` marker uses for pprof
+      sources (see this spec's intent).
     timeoutMs: 20000
     verify:
       command:
@@ -106,7 +112,7 @@ outcomes:
           import json
           d = json.load(open('/tmp/monitor-spec-hot-go-heap.json'))
           fn = next(f for f in d['functions'] if f['name'] == 'main.buildIndex')
-          best = max(fn['lines'], key=lambda l: l.get('self', 0))
+          best = max(fn['lines'], key=lambda l: l.get('cum', 0))
           assert best['line'] == 96, fn['lines']
           "
 
