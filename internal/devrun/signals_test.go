@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +15,24 @@ import (
 	"testing"
 	"time"
 )
+
+// TestMain keeps the test binary itself alive for the whole package run.
+// The forwarding tests below deliberately signal their OWN process
+// (syscall.Kill(os.Getpid(), ...)), and each forwardSignals under test
+// only holds a signal.Notify registration inside its own window -- a
+// SIGTERM or SIGHUP landing outside every window (a stray sender on a
+// shared CI runner, a runtime delivery edge) otherwise kills the binary
+// with Go's default disposition, surfacing as a bare "signal: terminated"
+// with zero FAIL lines (observed on ubuntu CI). Go broadcasts notified
+// signals to EVERY registered channel, so this package-level registration
+// changes no test's semantics: each forwardSignals still receives its own
+// copy and the assertions still observe the real forwarding behavior. The
+// guard channel is never drained and never stopped: a full channel only
+// drops that spare copy, and survival needs registration, not receipt.
+func TestMain(m *testing.M) {
+	signal.Notify(make(chan os.Signal, 64), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	os.Exit(m.Run())
+}
 
 // tempFileStdout gives cmd.Stdout a real *os.File (not an in-memory
 // io.Writer): the test scripts below background a "sleep" job so their
