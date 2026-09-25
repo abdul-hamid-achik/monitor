@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-24
+
 ### Breaking
 
 - **MCP `monitor_issue` now returns the issue brief by default.** A call
@@ -506,6 +508,7 @@ remaining pure CLI helpers.
 Initial release: a terminal system monitor for macOS with a Network tab,
 Settings documentation, and a GoReleaser + GitHub Actions release workflow.
 
+[2.0.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.15.1...v2.0.0
 [1.15.1]: https://github.com/abdul-hamid-achik/monitor/compare/v1.15.0...v1.15.1
 [1.15.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.14.0...v1.15.0
 [1.14.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.13.0...v1.14.0
