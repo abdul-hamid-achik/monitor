@@ -81,6 +81,33 @@ func TestAgainBannerFormat(t *testing.T) {
 	}
 }
 
+func TestNewIssueBannerRegressed(t *testing.T) {
+	line := NewIssueBanner(newIssueEvent{
+		ShortID: "5C1D", Level: "fatal", Title: "Error: boom",
+		File: "js/workload.js", Line: 31, Func: "flakyParse", Regressed: true,
+	})
+	for _, want := range []string{"REGRESSED", "5C1D", "js/workload.js:31", "flakyParse()"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("NewIssueBanner(regressed) = %q, missing %q", line, want)
+		}
+	}
+	for _, notWant := range []string{"NEW", "fatal"} {
+		if strings.Contains(line, notWant) {
+			t.Errorf("NewIssueBanner(regressed) = %q, must not contain %q (a regression is never NEW, and the level word carries no news)", line, notWant)
+		}
+	}
+}
+
+func TestExitSummaryMentionsRegressedIDs(t *testing.T) {
+	line := ExitSummary(ExitSummaryInfo{
+		CmdName: "node", ExitCode: 1, Duration: 3 * time.Second,
+		RegressedIDs: []string{"a1b2c3", "d4e5f6"},
+	})
+	if !strings.Contains(line, "2 regressed (a1b2c3, d4e5f6)") {
+		t.Errorf("ExitSummary = %q, want the regressed clause", line)
+	}
+}
+
 func TestExitSummaryNoIssuesNoDrops(t *testing.T) {
 	line := ExitSummary(ExitSummaryInfo{CmdName: "node", ExitCode: 0, Duration: 3 * time.Second})
 	for _, want := range []string{"node exited 0 after 3s", "0 new issues", "0 lines dropped"} {

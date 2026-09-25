@@ -6,12 +6,85 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- **MCP `monitor_issue` now returns the issue brief by default.** A call
+  with only `{"id": ...}` returns the bounded `monitor.issue_context.v1`
+  **brief** (schema, budget, issue summary, culprit with snippet, causes,
+  in-app frames, impact, timeline, privacy block, and proposed next steps)
+  instead of the legacy `{issue, occurrences, occurrences_truncated}`
+  payload. Existing callers that need the legacy shape pass
+  `occurrence_limit` > 0 (default 20, max 200), which restores the full
+  issue record plus its occurrences.
+
+### Added
+
+- **SDK-free crash capture: `monitor run -- <cmd>`.** Launch a command,
+  keep its output on the terminal untouched, and turn uncaught exceptions
+  and caught-and-printed errors from Node, Deno, Bun, Python, Ruby and Go
+  into durable, grouped issues — no SDK, no code change. Every issue gets
+  a culprit `file:line`, and the launch banners announce `NEW <id>` the
+  first time a crash is seen and `<id> again (xN)` for repeats. The
+  child's exit code becomes monitor's exit code, and the copy to the
+  terminal never waits on detection or the store.
+- **Log replay: `monitor stacktrace parse --record --file app.log`.**
+  Records exceptions from an existing log file, idempotently: per-file
+  checkpoints skip bytes already parsed, and re-running over a log that
+  has not grown replays nothing. A replayed occurrence takes its
+  timestamp from the log line (or the file's mtime), never from "now".
+- **Issue pages: `monitor issue <id>`.** One command renders the full
+  `monitor.issue_context.v1` page: culprit line with a source snippet,
+  the exception chain's causes, the in-app stack, codemap blast radius
+  (impact), the last commit that touched the culprit line, honest
+  `degraded` notes, and proposed next steps. `--json` emits the standard
+  contract, `--md` a paste-ready page for an agent, and the literal id
+  `latest` (with optional `--project`/`--service`/`--kind` filters)
+  selects the most recently active issue.
+- **Richer `monitor issues` list.** `--at <file:line>` finds issues whose
+  culprit sits inside the function containing that location;
+  `--kind`, `--since`/`--until`, `--run-id` and `--release` filter by
+  kind and activity window; the human list defaults to the current
+  project and `--all` lists every project.
+- **Hot lines: `monitor hot`.** Answers "which LINE inside this function
+  burns CPU/heap/goroutines", not just which function. Three modes:
+  `--file` (a saved V8/Bun `.cpuprofile` or pprof `.pb`/`.pb.gz`), a
+  numeric `<pid>` (resolving yarn/npm/`go run` wrappers to the real
+  runtime leaf), or a `<service>` name registered by
+  `monitor run --name <service>`. The per-function CodeFrame highlights
+  the hot line with per-line percentages, marks issue culprits on the
+  heat table (errors × heat), resolves hot lines through source maps
+  (`mapping: exact`/`ambiguous`, with stale-map warnings), and stays
+  honest: likely-JIT-inlined callees are called out instead of blamed on
+  the caller's line, and an idle or diffuse profile says so rather than
+  inventing a hot line.
+- **Launch-time profiling flags.** `monitor run --inspect` opens a
+  debugger inspector for Node/Deno (a one-line no-op note for Bun) and
+  registers it for `monitor hot <service>`; `monitor run --profile`
+  writes a V8 `.cpuprofile` at exit for Node/Bun, flushed even by a bare
+  Ctrl-C unless the app installs its own signal handler. Inspector
+  `ws://` URLs are never printed — only the port.
+- **Runtime-aware `monitor profile`.** Node/Bun/Deno `cpu` and `heap` use
+  the Chrome DevTools Protocol when the target was started with
+  `--inspect`; Go `heap`/`cpu`/`goroutine` use `net/http/pprof` with
+  listener-ownership verification; `sample` uses macOS `sample`.
+  `--keep` retains the temp artifact, `--output` persists it.
+- **Privacy scrubbing for recorded error text.** Exception text recorded
+  by `monitor run --` or `stacktrace parse --record` is scrubbed before
+  it is persisted: provider-shaped secrets, emails, Luhn-valid card
+  numbers, URL credentials, and the exact values of secret-named
+  environment variables (`--redact-env` adds more names). MCP and `--md`
+  issue payloads are scrubbed again at read time and carry
+  `privacy: {text_is_untrusted: true, scrubbed: N}`.
+
 ### Changed
 
 - The documentation site now uses a purpose-built editorial landing page,
   local Geist variable fonts, an interactive signal-to-evidence walkthrough,
   clearer ecosystem and MCP safety explanations, and a more polished reading
   system across navigation, sidebars, code blocks, tables, and mobile layouts.
+- New guides: [Your First Issue](docs/guide/first-issue.md) (the
+  crash-to-explained-issue journey), [Hot Lines](docs/guide/hot-lines.md),
+  and the [Runtimes Matrix](docs/guide/runtimes.md).
 
 ## [1.15.1] - 2026-07-27
 

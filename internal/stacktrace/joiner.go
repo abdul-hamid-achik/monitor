@@ -242,16 +242,56 @@ func (j *Joiner) maxBytes() int {
 // room for the frames that follow it.
 const maxLineBytes = 8 << 10
 
-// clean normalizes one input line: it drops a trailing CR (CRLF input from
-// Windows tools or TTY-attached containers), strips ANSI escapes, and
-// truncates the line to maxLineBytes (and always under MaxBytes).
+// pyTracebackHeader is CPython's traceback header line (python.go's
+// reTracebackHeader). clean() uses it to re-align a line whose tail IS the
+// header but whose head is an unterminated progress bar (CC-7).
+const pyTracebackHeader = "Traceback (most recent call last):"
+
+// clean normalizes one input line: it strips ANSI escapes, drops the
+// CRLF artifact's trailing CRs, applies carriage-return overwrite
+// semantics to any interior CR, re-aligns a traceback header glued behind
+// an open progress bar, and truncates the line to maxLineBytes (and always
+// under MaxBytes).
 func (j *Joiner) clean(line string) string {
-	line = strings.TrimRight(line, "\r")
 	line = StripANSI(line)
+	// Trailing CRs are the CRLF line-ending artifact (the splitter hands
+	// us "text\r"); drop them BEFORE overwrite semantics, or the last-'\r'
+	// rule below reduces every CRLF line to "".
+	line = strings.TrimRight(line, "\r")
+	// CC-7: a terminal cursor returns to column 0 on '\r' and overwrites,
+	// so only the text after the LAST '\r' is ever visible. A status or
+	// progress line cleared with a bare '\r' (or "\r\x1b[2K", whose ANSI
+	// strip above leaves the '\r' behind) otherwise keeps the exception
+	// header off column 0 and the block is never recognized, even though
+	// the terminal showed a clean "Error:"/"Traceback" line. Stripping
+	// ANSI first is what makes the "\r\x1b[2K" shape reduce to this too.
+	if i := strings.LastIndexByte(line, '\r'); i >= 0 {
+		line = line[i+1:]
+	}
+	// CC-7, second shape: a hand-rolled progress bar printed with '\r' and
+	// no newline glues itself onto the line that follows it, so the raw
+	// line ends with Python's traceback header but does not START with
+	// it. When the glued prefix looks like a progress bar ('%' or '|'),
+	// trim everything before the header so header detection sees it at
+	// column 0.
+	if i := strings.LastIndex(line, pyTracebackHeader); i > 0 && strings.ContainsAny(line[:i], "|%") {
+		line = line[i:]
+	}
 	return truncateUTF8(line, min(maxLineBytes, j.maxBytes()-1))
 }
 
-// truncateUTF8 cuts s to at most n bytes without splitting a rune.
+// truncateDelims lists the byte delimiters truncateUTF8 backs off to when a
+// cut lands mid-token (SEC-7): scrub's shape detectors and exact-value
+// passes run on the TRUNCATED line, so a secret whose recognizable prefix
+// survives the cut (a "ghp_..." token straddling the 8 KiB line limit)
+// would otherwise be persisted unredacted -- the GitHub detector needs 20+
+// characters and the AWS detector 16, so a cut prefix slips through.
+const truncateDelims = " \t\"'=,:/?&"
+
+// truncateUTF8 cuts s to at most n bytes without splitting a rune. When the
+// cut would land mid-token (SEC-7), it backs off to the last delimiter
+// before the limit so no partial token survives; with no delimiter in the
+// prefix there is no safer boundary and the rune-aligned cut stands.
 func truncateUTF8(s string, n int) string {
 	if n < 0 {
 		n = 0
@@ -261,6 +301,9 @@ func truncateUTF8(s string, n int) string {
 	}
 	for n > 0 && !utf8.RuneStart(s[n]) {
 		n--
+	}
+	if i := strings.LastIndexAny(s[:n], truncateDelims); i >= 0 {
+		n = i
 	}
 	return s[:n]
 }

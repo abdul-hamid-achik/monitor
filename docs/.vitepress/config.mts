@@ -97,7 +97,16 @@ export default defineConfig({
           items: [
             { text: 'Installation', link: '/guide/installation' },
             { text: 'Getting Started', link: '/guide/getting-started' },
+            { text: 'Your First Issue', link: '/guide/first-issue' },
             { text: 'The TUI', link: '/guide/tui' },
+          ],
+        },
+        {
+          text: 'Error tracking',
+          items: [
+            { text: 'Runtimes Matrix', link: '/guide/runtimes' },
+            { text: 'Hot Lines', link: '/guide/hot-lines' },
+            { text: 'Local Issues', link: '/guide/issues' },
           ],
         },
         {
@@ -105,7 +114,6 @@ export default defineConfig({
           items: [
             { text: 'CLI Reference', link: '/guide/cli' },
             { text: 'MCP Server', link: '/guide/mcp' },
-            { text: 'Local Issues', link: '/guide/issues' },
             { text: 'Ecosystem Integration', link: '/guide/ecosystem' },
           ],
         },

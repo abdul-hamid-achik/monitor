@@ -3,8 +3,10 @@ package explain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -40,6 +42,15 @@ func readSnippet(root, relFile string, line, context int) (*Snippet, string) {
 	if err != nil {
 		return nil, fmt.Sprintf("read %s: %v", relFile, err)
 	}
+	// SEC-2: the frame's file must be a file git tracks under the root the
+	// caller trusted. A forged frame (log injection of untrusted stderr)
+	// naming .env, a gitignored secrets file or anything else the repo
+	// never committed must not have its contents lifted into the MCP brief
+	// or the --md page, next to an attacker-written title.
+	if allowed, reason := snippetTrackedUnderRoot(absRoot, clean); !allowed {
+		return nil, reason
+	}
+
 	rootWithSep := absRoot + string(filepath.Separator)
 	if resolved != absRoot && !strings.HasPrefix(resolved, rootWithSep) {
 		return nil, fmt.Sprintf("resolved path escapes the git root: %q", relFile)
@@ -80,4 +91,70 @@ func readSnippet(root, relFile string, line, context int) (*Snippet, string) {
 		Highlight: line,
 		SHA256:    hex.EncodeToString(sum[:]),
 	}, ""
+}
+
+// snippetTrackedUnderRoot is SEC-2's ingest gate for readSnippet: relFile
+// (already cleaned and prefix-checked against the root) is readable only
+// when git tracks it under absRoot -- `git -C absRoot ls-files
+// --error-unmatch -- relFile` succeeds. A tracked file is committed source;
+// anything else (a gitignored .env, a local secrets file, an untracked
+// scratch file) stays out of the snippet even when it exists on disk under
+// the root. When provenance cannot be verified at all -- git itself is
+// unavailable, or absRoot is not inside a git work tree (a marker- or
+// service-rooted project) -- the gate degrades to the gitlessFallback
+// refusal below instead of pretending to have verified anything. The
+// returned reason is the Degraded detail when refused.
+func snippetTrackedUnderRoot(absRoot, relFile string) (bool, string) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		if gitlessFallbackRefused(relFile) {
+			return false, fmt.Sprintf("git unavailable; refusing to read sensitive file %q unverified", relFile)
+		}
+		return true, ""
+	}
+	cmd := exec.Command(gitPath, "-C", absRoot, "ls-files", "--error-unmatch", "--", filepath.ToSlash(relFile))
+	if err := cmd.Run(); err == nil {
+		return true, ""
+	}
+	if errors.Is(err, exec.ErrNotFound) {
+		// git vanished between LookPath and Run; degrade the same way.
+		if gitlessFallbackRefused(relFile) {
+			return false, fmt.Sprintf("git unavailable; refusing to read sensitive file %q unverified", relFile)
+		}
+		return true, ""
+	}
+	// ls-files failed. Outside a work tree that failure is git's "not a
+	// git repository", which says nothing about the file -- degrade to
+	// the fallback instead of locking snippets out of non-git projects.
+	// (The rev-parse runs only on this failure path, so the common
+	// tracked-file case still costs a single git invocation.)
+	if !dirIsGitWorkTree(gitPath, absRoot) {
+		if gitlessFallbackRefused(relFile) {
+			return false, fmt.Sprintf("not a git repository; refusing to read sensitive file %q unverified", relFile)
+		}
+		return true, ""
+	}
+	// Inside a work tree, exit status 1 is git's "pathspec did not match
+	// any file(s) known to git" (untracked or ignored): refuse.
+	return false, fmt.Sprintf("refusing to read %s: not tracked by git under the snippet root", relFile)
+}
+
+// dirIsGitWorkTree reports whether dir sits inside a git work tree.
+func dirIsGitWorkTree(gitPath, dir string) bool {
+	out, err := exec.Command(gitPath, "-C", dir, "rev-parse", "--is-inside-work-tree").Output()
+	return err == nil && strings.TrimSpace(string(out)) == "true"
+}
+
+// gitlessFallbackRefused reports whether relFile must stay unreadable when
+// git cannot be asked at all (SEC-2): dotfiles (which covers .env and
+// .env.* variants) and anything under a .git/ directory are refused
+// outright, while ordinary-looking paths are allowed through -- the gate
+// degrades, it does not lock the whole snippet feature down.
+func gitlessFallbackRefused(relFile string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(relFile), "/") {
+		if part == ".git" || strings.HasPrefix(part, ".") || strings.HasPrefix(part, ".env") {
+			return true
+		}
+	}
+	return false
 }

@@ -166,6 +166,7 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 			// cwd would break any script or spec invoking it from a fixed
 			// checkout without expecting a directory-dependent answer.
 			effectiveProject := strings.TrimSpace(projectFlag)
+			projectFromCwd := false
 			if effectiveProject == "" && !all && !JSONOutput(cmd) {
 				// PID: 1 is a positive, non-real PID purely to steer
 				// project.Resolve's OWN "PID<=0 means a host-wide,
@@ -174,6 +175,7 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 				// call is about resolving the CURRENT directory's project
 				// identity, not describing a specific process.
 				effectiveProject = project.Resolve(project.Hints{UseWorkingDir: true, PID: 1}).Slug
+				projectFromCwd = effectiveProject != ""
 			}
 			// --at (E3.4/E3's "monitor issues --at <file:line>") narrows to
 			// issues whose culprit lands inside the target function/line, a
@@ -218,7 +220,24 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 			if JSONOutput(cmd) {
 				return writeIssueJSON(cmd.OutOrStdout(), entries)
 			}
-			return writeIssuesListHuman(cmd.OutOrStdout(), path, entries, effectiveProject)
+			// LUX-9/CC-6: an empty human list under the silently-defaulted
+			// cwd project must not read as "the store is empty" -- other
+			// projects may hold issues, and --all is the way to see them.
+			// The second count keeps every OTHER filter (--status, --since,
+			// ...) and only drops the project scoping, so the hint never
+			// promises issues --all would actually hide.
+			emptyHint := ""
+			if len(entries) == 0 && projectFromCwd {
+				if others := countIssuesExcludingProject(path, issues.ListOptions{
+					Statuses: parsedStatuses, Service: strings.TrimSpace(service),
+					Since: sinceBound, Until: untilBound,
+					RunID: strings.TrimSpace(runID), Release: strings.TrimSpace(release),
+					Kind: strings.TrimSpace(kind),
+				}); others > 0 {
+					emptyHint = fmt.Sprintf("No issues in project %s. (%d in other projects; monitor issues --all)", effectiveProject, others)
+				}
+			}
+			return writeIssuesListHuman(cmd.OutOrStdout(), path, entries, effectiveProject, emptyHint)
 		},
 	}
 	cmd.Flags().StringSliceVar(&statuses, "status", nil, "filter by status (open, resolved, ignored; repeatable)")
@@ -452,7 +471,7 @@ const (
 	// cap below ~35, or a project-relative rewrite that drops the
 	// "examples/polyglot/" prefix, both make that committed, must-pass
 	// spec fail. 40 keeps that contract intact while
-	// truncatePathDisplay's own tail-preserving cut (see below) still
+	// truncateLocation's own tail-preserving, boundary-aligned cut (see
 	// improves the genuinely pathological case (a monorepo path deeper
 	// than 40 runes) that used to render in full, unbounded.
 	maxTitleLen = 20
@@ -467,8 +486,17 @@ const (
 // sparkline column rather than failing the whole list) to read each
 // entry's recent occurrence timestamps, since issues.Issue itself does not
 // carry a time series.
-func writeIssuesListHuman(w io.Writer, storePath string, entries []issues.Issue, projectFilter string) error {
+func writeIssuesListHuman(w io.Writer, storePath string, entries []issues.Issue, projectFilter, emptyProjectHint string) error {
 	if len(entries) == 0 {
+		// LUX-9/CC-6: when the caller scoped this list to the cwd's
+		// project by default and other projects DO hold matching issues,
+		// it passes the ready-to-print one-line explanation (built next to
+		// the List call, which has every filter at hand) instead of the
+		// bare, misleading "No issues found.".
+		if emptyProjectHint != "" {
+			_, err := fmt.Fprintln(w, emptyProjectHint)
+			return err
+		}
 		_, err := fmt.Fprintln(w, "No issues found.")
 		return err
 	}
@@ -497,7 +525,7 @@ func writeIssuesListHuman(w io.Writer, storePath string, entries []issues.Issue,
 		if _, err := fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\n",
 			strings.ToUpper(displayIDs[issue.ID]), issue.OccurrenceCount, line,
 			humanDuration(now.Sub(issue.LastSeen)), title,
-			truncatePathDisplay(culpritLocation(issue), maxWhereLen)); err != nil {
+			truncateLocation(culpritLocation(issue), maxWhereLen)); err != nil {
 			return err
 		}
 	}
@@ -505,6 +533,25 @@ func writeIssuesListHuman(w io.Writer, storePath string, entries []issues.Issue,
 		return err
 	}
 	return writeIssuesListFooter(w, entries, displayIDs)
+}
+
+// countIssuesExcludingProject re-lists the store with opts plus Project
+// left empty (LUX-9/CC-6): every other filter applies unchanged, so the
+// count is exactly what `monitor issues --all <same flags>` would show.
+// Best-effort by design -- any failure to reopen the store just yields 0,
+// degrading the empty list to its old wording rather than failing a
+// command that already succeeded.
+func countIssuesExcludingProject(storePath string, opts issues.ListOptions) int {
+	store, err := issues.OpenReadOnly(storePath)
+	if err != nil {
+		return 0
+	}
+	defer store.Close()
+	entries, err := store.List(opts)
+	if err != nil {
+		return 0
+	}
+	return len(entries)
 }
 
 // uniqueDisplayIDs returns, for each of entries, the shortest ID-suffix
@@ -717,19 +764,36 @@ func truncateDisplay(s string, n int) string {
 	return string(r[:n-3]) + "..."
 }
 
-// truncatePathDisplay shortens a "file:line"-shaped path to at most n
-// runes, keeping its TAIL — the filename and line number, the part someone
-// actually needs to find the culprit — rather than truncateDisplay's own
-// right-truncation, which would keep a long leading directory (e.g.
-// "examples/polyglot/") and cut off exactly the useful part. A leading "…"
-// marks the cut. See the polish review's "narrow the WHERE column ...
-// sensibly" finding.
-func truncatePathDisplay(s string, n int) string {
+// truncateLocation shortens a WHERE-column "file:line" location to at
+// most n runes, keeping the TAIL and cutting at a path-segment boundary
+// (LUX-8): the ":line" suffix and the filename are the only parts that
+// point someone at the culprit, so a head truncation at 40 runes -- or
+// even a plain tail truncation, which lands mid-directory ("…mponents/
+// dashboard/...") -- loses or muddles exactly that. When the kept tail
+// contains a '/', everything up to and including the first one is
+// dropped too, so the result reads like "…/widgets/revenue.js:2". A
+// location with no '/' in its tail (or one that fits) is returned with
+// only the rune cap applied.
+func truncateLocation(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n || n <= 1 {
 		return s
 	}
-	return "…" + string(r[len(r)-(n-1):])
+	tail := r[len(r)-(n-1):]
+	if cut := runeIndex(tail, '/'); cut >= 0 && cut < len(tail)-1 {
+		tail = tail[cut:]
+	}
+	return "…" + string(tail)
+}
+
+// runeIndex returns s's first index of target, or -1.
+func runeIndex(s []rune, target rune) int {
+	for i, r := range s {
+		if r == target {
+			return i
+		}
+	}
+	return -1
 }
 
 func writeIssueDetail(w io.Writer, out issueDetailOutput) error {
@@ -973,17 +1037,59 @@ var deprecatedIssuesAlias = map[string]bool{
 // rather than duplicating any of it, so behavior (--json, --status, --since,
 // --occurrences, whatever the target subcommand accepts) matches `monitor
 // issues <args>` exactly, not just approximately. It also means `--store`
-// works exactly like it always did on this alias, as long as it comes after
-// the subcommand name (`monitor issue list --store X`), the position every
-// pre-E2.5 example used.
-func runDeprecatedIssueAlias(cmd *cobra.Command, args []string) error {
-	fmt.Fprintf(cmd.ErrOrStderr(), "`monitor issue %s` is deprecated; use `monitor issues %s` instead.\n", args[0], args[0])
+// works exactly like it always did on this alias, wherever it appears: the
+// alias detection scans past leading flags (firstNonFlagArg, CC-7), and
+// `issues` itself accepts its flags in any position.
+func runDeprecatedIssueAlias(cmd *cobra.Command, args []string, sub string) error {
+	fmt.Fprintf(cmd.ErrOrStderr(), "`monitor issue %s` is deprecated; use `monitor issues %s` instead.\n", sub, sub)
 	issuesCmd := newIssuesCmd()
 	issuesCmd.SetArgs(args)
 	issuesCmd.SetOut(cmd.OutOrStdout())
 	issuesCmd.SetErr(cmd.ErrOrStderr())
 	issuesCmd.SetContext(cmd.Context())
 	return issuesCmd.Execute()
+}
+
+// issueAliasValueFlags are the flag NAMES newIssueCmd registers that take
+// a separate value argument. firstNonFlagArg needs them to keep scanning
+// past `--store X`-style pairs without mistaking X for the first
+// positional token.
+var issueAliasValueFlags = map[string]bool{
+	"store": true, "project": true, "service": true, "kind": true, "root": true,
+}
+
+// firstNonFlagArg returns the first token in args that is a positional
+// argument rather than a flag or a flag's value (CC-7): a token starting
+// with "-" is skipped, `--x=v` forms carry their value inline, and a
+// bare `--store`-style flag in issueAliasValueFlags additionally skips
+// the NEXT token (its separate value). Everything after a bare "--" is
+// positional by definition. This exists so the deprecated
+// `monitor issue <sub>` alias still triggers when flags come before the
+// subcommand (`monitor issue --store P list`, the position cobra's own
+// persistent flags allowed before E2.5) while a leading flag can never
+// disguise a real issue id as an alias subcommand.
+func firstNonFlagArg(args []string) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		tok := args[i]
+		if tok == "--" {
+			if i+1 < len(args) {
+				return args[i+1], true
+			}
+			return "", false
+		}
+		if len(tok) > 0 && tok[0] == '-' && tok != "-" {
+			name := strings.TrimLeft(tok, "-")
+			if strings.Contains(name, "=") {
+				continue
+			}
+			if issueAliasValueFlags[name] {
+				i++
+			}
+			continue
+		}
+		return tok, true
+	}
+	return "", false
 }
 
 func newIssueCmd() *cobra.Command {
@@ -1026,8 +1132,10 @@ args>'.`,
 			if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
 				return cmd.Help()
 			}
-			if len(args) > 0 && deprecatedIssuesAlias[strings.ToLower(args[0])] {
-				return runDeprecatedIssueAlias(cmd, args)
+			if len(args) > 0 {
+				if sub, ok := firstNonFlagArg(args); ok && deprecatedIssuesAlias[strings.ToLower(sub)] {
+					return runDeprecatedIssueAlias(cmd, args, sub)
+				}
 			}
 			if err := cmd.Flags().Parse(args); err != nil {
 				return err

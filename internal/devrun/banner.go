@@ -67,7 +67,12 @@ func scanDescription(scan string) string {
 
 // NewIssueBanner is printed the first time this run records a given
 // fingerprint: "monitor > NEW <short> <level> <title> <file>:<line>
-// <func>()".
+// <func>()". When ev.Regressed is set (LUX-14: this write flipped a
+// resolved issue back open) it renders "monitor > REGRESSED <short>
+// <title> <file>:<line> <func>()" instead -- a regression is the one
+// thing a live run must never report as a silent "again", and the level
+// word carries no extra information there (the issue is open again; that
+// IS the news).
 func NewIssueBanner(ev newIssueEvent) string {
 	loc := ev.File
 	if ev.Line > 0 {
@@ -76,6 +81,9 @@ func NewIssueBanner(ev newIssueEvent) string {
 	fnPart := ""
 	if ev.Func != "" {
 		fnPart = " " + ev.Func + "()"
+	}
+	if ev.Regressed {
+		return fmt.Sprintf("%s REGRESSED %s %s %s%s", bannerPrefix, ev.ShortID, ev.Title, loc, fnPart)
 	}
 	level := ev.Level
 	if level == "" {
@@ -126,6 +134,11 @@ type ExitSummaryInfo struct {
 	// itself could not be reached in time (almost always another process
 	// holding its writer lock past detector.flushShutdownBudget).
 	FailedWrites int64
+	// RegressedIDs are the display short IDs of every write this run that
+	// reopened a previously resolved issue (LUX-14, detector.regressedIDs)
+	// -- counted in the exit summary right after the new-issue clause, so
+	// "0 new issues" never hides a regression-only run.
+	RegressedIDs []string
 }
 
 // ExitSummary is the one line printed once the child has exited: "monitor
@@ -158,6 +171,13 @@ func ExitSummary(info ExitSummaryInfo) string {
 	}
 	line := fmt.Sprintf("%s %s exited %d after %s · %s · %s",
 		bannerPrefix, info.CmdName, info.ExitCode, formatDuration(info.Duration), issuesPart, dropPart)
+	if len(info.RegressedIDs) > 0 {
+		// LUX-14: "regressed" is an adjective, not a countable noun, so
+		// this clause has no plural of its own -- "2 regressed (a1b2,
+		// c3d4)" reads the same as "1 regressed (a1b2)" with the count
+		// doing the work.
+		line += fmt.Sprintf(" · %d regressed (%s)", len(info.RegressedIDs), strings.Join(info.RegressedIDs, ", "))
+	}
 	if info.FailedWrites > 0 {
 		noun := "issue"
 		if info.FailedWrites != 1 {

@@ -170,15 +170,16 @@ func isLikelySourceNoise(path string) bool {
 	return testyPathSegment.MatchString(p) || testyFileSuffix.MatchString(p)
 }
 
-// bestVecgrepResult turns hits into a messageSearchResult, preferring the
+// bestVecgrepResult turns hits into a messageSearchResult, returning the
 // first hit whose file does not look like test/fixture noise (see
-// isLikelySourceNoise) over a plain "first hit wins" -- vecgrep's own
-// ranking has no notion of "is this actually source", so a golden fixture
-// that scores well on the query text can otherwise outrank the real source
-// line. Falls back to the first hit at all when every one of them looks
-// noisy, rather than reporting no result.
+// isLikelySourceNoise) -- vecgrep's own ranking has no notion of "is
+// this actually source", so a golden fixture that scores well on the
+// query text can otherwise outrank the real source line. When EVERY hit
+// looks noisy it returns no result at all (LUX-2): a message fragment
+// only a test or golden fixture reproduces is not evidence about the
+// code that printed it, and the caller falls through to git grep (and
+// then to an honest degraded note) instead of blaming the fixture.
 func bestVecgrepResult(hits []ecosystem.VecgrepHit, fragment string) (*messageSearchResult, bool) {
-	var fallback *messageSearchResult
 	for _, hit := range hits {
 		r, ok := resultFromVecgrepHit(hit, fragment)
 		if !ok {
@@ -187,12 +188,6 @@ func bestVecgrepResult(hits []ecosystem.VecgrepHit, fragment string) (*messageSe
 		if !isLikelySourceNoise(r.File) {
 			return r, true
 		}
-		if fallback == nil {
-			fallback = r
-		}
-	}
-	if fallback != nil {
-		return fallback, true
 	}
 	return nil, false
 }
@@ -221,8 +216,12 @@ func resultFromVecgrepHit(hit ecosystem.VecgrepHit, fragment string) (*messageSe
 // gitGrepFragment runs `git grep -n -F -e <fragment>` in root, capped at 2s,
 // and returns the best match as file:line: the first hit (git grep's own
 // output order, stable across otherwise-identical trees) that does not look
-// like a test/fixture/spec file (see isLikelySourceNoise), falling back to
-// the literal first hit when every match looks noisy.
+// like a test/fixture/spec file (see isLikelySourceNoise). When every match
+// looks noisy it returns an error rather than a result (LUX-2): blaming a
+// golden fixture that merely reproduces the rendered message misleads more
+// than reporting no culprit, and the error text names the noise so the
+// degraded note a caller builds from it says the search ran and found only
+// fixtures.
 func gitGrepFragment(ctx context.Context, root, fragment string) (*messageSearchResult, error) {
 	if _, err := exec.LookPath("git"); err != nil {
 		return nil, fmt.Errorf("git not on PATH")
@@ -255,8 +254,11 @@ func gitGrepFragment(ctx context.Context, root, fragment string) (*messageSearch
 	if !ok {
 		return nil, fmt.Errorf("git grep produced no parseable match")
 	}
-	file, line := preferSourceMatch(matches)
-	return &messageSearchResult{File: file, Line: line, Via: "git_grep"}, nil
+	match, ok := preferSourceMatch(matches)
+	if !ok {
+		return nil, fmt.Errorf("git grep matched only test/fixture/spec noise for the message fragment")
+	}
+	return &messageSearchResult{File: match.File, Line: match.Line, Via: "git_grep"}, nil
 }
 
 // gitGrepMatch is one "path:lineno" pair parsed from `git grep -n`'s output.
@@ -295,17 +297,19 @@ func parseGitGrepMatches(out string) ([]gitGrepMatch, bool) {
 }
 
 // preferSourceMatch returns the first match whose file does not look like
-// test/fixture/spec noise (see isLikelySourceNoise), falling back to the
-// literal first match when every one of them looks noisy -- still better
-// than reporting no culprit at all, and Source is already "message_search"/
-// confidence "low" either way.
-func preferSourceMatch(matches []gitGrepMatch) (string, int) {
+// test/fixture/spec noise (see isLikelySourceNoise), and NO match when
+// every one of them looks noisy (LUX-2): a message fragment that only a
+// test or golden fixture reproduces is not evidence about the code that
+// PRINTED it, and blaming the fixture misleads more than reporting no
+// culprit -- Source "message_search" is already confidence "low", and
+// gitGrepFragment's error text says the search ran and found only noise.
+func preferSourceMatch(matches []gitGrepMatch) (gitGrepMatch, bool) {
 	for _, m := range matches {
 		if !isLikelySourceNoise(m.File) {
-			return m.File, m.Line
+			return m, true
 		}
 	}
-	return matches[0].File, matches[0].Line
+	return gitGrepMatch{}, false
 }
 
 func firstNonEmptyString(values ...string) string {

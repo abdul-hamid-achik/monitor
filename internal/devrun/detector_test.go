@@ -162,6 +162,137 @@ func TestDetectorDiscardsBlockSpanningAGap(t *testing.T) {
 	}
 }
 
+// TestDowngradeModuleFatal pins LUX-11's pure rule: a fatal exception whose
+// entry frame is Python's <module> (or <frozen runpy>) was caught and
+// printed rather than process-ending, so it downgrades to a handled error.
+// Anything else -- a real main(), an already-non-fatal level, no frames --
+// is left untouched.
+func TestDowngradeModuleFatal(t *testing.T) {
+	fatal := func(fn string) *stacktrace.Exception {
+		return &stacktrace.Exception{Level: stacktrace.LevelFatal, Frames: []stacktrace.Frame{{Function: fn}}}
+	}
+	fatalFile := func(file string) *stacktrace.Exception {
+		return &stacktrace.Exception{Level: stacktrace.LevelFatal, Frames: []stacktrace.Frame{{Filename: file}}}
+	}
+	cases := []struct {
+		name      string
+		ex        *stacktrace.Exception
+		wantLevel string
+		wantTrue  bool // want Handled != nil && *Handled
+	}{
+		{"module entry downgrades", fatal("<module>"), stacktrace.LevelError, true},
+		{"frozen runpy downgrades", fatalFile("<frozen runpy>"), stacktrace.LevelError, true},
+		{"real main untouched", fatal("main"), stacktrace.LevelFatal, false},
+		{"non-fatal untouched", &stacktrace.Exception{Level: stacktrace.LevelError, Frames: []stacktrace.Frame{{Function: "<module>"}}}, stacktrace.LevelError, false},
+		{"no frames untouched", &stacktrace.Exception{Level: stacktrace.LevelFatal}, stacktrace.LevelFatal, false},
+		{"nil safe", nil, "", false},
+	}
+	for _, c := range cases {
+		downgradeModuleFatal(c.ex)
+		if c.ex == nil {
+			continue
+		}
+		if c.ex.Level != c.wantLevel {
+			t.Errorf("%s: Level = %q, want %q", c.name, c.ex.Level, c.wantLevel)
+		}
+		if got := c.ex.Handled != nil && *c.ex.Handled; got != c.wantTrue {
+			t.Errorf("%s: handled = %v, want %v", c.name, got, c.wantTrue)
+		}
+	}
+}
+
+const pythonModuleFatalText = `Traceback (most recent call last):
+  File "/repo/app.py", line 3, in <module>
+    main()
+  File "/repo/app.py", line 1, in main
+    boom()
+ValueError: bad value
+`
+
+// TestDetectorDowngradesModuleFatalOnCleanExit is LUX-11's end-to-end half:
+// the same <module>-rooted traceback records as fatal when the child's
+// exit is unknown, but as a handled error once noteChildExit(0) proves the
+// process exited cleanly (the traceback was caught and printed).
+func TestDetectorDowngradesModuleFatalOnCleanExit(t *testing.T) {
+	run := func(storePath string, exitCode *int) (string, issues.Issue) {
+		t.Helper()
+		var level string
+		det := newDetector(detectorOptions{
+			storePath: storePath, launch: ResolveLaunchIDs(nil, ""), id: testProjectIdentity(),
+			onNewIssue: func(ev newIssueEvent) { level = ev.Level },
+		})
+		if exitCode != nil {
+			det.noteChildExit(*exitCode)
+		}
+		runDetectorOverLines(t, det, stderrLines(pythonModuleFatalText))
+		store, err := issues.OpenReadOnly(storePath)
+		if err != nil {
+			t.Fatalf("OpenReadOnly: %v", err)
+		}
+		defer store.Close()
+		items, err := store.List(issues.ListOptions{})
+		if err != nil || len(items) != 1 {
+			t.Fatalf("List = %+v, err = %v, want exactly 1 issue", items, err)
+		}
+		return level, items[0]
+	}
+
+	zero := 0
+	unknownLevel, unknownIssue := run(filepath.Join(t.TempDir(), "issues.veclite"), nil)
+	if unknownLevel != stacktrace.LevelFatal || unknownIssue.Level != stacktrace.LevelFatal {
+		t.Fatalf("unknown exit: banner/stored level = %q/%q, want fatal (the downgrade precondition)", unknownLevel, unknownIssue.Level)
+	}
+	cleanLevel, cleanIssue := run(filepath.Join(t.TempDir(), "issues.veclite"), &zero)
+	if cleanLevel != stacktrace.LevelError {
+		t.Errorf("clean exit: banner level = %q, want error", cleanLevel)
+	}
+	if cleanIssue.Level != stacktrace.LevelError {
+		t.Errorf("clean exit: stored level = %q, want error", cleanIssue.Level)
+	}
+	if cleanIssue.Handled == nil || !*cleanIssue.Handled {
+		t.Errorf("clean exit: stored handled = %+v, want true", cleanIssue.Handled)
+	}
+}
+
+// TestDetectorReportsReopenedIssueAsRegressed is LUX-14's detector half: a
+// crash whose fingerprint matches a RESOLVED issue reopens it, and this
+// run reports REGRESSED (never a silent "again") while collecting the
+// short id for the exit summary.
+func TestDetectorReportsReopenedIssueAsRegressed(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	runOnce := func() (gotNew bool, regressed bool) {
+		det := newDetector(detectorOptions{
+			storePath: storePath, launch: ResolveLaunchIDs(nil, ""), id: testProjectIdentity(),
+			onNewIssue: func(ev newIssueEvent) { gotNew, regressed = true, ev.Regressed },
+		})
+		runDetectorOverLines(t, det, stderrLines(goCrashPanicText))
+		return gotNew, regressed
+	}
+
+	if gotNew, regressed := runOnce(); !gotNew || regressed {
+		t.Fatalf("first run: new=%v regressed=%v, want true/false", gotNew, regressed)
+	}
+	wstore, err := issues.OpenStore(storePath)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	items, err := wstore.List(issues.ListOptions{})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("List = %+v, err = %v, want exactly 1 issue", items, err)
+	}
+	if _, err := wstore.Resolve(items[0].ID); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if err := wstore.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	gotNew, regressed := runOnce()
+	if !gotNew || !regressed {
+		t.Fatalf("second run after resolve: new=%v regressed=%v, want true/true", gotNew, regressed)
+	}
+}
+
 // TestDetectorNewVsRepeatAcrossRunsUsesStoreOccurrenceCount is the NEW-vs-
 // "again" fix: NEW means "this write created the issue's first-ever
 // occurrence", not merely "this session has not seen the fingerprint
@@ -170,9 +301,15 @@ func TestDetectorDiscardsBlockSpanningAGap(t *testing.T) {
 // as a repeat, never as NEW.
 func TestDetectorNewVsRepeatAcrossRunsUsesStoreOccurrenceCount(t *testing.T) {
 	store := filepath.Join(t.TempDir(), "issues.veclite")
+	// Each run is a SEPARATE outermost launch, so each mints its own
+	// launch root (ResolveLaunchIDs, the per-launch ROOT design CC-3's
+	// bucket±1 aliases require): sharing one directory-shaped root
+	// would fold the second run into the first's live DedupeKey and
+	// report 0/0 instead of 0/1. Dedupe-timing itself is a SEPARATE
+	// property, covered by TestLiveDedupeKey*.
 	runOnce := func() (newCount, repeatCount int) {
 		det := newDetector(detectorOptions{
-			storePath: store, launch: LaunchIDs{Root: "/repo"}, id: testProjectIdentity(),
+			storePath: store, launch: ResolveLaunchIDs(nil, ""), id: testProjectIdentity(),
 			onNewIssue: func(newIssueEvent) { newCount++ },
 			onRepeat:   func(string, int64) { repeatCount++ },
 		})
@@ -184,12 +321,6 @@ func TestDetectorNewVsRepeatAcrossRunsUsesStoreOccurrenceCount(t *testing.T) {
 	if n1 != 1 || r1 != 0 {
 		t.Fatalf("first run: new=%d repeat=%d, want 1/0", n1, r1)
 	}
-	// Clear dedupeBucketSeconds' window: this test is about NEW-vs-repeat
-	// occurrence-counting semantics, not about live dedupe timing (a
-	// SEPARATE property, covered by TestLiveDedupeKey*), so the two runs
-	// must not accidentally collide on the live DedupeKey the way two
-	// nested launches observing the same instant intentionally would.
-	time.Sleep(1100 * time.Millisecond)
 	n2, r2 := runOnce()
 	if n2 != 0 || r2 != 1 {
 		t.Fatalf("second run (fresh session, same store, same crash): new=%d repeat=%d, want 0/1 -- a pre-existing issue must never be announced as NEW", n2, r2)

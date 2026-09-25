@@ -9,13 +9,21 @@ import (
 	"time"
 )
 
-// captureSample runs the real macOS `sample <pid> 1 -mayDie` and parses its
-// call-graph output with parseSampleTree. This is the only file that execs
-// `sample`; the pure tree parser lives in sample_parse.go (no build tag) so
-// it's exercised on every OS CI runs on.
-func captureSample(ctx context.Context, pid int32) (Profile, error) {
+// captureSample runs the real macOS `sample <pid> <secs> -mayDie` and
+// parses its call-graph output with parseSampleTree. This is the only file
+// that execs `sample`; the pure tree parser lives in sample_parse.go (no
+// build tag) so it's exercised on every OS CI runs on.
+//
+// duration is the caller's requested window (LUX-15: `monitor hot <pid>
+// --duration` used to be silently ignored here — `sample <pid> 1` ran
+// regardless of what the banner promised). `sample`'s own seconds argument
+// is an integer, so the request is clamped by SampleSeconds to [1, 120];
+// the banner prints the same clamped value via SampleSeconds, so what a
+// person reads is what actually ran.
+func captureSample(ctx context.Context, pid int32, duration time.Duration) (Profile, error) {
 	p := Profile{PID: pid, Type: ProfileSample, Method: "sample", Taken: time.Now()}
-	out, err := exec.CommandContext(ctx, "sample", fmt.Sprintf("%d", pid), "1", "-mayDie").CombinedOutput()
+	secs := SampleSeconds(duration)
+	out, err := exec.CommandContext(ctx, "sample", fmt.Sprintf("%d", pid), fmt.Sprintf("%d", secs), "-mayDie").CombinedOutput()
 	if err != nil {
 		return p, fmt.Errorf("sample: %w", err)
 	}

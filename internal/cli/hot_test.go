@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/http/pprof"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -273,6 +276,9 @@ func TestFuncNotFoundErrorNoFunctionsSampled(t *testing.T) {
 // which directory `go test` happens to run from.
 func TestHotFileInlinedFixtureWarnsUnderCodeFrame(t *testing.T) {
 	dir := t.TempDir()
+	// SEC-8: run from the fixture dir, as a user runs from their project
+	// root -- readCode confines source reads to the cwd/git root.
+	t.Chdir(dir)
 	jsPath := filepath.Join(dir, "workload.js")
 	src := "function heavyStringify(items) {\n  return items.length;\n}\n\nfunction processBatch(n) {\n  const items = [];\n  return heavyStringify(items);\n}\n"
 	if err := os.WriteFile(jsPath, []byte(src), 0o644); err != nil {
@@ -301,33 +307,92 @@ func TestHotFileInlinedFixtureWarnsUnderCodeFrame(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 	text := out.String()
+	// LUX-16: the PRIMARY CodeFrame points at the CALLEE's located
+	// range (where the time is actually spent), with the finding's own
+	// inferred-mapping attribution — not the caller's call-site line.
+	// The warning stays under that frame; a secondary would repeat it.
 	tableIdx := strings.Index(text, "TOTAL")
-	codeFrameIdx := strings.Index(text, "-- processBatch")
+	frameIdx := strings.Index(text, "-- heavyStringify (mapping: inferred (inlined into processBatch:7))")
 	warnIdx := strings.Index(text, "likely JIT-inlined: heavyStringify() was inlined into processBatch; the time on line 7 is spent inside heavyStringify")
-	secondaryIdx := strings.Index(text, "inlined callee, no per-line data")
-	if tableIdx < 0 || codeFrameIdx < 0 || warnIdx < 0 || secondaryIdx < 0 {
+	if tableIdx < 0 || frameIdx < 0 || warnIdx < 0 {
 		t.Fatalf("missing an expected section in:\n%s", text)
 	}
-	if !(tableIdx < codeFrameIdx && codeFrameIdx < warnIdx && warnIdx < secondaryIdx) {
-		t.Errorf("expected order TABLE < CodeFrame < warning < secondary frame, got positions %d/%d/%d/%d:\n%s",
-			tableIdx, codeFrameIdx, warnIdx, secondaryIdx, text)
+	if !(tableIdx < frameIdx && frameIdx < warnIdx) {
+		t.Errorf("expected order TABLE < callee CodeFrame < warning, got positions %d/%d/%d:\n%s",
+			tableIdx, frameIdx, warnIdx, text)
 	}
 	if !strings.Contains(text, "function heavyStringify(items)") {
-		t.Errorf("secondary frame missing heavyStringify's own body:\n%s", text)
+		t.Errorf("primary frame missing heavyStringify's own body:\n%s", text)
 	}
-	// Regression for the review's "the secondary frame claims things that
-	// are not true" finding: with no real per-line data for the inlined
-	// callee, the secondary frame must never mark a '>' hot line (the OLD
-	// unconditional CodeFrame fell back to the declaration line) or print a
-	// fabricated "0.0% self" header.
-	secondary := text[secondaryIdx:]
-	for _, line := range strings.Split(secondary, "\n") {
+	if strings.Contains(text, "inlined callee, no per-line data") {
+		t.Errorf("primary frame already shows the callee; a secondary would repeat it:\n%s", text)
+	}
+	// The synthetic target carries Code but no weights: its frame must
+	// never mark a '>' hot line or print a fabricated "0.0% self"
+	// headline (HideMetrics mode — the review's "claims things that are
+	// not true" finding, now applied to the primary frame).
+	primary := text[frameIdx:warnIdx]
+	for _, line := range strings.Split(primary, "\n") {
 		if strings.HasPrefix(line, ">") {
-			t.Errorf("secondary frame must never mark a hot line (no real per-line data exists): %q\nfull output:\n%s", line, text)
+			t.Errorf("retargeted frame must never mark a hot line (no real per-line data exists): %q\nfull output:\n%s", line, text)
 		}
 	}
-	if strings.Contains(secondary, "0.0% self") {
-		t.Errorf("secondary frame must not print a fabricated self%% headline:\n%s", secondary)
+	if strings.Contains(primary, "0.0% self") {
+		t.Errorf("retargeted frame must not print a fabricated self%% headline:\n%s", primary)
+	}
+	if !strings.Contains(text, "--func 'processBatch'") {
+		t.Errorf("next hint should still offer the caller:\n%s", text)
+	}
+}
+
+// TestHotFileInlinedFixtureFuncCallerViewKeepsSecondary pins that LUX-16's
+// retarget only drives the no---func default: an explicit --func view of
+// the CALLER keeps the old shape (caller's measured CodeFrame, warning,
+// body-only secondary), since the caller asked for that function.
+func TestHotFileInlinedFixtureFuncCallerViewKeepsSecondary(t *testing.T) {
+	dir := t.TempDir()
+	// SEC-8: run from the fixture dir, as a user runs from their project
+	// root -- readCode confines source reads to the cwd/git root.
+	t.Chdir(dir)
+	jsPath := filepath.Join(dir, "workload.js")
+	src := "function heavyStringify(items) {\n  return items.length;\n}\n\nfunction processBatch(n) {\n  const items = [];\n  return heavyStringify(items);\n}\n"
+	if err := os.WriteFile(jsPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cpPath := filepath.Join(dir, "inlined.cpuprofile")
+	raw := `{
+		"nodes": [
+			{"id":1,"callFrame":{"functionName":"(root)","url":"","lineNumber":-1,"columnNumber":-1},"hitCount":0,"children":[2,3]},
+			{"id":2,"callFrame":{"functionName":"(idle)","url":"","lineNumber":-1,"columnNumber":-1},"hitCount":1},
+			{"id":3,"callFrame":{"functionName":"processBatch","url":"file://` + jsPath + `","lineNumber":4,"columnNumber":9},"hitCount":99,"positionTicks":[{"line":7,"ticks":99}]}
+		],
+		"samples": [2],
+		"startTime": 0, "endTime": 1000000
+	}`
+	if err := os.WriteFile(cpPath, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := newHotCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--file", cpPath, "--func", "processBatch"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	text := out.String()
+	frameIdx := strings.Index(text, "-- processBatch")
+	warnIdx := strings.Index(text, "likely JIT-inlined: heavyStringify() was inlined into processBatch")
+	secondaryIdx := strings.Index(text, "inlined callee, no per-line data")
+	if frameIdx < 0 || warnIdx < 0 || secondaryIdx < 0 {
+		t.Fatalf("missing an expected section in:\n%s", text)
+	}
+	if !(frameIdx < warnIdx && warnIdx < secondaryIdx) {
+		t.Errorf("expected order caller CodeFrame < warning < secondary frame:\n%s", text)
+	}
+	if strings.Contains(text, "mapping: inferred") {
+		t.Errorf("--func view must not retarget onto the callee:\n%s", text)
 	}
 }
 
@@ -341,6 +406,9 @@ func TestHotFileInlinedFixtureWarnsUnderCodeFrame(t *testing.T) {
 // percentages — instead of the body-only, no-data placeholder.
 func TestHotFileInlinedFixtureUsesRealCalleeDataWhenAvailable(t *testing.T) {
 	dir := t.TempDir()
+	// SEC-8: run from the fixture dir, as a user runs from their project
+	// root -- readCode confines source reads to the cwd/git root.
+	t.Chdir(dir)
 	jsPath := filepath.Join(dir, "workload.js")
 	src := "function heavyStringify(items) {\n  return items.length;\n}\n\nfunction processBatch(n) {\n  const items = [];\n  return heavyStringify(items);\n}\n"
 	if err := os.WriteFile(jsPath, []byte(src), 0o644); err != nil {
@@ -1699,5 +1767,63 @@ func TestRunHotPIDDarwinSampleFallbackForNonJSTarget(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("Warnings = %v, want the function-level-only disclosure", hm.Warnings)
+	}
+}
+
+// TestRunHotPIDUnknownLeafFallsBackToExplicitPprofAddr is LUX-7's
+// regression: a process with no classifiable runtime leaf (a plain
+// compiled Go binary -- `go build` output, the normal way to run a Go
+// service -- or here, /bin/sleep, which ResolveLeaf likewise refuses)
+// must NOT be refused before capture. With an explicit --pprof-addr the
+// target is treated as Go and goes straight to pprof; without one the
+// darwin sample fallback still runs.
+func TestRunHotPIDUnknownLeafFallsBackToExplicitPprofAddr(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)          // heap, goroutine, ...
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile) // CPU needs its own route
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	sleepBin, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("sleep not on PATH")
+	}
+	cmd := exec.Command(sleepBin, "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+
+	// Sanity: the fixture really is unclassifiable, or this test proves
+	// nothing about the fallback.
+	if _, _, rerr := procbind.ResolveLeaf(context.Background(), int32(cmd.Process.Pid), procbind.LeafOptions{}); rerr == nil {
+		t.Skip("sleep unexpectedly resolves a runtime leaf on this platform")
+	}
+
+	hotCmd := newHotCmd()
+	hotCmd.SetErr(&bytes.Buffer{})
+	hotCmd.SetArgs([]string{fmt.Sprintf("%d", cmd.Process.Pid), "--pprof-addr", addr, "--duration", "1s", "--json"})
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	runErr := hotCmd.Execute()
+	_ = w.Close()
+	raw, _ := io.ReadAll(r)
+	os.Stdout = oldStdout
+	if runErr != nil {
+		t.Fatalf("monitor hot <unknown-leaf pid> --pprof-addr: %v (LUX-7: must fall back, not refuse)", runErr)
+	}
+	var hm profiler.Heatmap
+	if err := json.Unmarshal(raw, &hm); err != nil {
+		t.Fatalf("output is not valid line_heatmap JSON: %v\n%s", err, raw)
+	}
+	if hm.Method != profiler.MethodPprofProto {
+		t.Errorf("Method = %q, want %q (explicit --pprof-addr goes straight to pprof)", hm.Method, profiler.MethodPprofProto)
 	}
 }

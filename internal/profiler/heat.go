@@ -24,7 +24,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -32,6 +34,7 @@ import (
 	"github.com/google/pprof/profile"
 
 	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
+	"github.com/abdul-hamid-achik/monitor/internal/scrub"
 	"github.com/abdul-hamid-achik/monitor/internal/sourcemap"
 )
 
@@ -254,6 +257,15 @@ type InlinedCallee struct {
 	// (see addInliningWarnings), so its absence is not a degradation.
 	Body      []string `json:"body,omitempty"`
 	BodyStart int      `json:"body_start,omitempty"`
+	// DefaultFrame is set when BuildHeatmap pointed the default CodeFrame
+	// target (Heatmap.DefaultTarget) at this callee's located range
+	// (LUX-16): the caller this callee was inlined into was itself the
+	// default target, so the frame a person sees first names the callee —
+	// where the time is actually spent — with a "mapping: inferred
+	// (inlined into <caller>:<line>)" attribution, instead of the caller's
+	// call-site line. Additive; false (omitted) for every finding whose
+	// caller was NOT the default target.
+	DefaultFrame bool `json:"default_frame,omitempty"`
 }
 
 // HeatCallee is one function this HeatFunction called, and how much
@@ -300,6 +312,17 @@ type HeatOptions struct {
 	// Codebase scopes codemap symbol-at lookups exactly as `codemap -C
 	// <path>` does. "" uses codemap's own cwd resolution.
 	Codebase string
+	// CodeRoots lists extra directories readCode may read source text
+	// from, on top of the git root of the working directory it always
+	// derives itself (SEC-8's confinement — see readCode). A caller that
+	// knows where the profile's own files live (a live leaf's codebase
+	// root) passes them here so confinement keeps permitting exactly
+	// those reads; a crafted profile naming ~/.aws/credentials is still
+	// refused regardless. `hot --file` deliberately passes none: a shared
+	// profile must not whitelist its own directory (that IS the SEC-8
+	// evidence shape), so --file reads only resolve under the cwd the
+	// user ran from, with an honest warning otherwise.
+	CodeRoots []string
 	// Sourcemaps resolves CDP frames through internal/sourcemap (E3.3a
 	// wiring). nil disables source-map resolution outright (tests that
 	// want purely-generated coordinates); BuildHeatmap otherwise builds one
@@ -361,7 +384,7 @@ func BuildHeatmap(ctx context.Context, src *Source, opts HeatOptions) (*Heatmap,
 
 	resolveRanges(ctx, hm, opts)
 	if !opts.NoReadCode {
-		readCode(hm)
+		readCode(hm, opts)
 	}
 	// addWarnings must run BEFORE finalizeFunctions: it picks
 	// DefaultTarget and computes the "diffuse" check from the FULL
@@ -369,13 +392,18 @@ func BuildHeatmap(ctx context.Context, src *Source, opts HeatOptions) (*Heatmap,
 	// capped Functions would judge "how spread out is this profile" (and
 	// pick monitor hot's default CodeFrame target) from whatever sliver of
 	// functions survived filtering, not the real profile.
-	addWarnings(hm)
+	addWarnings(hm, opts)
 	// addInliningWarnings, like addWarnings just above, must run on the
 	// FULL function list before finalizeFunctions filters/caps it — a
 	// caller's hottest line can only be judged "textually a call to a
 	// function this profile never sampled" against every function
 	// BuildHeatmap actually found, not whatever slice --top left visible.
 	addInliningWarnings(hm)
+	// retargetDefaultToInlinedCallee closes the loop addWarnings opened:
+	// it reads the InlinedCallees the pass above produced, so it must run
+	// after it (and still before finalizeFunctions, since it can replace
+	// DefaultTarget).
+	retargetDefaultToInlinedCallee(hm)
 	finalizeFunctions(hm, opts)
 	return hm, nil
 }
@@ -406,16 +434,16 @@ func BuildHeatmapFromSample(ctx context.Context, prof Profile, opts HeatOptions)
 		return nil, fmt.Errorf("heat.Build: this sample capture has no symbols to build a heatmap from")
 	}
 
-	runtime := opts.Runtime
-	if runtime == "" {
-		runtime = "unknown"
+	rt := opts.Runtime
+	if rt == "" {
+		rt = "unknown"
 	}
 	hm := &Heatmap{
 		Schema:      HeatSchema,
 		ProfileType: HeatCPU, // `sample` only ever measures CPU; there is no heap/goroutine sample capture.
 		Unit:        "samples",
 		Method:      MethodDarwinSample,
-		Runtime:     runtime,
+		Runtime:     rt,
 	}
 	if prof.Stats != nil {
 		hm.Samples = prof.Stats.Samples
@@ -446,9 +474,9 @@ func BuildHeatmapFromSample(ctx context.Context, prof Profile, opts HeatOptions)
 
 	resolveRanges(ctx, hm, opts) // no-op here (no rangeHintLine ever set), kept for pipeline symmetry with BuildHeatmap.
 	if !opts.NoReadCode {
-		readCode(hm) // no-op here too (every function's Lines is empty).
+		readCode(hm, opts) // no-op here too (every function's Lines is empty).
 	}
-	addWarnings(hm)
+	addWarnings(hm, opts)
 	hm.Warnings = append(hm.Warnings, sampleFunctionLevelOnlyWarning)
 	finalizeFunctions(hm, opts)
 	return hm, nil
@@ -1487,9 +1515,24 @@ func lookupCodemapRange(ctx context.Context, cache *codemapRangeCache, file stri
 // error just leaves Code empty — per AC-5, a profile taken against a
 // binary that has since moved or been rebuilt must still render, honestly
 // missing only the source snippet, not the whole heatmap.
-func readCode(hm *Heatmap) {
+//
+// (SEC-8) Every path here comes from the profile itself — callFrame urls
+// or source-map sources for CDP, build-time filenames for pprof — so a
+// crafted or shared .cpuprofile must never turn readCode into an
+// arbitrary file reader: each read is confined to a project root
+// (EvalSymlinks on both sides plus a prefix check, the same rule
+// explain.readSnippet applies to the git root), dotfile and .env* paths
+// are refused outright even inside a root (untracked secret files live in
+// dotfiles), and whatever text IS read goes through a scrub.Scrubber
+// carrying the exact values of this process's secret env vars before it
+// can reach a terminal, --json, or MCP. A file the rules refuse
+// contributes no Code lines plus one honesty warning instead.
+func readCode(hm *Heatmap, opts HeatOptions) {
+	roots := CodeReadRoots(opts.CodeRoots...)
+	scr := scrub.New(scrub.WithValues(scrub.SecretEnvValues(os.Environ(), nil)))
 	cache := map[string][]string{}
 	loaded := map[string]bool{}
+	var refused []string
 	for fi := range hm.Functions {
 		f := &hm.Functions[fi]
 		if f.File == "" {
@@ -1497,6 +1540,10 @@ func readCode(hm *Heatmap) {
 		}
 		if !loaded[f.File] {
 			loaded[f.File] = true
+			if !CodeReadAllowed(f.File, roots) {
+				refused = append(refused, f.File)
+				continue
+			}
 			if lines, err := readFileLines(f.File); err == nil {
 				cache[f.File] = lines
 			}
@@ -1508,10 +1555,143 @@ func readCode(hm *Heatmap) {
 		for li := range f.Lines {
 			l := &f.Lines[li]
 			if l.Line >= 1 && l.Line <= len(lines) {
-				l.Code = truncateCode(lines[l.Line-1])
+				l.Code = truncateCode(scr.String(lines[l.Line-1]))
 			}
 		}
 	}
+	if len(refused) > 0 {
+		hm.Warnings = append(hm.Warnings, codeRefusalWarning(refused))
+	}
+}
+
+// codeRefusalWarning renders readCode's (SEC-8) honesty note for files the
+// confinement rules refused: the heatmap still points at the line NUMBER
+// (that comes from the profile, not the disk), but its text was not read,
+// and the warning is what tells a person why.
+func codeRefusalWarning(refused []string) string {
+	return fmt.Sprintf("source text omitted: %d file(s) named by the profile are outside the readable project root (e.g. %s); nothing outside it is read", len(refused), refused[0])
+}
+
+// CodeReadRoots resolves the directories readCode treats as project roots
+// for (SEC-8) source reads: the git root of the working directory when one
+// exists (else the working directory itself), plus every extra entry a
+// caller knows the profile's own files live under — the directory of a
+// `--file` target, a live leaf's codebase root. Each root is resolved with
+// EvalSymlinks so a symlinked spelling of a directory (/tmp vs
+// /private/tmp on macOS) confines the same tree the real path would; a
+// root that cannot be resolved, or that resolves to the filesystem root
+// itself (a cwd of "/" must never whitelist the whole disk), is dropped.
+// The result is deduplicated, first-seen order.
+func CodeReadRoots(extra ...string) []string {
+	var roots []string
+	add := func(dir string) {
+		if dir == "" {
+			return
+		}
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err != nil || resolved == string(filepath.Separator) {
+			return
+		}
+		for _, r := range roots {
+			if r == resolved {
+				return
+			}
+		}
+		roots = append(roots, resolved)
+	}
+	if root, ok := gitRootOfCwd(); ok {
+		add(root)
+	} else if wd, err := os.Getwd(); err == nil {
+		add(wd)
+	}
+	for _, e := range extra {
+		add(e)
+	}
+	return roots
+}
+
+// gitRootOfCwd walks up from the working directory looking for a .git
+// entry (a directory for a normal clone, a file for a worktree) — the same
+// discovery git itself performs. ok is false outside any repository.
+func gitRootOfCwd() (string, bool) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+// CodeReadAllowed reports whether path may be read as heatmap source text
+// under (SEC-8)'s confinement. A path that does not exist is simply not
+// readable (the caller degrades to an empty snippet, as it always did for
+// a missing file); an existing one is allowed only when it is not a
+// dotfile or .env* path (a dot component anywhere: .git, .env, .aws,
+// .ssh, ... — untracked secret files live in exactly those names even
+// inside an otherwise trusted root) and its EvalSymlinks-resolved self
+// sits under one of the equally-resolved roots — both sides resolved, so a
+// symlink planted inside a root cannot walk the read back outside it (the
+// same rule explain.readSnippet applies).
+func CodeReadAllowed(path string, roots []string) bool {
+	if !filepath.IsAbs(path) {
+		// Profile-named paths are usually absolute, but a capture can
+		// name a repo-relative file (the committed inlined-caller
+		// fixture does): resolve it against the directory the user
+		// ran from, exactly as readFileLines below would open it.
+		// EvalSymlinks alone would NOT do this (it keeps a relative
+		// path relative), which would refuse every relative path.
+		// A relative escape (../.., .env) still has to pass the
+		// dot-segment refusal and the root-prefix check below, like
+		// any other path.
+		if wd, err := os.Getwd(); err == nil {
+			path = filepath.Join(wd, path)
+		}
+	}
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	if neverReadableSourcePath(path) {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	for _, root := range roots {
+		if resolved == root || strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// neverReadableSourcePath reports whether any component of path starts
+// with a dot, so .git/, .env, .env.local, ~/.aws/credentials and every
+// other dot-named file or directory is refused as heatmap source text no
+// matter which root it sits under (SEC-8; the same denylist shape
+// explain.readSnippet's git-unavailable fallback uses).
+func neverReadableSourcePath(path string) bool {
+	clean := filepath.Clean(path)
+	if clean == "" || clean == "." || clean == string(filepath.Separator) {
+		return true
+	}
+	for _, part := range strings.Split(clean, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		if strings.HasPrefix(part, ".") {
+			return true
+		}
+	}
+	return false
 }
 
 // maxHeatLineCodeRunes caps HeatLine.Code so one pathological source line —
@@ -1584,25 +1764,15 @@ func finalizeFunctions(hm *Heatmap, opts HeatOptions) {
 // them: idle_pct past idleWarningThresholdPct (CPU heat can't explain
 // off-CPU slowness) and a top function whose own self share is under
 // diffuseWarningThresholdPct (no single line dominates enough to call it
-// "the" hot line).
-func addWarnings(hm *Heatmap) {
+// "the" hot line). It also picks DefaultTarget — see defaultTargetFunction.
+func addWarnings(hm *Heatmap, opts HeatOptions) {
 	if hm.IdlePct > idleWarningThresholdPct {
 		hm.Warnings = append(hm.Warnings, "mostly idle: slowness is off-CPU")
 	}
 	if len(hm.Functions) == 0 {
 		return
 	}
-	// "The hottest function" here must mean the same thing `monitor hot`
-	// actually renders as its default CodeFrame target — the highest SELF
-	// share, not Functions[0] (sorted by CUM, so a near-zero-self wrapper
-	// that merely calls a genuinely hot function would otherwise trigger a
-	// false "diffuse" warning on data that isn't diffuse at all).
-	top := hm.Functions[0]
-	for _, f := range hm.Functions[1:] {
-		if f.SelfPct > top.SelfPct {
-			top = f
-		}
-	}
+	top := defaultTargetFunction(hm, opts)
 	// Stash it as DefaultTarget too: this runs on the FULL, pre-filter/cap
 	// list (see BuildHeatmap's ordering comment), so a caller (monitor hot
 	// with no --func) that reads DefaultTarget instead of re-deriving
@@ -1620,6 +1790,183 @@ func addWarnings(hm *Heatmap) {
 			"diffuse: the hottest function (%s) has only %.1f%% of active samples; this profile may be too spread out to point at one line",
 			nonEmpty(top.Name, "(unknown)"), basis))
 	}
+}
+
+// defaultTargetFunction picks the function the default CodeFrame shows
+// (Heatmap.DefaultTarget). "The hottest function" must mean the same thing
+// `monitor hot` actually renders: the highest SELF share for a CDP source —
+// not Functions[0] (sorted by CUM, so a near-zero-self wrapper that merely
+// calls a genuinely hot function would otherwise be the default target).
+//
+// For a pprof proto (LUX-1) it is the highest-CUM IN-APP function instead:
+// in Go the expensive work is routinely cum-only (a main.* function whose
+// whole cost flows through json.Marshal and the allocator), so max-self
+// lands on idle waits (runtime.kevent, runtime.pthread_cond_wait,
+// runtime.gopark) or allocator internals and never names the program's own
+// function. pprofFunctionInApp defines "in-app"; when no function passes
+// it (a pure-runtime profile), the old max-self rule still applies, minus
+// the known idle frames.
+func defaultTargetFunction(hm *Heatmap, opts HeatOptions) HeatFunction {
+	if hm.Method == MethodPprofProto {
+		if f, ok := highestCumInAppFunction(hm.Functions, opts); ok {
+			return f
+		}
+	}
+	return maxSelfFunction(hm.Functions)
+}
+
+// highestCumInAppFunction returns the highest-CumPct in-app function in
+// fns (ties broken by SelfPct, then first occurrence), for LUX-1's pprof
+// default target. ok is false when nothing qualifies.
+func highestCumInAppFunction(fns []HeatFunction, opts HeatOptions) (HeatFunction, bool) {
+	var best HeatFunction
+	found := false
+	for _, f := range fns {
+		if !pprofFunctionInApp(f, opts) {
+			continue
+		}
+		if !found || f.CumPct > best.CumPct || (f.CumPct == best.CumPct && f.SelfPct > best.SelfPct) {
+			best, found = f, true
+		}
+	}
+	return best, found
+}
+
+// maxSelfFunction returns the highest-SelfPct function in fns, never a
+// known idle/wait frame when any alternative exists (LUX-1): an all-idle
+// profile keeps its (honest) max-self answer rather than nothing.
+func maxSelfFunction(fns []HeatFunction) HeatFunction {
+	for _, skipIdle := range []bool{true, false} {
+		var best HeatFunction
+		found := false
+		for _, f := range fns {
+			if skipIdle && isKnownIdleWaitFrame(f.Name) {
+				continue
+			}
+			if !found || f.SelfPct > best.SelfPct {
+				best, found = f, true
+			}
+		}
+		if found {
+			return best
+		}
+	}
+	return fns[0] // unreachable for a non-empty fns; the loop above always finds one.
+}
+
+// pprofIdleFramePrefixes are the sampler frames LUX-1 must never pick as
+// the default CodeFrame target, whatever their self share: they are where
+// a Go thread WAITS, not where it works, so "the hot line" would name a
+// syscall trampoline instead of the program.
+var pprofIdleFramePrefixes = []string{
+	"runtime.kevent", "runtime.pthread_cond_wait", "runtime.gopark",
+	"runtime.netpoll", "runtime.usleep", "syscall.syscall",
+}
+
+// isKnownIdleWaitFrame reports whether name is one of
+// pprofIdleFramePrefixes (prefix match, so runtime.netpollBreak and
+// syscall.syscall_unix are covered too).
+func isKnownIdleWaitFrame(name string) bool {
+	for _, p := range pprofIdleFramePrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// pprofFunctionInApp reports whether f is one of the profiled program's
+// own functions rather than the Go runtime, its standard library, or a
+// module dependency (LUX-1). A file under an explicitly known project root
+// (opts.Codebase, opts.CodeRoots — e.g. the resolved codebase root of a
+// live leaf) counts as in-app outright; otherwise the runtime's own
+// prefixes (runtime./internal/), GOROOT (including a GOROOT/src-relative
+// filename, the shape older or trimmed toolchains emit) and the module
+// cache (GOMODCACHE, default ~/go/pkg/mod) disqualify, and so does every
+// known idle/wait frame. A function with no File at all cannot be placed
+// and is conservatively not in-app.
+func pprofFunctionInApp(f HeatFunction, opts HeatOptions) bool {
+	if isKnownIdleWaitFrame(f.Name) {
+		return false
+	}
+	if f.File == "" {
+		return false
+	}
+	roots := append([]string{opts.Codebase}, opts.CodeRoots...)
+	for _, root := range CodeReadRoots(roots...) {
+		if underResolvedRoot(f.File, root) {
+			return true
+		}
+	}
+	if strings.HasPrefix(f.Name, "runtime.") || strings.HasPrefix(f.Name, "internal/") {
+		return false
+	}
+	if fileUnderGoRoot(f.File) {
+		return false
+	}
+	return !fileUnderGoModCache(f.File)
+}
+
+// underResolvedRoot reports whether path's EvalSymlinks-resolved self sits
+// under the equally-resolved root (a path that cannot be resolved — it
+// does not exist — never does).
+func underResolvedRoot(path, root string) bool {
+	if path == "" || root == "" {
+		return false
+	}
+	r, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	// A repo-relative profile path (the committed inlined-caller fixture
+	// names one) resolves against the directory the user ran from --
+	// EvalSymlinks alone keeps it relative, which can never prefix-match
+	// an absolute root (see CodeReadAllowed).
+	if !filepath.IsAbs(path) {
+		if wd, err := os.Getwd(); err == nil {
+			path = filepath.Join(wd, path)
+		}
+	}
+	p, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	return p == r || strings.HasPrefix(p, r+string(filepath.Separator))
+}
+
+// fileUnderGoRoot reports whether file names Go's own source: an absolute
+// path under runtime.GOROOT(), or a relative one that exists under
+// GOROOT/src (the "runtime/proc.go"/"encoding/json/encode.go" shape a
+// stripped or older toolchain emits).
+func fileUnderGoRoot(file string) bool {
+	root := runtime.GOROOT()
+	if root == "" {
+		return false
+	}
+	if underResolvedRoot(file, root) {
+		return true
+	}
+	if !filepath.IsAbs(file) {
+		if _, err := os.Stat(filepath.Join(root, "src", file)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// fileUnderGoModCache reports whether file sits under the Go module cache
+// (GOMODCACHE when set, ~/go/pkg/mod otherwise) — dependency code, not the
+// program's own.
+func fileUnderGoModCache(file string) bool {
+	cache := os.Getenv("GOMODCACHE")
+	if cache == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		cache = filepath.Join(home, "go", "pkg", "mod")
+	}
+	return underResolvedRoot(file, cache)
 }
 
 func nonEmpty(s, fallback string) string {
@@ -1867,6 +2214,10 @@ func addInliningWarnings(hm *Heatmap) {
 	if hm.Method != MethodV8PositionTicks && hm.Method != MethodCPUProfileFile {
 		return
 	}
+	// The callee bodies this pass reads from disk are rendered (the
+	// inlined-callee secondary frame) and serialized (--json), so they get
+	// the same (SEC-8) scrub readCode applies to HeatLine.Code.
+	scr := scrub.New(scrub.WithValues(scrub.SecretEnvValues(os.Environ(), nil)))
 	selfPctByName := make(map[string]float64, len(hm.Functions))
 	for _, f := range hm.Functions {
 		selfPctByName[f.Name] = f.SelfPct
@@ -1921,7 +2272,7 @@ func addInliningWarnings(hm *Heatmap) {
 		// like an in-app call gets silently, falsely flagged. When no
 		// declaration is found, this heuristic has nothing left to stand
 		// on and stays silent rather than guessing.
-		ic := buildInlinedCallee(f, callee, line.Line)
+		ic := buildInlinedCallee(f, callee, line.Line, scr)
 		if len(ic.Body) == 0 {
 			continue
 		}
@@ -1962,12 +2313,15 @@ func inlineCalleeDeclPattern(callee string) *regexp.Regexp {
 // lookup: a best-effort text scan of the CALLER's own file (never the
 // whole repo — see InlinedCallee.File's own doc comment) for a
 // declaration-shaped line naming callee, reading up to
-// maxInlinedCalleeBodyLines lines from there. Returns a Body-less
-// InlinedCallee — never an error — when File is empty, unreadable, or no
-// such declaration is found: the primary warning above already carries the
-// whole finding; this secondary body is explicitly optional, so its
-// absence degrades silently rather than failing anything.
-func buildInlinedCallee(f *HeatFunction, callee string, line int) InlinedCallee {
+// maxInlinedCalleeBodyLines lines from there. scr scrubs each body line
+// the same way readCode scrubs HeatLine.Code (SEC-8) — the body is
+// rendered and serialized too — and caps it at maxHeatLineCodeRunes.
+// Returns a Body-less InlinedCallee — never an error — when File is
+// empty, unreadable, or no such declaration is found: the primary warning
+// above already carries the whole finding; this secondary body is
+// explicitly optional, so its absence degrades silently rather than
+// failing anything.
+func buildInlinedCallee(f *HeatFunction, callee string, line int, scr *scrub.Scrubber) InlinedCallee {
 	ic := InlinedCallee{Caller: f.Name, Callee: callee, Line: line, File: f.File}
 	if f.File == "" {
 		return ic
@@ -1987,7 +2341,65 @@ func buildInlinedCallee(f *HeatFunction, callee string, line int) InlinedCallee 
 		}
 		ic.BodyStart = i + 1
 		ic.Body = append([]string(nil), lines[i:end]...)
+		for j := range ic.Body {
+			ic.Body[j] = truncateCode(scr.String(ic.Body[j]))
+		}
 		return ic
 	}
 	return ic
+}
+
+// retargetDefaultToInlinedCallee is LUX-16's answer to the Node/Deno half
+// of the success metric: when V8 inlines the callee into the caller, a
+// fresh capture attributes ~all of the caller's self time to its own
+// call-site line, so the DEFAULT CodeFrame names "processBatch:26" while
+// the planted hot line lives inside heavyStringify. addInliningWarnings
+// already detects that shape (one line ≥ inlineHotLineThresholdPct of the
+// caller, textually a call, callee unsampled or near-zero, declaration
+// readable in the same file); this pass points DefaultTarget at the
+// CALLEE instead when the flagged caller IS the default target:
+//
+//   - a callee with real per-line rows of its own (the "trickle" case)
+//     becomes the target directly, so its genuinely-sampled percentages
+//     render;
+//   - a fully-inlined callee gets a synthetic function over its located
+//     declaration window (BodyStart..end), whose lines carry Code but no
+//     fabricated weights — a renderer shows it HideMetrics-style, with the
+//     "mapping: inferred (inlined into <caller>:<line>)" attribution
+//     (InlinedCallee.DefaultFrame marks the finding).
+//
+// The warning itself stays (a renderer keeps printing it under the frame);
+// a --func caller view is untouched, since DefaultTarget only drives the
+// no---func default.
+func retargetDefaultToInlinedCallee(hm *Heatmap) {
+	if hm.DefaultTarget == nil {
+		return
+	}
+	caller := *hm.DefaultTarget
+	for i := range hm.InlinedCallees {
+		ic := &hm.InlinedCallees[i]
+		if ic.Caller != caller.Name || len(ic.Body) == 0 {
+			continue
+		}
+		ic.DefaultFrame = true
+		for fi := range hm.Functions {
+			f := &hm.Functions[fi]
+			if f.Name == ic.Callee && len(f.Lines) > 0 {
+				real := *f
+				hm.DefaultTarget = &real
+				return
+			}
+		}
+		synthetic := HeatFunction{
+			Name:      ic.Callee,
+			File:      ic.File,
+			StartLine: ic.BodyStart,
+			EndLine:   ic.BodyStart + len(ic.Body) - 1,
+		}
+		for j, code := range ic.Body {
+			synthetic.Lines = append(synthetic.Lines, HeatLine{Line: ic.BodyStart + j, Code: code})
+		}
+		hm.DefaultTarget = &synthetic
+		return
+	}
 }

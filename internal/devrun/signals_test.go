@@ -267,6 +267,92 @@ func TestForwardSignalsReachesWholeProcessGroupWhenNotTTYShared(t *testing.T) {
 	t.Errorf("grandchild pid %d is still alive 2s after the forwarded SIGTERM -- it must reach the whole process group, not just the direct child", grandchildPID)
 }
 
+// TestForwardSignalsTtySharedReachesDescendants is CC-9's ttyShared fix:
+// when monitor's stdin is a terminal the child stays in monitor's OWN
+// process group, so a forwarded SIGTERM/SIGHUP cannot be a group kill
+// (Kill(0) would hit monitor itself, pipeline siblings and a non-job-
+// control parent shell). It must instead reach cmd.Process AND every
+// DESCENDANT of it, taken from a process-tree snapshot, leaves first --
+// otherwise a wrapper child (`sh -c 'node srv.js'`) dies without passing
+// the signal on and leaves the real server orphaned, still holding its
+// port. This proves it with a real grandchild (`sleep`, backgrounded by
+// the shell with no trap of its own, exactly the repro's shape): the shell
+// is signaled last, and only the descendant walk can reach the sleep.
+func TestForwardSignalsTtySharedReachesDescendants(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sig  syscall.Signal
+	}{
+		{"sigterm", syscall.SIGTERM},
+		{"sighup", syscall.SIGHUP},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+			// No trap on the shell: it must die on the forwarded signal
+			// like an ordinary wrapper would, not cooperate with us.
+			cmd := exec.CommandContext(context.Background(), "sh", "-c",
+				"sleep 100 & echo $! > "+pidFile+"; wait")
+			out := tempFileStdout(t)
+			cmd.Stdout = out
+			configureProcessGroup(cmd, true) // ttyShared: SysProcAttr stays nil, the child shares OUR group.
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+
+			done := make(chan struct{})
+			go forwardSignals(cmd, true, done)
+
+			var grandchildPID int
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				if data, err := os.ReadFile(pidFile); err == nil {
+					if s := strings.TrimSpace(string(bytes.TrimSpace(data))); s != "" {
+						if pid, perr := strconv.Atoi(s); perr == nil && pid > 0 {
+							grandchildPID = pid
+							break
+						}
+					}
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if grandchildPID == 0 {
+				close(done)
+				t.Fatal("grandchild pid was never written to the pidfile")
+			}
+
+			// Exactly what a user's `kill <monitor-pid>` does: only
+			// monitor's own pid, never the shared group.
+			if err := syscall.Kill(os.Getpid(), tc.sig); err != nil {
+				t.Fatalf("Kill(self, %v): %v", tc.sig, err)
+			}
+
+			waitDone := make(chan error, 1)
+			go func() { waitDone <- cmd.Wait() }()
+			select {
+			case <-waitDone:
+			case <-time.After(5 * time.Second):
+				_ = cmd.Process.Kill()
+				close(done)
+				t.Fatalf("the direct child did not exit within 5s of the forwarded %v", tc.sig)
+			}
+			close(done)
+
+			// The grandchild shares monitor's process group, so only the
+			// descendant walk (not the self-pid kill above) can have
+			// reached it. Poll for the kernel to finish reaping it.
+			deadline = time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if err := syscall.Kill(grandchildPID, 0); err != nil {
+					return // ESRCH: gone. Success.
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			_ = syscall.Kill(grandchildPID, syscall.SIGKILL) // don't leak a sleep(100) past this test
+			t.Fatalf("grandchild pid %d is still alive 5s after the forwarded %v -- ttyShared delivery must walk the process tree, not just the direct child (CC-9)", grandchildPID, tc.sig)
+		})
+	}
+}
+
 func boolLabel(name string, v bool) string {
 	if v {
 		return name + "=true"

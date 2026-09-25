@@ -230,7 +230,9 @@ func TestDiscardTempProfilePathClearsOnlyPath(t *testing.T) {
 	}
 	prof := &profiler.Profile{Path: path, Text: "heap profile: 1", Symbols: []profiler.Symbol{{Func: "main.f"}}}
 
-	discardTempProfilePath(prof)
+	if !discardTempProfilePath(prof) {
+		t.Fatal("discardTempProfilePath = false, want true when the file is the redundant copy")
+	}
 
 	if prof.Path != "" {
 		t.Errorf("Path = %q, want empty", prof.Path)
@@ -246,8 +248,49 @@ func TestDiscardTempProfilePathClearsOnlyPath(t *testing.T) {
 	}
 
 	// Safe to call again (no Path left) and on a Profile that never had one.
-	discardTempProfilePath(prof)
-	discardTempProfilePath(&profiler.Profile{})
+	if discardTempProfilePath(prof) || discardTempProfilePath(&profiler.Profile{}) {
+		t.Fatal("discardTempProfilePath = true with no Path, want false")
+	}
+}
+
+// TestDiscardTempProfilePathKeepsSoleEvidence is CC-2's keep-rules half:
+// the temp file is deleted only when Text/Symbols already carry the
+// evidence. A pprof CPU profile (Text always empty -- the .pb.gz is what
+// `go tool pprof` reads) and a CDP heap snapshot (no Text, no Symbols)
+// both keep their Path, so --json still returns usable raw evidence.
+func TestDiscardTempProfilePathKeepsSoleEvidence(t *testing.T) {
+	mkpath := func(t *testing.T) string {
+		t.Helper()
+		f, err := os.CreateTemp(t.TempDir(), "monitor-prof-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString("raw bytes"); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return f.Name()
+	}
+	cpu := &profiler.Profile{Method: "pprof_cpu", Path: mkpath(t), Symbols: []profiler.Symbol{{Func: "main.f"}}}
+	if discardTempProfilePath(cpu) {
+		t.Error("pprof_cpu with symbols: discard = true, want false (the .pb.gz stays the primary artifact)")
+	}
+	if cpu.Path == "" {
+		t.Error("pprof_cpu: Path cleared, want it kept")
+	} else if _, err := os.Stat(cpu.Path); err != nil {
+		t.Errorf("pprof_cpu temp file gone: %v", err)
+	}
+	heap := &profiler.Profile{Method: "cdp_heap", Path: mkpath(t)}
+	if discardTempProfilePath(heap) {
+		t.Error("CDP heap snapshot: discard = true, want false (the file IS the evidence)")
+	}
+	if heap.Path == "" {
+		t.Error("CDP heap: Path cleared, want it kept")
+	} else if _, err := os.Stat(heap.Path); err != nil {
+		t.Errorf("CDP heap temp file gone: %v", err)
+	}
 }
 
 // installFakeCodemap writes a fake `codemap` executable to a fresh PATH

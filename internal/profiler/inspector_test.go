@@ -3,15 +3,46 @@ package profiler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/coder/websocket"
 )
+
+// TestInspectorWSConnectErrorOmitsSessionUUID is SEC-3's regression:
+// coder/websocket wraps dial failures in a *url.Error whose URL is the
+// debugger's full WebSocket URL -- session UUID path included -- and that
+// UUID grants Runtime.evaluate code execution in the target. The rebuilt
+// message carries the address and the transport cause only, never the URL
+// (with an http:// scheme, so a ws:// grep would not even catch it).
+func TestInspectorWSConnectErrorOmitsSessionUUID(t *testing.T) {
+	uuid := "11112222-3333-4444-5555-666677778888"
+	wrapped := &url.Error{
+		Op:  "dial",
+		URL: "http://127.0.0.1:9229/" + uuid,
+		Err: errors.New("connection refused"),
+	}
+	msg := inspectorWSConnectError("127.0.0.1:9229", wrapped).Error()
+	if strings.Contains(msg, uuid) || strings.Contains(msg, "ws://") || strings.Contains(msg, "http://") {
+		t.Errorf("dial error leaks the inspector URL: %q", msg)
+	}
+	for _, want := range []string{"127.0.0.1:9229", "connection refused"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("dial error = %q, want it to name %q", msg, want)
+		}
+	}
+	// A non-URL error degrades to the address-only message.
+	plain := inspectorWSConnectError("127.0.0.1:9229", errors.New("boom")).Error()
+	if !strings.Contains(plain, "127.0.0.1:9229") || strings.Contains(plain, "boom") {
+		t.Errorf("non-URL dial error = %q, want the address-only message", plain)
+	}
+}
 
 func TestFlattenCDPProfile(t *testing.T) {
 	// Minimal CDP profile: root → foo (10 hits) → bar (5 hits). Neither node

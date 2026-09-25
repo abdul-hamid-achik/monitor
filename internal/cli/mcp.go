@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -230,8 +231,10 @@ const (
 // already-captured .cpuprofile/pprof bytes.
 func buildMCPLineHeatmap(ctx context.Context, prof profiler.Profile, binding *procbind.Binding) (*profiler.Heatmap, *mcp.HeatmapSkip) {
 	runtime := ""
+	codebase := ""
 	if binding != nil {
 		runtime = string(binding.Runtime)
+		codebase = binding.CodebaseRoot
 	}
 	switch prof.Method {
 	case "sample":
@@ -265,7 +268,8 @@ func buildMCPLineHeatmap(ctx context.Context, prof profiler.Profile, binding *pr
 	hm, buildErr := profiler.BuildHeatmap(ctx, src, profiler.HeatOptions{
 		ProfileType: heatType,
 		Runtime:     runtime,
-		NoReadCode:  true, // payload diet: line numbers/percentages answer "which line", not the source text itself
+		CodeRoots:   []string{codebase}, // LUX-1: the leaf's codebase roots pprof in-app classification (NoReadCode still skips source text)
+		NoReadCode:  true,               // payload diet: line numbers/percentages answer "which line", not the source text itself
 	})
 	if buildErr != nil {
 		return nil, &mcp.HeatmapSkip{Detail: buildErr.Error(), Recovery: mcpLineHeatmapRecovery(runtime, prof.Method)}
@@ -366,33 +370,56 @@ func boundHeatmapLines(hm *profiler.Heatmap, maxLines int) {
 // since/until strings into time.Time via the shared issues.ParseWindowBound,
 // so internal/mcp/server.go's handleIssues stays a pure field copy with no
 // business logic of its own (see mcp.IssuesListFilter's doc comment).
-func listIssuesForMCP(_ context.Context, filter mcp.IssuesListFilter) (items []issues.Issue, err error) {
+//
+// It also runs monitor_issues' defense-in-depth scrub pass (SEC-5): every
+// row's Title/Message/LatestException.Value goes through ONE scrubber built
+// with the environment's secret values (the same construction
+// scrubIssueForResponse and explain's redactContext use, per SEC-2), because
+// a list row is untrusted process text that legacy or pre-scrub records may
+// never have redacted at ingest. The pass's Count() is returned as
+// IssuesListResult.Scrubbed, which handleIssues reports as
+// privacy.scrubbed.
+func listIssuesForMCP(_ context.Context, filter mcp.IssuesListFilter) (mcp.IssuesListResult, error) {
 	now := time.Now()
 	since, err := issues.ParseWindowBound(filter.Since, now)
 	if err != nil {
-		return nil, err
+		return mcp.IssuesListResult{}, err
 	}
 	until, err := issues.ParseWindowBound(filter.Until, now)
 	if err != nil {
-		return nil, err
+		return mcp.IssuesListResult{}, err
 	}
 	path, err := issues.ResolvePath("")
 	if err != nil {
-		return nil, err
+		return mcp.IssuesListResult{}, err
 	}
 	store, err := issues.OpenReadOnly(path)
 	if err != nil {
-		return nil, err
+		return mcp.IssuesListResult{}, err
 	}
-	defer func() {
-		if closeErr := store.Close(); err == nil && closeErr != nil {
-			err = closeErr
-		}
-	}()
-	return store.List(issues.ListOptions{
+	items, err := store.List(issues.ListOptions{
 		Statuses: filter.Statuses, Project: filter.Project, Service: filter.Service,
 		Since: since, Until: until, RunID: filter.RunID, Release: filter.Release, Kind: filter.Kind,
 	})
+	if closeErr := store.Close(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil {
+		return mcp.IssuesListResult{}, err
+	}
+	// One scrubber across every row so Scrubbed is the TOTAL number of
+	// redactions this read made, not a per-row max.
+	s := scrub.New(scrub.WithValues(scrub.SecretEnvValues(os.Environ(), nil)))
+	for i := range items {
+		items[i].Title = s.String(items[i].Title)
+		items[i].Message = s.String(items[i].Message)
+		if items[i].LatestException != nil {
+			ex := *items[i].LatestException
+			ex.Value = s.String(ex.Value)
+			items[i].LatestException = &ex
+		}
+	}
+	return mcp.IssuesListResult{Items: items, Scrubbed: s.Count()}, nil
 }
 
 // issueContextForMCP is mcp.Service.IssueContext's implementation (E2.7):
@@ -511,10 +538,13 @@ func recoveryHintForLatestNoMatch(resolved explain.ResolvedFrom) string {
 // every free-text field the legacy issue/occurrences shape would otherwise
 // return verbatim (Title/Message/the exception Value, on both the issue and
 // each occurrence) -- mirrors internal/explain's own redactContext, which
-// only ever covers Context's fields, never these legacy ones. Returns
+// only ever covers Context's fields, never these legacy ones. The scrubber
+// carries the environment's secret env values (SEC-2): a read-time pass
+// without them cannot catch an exact value that slipped past ingest, and
+// --md/MCP are exactly the surfaces that must never print one. Returns
 // copies; the store's own records are never mutated.
 func scrubIssueForResponse(issue issues.Issue, occurrences []issues.Occurrence) (issues.Issue, []issues.Occurrence, int) {
-	s := scrub.New()
+	s := scrub.New(scrub.WithValues(scrub.SecretEnvValues(os.Environ(), nil)))
 	issue.Title = s.String(issue.Title)
 	issue.Message = s.String(issue.Message)
 	if issue.LatestException != nil {

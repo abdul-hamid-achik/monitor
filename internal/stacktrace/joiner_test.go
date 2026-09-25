@@ -195,6 +195,34 @@ func TestJoinerStripsANSI(t *testing.T) {
 	}
 }
 
+// TestJoinerCleanCarriageReturnSemantics pins CC-7's two shapes on top of
+// the CRLF artifact: a trailing CR is a line ending (dropped), an interior
+// CR is a terminal overwrite (only the text after the last one survives),
+// and a progress-bar prefix glued to Python's traceback header is trimmed
+// so header detection sees it at column 0.
+func TestJoinerCleanCarriageReturnSemantics(t *testing.T) {
+	j := NewJoiner()
+	cases := []struct{ in, want string }{
+		{"Error: boom\r", "Error: boom"},             // CRLF artifact
+		{"\rError: boom", "Error: boom"},             // cleared line (cr1.js)
+		{"progress 50%\rError: boom", "Error: boom"}, // overwrite
+		{"a\rb\r", "b"},                              // artifact + overwrite
+		{" 60%|###|Traceback (most recent call last):", "Traceback (most recent call last):"},
+		{"plain line", "plain line"},
+		{"saw Traceback (most recent call last): twice", "saw Traceback (most recent call last): twice"},
+	}
+	for _, c := range cases {
+		if got := j.clean(c.in); got != c.want {
+			t.Errorf("clean(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// End to end: the cr1.js shape still joins into one block.
+	bs := feedAll(NewJoiner(), time.Unix(0, 0), 0, "\rError: spin fail", "    at load (/repo/cr1.js:1:1)")
+	if len(bs) != 1 || bs[0].Lines[0] != "Error: spin fail" {
+		t.Fatalf("got %+v, want one block starting at the cleared header", bs)
+	}
+}
+
 func TestBlockText(t *testing.T) {
 	b := Block{Lines: []string{"a", "b", "c"}}
 	if got, want := b.Text(), "a\nb\nc"; got != want {

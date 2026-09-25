@@ -86,8 +86,18 @@ func newProfileCmd() *cobra.Command {
 			// `symbols` fields are UNCHANGED by this (glyphrun procmon
 			// depends on them): discardTempProfilePath only clears Path,
 			// never Text/Symbols, unlike profiler.Profile.DiscardRawArtifact.
+			removed := false
 			if output == "" && !keep {
-				discardTempProfilePath(&prof)
+				removed = discardTempProfilePath(&prof)
+				if removed {
+					// CC-2: the receipt above was verified against a file
+					// that was JUST unlinked -- recompute it against the
+					// surviving evidence (Text/Symbols, the only shapes
+					// discard removes the file for) so --json never
+					// claims a verified artifact that no longer exists.
+					rec = prof.VerifyArtifact()
+					prof.Receipt = &rec
+				}
 			}
 			if JSONOutput(cmd) {
 				return WriteJSON(prof)
@@ -102,6 +112,8 @@ func newProfileCmd() *cobra.Command {
 			}
 			if prof.Path != "" {
 				fmt.Printf("  Saved to: %s\n", prof.Path)
+			} else if removed {
+				fmt.Printf("  (temp file removed; pass --keep or --output to retain it)\n")
 			}
 			return nil
 		},
@@ -125,15 +137,32 @@ func newProfileCmd() *cobra.Command {
 // --keep it (E1.7: repeated captures must not accumulate temp files).
 // Unlike profiler.Profile.DiscardRawArtifact, this clears ONLY Path:
 // prof.Text and prof.Symbols — what `monitor profile --json` promises
-// glyphrun procmon (AGENTS.md) — are left untouched. The payload-diet
-// `text` omission MCP/investigate apply is a separate, unaffected contract;
-// `monitor profile --json` keeps text exactly as before this change.
-func discardTempProfilePath(prof *profiler.Profile) {
+// glyphrun procmon (AGENTS.md) — are left untouched.
+//
+// (CC-2) It refuses to delete the artifact while the FILE is the
+// capture's only evidence: a pprof CPU profile (its Text is always empty —
+// the .pb.gz is what `go tool pprof` reads) and a CDP heap snapshot (no
+// Text, no Symbols) both keep their Path, so `--json` still returns
+// usable raw evidence instead of a hollow {textlen:0, path:null} with a
+// receipt claiming a verified file that was just unlinked. Deletion
+// happens only when Text/Symbols fully carry the evidence (a pprof
+// heap/goroutine capture, whose debug=1 dump IS its Text). Returns
+// whether the temp file was actually removed, so the caller can recompute
+// its receipt against the evidence that survives and print the human
+// hint.
+func discardTempProfilePath(prof *profiler.Profile) bool {
 	if prof.Path == "" {
-		return
+		return false
+	}
+	if prof.Text == "" && len(prof.Symbols) == 0 {
+		return false // CDP heap: the .heapsnapshot IS the evidence (CC-2).
+	}
+	if prof.Method == "pprof_cpu" {
+		return false // the .pb.gz is the primary artifact `go tool pprof` needs (CC-2).
 	}
 	_ = os.Remove(prof.Path)
 	prof.Path = ""
+	return true
 }
 
 const maxPersistedProfileBytes int64 = 128 << 20

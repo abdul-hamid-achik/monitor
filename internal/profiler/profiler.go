@@ -131,9 +131,10 @@ func Capture(ctx context.Context, pid int32, t ProfileType, addr string) (Profil
 // callers that need proof the endpoint belongs to pid should call
 // VerifyListenerOwnership first (the investigate pipeline and the MCP
 // profile tool do). cpuDuration sizes the CPU sampling window
-// (?seconds=N); it is ignored for heap/goroutine (instant snapshots) and
-// sample (its own fixed-duration `sample <pid> 1` invocation). For the
-// macOS sample type it runs `sample <pid>` and addr is ignored.
+// (?seconds=N) and the macOS `sample` fallback's own seconds argument
+// (clamped to 1-120 by SampleSeconds, LUX-15); it is ignored for
+// heap/goroutine (instant snapshots). For the macOS sample type addr is
+// ignored.
 func CaptureWithDuration(ctx context.Context, pid int32, t ProfileType, addr string, cpuDuration time.Duration) (Profile, error) {
 	p := Profile{PID: pid, Type: t, Taken: time.Now()}
 	if err := ValidateCapture(t); err != nil {
@@ -149,10 +150,28 @@ func CaptureWithDuration(ctx context.Context, pid int32, t ProfileType, addr str
 	case ProfileHeap, ProfileGoroutine, ProfileCPU:
 		return captureProfilePprof(ctx, p, addr, t, cpuDuration)
 	case ProfileSample:
-		return captureSample(ctx, pid)
+		return captureSample(ctx, pid, cpuDuration)
 	default:
 		return p, fmt.Errorf("unknown profile type %q", t)
 	}
+}
+
+// SampleSeconds clamps a requested macOS `sample` window to the whole
+// seconds `sample`'s own CLI accepts (LUX-15): at least 1 (a 0 would mean
+// `sample`'s own longer default, silently ignoring the caller) and at most
+// 120 (`monitor profile --duration`'s own cap — anything longer holds the
+// terminal for no additional diagnostic value a heatmap needs). Shared by
+// captureSample and the `monitor hot` banner, so the duration shown is
+// always the duration actually sampled.
+func SampleSeconds(d time.Duration) int {
+	secs := int(math.Ceil(d.Seconds()))
+	if secs < 1 {
+		secs = 1
+	}
+	if secs > 120 {
+		secs = 120
+	}
+	return secs
 }
 
 // pprofPreferredValue picks which of a pprof profile's (possibly several)
@@ -178,14 +197,22 @@ func pprofPreferredValue(t ProfileType) []string {
 }
 
 // captureProfilePprof fetches a pprof proto (heap/goroutine: the raw
-// protobuf, never ?debug=1 text; cpu: /debug/pprof/profile, always proto)
-// and parses it in-process with github.com/google/pprof/profile —
-// monitor no longer shells out to `go tool pprof`, so profiling works on a
-// host with no go toolchain installed. The proto is always saved to Path so
-// the raw evidence survives even when in-process symbolication finds
-// nothing (a profile with zero samples of the selected type isn't an
-// error). cpuDuration sizes the CPU sampling window (ignored for
-// heap/goroutine, which are instant snapshots either way).
+// protobuf for Symbols and the on-disk Path evidence; cpu: /debug/pprof/
+// profile, always proto) and parses it in-process with
+// github.com/google/pprof/profile — monitor no longer shells out to
+// `go tool pprof`, so profiling works on a host with no go toolchain
+// installed. The proto is always saved to Path so the raw evidence
+// survives even when in-process symbolication finds nothing (a profile
+// with zero samples of the selected type isn't an error). cpuDuration
+// sizes the CPU sampling window (ignored for heap/goroutine, which are
+// instant snapshots either way).
+//
+// For heap/goroutine, Text is the legacy ?debug=1 text dump (CC-1): the
+// `monitor profile --json` contract (glyphrun procmon stores Text
+// verbatim, AGENTS.md) promises the full readable dump — every goroutine
+// stack, the heap's own legend lines — not a summary table. A target that
+// can't serve debug=1 falls back to summarizeSymbols rather than losing
+// Text entirely.
 func captureProfilePprof(ctx context.Context, p Profile, addr string, t ProfileType, cpuDuration time.Duration) (Profile, error) {
 	p.Method = "pprof_" + string(t)
 	endpoint := pprofURL(addr, t, cpuDuration)
@@ -220,29 +247,45 @@ func captureProfilePprof(ctx context.Context, p Profile, addr string, t ProfileT
 	p.Symbols = syms
 	if t != ProfileCPU {
 		// CPU's saved .pb.gz IS the primary artifact `go tool pprof` reads;
-		// heap/goroutine no longer have a ?debug=1 text dump at all now
-		// that both are fetched as proto, so Text becomes the human-
-		// readable top-N summary instead of going empty.
-		p.Text = summarizeSymbols(syms, 25)
+		// its Text stays empty (see the doc comment above).
+		if dump, derr := httpGet(ctx, client, pprofDebugURL(addr, t)); derr == nil && len(dump) > 0 {
+			p.Text = string(dump)
+		} else {
+			p.Text = summarizeSymbols(syms, 25)
+		}
 	}
 	return p, nil
+}
+
+// pprofDebugURL maps a non-CPU ProfileType to its legacy human-readable
+// ?debug=1 dump endpoint at addr (host:port, defaulting to localhost:6060
+// when empty) — the text form main's `monitor profile` always returned in
+// Text for heap/goroutine (CC-1). Never used for CPU: /debug/pprof/profile
+// has no debug=1 form, and the proto capture above already covers it.
+func pprofDebugURL(addr string, t ProfileType) string {
+	if addr == "" {
+		addr = DefaultPprofAddr
+	}
+	return fmt.Sprintf("http://%s/debug/pprof/%s?debug=1", addr, t)
 }
 
 // DefaultPprofAddr is the host:port scraped when Capture is given no address.
 const DefaultPprofAddr = "localhost:6060"
 
-// pprofURL maps a ProfileType to its net/http/pprof endpoint at addr
+// pprofURL maps a ProfileType to its net/http/pprof PROTO endpoint at addr
 // (host:port, defaulting to localhost:6060 when empty). Every type is
-// fetched as the raw protobuf now (never ?debug=1 text): CPU always was
-// (there is no /cpu handler; /profile bounded with ?seconds=N so the scrape
-// can't block indefinitely), and heap/goroutine moved off ?debug=1 so
-// symbolsFromPprof can compute real flat/cum per line with inlining instead
-// of text-scraping a human-oriented dump. cpuDuration sets N, rounded up to
-// the next whole second (net/http/pprof's `seconds` query param is an
-// integer) and floored at 1 so a caller-supplied sub-second duration still
-// samples for at least one second rather than requesting `seconds=0`
-// (net/http/pprof treats that as "use its own 30s default", silently
-// ignoring the caller's intent). Ignored for heap/goroutine.
+// fetched as the raw protobuf here: CPU always was (there is no /cpu
+// handler; /profile bounded with ?seconds=N so the scrape can't block
+// indefinitely), and heap/goroutine's symbols need the proto so
+// symbolsFromPprof can compute real flat/cum per line with inlining
+// instead of text-scraping a human-oriented dump (heap/goroutine's
+// human-readable ?debug=1 text is fetched separately for Text — see
+// pprofDebugURL and CC-1). cpuDuration sets N, rounded up to the next
+// whole second (net/http/pprof's `seconds` query param is an integer) and
+// floored at 1 so a caller-supplied sub-second duration still samples for
+// at least one second rather than requesting `seconds=0` (net/http/pprof
+// treats that as "use its own 30s default", silently ignoring the
+// caller's intent). Ignored for heap/goroutine.
 func pprofURL(addr string, t ProfileType, cpuDuration time.Duration) string {
 	if addr == "" {
 		addr = DefaultPprofAddr

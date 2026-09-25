@@ -111,7 +111,21 @@ func buildExceptionInfo(ex stacktrace.Exception) *ExceptionInfo {
 		Handled: cloneBool(ex.Handled),
 		Frames:  topInAppFrames(ex.Frames, maxExceptionFrames),
 	}
-	for _, cause := range selectCauses(ex.Chained, maxExceptionCauses) {
+	// (CC-4) record what the caps dropped before the size backstop runs,
+	// so a reader can tell "12 frames kept" from "12 frames kept of 21":
+	// maxExceptionFrames keeps only the in-app frames closest to the
+	// crash, and selectCauses only the outermost-plus-innermost slice of
+	// a long chain.
+	inApp := 0
+	for _, f := range ex.Frames {
+		if f.InApp {
+			inApp++
+		}
+	}
+	info.DroppedFrames = inApp - len(info.Frames)
+	kept := selectCauses(ex.Chained, maxExceptionCauses)
+	info.DroppedCauses = len(ex.Chained) - len(kept)
+	for _, cause := range kept {
 		entry := CauseInfo{Type: cause.Type}
 		if f, ok := lastInAppFrame(cause); ok {
 			entry.Culprit = culpritFromFrame(f)
@@ -156,7 +170,9 @@ const maxExceptionValueBytes = 512
 // closest to the crash), then drops causes -- preserving the outermost and,
 // above all, the innermost entry as long as possible (see dropOneCause) --
 // until info's JSON encoding fits maxExceptionInfoBytes, or there is
-// nothing left to drop.
+// nothing left to drop. Every frame and cause dropped here is counted in
+// DroppedFrames/DroppedCauses (CC-4), on top of what the caps in
+// buildExceptionInfo already recorded.
 func truncateExceptionInfo(info *ExceptionInfo) {
 	if len(info.Value) > maxExceptionValueBytes {
 		info.Value = truncateUTF8(info.Value, maxExceptionValueBytes)
@@ -169,8 +185,10 @@ func truncateExceptionInfo(info *ExceptionInfo) {
 		switch {
 		case len(info.Frames) > 0:
 			info.Frames = info.Frames[1:]
+			info.DroppedFrames++
 		case len(info.Causes) > 0:
 			info.Causes = dropOneCause(info.Causes)
+			info.DroppedCauses++
 		default:
 			return
 		}
@@ -194,6 +212,71 @@ func dropOneCause(causes []CauseInfo) []CauseInfo {
 		i := len(causes) - 2
 		return append(causes[:i:i], causes[i+1:]...)
 	}
+}
+
+// culpritFromExceptionInfo re-derives the exception-chain Culprit from a
+// stored ExceptionInfo using the same innermost-cause rule culpritFor
+// applies to a raw stacktrace.Exception (the naming ADR §6): the
+// innermost cause's own culprit when the chain's last kept entry has one
+// (buildExceptionInfo stores each cause's lastInAppFrame pick), else the
+// outer exception's last in-app frame (ExceptionInfo.Frames keeps the
+// crash frame last). This is culpritFor's read-side mirror for callers
+// that only hold the bounded stored detail, never the raw exception; nil
+// only when the stored chain carries no in-app frame at all.
+func culpritFromExceptionInfo(info *ExceptionInfo) *Culprit {
+	if len(info.Causes) > 0 {
+		if c := info.Causes[len(info.Causes)-1].Culprit; c != nil {
+			return c
+		}
+	}
+	if len(info.Frames) > 0 {
+		return culpritFromFrame(info.Frames[len(info.Frames)-1])
+	}
+	return nil
+}
+
+// RebuildFromFirstOccurrence restores the exception detail an older
+// monitor binary stripped from an issue record (CC-3): a mixed install
+// where a v1.15 binary writes to the same store decodes the issue into
+// its old struct and re-marshals it, silently dropping the additive
+// Culprit/LatestException/Handled fields, while the occurrence rows keep
+// their Exception detail (only an issue's FIRST occurrence retains it --
+// see Occurrence.Exception). When issue is an exception-kind issue whose
+// LatestException is missing, this loads its occurrences and uses the
+// first one carrying Exception as LatestException, re-derives Culprit
+// (see culpritFromExceptionInfo) and fills Handled from
+// ExceptionInfo.Handled -- only ever filling fields that are missing,
+// never overwriting data that survived the rewrite. ok reports whether a
+// rebuild happened; a nil store, a store error, or no occurrence carrying
+// Exception leaves issue unchanged (ok false), so the read degrades to
+// the pre-rebuild behavior instead of failing.
+func RebuildFromFirstOccurrence(store *Store, issue Issue) (Issue, bool) {
+	if store == nil || issue.Kind != KindException || issue.LatestException != nil {
+		return issue, false
+	}
+	occurrences, err := store.Occurrences(issue.ID, 0)
+	if err != nil {
+		return issue, false
+	}
+	// Occurrences returns newest-first and only the FIRST occurrence
+	// keeps Exception detail, so the rebuild source is the last row in
+	// that order that carries one -- walking from the oldest end.
+	for i := len(occurrences) - 1; i >= 0; i-- {
+		info := occurrences[i].Exception
+		if info == nil {
+			continue
+		}
+		rebuilt := issue
+		rebuilt.LatestException = info
+		if rebuilt.Culprit == nil {
+			rebuilt.Culprit = culpritFromExceptionInfo(info)
+		}
+		if rebuilt.Handled == nil {
+			rebuilt.Handled = info.Handled
+		}
+		return rebuilt, true
+	}
+	return issue, false
 }
 
 // truncateUTF8 cuts s to at most n bytes without splitting a rune in half
@@ -463,7 +546,20 @@ func cloneExceptionForGitRoot(ex stacktrace.Exception) stacktrace.Exception {
 // keeps the untrimmed issues.Issue, where the full frame/cause detail is
 // exactly what a reader asked for. Issue.Culprit (already compact, a single
 // file:line) is left untouched, so a trimmed list row still names a culprit.
-func SummarizeForList(issue Issue) Issue {
+//
+// The optional store (CC-3) rebuilds an exception-kind issue whose
+// LatestException an older monitor binary stripped before trimming (see
+// RebuildFromFirstOccurrence): a list row that can cheaply name the real
+// culprit should not show `culprit: null` just because a v1.15 binary
+// rewrote the store. Callers that already hold the store they listed from
+// pass it; callers without one keep the historical store-less behavior
+// byte for byte.
+func SummarizeForList(issue Issue, store ...*Store) Issue {
+	if len(store) > 0 {
+		if rebuilt, ok := RebuildFromFirstOccurrence(store[0], issue); ok {
+			issue = rebuilt
+		}
+	}
 	if issue.LatestException == nil {
 		return issue
 	}

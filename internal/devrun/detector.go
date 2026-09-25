@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/abdul-hamid-achik/monitor/internal/contextids"
@@ -58,7 +59,9 @@ const dedupeBucketSeconds = 1
 const flushShutdownBudget = 2 * time.Second
 
 // newIssueEvent is what the detector reports to Options' banner callback
-// the first time a fingerprint is recorded during this run.
+// when a store write lands: the first record of a fingerprint (NEW) or a
+// recurrence that flipped a resolved issue back open (REGRESSED, LUX-14 --
+// rendered by NewIssueBanner, which both callbacks feed).
 type newIssueEvent struct {
 	ShortID string
 	Level   string
@@ -66,6 +69,10 @@ type newIssueEvent struct {
 	File    string
 	Line    int
 	Func    string
+	// Regressed marks the LUX-14 case: this write reopened a previously
+	// resolved issue (UpsertResult.Reopened). NewIssueBanner renders it as
+	// "monitor > REGRESSED <short> <title> <where>" instead of NEW.
+	Regressed bool
 }
 
 type detectorOptions struct {
@@ -100,6 +107,13 @@ type detector struct {
 	// whether the issue already existed in the store from an earlier run).
 	seen map[string]string
 
+	// regressedIDs collects the display short IDs of every write this run
+	// that reopened a previously resolved issue (LUX-14), newest last --
+	// the detector-side twin of newIssueIDs, surfaced through Result so
+	// ExitSummary can count regressions ("... · 1 regressed (cded)")
+	// instead of reporting a regression-heavy run as "0 new issues".
+	regressedIDs []string
+
 	newIssueIDs []string
 	// firstNewIssueFullID is the first NEW issue's full "ISS-..." id
 	// recorded this run, set once (see record). Kept for a caller that
@@ -128,6 +142,15 @@ type detector struct {
 	// can print "store corrupted" instead of "store busy" for these is a
 	// one-line follow-up left to whoever owns devrun.go.
 	failedWritesCorrupted int64
+
+	// childExitCode carries the reaped child's exit code (LUX-11), or -1
+	// while the child is still running/unknown. Run stores it right after
+	// cmd.Wait returns and BEFORE closing the lines channel (see
+	// noteChildExit), so it is always set by the time the shutdown flush
+	// runs; a coalesce timer that fires even earlier just sees -1 and
+	// leaves the parsed severity alone. Atomic: the write happens on Run's
+	// goroutine, reads on flush goroutines.
+	childExitCode atomic.Int32
 
 	// flushWG tracks every coalesceWindow timer's flush goroutine
 	// (started in observe) so run's final flushAllPending can wait out one
@@ -158,12 +181,24 @@ type coalesceEntry struct {
 }
 
 func newDetector(opts detectorOptions) *detector {
-	return &detector{
+	d := &detector{
 		opts:     opts,
 		scrubber: scrub.New(scrub.WithValues(scrub.SecretEnvValues(os.Environ(), opts.redactEnvNames))),
 		pending:  make(map[string]*coalesceEntry),
 		seen:     make(map[string]string),
 	}
+	d.childExitCode.Store(-1)
+	return d
+}
+
+// noteChildExit records the child's exit code once Run has reaped it
+// (LUX-11). Run calls this after cmd.Wait and before closing the lines
+// channel, so every flush that runs after the stream ends --
+// flushAllPending, and any timer callback still racing it -- can treat a
+// clean exit (code 0) as proof that a "<module>"-rooted fatal traceback
+// was caught and printed rather than process-ending.
+func (d *detector) noteChildExit(code int) {
+	d.childExitCode.Store(int32(code))
 }
 
 // run consumes lines until the channel is closed (the copy goroutine(s)
@@ -333,10 +368,26 @@ func (d *detector) flushAllPending(ctx context.Context) {
 // announced as a repeat, never as NEW, even though this session is seeing
 // its fingerprint for the first time.
 func (d *detector) record(ctx context.Context, fingerprint string, entry *coalesceEntry) {
+	// LUX-11: a Python traceback whose OLDEST frame is the module top
+	// level parses as fatal/unhandled because the parser cannot know
+	// whether the process survived it (pythonDisposition). A child that
+	// was reaped with exit code 0 DID survive, so at flush time the block
+	// is downgraded to handled/error before it is persisted -- "caught and
+	// printed means handled" (goal decision 3). An unknown (-1) or
+	// non-zero exit leaves the parser's verdict untouched.
+	if d.childExitCode.Load() == 0 {
+		downgradeModuleFatal(&entry.ex)
+	}
+	dedupe := liveDedupeKey(d.opts.launch.Root, entry.block, entry.observedAt)
 	result, err := issues.RecordException(ctx, d.opts.storePath, issues.DefaultWriterWait, entry.ex, d.opts.id, d.opts.run, issues.RecordExceptionOptions{
 		ObservedAt: entry.observedAt,
 		Count:      entry.count,
-		DedupeKey:  liveDedupeKey(d.opts.launch.Root, entry.block, entry.observedAt),
+		DedupeKey:  dedupe,
+		// DedupeAliases (CC-3): the neighboring dedupe buckets, so a
+		// nested `monitor run --` pair whose observation times straddle a
+		// whole-second boundary still folds into one occurrence. See
+		// liveDedupeKeyNeighbors for the safety argument.
+		DedupeAliases: liveDedupeKeyNeighbors(d.opts.launch.Root, entry.block, entry.observedAt),
 	})
 	if err != nil {
 		// A store write failure must never bring down the detector, let
@@ -361,6 +412,10 @@ func (d *detector) record(ctx context.Context, fingerprint string, entry *coales
 	}
 
 	isNewIssue := result.Issue.OccurrenceCount == entry.count
+	// LUX-14: this write flipped a resolved issue back open -- a
+	// regression, announced as REGRESSED (and counted in the exit
+	// summary), never as a silent "again".
+	regressed := result.Reopened
 
 	d.mu.Lock()
 	shortID, seenBefore := d.seen[fingerprint]
@@ -374,10 +429,25 @@ func (d *detector) record(ctx context.Context, fingerprint string, entry *coales
 			d.firstNewIssueFullID = result.Issue.ID
 		}
 	}
+	if regressed {
+		d.regressedIDs = append(d.regressedIDs, shortID)
+	}
 	d.occurrences += entry.count
 	d.mu.Unlock()
 
 	switch {
+	case regressed && d.opts.onNewIssue != nil:
+		culprit := result.Issue.Culprit
+		d.bannerMu.Lock()
+		d.opts.onNewIssue(newIssueEvent{
+			ShortID:   shortID,
+			Title:     result.Issue.Title,
+			File:      culpritFile(culprit),
+			Line:      culpritLine(culprit),
+			Func:      culpritFunc(culprit),
+			Regressed: true,
+		})
+		d.bannerMu.Unlock()
 	case isNewIssue && d.opts.onNewIssue != nil:
 		culprit := result.Issue.Culprit
 		d.bannerMu.Lock()
@@ -400,6 +470,7 @@ func (d *detector) record(ctx context.Context, fingerprint string, entry *coales
 //	liveDedupeKey implements the live DedupeKey rule (naming ADR §5): sha256(MONITOR_LAUNCH_ROOT
 //
 // + hash(exception
+//
 // block)), bucketed by dedupeBucketSeconds so two detectors independently
 // parsing the identical raw text at nearly the same wall-clock instant (a
 // `monitor run --` nested inside another one) land on the same key and the
@@ -407,9 +478,41 @@ func (d *detector) record(ctx context.Context, fingerprint string, entry *coales
 // retained occurrences) folds the second write into the first's Deduped
 // case instead of double-counting -- while two SEQUENTIAL windows from the
 // SAME detector (see dedupeBucketSeconds' doc comment for the proof) never
-// collide with each other.
+// collide with each other. When the two observation times straddle a
+// whole-second boundary the primary keys differ, so the detector also
+// passes the neighbor buckets as DedupeAliases (CC-3, see
+// liveDedupeKeyNeighbors) and the store folds the straddling pair through
+// the first write's retained primary key.
 func liveDedupeKey(launchRoot string, block stacktrace.Block, observedAt time.Time) string {
+	return bucketedDedupeKey(launchRoot, block, observedAt.Unix()/dedupeBucketSeconds)
+}
+
+// liveDedupeKeyNeighbors returns the live DedupeKey's bucket-1 and
+// bucket+1 siblings (CC-3): a nested `monitor run --` pair observes the
+// same block from two detectors whose wall-clock times can straddle a
+// whole-second boundary, so the second write passes these as
+// issues.RecordExceptionOptions.DedupeAliases and the store's dedupe
+// lookup folds it into the first write's retained occurrence instead of
+// counting the crash twice. Only the primary key is ever retained.
+//
+// This cannot fold two SEQUENTIAL windows from ONE detector: a second
+// window can only open after the first's timer fired (coalesceWindow = 2s
+// later at the earliest, per observe), and dedupeBucketSeconds is 1, so
+// consecutive observedAt values are at least 2 buckets apart -- a later
+// window's bucket-1 neighbor is still strictly newer than every earlier
+// window's retained primary key. See dedupeBucketSeconds' doc comment and
+// TestLiveDedupeKeyNeighborsNeverFoldSequentialWindows.
+func liveDedupeKeyNeighbors(launchRoot string, block stacktrace.Block, observedAt time.Time) []string {
 	bucket := observedAt.Unix() / dedupeBucketSeconds
+	return []string{
+		bucketedDedupeKey(launchRoot, block, bucket-1),
+		bucketedDedupeKey(launchRoot, block, bucket+1),
+	}
+}
+
+// bucketedDedupeKey is liveDedupeKey's hashing core for one explicit
+// bucket number.
+func bucketedDedupeKey(launchRoot string, block stacktrace.Block, bucket int64) string {
 	seed := strings.Join([]string{
 		launchRoot,
 		stacktrace.HashBlock(block.Text()),
@@ -477,4 +580,24 @@ func scrubException(scrubber *scrub.Scrubber, ex *stacktrace.Exception) {
 	for i := range ex.Chained {
 		scrubException(scrubber, &ex.Chained[i])
 	}
+}
+
+// downgradeModuleFatal downgrades ex in place when it is a Python
+// module-top-level FATAL exception -- the exact shape internal/stacktrace's
+// pythonDisposition marks unhandled/fatal because its oldest frame is the
+// module top level ("<module>", or runpy's frozen driver) and the parser
+// has no way to know the traceback was caught and printed (LUX-11). The
+// downgrade mirrors what the parser itself does for every non-module
+// traceback: Handled=true, Level=error.
+func downgradeModuleFatal(ex *stacktrace.Exception) {
+	if ex == nil || ex.Level != stacktrace.LevelFatal || len(ex.Frames) == 0 {
+		return
+	}
+	f := ex.Frames[0] // Frames run oldest -> newest; [0] is the entry frame.
+	if f.Function != "<module>" && f.Filename != "<frozen runpy>" {
+		return
+	}
+	handled := true
+	ex.Handled = &handled
+	ex.Level = stacktrace.LevelError
 }

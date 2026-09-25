@@ -61,10 +61,11 @@ func newStacktraceParseCmd() *cobra.Command {
 		root        string
 		fromStart   bool
 		record      bool
+		redactEnv   []string
 	)
 	cmd := &cobra.Command{
 		Use:   "parse",
-		Short: "Detect exceptions in a log file or stdin and print them as NDJSON",
+		Short: "Detect stack traces in a log file or stdin; --record replays them into the issues store",
 		Long: `parse reads raw stderr/stdout/log text -- from --file, or from stdin
 when --file is omitted -- and prints one JSON object per detected
 exception (internal/stacktrace's Exception, tagged with --project and
@@ -92,7 +93,6 @@ double-counting). ObservedAt for a recorded occurrence is the log
 line's own timestamp when one could be read, else the file's mtime --
 never the current time, so replaying an old log never bumps an issue's
 last_seen to "now".`,
-		Hidden: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			rootDir := "."
 			if file != "" {
@@ -121,6 +121,7 @@ last_seen to "now".`,
 					gitRoot:   gitRoot,
 					fromStart: fromStart,
 					storePath: storePath,
+					redactEnv: redactEnv,
 				})
 			}
 
@@ -152,6 +153,8 @@ last_seen to "now".`,
 		"record detected exceptions into the issues store (idempotent via a per-file checkpoint; requires --file)")
 	cmd.Flags().BoolVar(&fromStart, "from-start", false,
 		"with --record, ignore the saved checkpoint and replay the whole file from byte 0 (no effect without --record, which always reads from the start)")
+	cmd.Flags().StringSliceVar(&redactEnv, "redact-env", nil,
+		"with --record, additional environment variable NAMEs to redact from recorded exception text (name-matched secret vars are always redacted)")
 	return cmd
 }
 
@@ -333,6 +336,10 @@ type stacktraceRecordOptions struct {
 	file, project, service, gitRoot string
 	fromStart                       bool
 	storePath                       string
+	// redactEnv names extra environment variables whose values must be
+	// redacted from recorded text (SEC-6's --redact-env), on top of the
+	// secret-name heuristic scrub.SecretEnvValues applies.
+	redactEnv []string
 }
 
 // recordSummary is --record's one-line human summary (the roadmap's Act-1
@@ -350,6 +357,11 @@ type recordSummary struct {
 	// bytes. Not part of the roadmap's fixed mockup text, so it is only
 	// appended when non-zero, keeping the common-case line unchanged.
 	Deduped int `json:"deduped,omitempty"`
+	// HeldBack (LUX-4) is how many trailing blocks were NOT recorded
+	// because the file was still being written after --record waited out
+	// the settle window once; the checkpoint stops before them so a
+	// re-run records them whole.
+	HeldBack int `json:"held_back,omitempty"`
 }
 
 func (s recordSummary) String() string {
@@ -357,6 +369,14 @@ func (s recordSummary) String() string {
 		s.LinesParsed, s.NewBlocks, s.CheckpointOffset, s.CheckpointInode, s.OccurrencesWritten)
 	if s.Deduped > 0 {
 		line += fmt.Sprintf(" · %d deduped", s.Deduped)
+	}
+	if s.HeldBack > 0 {
+		blocks, them := "block", "it"
+		if s.HeldBack > 1 {
+			blocks, them = "blocks", "them"
+		}
+		line += fmt.Sprintf(" · %d trailing %s held (file modified <%s ago); re-run to record %s",
+			s.HeldBack, blocks, stacktrace.SettleWindow, them)
 	}
 	return line
 }
@@ -386,6 +406,17 @@ func (s recordSummary) String() string {
 // SAFE (structurally closed) point, and the next --record run re-reads the
 // open fragment from scratch, into a fresh Joiner, alongside whatever got
 // appended since.
+//
+// LUX-4 refines the tail: when EOF arrives with the mtime still inside
+// SettleWindow, --record waits out the remainder once and re-stats, so a
+// one-shot writer that already exited (`cmd 2>err.log; monitor ... --file
+// err.log`) still gets its trailing trace recorded in the same run. But a
+// quiet file is not the same as a COMPLETE tail: a Python-shaped fragment
+// (frames, no closing "Type: ..." line yet) force-closes to an empty-type
+// exception, and recording that fabricates a bogus issue. tailBlockHeldBack
+// holds such fragments back even after the wait -- the checkpoint stops
+// before them and the summary says HeldBack -- so the run that completes
+// them records the real exception whole.
 func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecordOptions) error {
 	absPath, err := filepath.Abs(opts.file)
 	if err != nil {
@@ -415,10 +446,21 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 		}
 	}
 
+	// LUX-3: resolve the identity from the git root actually used (--root,
+	// else the file's repo, else the cwd repo), not from the log file's
+	// own directory. A log stored outside the repo (/tmp, ~/Library/Logs)
+	// has frames in-app to the cwd repo; resolving from the log's
+	// directory stamped it with project "local", so the same crash became
+	// a SECOND issue (FingerprintV2 hashes the project) next to the one
+	// `monitor run --` recorded under the repo's slug.
+	dir := filepath.Dir(absPath)
+	if opts.gitRoot != "" {
+		dir = opts.gitRoot
+	}
 	id := project.Resolve(project.Hints{
 		ExplicitProject: opts.project,
 		ExplicitService: opts.service,
-		Dir:             filepath.Dir(absPath),
+		Dir:             dir,
 		PID:             fileReplayPIDHint,
 	})
 	if opts.gitRoot != "" {
@@ -426,7 +468,9 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 		id.Root = opts.gitRoot
 	}
 	run := contextids.FromEnv(contextids.IDs{})
-	scrubber := scrub.New(scrub.WithValues(scrub.SecretEnvValues(os.Environ(), nil)))
+	// SEC-6: --redact-env names are added on top of the name heuristic so
+	// an oddly-named secret variable is still redacted from replayed text.
+	scrubber := scrub.New(scrub.WithValues(scrub.SecretEnvValues(os.Environ(), opts.redactEnv)))
 
 	j := stacktrace.NewJoiner()
 	lr := newCheckpointLineReader(f, stacktrace.DefaultMaxBytes)
@@ -444,6 +488,18 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 	lineOffsets := []int64{0}
 	summary := recordSummary{CheckpointInode: cp.Inode}
 
+	// LUX-10: the whole replay shares ONE short-lived writer scope, opened
+	// lazily the first time a block actually needs recording (a quiet log
+	// never touches the store at all) and held until the run ends. The
+	// replay closure below first runs with a nil store; when it reaches
+	// the first recordable block it returns errNeedWriter, and
+	// issues.WithWriter re-enters it with the open store resuming exactly
+	// where it stopped (reader, Joiner and offsets live out here, outside
+	// the closure). This replaces one full writer open+save+close per
+	// block -- whose wall-clock cost grows with store size -- with a
+	// single acquisition, the same shape `monitor run`'s coalesced writer
+	// uses.
+	var store *issues.Store
 	process := func(blocks []stacktrace.Block) error {
 		for _, b := range blocks {
 			summary.NewBlocks++
@@ -455,7 +511,7 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 			if b.LineStart > 0 && b.LineStart < len(lineOffsets) {
 				blockOffset = lineOffsets[b.LineStart]
 			}
-			deduped, err := recordParsedException(ctx, opts.storePath, cp.Dev, cp.Inode, cp.Generation, blockOffset, b, ex, id, run, scrubber, mtime)
+			deduped, err := recordParsedExceptionOnStore(store, cp.Dev, cp.Inode, cp.Generation, blockOffset, b, ex, id, run, scrubber, mtime)
 			if err != nil {
 				return err
 			}
@@ -464,6 +520,28 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 			} else {
 				summary.OccurrencesWritten++
 			}
+			// LUX-10: large replays can run for minutes with no output
+			// at all; report progress on stderr (stdout carries only the
+			// one-line summary).
+			if summary.NewBlocks%100 == 0 {
+				fmt.Fprintf(os.Stderr, "monitor: %s: %d new blocks · %d occurrences written\n", filepath.Base(opts.file), summary.NewBlocks, summary.OccurrencesWritten)
+			}
+		}
+		return nil
+	}
+
+	// saveCheckpointAt commits the checkpoint mid-replay (LUX-10), so a
+	// crash partway through a large file loses at most the batch in
+	// flight instead of the whole run's progress.
+	saveCheckpointAt := func(off int64) error {
+		batch := cp
+		batch.Offset = off
+		if info, err := f.Stat(); err == nil {
+			batch.MtimeNs = info.ModTime().UnixNano()
+		}
+		batch.PrefixHash = stacktrace.PrefixHash(f, off)
+		if err := stacktrace.SaveCheckpointByKey(stacktrace.CheckpointKey{Dev: cp.Dev, Inode: cp.Inode}, batch); err != nil {
+			return fmt.Errorf("save checkpoint: %w", err)
 		}
 		return nil
 	}
@@ -471,20 +549,41 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 	base := time.Unix(0, 0)
 	n := 0
 	var readErr error
-	for {
-		line, consumed, rerr := lr.next()
-		if rerr != nil {
-			readErr = rerr
-			break
+	readDone := false
+	// pending holds blocks closed mid-read whose recording forced the
+	// writer scope open; pendingTail holds the trailing flush in the same
+	// situation. endMtime carries the tail's settled mtime across that
+	// re-entry.
+	var pending, pendingTail []stacktrace.Block
+	var endMtime time.Time
+
+	replay := func(s *issues.Store) error {
+		if s != nil {
+			store = s
 		}
-		n++
-		summary.LinesParsed++
-		lineOffsets = append(lineOffsets, offset)
-		offset += consumed
-		blocks := j.Feed(line, base.Add(time.Duration(n)*time.Microsecond))
-		if len(blocks) > 0 {
-			if err := process(blocks); err != nil {
+		if len(pending) > 0 {
+			if err := process(pending); err != nil {
 				return err
+			}
+			pending = nil
+			if err := saveCheckpointAt(safeOffset); err != nil {
+				return err
+			}
+		}
+		for !readDone {
+			line, consumed, rerr := lr.next()
+			if rerr != nil {
+				readErr = rerr
+				readDone = true
+				break
+			}
+			n++
+			summary.LinesParsed++
+			lineOffsets = append(lineOffsets, offset)
+			offset += consumed
+			blocks := j.Feed(line, base.Add(time.Duration(n)*time.Microsecond))
+			if len(blocks) == 0 {
+				continue
 			}
 			// Every block just closed did so structurally (Feed only
 			// force-closes a block on its own idle timeout, which cannot
@@ -492,36 +591,117 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 			// the line that triggered it (this one) starts the new safe
 			// boundary.
 			safeOffset = lineOffsets[n]
+			if store == nil && anyParseableBlocks(blocks) {
+				pending = blocks
+				return errNeedWriter
+			}
+			if err := process(blocks); err != nil {
+				return err
+			}
+			if err := saveCheckpointAt(safeOffset); err != nil {
+				return err
+			}
 		}
-	}
-	if readErr != io.EOF {
-		return fmt.Errorf("read %s: %w", opts.file, readErr)
-	}
-
-	finalOffset := safeOffset
-	settled, endMtime := fileSettled(f, mtime)
-	if settled {
-		if err := process(j.Flush()); err != nil {
-			return err
+		if readErr != io.EOF {
+			return fmt.Errorf("read %s: %w", opts.file, readErr)
 		}
-		finalOffset = offset
+
+		finalOffset := safeOffset
+		if len(pendingTail) > 0 {
+			// Re-entered with a writer for the trailing blocks the first
+			// pass below held: record them now (a parseable held block is
+			// always either written or deduped), then advance the
+			// checkpoint past the whole file.
+			if err := process(pendingTail); err != nil {
+				return err
+			}
+			pendingTail = nil
+			finalOffset = offset
+		} else {
+			settled, mnow := fileSettled(f, mtime)
+			if !settled {
+				// LUX-4: EOF on a file whose mtime is still inside
+				// SettleWindow almost always follows a one-shot writer
+				// that has ALREADY exited (`cmd 2> err.log; monitor
+				// stacktrace parse --record --file err.log`). Wait once
+				// for the remainder of the window (bounded by
+				// SettleWindow), re-stat, and only then decide: quiet for
+				// the whole window means done.
+				if remain := stacktrace.SettleWindow - time.Since(mnow); remain > 0 {
+					timer := time.NewTimer(remain)
+					select {
+					case <-timer.C:
+					case <-ctx.Done():
+						timer.Stop()
+					}
+				}
+				settled, mnow = fileSettled(f, mnow)
+			}
+			endMtime = mnow
+			if settled {
+				held := j.Flush()
+				// LUX-4 vs the mid-write fragment: split the flushed tail
+				// before anything is recorded. Incomplete blocks (a Python
+				// traceback cut before its closing line) stay held even
+				// though the file went quiet -- recording them would
+				// fabricate an empty-type issue (see tailBlockHeldBack).
+				var complete []stacktrace.Block
+				for _, b := range held {
+					if tailBlockHeldBack(b, stacktrace.Parse(b)) {
+						summary.HeldBack++
+					} else {
+						complete = append(complete, b)
+					}
+				}
+				before := summary.OccurrencesWritten + summary.Deduped
+				if len(complete) > 0 && store == nil && anyParseableBlocks(complete) {
+					pendingTail = complete
+					return errNeedWriter
+				}
+				if len(complete) > 0 {
+					if err := process(complete); err != nil {
+						return err
+					}
+				}
+				// Advance past the flushed tail only when nothing was held
+				// back and it was empty or produced records: a fragment
+				// that parses to nothing, or that is still incomplete,
+				// keeps the checkpoint at the last safe offset, so the
+				// bytes that complete it are re-read whole by the next
+				// run (the mid-write protection in the func doc).
+				if len(complete) == len(held) && (len(held) == 0 || summary.OccurrencesWritten+summary.Deduped > before) {
+					finalOffset = offset
+				}
+			} else if held := j.Flush(); len(held) > 0 {
+				// LUX-4: the file changed again during the wait, so a
+				// writer is genuinely still attached. Say so instead of
+				// silently recording nothing; the checkpoint stops before
+				// the held blocks and a re-run records them whole.
+				summary.HeldBack = len(held)
+			}
+		}
+
+		cp.Offset = finalOffset
+		// Stamp the checkpoint with THIS run's own end-of-read mtime/content
+		// fingerprint (not the start-of-run mtime `mtime` still holds -- that
+		// one remains the ObservedAt fallback above), so the NEXT run's CC-1
+		// rewrite check (ResolveOffset) compares against what this run
+		// actually left the file at.
+		cp.MtimeNs = endMtime.UnixNano()
+		cp.PrefixHash = stacktrace.PrefixHash(f, finalOffset)
+		if err := stacktrace.SaveCheckpointByKey(stacktrace.CheckpointKey{Dev: cp.Dev, Inode: cp.Inode}, cp); err != nil {
+			return fmt.Errorf("save checkpoint: %w", err)
+		}
+		summary.CheckpointOffset = cp.Offset
+
+		fmt.Fprintln(w, summary.String())
+		return nil
 	}
 
-	cp.Offset = finalOffset
-	// Stamp the checkpoint with THIS run's own end-of-read mtime/content
-	// fingerprint (not the start-of-run mtime `mtime` still holds -- that
-	// one remains the ObservedAt fallback above), so the NEXT run's CC-1
-	// rewrite check (ResolveOffset) compares against what this run
-	// actually left the file at.
-	cp.MtimeNs = endMtime.UnixNano()
-	cp.PrefixHash = stacktrace.PrefixHash(f, finalOffset)
-	if err := stacktrace.SaveCheckpointByKey(stacktrace.CheckpointKey{Dev: cp.Dev, Inode: cp.Inode}, cp); err != nil {
-		return fmt.Errorf("save checkpoint: %w", err)
+	if err := replay(nil); errors.Is(err, errNeedWriter) {
+		err = issues.WithWriter(ctx, opts.storePath, issues.DefaultWriterWait, replay)
 	}
-	summary.CheckpointOffset = cp.Offset
-
-	fmt.Fprintln(w, summary.String())
-	return nil
+	return err
 }
 
 // fileSettled reports whether f's CURRENT mtime (re-stat'd here, not the
@@ -544,17 +724,14 @@ func fileSettled(f *os.File, fallback time.Time) (settled bool, mtime time.Time)
 	return err != nil || time.Since(mtime) >= stacktrace.SettleWindow, mtime
 }
 
-// recordParsedException applies the git root, scrubs the exception's text,
-//
-//	derives ObservedAt and the reprocess DedupeKey (naming ADR §4-5), and writes one occurrence
-//
-// via
-// issues.RecordException. The returned bool is UpsertResult.Deduped: the
-// caller only counts a write toward "occurrences written" when it is
+// recordParsedExceptionOnStore applies the git root, scrubs the exception's
+// text, derives ObservedAt and the reprocess DedupeKey (naming ADR §4-5),
+// and writes one occurrence on the caller's open store via
+// issues.RecordExceptionOnStore. The returned bool is UpsertResult.Deduped:
+// the caller only counts a write toward "occurrences written" when it is
 // false, so a --from-start replay (or any other reprocess that lands on an
 // already-retained DedupeKey) reports the truth instead of claiming N
 // occurrences written when the store actually deduped every one of them.
-//
 // dev/inode/generation (CC-2, CC-1) replace the file's absPath in the
 // DedupeKey seed: a path breaks across a logrotate-style rename (the same
 // physical file, same dev/inode, gets a NEW path) and across two spellings
@@ -566,7 +743,7 @@ func fileSettled(f *os.File, fallback time.Time) (settled bool, mtime time.Time)
 // generation's occurrence recorded at the same byte offset, while two
 // --from-start replays of the SAME (unrotated) generation still dedupe
 // against each other correctly.
-func recordParsedException(ctx context.Context, storePath string, dev, inode uint64, generation int, blockOffset int64, block stacktrace.Block, ex *stacktrace.Exception, id project.Identity, run contextids.IDs, scrubber *scrub.Scrubber, mtime time.Time) (deduped bool, err error) {
+func recordParsedExceptionOnStore(store *issues.Store, dev, inode uint64, generation int, blockOffset int64, block stacktrace.Block, ex *stacktrace.Exception, id project.Identity, run contextids.IDs, scrubber *scrub.Scrubber, mtime time.Time) (deduped bool, err error) {
 	stacktrace.ApplyGitRoot(ex, id.GitRoot)
 	scrubException(scrubber, ex)
 
@@ -578,11 +755,49 @@ func recordParsedException(ctx context.Context, storePath string, dev, inode uin
 	dedupeSeed := fmt.Sprintf("%d:%d:%d:%d:%s", dev, inode, generation, blockOffset, stacktrace.HashBlock(block.Text()))
 	sum := sha256.Sum256([]byte(dedupeSeed))
 
-	result, err := issues.RecordException(ctx, storePath, issues.DefaultWriterWait, *ex, id, run, issues.RecordExceptionOptions{
+	// LUX-10: the write goes to the ONE writer scope runStacktraceRecord
+	// holds open for the whole replay, not to a fresh writer per block.
+	result, err := issues.RecordExceptionOnStore(store, *ex, id, run, issues.RecordExceptionOptions{
 		ObservedAt: observedAt,
 		DedupeKey:  hex.EncodeToString(sum[:]),
 	})
 	return result.Deduped, err
+}
+
+// errNeedWriter is runStacktraceRecord's internal sentinel (LUX-10): the
+// replay reached its first recordable block with no writer scope open yet,
+// so it stops and asks to be re-entered inside issues.WithWriter, resuming
+// from exactly where it stopped.
+var errNeedWriter = errors.New("stacktrace record: open writer scope")
+
+// anyParseableBlocks reports whether any block in bs would parse into an
+// exception. LUX-10 uses it to decide when the replay first needs the
+// writer scope, so a quiet log (or one whose blocks all parse to nothing)
+// never opens the store at all.
+func anyParseableBlocks(bs []stacktrace.Block) bool {
+	for _, b := range bs {
+		if stacktrace.Parse(b) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// tailBlockHeldBack reports whether a settled-tail block is an INCOMPLETE
+// fragment that must stay held back even though the file went quiet (LUX-4
+// vs the mid-write test): a block with frames but no exception type, in a
+// grammar whose type comes from a CLOSING line. A CPython traceback always
+// ends in its "Type: value" line (likewise a SyntaxError dump), so frames
+// without it mean the writer was cut mid-trace -- force-closing records a
+// bogus empty-type issue. Message-only records (no frames) and grammars
+// whose signal sits in the OPENING line (js, gopanic, ruby, zap) are
+// complete by construction and never held here; unparseable blocks keep
+// their existing behavior (counted, never recorded, checkpoint held).
+func tailBlockHeldBack(b stacktrace.Block, ex *stacktrace.Exception) bool {
+	if ex == nil || ex.Type != "" || len(ex.Frames) == 0 {
+		return false
+	}
+	return b.Kind == "python" || b.Kind == "python-syntax"
 }
 
 // scrubException redacts ex's Type/Value and every frame's Function text,

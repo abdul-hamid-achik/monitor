@@ -180,7 +180,15 @@ func runHotPID(cmd *cobra.Command, pid int32, funcName, ptypeFlag, export, pprof
 			os.Exit(2)
 			return nil
 		}
-		return fmt.Errorf("monitor hot %d: %w", pid, err)
+		// LUX-7: a plain compiled Go binary (`go build` output -- no
+		// "go" in argv, no .test suffix, the normal way to run a Go
+		// service) has no runtime leaf for ResolveLeaf to classify,
+		// but it may still serve pprof (an explicit --pprof-addr
+		// asserts that) or yield a function-level macOS sample. Fall
+		// back to an unknown binding instead of erroring before
+		// either path can run; `monitor profile` and MCP already
+		// accept the same pid.
+		binding = procbind.Binding{PID: pid, Runtime: procbind.RuntimeUnknown}
 	}
 
 	// heap/heap-alloc/goroutine need per-line detail only a Go pprof proto
@@ -236,6 +244,7 @@ func runHotPID(cmd *cobra.Command, pid int32, funcName, ptypeFlag, export, pprof
 	if sampleFallback {
 		hm, err = profiler.BuildHeatmapFromSample(ctx, prof, profiler.HeatOptions{
 			Func: funcName, Top: top, Runtime: string(binding.Runtime),
+			CodeRoots: []string{binding.CodebaseRoot}, // SEC-8: the leaf's own codebase stays readable when monitor runs elsewhere
 		})
 		if err != nil {
 			return fmt.Errorf("monitor hot %d: %w", pid, err)
@@ -250,6 +259,7 @@ func runHotPID(cmd *cobra.Command, pid int32, funcName, ptypeFlag, export, pprof
 
 		hm, err = profiler.BuildHeatmap(ctx, src, profiler.HeatOptions{
 			Func: funcName, Top: top, ProfileType: heatType, Runtime: string(binding.Runtime),
+			CodeRoots: []string{binding.CodebaseRoot}, // SEC-8: the leaf's own codebase stays readable when monitor runs elsewhere
 		})
 		if err != nil {
 			return err
@@ -461,10 +471,10 @@ func hotLiveHeaderLine(ctx context.Context, requestedPID int32, binding procbind
 	}
 	switch {
 	case method == "sample":
-		// captureSample always runs a fixed `sample <pid> 1`, ignoring the
-		// caller's own --duration entirely (see internal/profiler/sample_darwin.go)
-		// — showing the REQUESTED duration here would be honestly wrong.
-		parts = append(parts, "sampling 1s")
+		// LUX-15: captureSample runs `sample <pid> <secs>` with the
+		// clamped request, so the banner prints that same clamped
+		// value -- what a person reads is what actually ran.
+		parts = append(parts, fmt.Sprintf("sampling %ds", profiler.SampleSeconds(duration)))
 	case heatType == profiler.HeatCPU:
 		parts = append(parts, "sampling "+duration.String())
 	default:
@@ -771,7 +781,31 @@ func renderHeatBody(w io.Writer, hm *profiler.Heatmap, wantFunc, next string) er
 		target = hottestBySelf(hm.Functions)
 	}
 
+	// LUX-16: heat.go may have retargeted the default frame onto an
+	// inlined callee (ic.DefaultFrame): the primary CodeFrame IS the
+	// callee's source now, where the time is actually spent.
+	var retarget *profiler.InlinedCallee
+	for i := range hm.InlinedCallees {
+		ic := &hm.InlinedCallees[i]
+		if ic.DefaultFrame && ic.Callee == target.Name && ic.Caller != target.Name {
+			retarget = ic
+			break
+		}
+	}
 	cf := codeFrameForFunction(hm, target)
+	if retarget != nil {
+		if _, ok := findHeatFunctionByName(hm, target.Name); !ok {
+			// Fully-inlined: the synthetic target's lines carry Code
+			// but no weights, so HideMetrics-style (never a fabricated
+			// '>' or "0.0%", as renderInlinedCalleeFrame documents),
+			// with the finding's own inferred-mapping attribution.
+			// (A trickle-case target is a real sampled function and
+			// keeps its normal, measured frame.)
+			cf.HideMetrics = true
+			cf.Subtitle = fmt.Sprintf("mapping: inferred (inlined into %s:%d)", retarget.Caller, retarget.Line)
+			cf.Footer = ""
+		}
+	}
 	fmt.Fprintln(w, cf.Render())
 	// The JIT-inlining heuristic's own finding(s) for THIS specific target,
 	// printed right under its CodeFrame (per the polish note) rather than
@@ -781,11 +815,23 @@ func renderHeatBody(w io.Writer, hm *profiler.Heatmap, wantFunc, next string) er
 	// of hm.Warnings' free text, so the message and the optional secondary
 	// frame always agree.
 	for _, ic := range hm.InlinedCallees {
-		if ic.Caller != target.Name {
+		mine := ic.Caller == target.Name
+		if retarget != nil && ic.Callee == target.Name {
+			// LUX-16: the primary frame IS the callee now — the
+			// finding still keeps its warning under that frame.
+			mine = true
+		}
+		if !mine {
 			continue
 		}
 		fmt.Fprintf(w, "! likely JIT-inlined: %s() was inlined into %s; the time on line %d is spent inside %s\n",
 			ic.Callee, ic.Caller, ic.Line, ic.Callee)
+		if retarget != nil && ic.Callee == target.Name {
+			// The primary frame above already shows the callee (its
+			// real measured frame in the trickle case, its located
+			// body otherwise) — a secondary would repeat it.
+			continue
+		}
 		if calleeFn, ok := findHeatFunctionByName(hm, ic.Callee); ok && len(calleeFn.Lines) > 0 {
 			// The callee DID get a real (if small — addInliningWarnings'
 			// own "trickle" tolerance, JIT warmup/deopt samples) per-line

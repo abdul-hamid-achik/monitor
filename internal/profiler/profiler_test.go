@@ -58,8 +58,14 @@ func TestCaptureHeapOverHTTP(t *testing.T) {
 	if len(p.Symbols) == 0 {
 		t.Fatal("expected non-empty symbols from a real heap profile")
 	}
-	if p.Text == "" {
-		t.Error("expected Profile.Text to hold a readable top-N summary now that heap has no ?debug=1 text dump")
+	// CC-1: heap's Text is the legacy ?debug=1 dump verbatim (glyphrun
+	// procmon stores it as-is), not a summary table.
+	if !strings.HasPrefix(p.Text, "heap profile:") {
+		head := p.Text
+		if len(head) > 80 {
+			head = head[:80]
+		}
+		t.Errorf("expected Profile.Text to hold the ?debug=1 dump, got %q", head)
 	}
 	for _, s := range p.Symbols {
 		if s.Func == "unknown" || s.Func == "(unknown)" {
@@ -258,5 +264,33 @@ func TestDiscardRawArtifactNoPathIsNoop(t *testing.T) {
 	}
 	if p.Text != "" {
 		t.Errorf("Text = %q, want cleared", p.Text)
+	}
+}
+
+// TestSampleSecondsClampsToSampleRange is LUX-15's regression: macOS
+// `sample` takes whole seconds, so a request rounds UP (a 0 would mean
+// `sample`'s own longer default, silently ignoring the caller) and clamps
+// to [1, 120]. captureSample and the `monitor hot` banner share this, so
+// the duration shown is always the duration actually sampled.
+func TestSampleSecondsClampsToSampleRange(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want int
+	}{
+		{0, 1},
+		{-time.Second, 1},
+		{500 * time.Millisecond, 1},
+		{time.Second, 1},
+		{1500 * time.Millisecond, 2},
+		{5 * time.Second, 5},
+		{119*time.Second + 200*time.Millisecond, 120},
+		{120 * time.Second, 120},
+		{121 * time.Second, 120},
+		{5 * time.Minute, 120},
+	}
+	for _, c := range cases {
+		if got := SampleSeconds(c.in); got != c.want {
+			t.Errorf("SampleSeconds(%v) = %d, want %d", c.in, got, c.want)
+		}
 	}
 }

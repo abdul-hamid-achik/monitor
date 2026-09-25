@@ -504,6 +504,39 @@ func TestHandleProfileCaptureDefaultsType(t *testing.T) {
 	}
 }
 
+// TestHandleProfileCaptureLinesTrueDefaultsTypeToCpu is LUX-6's regression:
+// lines:true asks a line-level question a heap snapshot can never answer,
+// so the omitted-type default becomes "cpu" instead of pausing a JS
+// isolate for a guaranteed line_heatmap "skipped".
+func TestHandleProfileCaptureLinesTrueDefaultsTypeToCpu(t *testing.T) {
+	got := profiler.ProfileType("")
+	s := newTestServer(t, &Service{
+		Profile: func(_ context.Context, pid int32, ptype profiler.ProfileType, _ string, keep, _ bool) (ProfileCaptureResult, error) {
+			got = ptype
+			prof := profiler.Profile{PID: pid, Type: ptype, Taken: time.Now(), Text: "cpu profile: 1"}
+			receipt := prof.VerifyArtifact()
+			if !keep {
+				_ = prof.DiscardRawArtifact()
+			}
+			return ProfileCaptureResult{Profile: prof, Receipt: receipt}, nil
+		},
+	})
+	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Confirm: true, Lines: true})
+	if err != nil {
+		t.Fatalf("handleProfileCapture returned hard error: %v", err)
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("handleProfileCapture should produce a structured payload; got %T", payload)
+	}
+	if captured, _ := m["captured"].(bool); !captured {
+		t.Fatalf("success payload should set captured=true; got %v", m)
+	}
+	if got != "cpu" {
+		t.Fatalf("lines:true default profile type should be 'cpu'; got %q", got)
+	}
+}
+
 // TestHandleProfileCaptureRefusesEmptyArtifact verifies that a profile with
 // no evidence (no text, symbols, or file) is reported as captured=false with
 // a limitation, never as a blind success.
@@ -1249,9 +1282,9 @@ func TestHandleIssuesIsBoundedAndReadOnly(t *testing.T) {
 		items[i] = issues.Issue{ID: fmt.Sprintf("ISS-%03d", i), Status: issues.StatusOpen}
 	}
 	var got IssuesListFilter
-	s := newTestServer(t, &Service{IssuesList: func(_ context.Context, filter IssuesListFilter) ([]issues.Issue, error) {
+	s := newTestServer(t, &Service{IssuesList: func(_ context.Context, filter IssuesListFilter) (IssuesListResult, error) {
 		got = filter
-		return items, nil
+		return IssuesListResult{Items: items, Scrubbed: 3}, nil
 	}})
 	_, payload, err := s.handleIssues(context.Background(), nil, &issuesInput{
 		Statuses: []string{"OPEN"}, Project: "monitor", Service: "api", Limit: 999,
@@ -1263,6 +1296,16 @@ func TestHandleIssuesIsBoundedAndReadOnly(t *testing.T) {
 	m := payload.(map[string]any)
 	if len(m["issues"].([]any)) != 200 || m["total"].(float64) != 250 || !m["truncated"].(bool) {
 		t.Fatalf("bounded payload = %v", m)
+	}
+	// SEC-5: every monitor_issues payload carries the privacy marker, so
+	// an agent never mistakes list text (titles, culprits) for trusted
+	// instructions -- and the Service's redaction count flows through.
+	priv, ok := m["privacy"].(map[string]any)
+	if !ok || priv["text_is_untrusted"] != true {
+		t.Fatalf("privacy marker = %v, want {text_is_untrusted:true ...}", m["privacy"])
+	}
+	if priv["scrubbed"] != float64(3) {
+		t.Fatalf("scrubbed = %v, want the Service mock's 3", priv["scrubbed"])
 	}
 	if len(got.Statuses) != 1 || got.Statuses[0] != issues.StatusOpen || got.Project != "monitor" || got.Service != "api" {
 		t.Fatalf("filters = %+v", got)
@@ -1291,11 +1334,11 @@ func TestHandleIssuesIsBoundedAndReadOnly(t *testing.T) {
 // or a silently-ignored filter -- handleIssues itself does no since/until
 // parsing (or validation) of its own; see IssuesListFilter's doc comment.
 func TestHandleIssuesSurfacesServiceErrorAsStructuredPayload(t *testing.T) {
-	s := newTestServer(t, &Service{IssuesList: func(_ context.Context, filter IssuesListFilter) ([]issues.Issue, error) {
+	s := newTestServer(t, &Service{IssuesList: func(_ context.Context, filter IssuesListFilter) (IssuesListResult, error) {
 		if filter.Since == "not-a-time" {
-			return nil, fmt.Errorf("invalid time %q", filter.Since)
+			return IssuesListResult{}, fmt.Errorf("invalid time %q", filter.Since)
 		}
-		return nil, nil
+		return IssuesListResult{}, nil
 	}})
 	_, payload, err := s.handleIssues(context.Background(), nil, &issuesInput{Since: "not-a-time"})
 	if err != nil {

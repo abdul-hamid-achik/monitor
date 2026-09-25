@@ -640,6 +640,51 @@ func TestBuildHeatmapSourceMapResolvesToOriginalTSLine(t *testing.T) {
 // real, resolvable file — separate from the fixture-based hot-line tests,
 // whose committed .cpuprofile carries the honest, deliberately-unresolvable
 // "/repo/..." placeholder path convention (testdata/README.md).
+// TestCodeReadAllowedResolvesRelativePaths pins SEC-8's relative-path
+// rule: a capture can name a repo-relative file (the committed
+// inlined-caller fixture does), which resolves against the directory the
+// user ran from -- EvalSymlinks alone would keep it relative and refuse
+// it. Escapes (..) and dotfiles stay refused even when they resolve
+// inside a root.
+func TestCodeReadAllowedResolvesRelativePaths(t *testing.T) {
+	base := t.TempDir()
+	proj := filepath.Join(base, "proj")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, "app.js"), []byte("code\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, ".env"), []byte("K=V\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "sibling.js"), []byte("code\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(proj)
+	roots := CodeReadRoots(proj)
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"app.js", true},         // relative, exists, under the root
+		{"nope.js", false},       // relative, missing
+		{".env", false},          // dotfile, even inside the root
+		{"../sibling.js", false}, // escape attempt: cleans outside the root
+		{"../proj/app.js", true}, // .. that cleans back inside is harmless
+		{"./app.js", true},       // explicit-dot relative form
+	}
+	for _, c := range cases {
+		if got := CodeReadAllowed(c.path, roots); got != c.want {
+			t.Errorf("CodeReadAllowed(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+	// An absolute path outside every root stays refused.
+	if CodeReadAllowed(filepath.Join(base, "sibling.js"), roots) {
+		t.Errorf("CodeReadAllowed(absent outside root) = true, want false")
+	}
+}
+
 func TestBuildHeatmapReadsCodeFromDisk(t *testing.T) {
 	dir := t.TempDir()
 	jsPath := filepath.Join(dir, "app.js")
@@ -659,7 +704,7 @@ func TestBuildHeatmapReadsCodeFromDisk(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
 		t.Fatal(err)
 	}
-	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true})
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true, CodeRoots: []string{dir}})
 	if err != nil {
 		t.Fatalf("BuildHeatmap: %v", err)
 	}
@@ -1325,7 +1370,7 @@ func TestReadCodeTruncatesPathologicallyLongLines(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
 		t.Fatal(err)
 	}
-	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true})
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true, CodeRoots: []string{dir}})
 	if err != nil {
 		t.Fatalf("BuildHeatmap: %v", err)
 	}
@@ -1477,7 +1522,7 @@ func TestAddInliningWarningsDetectsFullyInlinedCallee(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
 		t.Fatal(err)
 	}
-	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true})
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true, CodeRoots: []string{filepath.Dir(jsPath)}})
 	if err != nil {
 		t.Fatalf("BuildHeatmap: %v", err)
 	}
@@ -1528,7 +1573,7 @@ func TestAddInliningWarningsSkipsReallySampledCallee(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
 		t.Fatal(err)
 	}
-	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true})
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true, CodeRoots: []string{filepath.Dir(jsPath)}})
 	if err != nil {
 		t.Fatalf("BuildHeatmap: %v", err)
 	}
@@ -1567,7 +1612,7 @@ func TestAddInliningWarningsFiresDespiteTrickleOfRealCalleeSamples(t *testing.T)
 	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
 		t.Fatal(err)
 	}
-	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true})
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true, CodeRoots: []string{filepath.Dir(jsPath)}})
 	if err != nil {
 		t.Fatalf("BuildHeatmap: %v", err)
 	}
@@ -1609,7 +1654,7 @@ func TestAddInliningWarningsSkipsPropertyAccessCalls(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
 		t.Fatal(err)
 	}
-	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true})
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true, CodeRoots: []string{filepath.Dir(jsPath)}})
 	if err != nil {
 		t.Fatalf("BuildHeatmap: %v", err)
 	}
@@ -1639,7 +1684,7 @@ func TestAddInliningWarningsSkipsBelowThreshold(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
 		t.Fatal(err)
 	}
-	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true})
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true, CodeRoots: []string{filepath.Dir(jsPath)}})
 	if err != nil {
 		t.Fatalf("BuildHeatmap: %v", err)
 	}
@@ -1784,7 +1829,7 @@ func TestAddInliningWarningsSkipsWhenCalleeHasNoDeclarationInCallerFile(t *testi
 	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
 		t.Fatal(err)
 	}
-	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true})
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true, CodeRoots: []string{filepath.Dir(jsPath)}})
 	if err != nil {
 		t.Fatalf("BuildHeatmap: %v", err)
 	}
@@ -1827,7 +1872,7 @@ func TestAddInliningWarningsSkipsLowSelfCaller(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
 		t.Fatal(err)
 	}
-	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true})
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true, CodeRoots: []string{dir}})
 	if err != nil {
 		t.Fatalf("BuildHeatmap: %v", err)
 	}
@@ -1869,7 +1914,7 @@ func TestAddInliningWarningsSkipsWhenCalleeHasRealCumUnderCaller(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
 		t.Fatal(err)
 	}
-	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true})
+	hm, err := BuildHeatmap(context.Background(), &Source{Kind: SourceCDP, CDP: &cp}, HeatOptions{NoCodemap: true, NoSourcemaps: true, CodeRoots: []string{dir}})
 	if err != nil {
 		t.Fatalf("BuildHeatmap: %v", err)
 	}

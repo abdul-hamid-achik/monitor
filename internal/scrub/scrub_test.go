@@ -603,6 +603,59 @@ func TestStringIdempotentOnAlreadyRedactedOutput(t *testing.T) {
 	}
 }
 
+// TestExactValuePassProtectsURLScheme is SEC-1's regression: with
+// POSTGRES_PASSWORD=postgres, the exact-value pass must not redact the
+// "postgres" URL scheme -- redactURLCredentials needs it intact to
+// replace the userinfo (the actual password).
+func TestExactValuePassProtectsURLScheme(t *testing.T) {
+	for _, in := range []string{
+		"connect postgres://u:pw@localhost/db",
+		"connect postgres://postgres:pw@10.0.0.1/db",
+	} {
+		s := New(WithValues([]string{"postgres"}))
+		out := s.String(in)
+		if strings.Contains(out, "pw@") {
+			t.Errorf("password survived in %q -> %q", in, out)
+		}
+		if !strings.HasPrefix(out, "connect postgres://") {
+			t.Errorf("scheme destroyed in %q -> %q", in, out)
+		}
+	}
+	// The scheme skip itself is not a redaction: only the userinfo
+	// replacement counts.
+	s := New(WithValues([]string{"postgres"}))
+	s.String("connect postgres://u:pw@localhost/db")
+	if got := s.Count(); got != 1 {
+		t.Errorf("Count() = %d, want 1 (the userinfo replacement only)", got)
+	}
+	// A scheme occurrence BEFORE a real secret occurrence: the scheme
+	// survives AND the secret is still redacted (no swallowed text).
+	out := New(WithValues([]string{"postgres"})).String("postgres://x postgres")
+	if want := "postgres://x " + tokenValue; out != want {
+		t.Errorf("scheme+secret = %q, want %q", out, want)
+	}
+}
+
+// TestURLCredentialsRescrubDoesNotRecount is SEC-9's regression:
+// re-scrubbing text whose userinfo is already the [url-credentials]
+// token (explain's read-time pass over a stored title) writes the same
+// token back without reporting a redaction that did not happen.
+func TestURLCredentialsRescrubDoesNotRecount(t *testing.T) {
+	s := New()
+	first := s.String("db postgres://app:S3cr3tPw@10.20.30.40:5432/app")
+	if strings.Contains(first, "S3cr3tPw") {
+		t.Fatalf("password survived the first scrub: %q", first)
+	}
+	countAfterFirst := s.Count()
+	second := s.String(first)
+	if second != first {
+		t.Fatalf("re-scrubbing redacted URL text changed it: %q -> %q", first, second)
+	}
+	if s.Count() != countAfterFirst {
+		t.Fatalf("re-scrubbing already-redacted URL text should add no further redactions: %d -> %d", countAfterFirst, s.Count())
+	}
+}
+
 // benchLine approximates the overwhelmingly common case on monitor run's
 // per-line hot path: an ordinary ~1KB structured log line carrying no
 // secret at all. This is what BenchmarkScrubberString1KB is measuring

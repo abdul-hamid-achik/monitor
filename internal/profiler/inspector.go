@@ -3,6 +3,7 @@ package profiler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -46,7 +47,7 @@ func ProfileInspector(ctx context.Context, pid int32, addr string, duration time
 
 	conn, _, err := websocket.Dial(ctx, wsURL, nil)
 	if err != nil {
-		return p, fmt.Errorf("inspector ws connect: %w", err)
+		return p, inspectorWSConnectError(addr, err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	conn.SetReadLimit(maxRawProfileBytes)
@@ -159,7 +160,7 @@ func ProfileInspectorHeap(ctx context.Context, pid int32, addr string) (profile 
 	}
 	conn, _, err := websocket.Dial(ctx, wsURL, nil)
 	if err != nil {
-		return profile, fmt.Errorf("inspector ws connect: %w", err)
+		return profile, inspectorWSConnectError(addr, err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	conn.SetReadLimit(maxRawProfileBytes + (1 << 20))
@@ -266,6 +267,23 @@ func ValidateInspectorAddr(addr string) error {
 		return fmt.Errorf("refusing non-loopback inspector address %q", addr)
 	}
 	return nil
+}
+
+// inspectorWSConnectError builds the WebSocket dial-failure message for the
+// inspector at addr (SEC-3). coder/websocket wraps transport errors in an
+// *url.Error whose URL is the debugger's full WebSocket URL -- session UUID
+// path included -- and that UUID is the inspector's only secret: it grants
+// Runtime.evaluate code execution in the target. The message is therefore
+// rebuilt from addr and the transport cause alone and never wraps the
+// original error with %w, whose text would carry the URL (with an http://
+// scheme, so a ws:// grep would not even catch it) into step.Limitation,
+// `investigate --json` and MCP monitor_profile_capture's error field.
+func inspectorWSConnectError(addr string, err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("inspector ws connect to %s: %v", addr, ue.Err)
+	}
+	return fmt.Errorf("inspector ws connect to %s failed", addr)
 }
 
 // inspectorWebSocketURL discovers the inspector WebSocket URL from

@@ -1,7 +1,8 @@
 # Monitor
 
 A terminal-based, **agent-harnessable** system monitor for macOS and Linux,
-built in Go with the Charm ecosystem (Bubble Tea v2) and a Nord theme.
+built in Go with the Charm ecosystem (Bubble Tea v2) and a Nord theme —
+with local, SDK-free error tracking built in.
 
 Monitor exposes the same system data three ways: an interactive TUI
 (`monitor studio`), JSON CLI commands, and an MCP stdio server — for humans,
@@ -13,6 +14,15 @@ scripts, and agents alike. Running bare `monitor` prints help.
 
 ## Features
 
+- 🧭 **Local error tracking, no SDK** — `monitor run -- <cmd>` turns crashes
+  and printed errors from Node, Deno, Bun, Python, Ruby and Go into grouped
+  issues, each with a culprit `file:line`, a source snippet, chained causes,
+  codemap blast radius and the last commit that touched the line;
+  `monitor stacktrace parse --record` replays existing logs idempotently
+- 🔥 **Hot lines** — `monitor hot` names the line inside a function that
+  burns CPU, heap or goroutines (from a saved profile, a live pid, or a
+  `monitor run --name` service), with source-map resolution and honest
+  inlining/idle warnings
 - 📊 **Real-time TUI** — CPU, Memory, Temperature, Network, Disk, and Processes
 - 🤖 **Agent-harnessable** — automation-ready JSON/NDJSON commands plus
   a typed MCP server with bounded read tools and confirmation-gated actions
@@ -32,6 +42,21 @@ scripts, and agents alike. Running bare `monitor` prints help.
   correlation, codemap symbol impact, vecgrep semantic context, tinyvault
   secret injection, and glyphrun specs
 - 🎨 **Nord theme** + full keyboard & mouse navigation
+
+## Quickstart: crash to explained issue
+
+```bash
+go build -o bin/monitor ./cmd/monitor
+WORKLOAD_SECONDS=3 ./bin/monitor run -- node examples/polyglot/js/workload.js   # crash -> grouped issue
+./bin/monitor issues                                        # list issues, newest first
+./bin/monitor issue latest                                  # culprit file:line, snippet, causes, impact, next steps
+./bin/monitor issue latest --md | pbcopy                    # paste-ready context for your agent
+```
+
+See the [docs](https://monitorcli.dev) guides:
+[Your First Issue](docs/guide/first-issue.md),
+[Runtimes Matrix](docs/guide/runtimes.md),
+[Hot Lines](docs/guide/hot-lines.md).
 
 ## Two ways to use it
 
@@ -63,8 +88,13 @@ machine-readable workflows:
 ./bin/monitor logs search "error" --level error --since 1h --json # filtered log search
 ./bin/monitor stash --json                        # capture an incident bundle to fcheap
 ./bin/monitor investigate 1234 --codebase "$PWD" --json # diagnose + evidence + grouped issue
-./bin/monitor issues list --status open --json     # recurring local issues
+./bin/monitor run -- node server.js                # SDK-free crash capture -> grouped issue
+./bin/monitor run --name api --inspect -- yarn start # register a service for live hot lines
+./bin/monitor stacktrace parse --record --file app.log # replay a log into issues, idempotently
+./bin/monitor issues --all --json                  # recurring local issues (every project)
 ./bin/monitor issues show ISS-... --json            # occurrences + evidence refs
+./bin/monitor issue latest --md                     # explained context: culprit, causes, impact, next
+./bin/monitor hot --file out.cpuprofile             # which line burns CPU (also <pid> or <service>)
 ./bin/monitor history record                       # persist metric samples over time
 ./bin/monitor history query cpu.usage --since 1h --json   # time-series + trend stats
 ./bin/monitor baseline save pre-deploy             # capture a labeled snapshot
@@ -77,8 +107,10 @@ machine-readable workflows:
 ./bin/monitor vault --project myapp -- mycommand  # run with tinyvault secrets injected
 ```
 
-When Monitor launches a child process or spec it sets `MONITOR=1` so the child
-can detect it is being observed.
+When Monitor launches a glyphrun spec (`monitor run <spec.yml>`), it sets
+`MONITOR=1` so the child can detect it is being observed;
+`monitor run -- <cmd>` instead exports only `MONITOR_LAUNCH_ID`,
+`MONITOR_LAUNCH_SERVICE` and `MONITOR_LAUNCH_ROOT`.
 
 ### 3. MCP server (for AI agents)
 
@@ -95,6 +127,13 @@ omits histories and bounds process/filesystem lists. Every mutating tool require
 requests still get a structured refusal rather than acting. Standard MCP tool
 annotations also identify read-only, destructive, idempotent, and closed-world
 behavior for compatible client approval UX.
+
+`monitor_issue` returns the bounded `monitor.issue_context.v1` brief
+(culprit, causes, impact, next steps) by default; pass `occurrence_limit`
+to also get the full issue record with its occurrences. Issue payloads
+carry `privacy: {text_is_untrusted: true, scrubbed: N}` — issue text comes
+from monitored processes' own output and is scrubbed before persisting and
+again at read time.
 
 ## Installation
 
@@ -198,12 +237,18 @@ monitor/
 ├── internal/
 │   ├── collector/             # pub/sub metric collector (canonical pattern)
 │   ├── telemetry/             # bounded, identity-free NDJSON metric windows
-│   ├── cli/                   # cobra subcommands (snapshot, watch, kill, ...)
+│   ├── cli/                   # cobra subcommands (run, issues, hot, investigate, ...)
 │   ├── mcp/                   # MCP stdio server (10 tools; mutations confirm-gated)
+│   ├── devrun/                # `monitor run -- <cmd>`: launch, copy, detect, record
+│   ├── stacktrace/            # SDK-free stack-trace parsers (V8, Python, Ruby, Go, ...)
+│   ├── scrub/                 # secret/PII redaction for recorded error text
+│   ├── project/               # project/service resolver (flag > env > git root > marker)
+│   ├── explain/               # monitor.issue_context.v1 builder (culprit, causes, impact)
+│   ├── sourcemap/             # dependency-free Source Map v3 decoder/resolver
 │   ├── analyzer/              # anomaly rules (CPU spike, RSS growth)
 │   ├── capture/               # process stdout/stderr → veclite log store
 │   ├── logger/                # bounded veclite log store + keyword search
-│   ├── profiler/              # pprof scrape + macOS `sample`
+│   ├── profiler/              # CDP inspector, pprof proto, macOS `sample`, heatmaps
 │   ├── procbind/              # process → runtime/codebase binding
 │   ├── contextids/            # Monitor/Chalupa run correlation
 │   ├── issues/                # Run/Event/Issue/Evidence persistence
@@ -214,7 +259,7 @@ monitor/
 │   ├── kill/                  # safe process termination
 │   ├── config/                # JSON settings (~/.config/monitor/config.json)
 │   ├── ui/studio/             # the TUI (Bubble Tea v2 / charm.land)
-│   └── widgets/               # sparklines, gauges (lipgloss v2)
+│   └── widgets/               # sparklines, gauges, CodeFrame (lipgloss v2)
 ├── specs/                     # glyphrun behavioral specs
 ├── Taskfile.yml
 └── README.md
@@ -231,12 +276,18 @@ monitor/
 
 ## Limitations
 
+- **Profiles and hot lines by runtime** — `monitor profile`/`monitor hot` use
+  the V8 inspector (CDP) for Node/Deno processes started with `--inspect`,
+  ownership-verified `net/http/pprof` for Go (default `localhost:6060`,
+  overridable per command), and macOS `sample` as a function-level-only
+  fallback. Bun gets exit-time `.cpuprofile` output (`monitor run --profile`)
+  rather than live lines; Python and Ruby get error tracking only (hot lines
+  need launch-time probes, a later epic). See the
+  [Runtimes Matrix](docs/guide/runtimes.md).
 - **Temperature** — real SMC readings need `powermetrics` (macOS) with cached
   sudo credentials; otherwise Monitor falls back to a CPU-load estimate and
   badges each reading `real` or `est`. On Linux, temperature is always the
   estimate.
-- **CPU profiles** — the pprof scrape targets `localhost:6060`; heap/goroutine
-  profiles are symbolicated, CPU profiles are returned as raw protobuf.
 - **Per-process CPU** — computed from consecutive cumulative CPU counters.
   `100%` means one fully used core and multithreaded processes may exceed it;
   first observations and reused PIDs are marked unavailable instead of

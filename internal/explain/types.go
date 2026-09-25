@@ -131,7 +131,10 @@ type CulpritInfo struct {
 	// Via is "vecgrep" or "git_grep", set only when Source is
 	// "message_search".
 	Via string `json:"via,omitempty"`
-	// Confidence is "high" for a stack culprit, "low" for an inferred one.
+	// Confidence is "high" for a stack culprit, "medium" for a stack
+	// culprit whose snippet came back stale (LUX-5: git says the file
+	// moved under the recorded line, so the location may point one edit
+	// out of date), and "low" for an inferred one.
 	Confidence string `json:"confidence"`
 	// Mapping reuses stacktrace.Frame's shared source-map confidence enum
 	// (exact|ambiguous|transpiled|inferred|"") rather than a second,
@@ -165,13 +168,15 @@ type Snippet struct {
 	// whole file) -- a caller diffing two reads of the same issue over time
 	// can tell the exact text changed even when Stale (below) is false.
 	SHA256 string `json:"sha256"`
-	// Stale is true when the culprit's file was touched (per git blame's
-	// commit SHA -- see last_touched.go) by a commit OTHER than the one the
-	// issue first recorded (Issue.FirstGitSHA): the snippet shown may no
-	// longer be the code that actually crashed. false (never guessed true)
-	// whenever either SHA is unknown, since FirstGitSHA is unset for an
-	// ordinary local dev session with no MONITOR_GIT_SHA/GIT_SHA/GITHUB_SHA
-	// in the environment (see issues.Issue.FirstGitSHA's own doc comment).
+	// Stale is true when the snippet shown may no longer be the code
+	// that actually crashed: the culprit's file was touched (per git
+	// blame's commit SHA -- see last_touched.go) by a commit OTHER than
+	// the one the issue first recorded (Issue.FirstGitSHA), or -- while
+	// FirstGitSHA is unknown, the ordinary local journey -- the file
+	// carries uncommitted changes against HEAD (LUX-5's interim check;
+	// a persisted culprit-line hash at ingest is the follow-up that
+	// replaces it). It is false (never guessed true) when no check could
+	// run at all: no blame answer, no git root, or no git on PATH.
 	Stale bool `json:"stale"`
 }
 

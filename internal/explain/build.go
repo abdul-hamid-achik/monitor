@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -220,6 +221,18 @@ func Build(ctx context.Context, store *issues.Store, id string, opts Options) (*
 	opts = normalizeOptions(opts)
 
 	degraded := map[string]Degraded{} // component -> entry, deduplicated
+	// (CC-3) an older monitor binary rewriting this store strips the
+	// additive issue fields (Culprit, LatestException, Handled) while the
+	// first occurrence keeps its Exception detail -- rebuild from it
+	// BEFORE anything below reads those fields (root resolution included).
+	if rebuilt, ok := issues.RebuildFromFirstOccurrence(store, issue); ok {
+		issue = rebuilt
+		degraded["issue"] = Degraded{
+			Component: "issue",
+			State:     "rebuilt",
+			Detail:    "culprit rebuilt from first occurrence; issue record was rewritten by an older monitor",
+		}
+	}
 	root := resolveRoot(opts, issue, degraded)
 
 	c := &Context{
@@ -248,6 +261,14 @@ func Build(ctx context.Context, store *issues.Store, id string, opts Options) (*
 	c.Culprit = culprit
 
 	if issue.LatestException != nil {
+		// (CC-4) frames and causes cut at INGEST time -- the 12-frame
+		// cap, the 3-cause cap, and the ~2 KB backstop -- were counted
+		// into ExceptionInfo.DroppedFrames/DroppedCauses when the record
+		// was written; seed Truncated with them here, before applyBudget
+		// adds this read's own budget cuts on top, so a reader can tell
+		// "12 frames kept" from "12 frames kept of 21".
+		c.Truncated.Frames = issue.LatestException.DroppedFrames
+		c.Truncated.Causes = issue.LatestException.DroppedCauses
 		for _, cause := range issue.LatestException.Causes {
 			c.Causes = append(c.Causes, causeEntryFrom(cause))
 		}
@@ -255,16 +276,13 @@ func Build(ctx context.Context, store *issues.Store, id string, opts Options) (*
 		// issue-context-v1.md's `frames` doc comment): issues.ExceptionInfo.
 		// Frames is stored oldest-to-newest with the crash frame LAST (the
 		// same convention stacktrace.Exception.Frames and the fingerprint's
-		// own outerFrames rule use), so this both filters to InApp and
-		// walks the slice back-to-front. Every non-in_app frame, like every
-		// frame a budget cap later drops, is counted in Truncated.Frames
-		// rather than listed.
+		// own outerFrames rule use), already filtered to in-app entries at
+		// ingest (topInAppFrames), so this only reverses the order. The
+		// former !f.InApp counting loop here was dead code: no stored
+		// frame is ever non-in-app, and ingest-time drops are pre-counted
+		// above.
 		for i := len(issue.LatestException.Frames) - 1; i >= 0; i-- {
 			f := issue.LatestException.Frames[i]
-			if !f.InApp {
-				c.Truncated.Frames++
-				continue
-			}
 			c.Frames = append(c.Frames, FrameEntry{Function: f.Function, File: f.Filename, Line: f.Lineno, InApp: f.InApp})
 		}
 	}
@@ -273,6 +291,13 @@ func Build(ctx context.Context, store *issues.Store, id string, opts Options) (*
 	c.LastTouched = lastTouchedSection(ectx, root, culprit, issue, degraded)
 	if culprit != nil && culprit.Snippet != nil {
 		culprit.Snippet.Stale = isStale(ectx, root, c.LastTouched, issue, culprit.File)
+		// (LUX-5) a stale snippet means the highlighted line may be the
+		// wrong line: a stack culprit's location confidence follows it
+		// down from "high" to "medium" rather than vouching for a line
+		// git just said the file moved under.
+		if culprit.Snippet.Stale && culprit.Confidence == "high" {
+			culprit.Confidence = "medium"
+		}
 	}
 
 	for _, d := range degraded {
@@ -331,7 +356,8 @@ func causeEntryFrom(cause issues.CauseInfo) CauseEntry {
 }
 
 // culpritInfoFor resolves Context.Culprit: the stored stack culprit when
-// there is one, else E2.8's message-search fallback. It also resolves the
+// there is one, else E2.8's message-search fallback (exception-kind
+// issues only -- LUX-12). It also resolves the
 // culprit's range (codemap symbol-at, falling back to a synthetic frame
 // window) and reads its snippet -- every dependency along the way reports
 // into degraded (keyed by component so two call sites reporting the same
@@ -343,11 +369,26 @@ func culpritInfoFor(ctx context.Context, root string, issue issues.Issue, degrad
 			Function: issue.Culprit.Function, File: issue.Culprit.File, Line: issue.Culprit.Line,
 			Source: "stack", Confidence: "high",
 		}
-	} else {
-		message := issue.Title
-		if message == "" {
-			message = issue.Message
+	} else if issue.Kind == issues.KindException {
+		// (LUX-12) the message-search fallback runs only for
+		// exception-kind issues: a watch alert ("monitor.alert.<rule>",
+		// project "host") has no source line to infer, and blaming
+		// whatever repo the reader happens to stand in -- plus a
+		// vecgrep/git-grep recovery for a disk alert -- is noise.
+		//
+		// (LUX-2) search the exception's own rendered value, NOT the
+		// Title: Title prefixes the exception type ("TypeError:
+		// loadUser: ..."), and that prefixed string never appears in
+		// source -- in a clean repo the fallback found nothing, and in a
+		// repo whose tests quote the rendered message it blamed the
+		// test. issue.Message mirrors ex.Value at ingest, and the stored
+		// exception's Value is the next-best spelling; the Title is the
+		// last resort, for a record with neither.
+		var exceptionValue string
+		if issue.LatestException != nil {
+			exceptionValue = issue.LatestException.Value
 		}
+		message := firstNonEmptyString(issue.Message, exceptionValue, issue.Title)
 		result, d := culpritForMessage(ctx, root, message)
 		if d != nil {
 			degraded[d.Component] = *d
@@ -437,6 +478,13 @@ func lastTouchedSection(ctx context.Context, root string, culprit *CulpritInfo, 
 //   - git blame's own answer for the culprit line is an UNCOMMITTED change
 //     (git's well-known all-zero SHA for a line not yet committed) -- the
 //     file on disk right now is, by definition, not what was recorded;
+//   - the file differs from HEAD while FirstGitSHA is unknown (LUX-5) --
+//     the ordinary `monitor run --` journey never sets FirstGitSHA (it
+//     comes only from MONITOR_GIT_SHA/GIT_SHA/GITHUB_SHA env), and the
+//     old behavior here (stale:false, no matter what) kept reporting a
+//     confident snippet on the WRONG line right after an edit shifted
+//     lines: an uncommitted difference against HEAD is the strongest
+//     signal available without a persisted line hash;
 //   - the blamed commit is not an ancestor of the issue's FirstGitSHA (the
 //     line was touched by a commit that did not exist yet when this issue
 //     was first recorded); or
@@ -444,14 +492,14 @@ func lastTouchedSection(ctx context.Context, root string, culprit *CulpritInfo, 
 //     edit made without changing the blamed line's OWN last commit, e.g. a
 //     nearby line moved this one without git attributing a new blame to it).
 //
-// It is always false when FirstGitSHA is unknown (see Snippet.Stale's doc
-// comment) -- an ordinary local dev session with no MONITOR_GIT_SHA/GIT_SHA/
-// GITHUB_SHA set -- since there is then nothing to compare against; guessing
-// true would be exactly the fabricated-provenance mistake this field exists
-// to avoid, and guessing false (the previous behavior, comparing two
-// SHA-shaped strings that are almost never actually equal even on an
-// unchanged file) reported stale for nearly every issue with a
-// FirstGitSHA, which is just as wrong in the other direction.
+// It stays false when there is nothing to compare against (no blame
+// answer, no git root, and -- for the FirstGitSHA rules -- no recorded
+// SHA); guessing true from an inconclusive check would be exactly the
+// fabricated-provenance mistake this field exists to avoid, and guessing
+// false (the previous behavior, comparing two SHA-shaped strings that
+// are almost never actually equal even on an unchanged file) reported
+// stale for nearly every issue with a FirstGitSHA, which is just as
+// wrong in the other direction.
 func isStale(ctx context.Context, root string, lt LastTouched, issue issues.Issue, relFile string) bool {
 	if lt.Status != SectionOK || lt.SHA == "" {
 		return false
@@ -459,7 +507,12 @@ func isStale(ctx context.Context, root string, lt LastTouched, issue issues.Issu
 	if isZeroGitSHA(lt.SHA) {
 		return true
 	}
-	if issue.FirstGitSHA == "" || root == "" {
+	if issue.FirstGitSHA == "" {
+		// LUX-5's interim rule until a culprit-line hash is persisted at
+		// ingest: see the doc comment above.
+		return gitWorktreeFileDiffers(ctx, root, relFile)
+	}
+	if root == "" {
 		return false
 	}
 	if !gitIsAncestor(ctx, root, lt.SHA, issue.FirstGitSHA) {
@@ -468,18 +521,65 @@ func isStale(ctx context.Context, root string, lt LastTouched, issue issues.Issu
 	return gitFileDiffers(ctx, root, issue.FirstGitSHA, relFile)
 }
 
+// gitWorktreeFileDiffers reports whether relFile's working-tree content in
+// root differs from HEAD, via `git diff --quiet HEAD -- <file>` (LUX-5's
+// staleness check for issues with no FirstGitSHA). Unlike gitFileDiffers
+// (blame.go), an inconclusive result -- git missing, root not a
+// repository, the file unknown to HEAD, or a timeout -- reports false:
+// FirstGitSHA is already unknown here, so no signal is strong enough to
+// justify guessing stale (Snippet.Stale's "never guessed true" rule).
+// Only git's definite "exit 1: the file differs" counts.
+func gitWorktreeFileDiffers(ctx context.Context, root, relFile string) bool {
+	if root == "" || relFile == "" {
+		return false
+	}
+	cctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "git", "diff", "--quiet", "HEAD", "--", relFile)
+	cmd.Dir = root
+	cmd.WaitDelay = 500 * time.Millisecond
+	err := cmd.Run()
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
+}
+
 func nextActionsFor(issue issues.Issue, culprit *CulpritInfo) []NextAction {
 	short := strings.ToLower(shortID(issue.ID))
 	next := []NextAction{
 		{CLI: fmt.Sprintf("monitor issue %s --md", short), Why: "paste-ready fix context for your agent"},
 	}
-	if culprit != nil && culprit.File != "" && culprit.Line > 0 {
-		next = append(next, NextAction{CLI: fmt.Sprintf("$EDITOR +%d %s", culprit.Line, culprit.File), Why: "jump straight to the culprit line"})
+	// (SEC-4) two guards on the $EDITOR hint:
+	//
+	// The culprit path is untrusted stderr text (in-app is decided by
+	// prefix, with no existence check), so it is shell-quoted -- an
+	// unquoted `$(...)` in a forged frame otherwise survives verbatim
+	// into a command monitor itself proposes, and running it executes
+	// the substitution.
+	//
+	// The hint is offered only when the snippet read succeeded: a culprit
+	// file that could not be read under the root is exactly a path
+	// monitor cannot vouch for, and "jump straight to the culprit line"
+	// promises a line the page just showed.
+	if culprit != nil && culprit.File != "" && culprit.Line > 0 && culprit.Snippet != nil {
+		next = append(next, NextAction{CLI: fmt.Sprintf("$EDITOR +%d %s", culprit.Line, shellQuote(culprit.File)), Why: "jump straight to the culprit line"})
 	}
 	if issue.Status == issues.StatusOpen {
 		next = append(next, NextAction{CLI: fmt.Sprintf("monitor issues resolve %s", strings.ToUpper(short)), Why: "marks it resolved; reopens automatically if it recurs"})
 	}
 	return next
+}
+
+// shellQuote wraps s in single quotes for a shell command line, escaping
+// any embedded single quote the POSIX way (' + \' + '), so an untrusted
+// culprit path cannot break out of the $EDITOR hint nextActionsFor
+// proposes (SEC-4). Byte-for-byte the same helper cli/hot.go uses for its
+// `monitor hot --file` hint; duplicated here rather than exported through
+// a new package boundary for one call site -- the two must stay in sync.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func sortDegraded(d []Degraded) {

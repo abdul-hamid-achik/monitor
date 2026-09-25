@@ -1,6 +1,7 @@
 package issues
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/contextids"
 	"github.com/abdul-hamid-achik/monitor/internal/project"
 	"github.com/abdul-hamid-achik/monitor/internal/stacktrace"
+	veclite "github.com/abdul-hamid-achik/veclite"
 )
 
 // syntheticInApp is a minimal in-app frame builder for the pure-function
@@ -659,5 +661,264 @@ func TestSummarizeForListTrimsExceptionDetailButKeepsCulprit(t *testing.T) {
 	}
 	if got := SummarizeForList(Issue{ID: "ISS-2"}); got.LatestException != nil {
 		t.Fatalf("SummarizeForList on a nil LatestException = %+v, want nil", got.LatestException)
+	}
+}
+
+// TestBuildExceptionInfoCountsDroppedFramesAndCauses (CC-4): the caps'
+// cuts must be COUNTED, not just performed -- a reader rendering "12
+// frames kept" must be able to say "of 20", and the same for a chain
+// longer than maxExceptionCauses.
+func TestBuildExceptionInfoCountsDroppedFramesAndCauses(t *testing.T) {
+	frames := make([]stacktrace.Frame, 0, 20)
+	for i := range 20 {
+		frames = append(frames, syntheticInApp(fmt.Sprintf("fn%d", i), "a.ts", i+1))
+	}
+	chained := make([]stacktrace.Exception, 0, 5)
+	for i := range 5 {
+		chained = append(chained, stacktrace.Exception{
+			Type:   fmt.Sprintf("Cause%d", i),
+			Frames: []stacktrace.Frame{syntheticInApp("cause", "a.ts", i+1)},
+		})
+	}
+	ex := stacktrace.Exception{Type: "Error", Value: "boom", Frames: frames, Chained: chained}
+	info := buildExceptionInfo(ex)
+	if len(info.Frames) != maxExceptionFrames {
+		t.Fatalf("Frames = %d, want %d", len(info.Frames), maxExceptionFrames)
+	}
+	if want := 20 - maxExceptionFrames; info.DroppedFrames != want {
+		t.Fatalf("DroppedFrames = %d, want %d (20 in-app frames, %d kept)", info.DroppedFrames, want, maxExceptionFrames)
+	}
+	if len(info.Causes) != maxExceptionCauses {
+		t.Fatalf("Causes = %d, want %d", len(info.Causes), maxExceptionCauses)
+	}
+	if want := 5 - maxExceptionCauses; info.DroppedCauses != want {
+		t.Fatalf("DroppedCauses = %d, want %d (5 chained causes, %d kept)", info.DroppedCauses, want, maxExceptionCauses)
+	}
+	// Non-in-app frames are filtered by design, never "dropped": they
+	// were never candidates for the stored list.
+	mixed := stacktrace.Exception{Frames: []stacktrace.Frame{
+		syntheticInApp("a", "a.ts", 1),
+		{Function: "dep", Filename: "node_modules/x.js", Lineno: 2, InApp: false},
+	}}
+	if info := buildExceptionInfo(mixed); info.DroppedFrames != 0 {
+		t.Fatalf("DroppedFrames = %d, want 0 (a non-in-app frame is filtered, not dropped)", info.DroppedFrames)
+	}
+}
+
+// TestBuildExceptionInfoCountsSizeBackstopCuts (CC-4): frames and causes
+// removed by truncateExceptionInfo's ~2 KB backstop must be counted too,
+// so everything cut at ingest is accounted for exactly once.
+func TestBuildExceptionInfoCountsSizeBackstopCuts(t *testing.T) {
+	frames := make([]stacktrace.Frame, 0, 20)
+	for i := range 20 {
+		frames = append(frames, stacktrace.Frame{
+			Function: fmt.Sprintf("fn%02d-%s", i, strings.Repeat("f", 180)),
+			Filename: "a.ts", Lineno: i + 1, InApp: true,
+		})
+	}
+	ex := stacktrace.Exception{Type: "Error", Value: "boom", Frames: frames}
+	info := buildExceptionInfo(ex)
+	if len(info.Frames) == maxExceptionFrames {
+		t.Fatal("precondition failed: the size backstop did not run (frames still at the cap)")
+	}
+	if want := 20 - len(info.Frames); info.DroppedFrames != want {
+		t.Fatalf("DroppedFrames = %d, want %d (cap cut + backstop cut, %d kept)", info.DroppedFrames, want, len(info.Frames))
+	}
+
+	// Causes-only variant: no frames, so the backstop drops causes.
+	chained := make([]stacktrace.Exception, 0, 3)
+	for range 3 {
+		chained = append(chained, stacktrace.Exception{Type: strings.Repeat("c", 700)})
+	}
+	info = buildExceptionInfo(stacktrace.Exception{Type: "Error", Value: "boom", Chained: chained})
+	if len(info.Causes) == len(chained) {
+		t.Fatal("precondition failed: the size backstop did not run (all causes kept)")
+	}
+	if want := 3 - len(info.Causes); info.DroppedCauses != want {
+		t.Fatalf("DroppedCauses = %d, want %d (%d kept)", info.DroppedCauses, want, len(info.Causes))
+	}
+}
+
+// TestExceptionInfoDroppedFieldsDecodeAdditively (CC-4): an old record
+// without the new fields decodes as 0, and a zero value is omitted from
+// the encoding -- the JSON change is additive in both directions.
+func TestExceptionInfoDroppedFieldsDecodeAdditively(t *testing.T) {
+	var info ExceptionInfo
+	if err := json.Unmarshal([]byte(`{"type":"TypeError","value":"boom"}`), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.DroppedFrames != 0 || info.DroppedCauses != 0 {
+		t.Fatalf("old record decoded DroppedFrames/DroppedCauses = %d/%d, want 0/0", info.DroppedFrames, info.DroppedCauses)
+	}
+	data, err := json.Marshal(ExceptionInfo{Type: "TypeError"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte("dropped_")) {
+		t.Fatalf("zero dropped counts must be omitted: %s", data)
+	}
+	data, err = json.Marshal(ExceptionInfo{DroppedFrames: 9, DroppedCauses: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"dropped_frames":9`)) || !bytes.Contains(data, []byte(`"dropped_causes":2`)) {
+		t.Fatalf("dropped counts must round-trip under their documented key names: %s", data)
+	}
+}
+
+// stripIssueLikeOldBinary re-saves issue the way a v1.15 binary does:
+// decode into the old struct (which drops the additive fields), marshal,
+// update the document. This is main's store.go saveIssue path verbatim
+// and is how CC-3's data loss actually happens in the wild.
+func stripIssueLikeOldBinary(t *testing.T, store *Store, issue Issue) {
+	t.Helper()
+	record, err := store.db.Collection(issuesCollection).FindOne(veclite.Equal("fingerprint", issue.Fingerprint))
+	if err != nil {
+		t.Fatalf("find issue record: %v", err)
+	}
+	stripped := issue
+	stripped.Culprit = nil
+	stripped.LatestException = nil
+	stripped.Handled = nil
+	if err := store.saveIssue(record, stripped); err != nil {
+		t.Fatalf("re-save stripped issue: %v", err)
+	}
+}
+
+// recordChainedForRebuild records one chained exception whose innermost
+// cause owns the culprit (src/users.ts:3), distinct from the outer
+// frame (src/run.ts:5), so a rebuild that picks the wrong frame is
+// detectable.
+func recordChainedForRebuild(t *testing.T, path string) Issue {
+	t.Helper()
+	handled := true
+	ex := stacktrace.Exception{
+		Type: "RuntimeError", Value: "work failed", Runtime: "node", Level: "error", Handled: &handled,
+		Frames: []stacktrace.Frame{syntheticInApp("run", "src/run.ts", 5)},
+		Chained: []stacktrace.Exception{{
+			Type: "TypeError", Value: "inner",
+			Frames: []stacktrace.Frame{syntheticInApp("loadUser", "src/users.ts", 3)},
+		}},
+	}
+	id := project.Identity{Slug: "acme", GitRoot: "/repo"}
+	res, err := RecordException(context.Background(), path, DefaultWriterWait, ex, id, contextids.IDs{},
+		RecordExceptionOptions{ObservedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("RecordException: %v", err)
+	}
+	return res.Issue
+}
+
+// TestRebuildFromFirstOccurrenceRestoresStrippedRecord (CC-3): after an
+// older binary rewrites the issue record without the additive fields, the
+// rebuild must restore LatestException, re-derive the Culprit with the
+// innermost-cause rule, and fill Handled -- from the FIRST occurrence,
+// the only row that still carries Exception detail.
+func TestRebuildFromFirstOccurrenceRestoresStrippedRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.veclite")
+	issue := recordChainedForRebuild(t, path)
+
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stripIssueLikeOldBinary(t, store, issue)
+
+	stripped, err := store.Get(issue.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stripped.Culprit != nil || stripped.LatestException != nil || stripped.Handled != nil {
+		t.Fatalf("precondition failed: the strip did not remove the additive fields: %+v", stripped)
+	}
+
+	rebuilt, ok := RebuildFromFirstOccurrence(store, stripped)
+	if !ok {
+		t.Fatal("RebuildFromFirstOccurrence reported no rebuild for a stripped exception issue")
+	}
+	if rebuilt.LatestException == nil || rebuilt.LatestException.Type != "RuntimeError" {
+		t.Fatalf("LatestException = %+v, want the first occurrence's detail", rebuilt.LatestException)
+	}
+	// The innermost-cause rule: src/users.ts:3 (the cause's frame), not
+	// the outer src/run.ts:5.
+	if rebuilt.Culprit == nil || rebuilt.Culprit.File != "src/users.ts" || rebuilt.Culprit.Line != 3 || rebuilt.Culprit.Source != "stack" {
+		t.Fatalf("Culprit = %+v, want src/users.ts:3 via the innermost-cause rule", rebuilt.Culprit)
+	}
+	if rebuilt.Handled == nil || !*rebuilt.Handled {
+		t.Fatalf("Handled = %v, want true from ExceptionInfo.Handled", rebuilt.Handled)
+	}
+}
+
+// TestRebuildFromFirstOccurrenceGuards (CC-3): a nil store, an intact
+// issue, and a non-exception kind must never trigger a rebuild, and data
+// that survived the rewrite must never be overwritten.
+func TestRebuildFromFirstOccurrenceGuards(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.veclite")
+	issue := recordChainedForRebuild(t, path)
+
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if _, ok := RebuildFromFirstOccurrence(nil, issue); ok {
+		t.Fatal("nil store must not rebuild")
+	}
+	if _, ok := RebuildFromFirstOccurrence(store, issue); ok {
+		t.Fatal("an issue that still carries LatestException must not rebuild")
+	}
+	alert := Issue{ID: "ISS-ALERT", Kind: "monitor.alert.disk_fill"}
+	if _, ok := RebuildFromFirstOccurrence(store, alert); ok {
+		t.Fatal("a non-exception kind must not rebuild")
+	}
+
+	// A stripped issue whose Culprit survived (a partial rewrite) keeps
+	// its own Culprit; only the missing fields are filled.
+	stripIssueLikeOldBinary(t, store, issue)
+	stripped, err := store.Get(issue.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stripped.Culprit = &Culprit{Function: "survived", File: "src/kept.go", Line: 9, Source: "stack"}
+	rebuilt, ok := RebuildFromFirstOccurrence(store, stripped)
+	if !ok {
+		t.Fatal("expected a rebuild for the stripped exception issue")
+	}
+	if rebuilt.Culprit.File != "src/kept.go" {
+		t.Fatalf("Culprit = %+v, want the surviving record's own culprit, never overwritten", rebuilt.Culprit)
+	}
+}
+
+// TestSummarizeForListRebuildsStrippedRow (CC-3): a list surface holding
+// the store gets the rebuilt culprit and trimmed exception summary; the
+// store-less historical call keeps returning the stripped row untouched.
+func TestSummarizeForListRebuildsStrippedRow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.veclite")
+	issue := recordChainedForRebuild(t, path)
+
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stripIssueLikeOldBinary(t, store, issue)
+	stripped, err := store.Get(issue.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := SummarizeForList(stripped, store)
+	if got.Culprit == nil || got.Culprit.File != "src/users.ts" {
+		t.Fatalf("Culprit = %+v, want the rebuilt innermost-cause culprit", got.Culprit)
+	}
+	if got.LatestException == nil || got.LatestException.Type != "RuntimeError" || len(got.LatestException.Frames) != 0 {
+		t.Fatalf("LatestException = %+v, want a rebuilt but trimmed summary", got.LatestException)
+	}
+
+	plain := SummarizeForList(stripped)
+	if plain.Culprit != nil || plain.LatestException != nil {
+		t.Fatalf("store-less SummarizeForList = %+v, want the historical untouched row", plain)
 	}
 }

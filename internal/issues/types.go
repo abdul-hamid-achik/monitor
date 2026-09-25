@@ -159,6 +159,18 @@ type ExceptionInfo struct {
 	// Causes holds at most maxExceptionCauses chain entries, outer to
 	// innermost (mirrors stacktrace.Exception.Chained's ordering).
 	Causes []CauseInfo `json:"causes,omitempty"`
+	// DroppedFrames counts the in-app frames the ingest-time bounds
+	// removed: maxExceptionFrames' cap plus every frame
+	// truncateExceptionInfo's size backstop dropped after it (CC-4). A
+	// reader can then report honest truncation ("9 more frames were cut")
+	// instead of silently showing fewer frames than the crash had. Old
+	// records decode as 0, which is additive.
+	DroppedFrames int `json:"dropped_frames,omitempty"`
+	// DroppedCauses counts the chain entries the ingest-time bounds
+	// removed: maxExceptionCauses' cap plus the entries
+	// truncateExceptionInfo's backstop dropped after it (CC-4) -- the
+	// same honesty rule as DroppedFrames.
+	DroppedCauses int `json:"dropped_causes,omitempty"`
 }
 
 // RunContext correlates a local event with an ephemeral/CI run without

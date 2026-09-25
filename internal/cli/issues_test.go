@@ -484,6 +484,62 @@ func executeIssueCommand(t *testing.T, storePath, root string, args ...string) (
 	return output.String(), err
 }
 
+func TestFirstNonFlagArgSkipsFlagsAndValues(t *testing.T) {
+	cases := []struct {
+		name   string
+		args   []string
+		want   string
+		wantOK bool
+	}{
+		{"positional first", []string{"ISS-0", "--json"}, "ISS-0", true},
+		{"bool flags skipped", []string{"--json", "--md", "ISS-9"}, "ISS-9", true},
+		{"value flag pair skipped", []string{"--store", "/tmp/x", "ISS-1"}, "ISS-1", true},
+		{"inline value kept scanning", []string{"--project=x", "ISS-2"}, "ISS-2", true},
+		{"double dash takes next literally", []string{"--", "--weird"}, "--weird", true},
+		{"no args", nil, "", false},
+		{"only flags", []string{"--json", "--md"}, "", false},
+		{"dangling value flag", []string{"--store"}, "", false},
+		{"bare dash is positional", []string{"-"}, "-", true},
+	}
+	for _, c := range cases {
+		got, ok := firstNonFlagArg(c.args)
+		if got != c.want || ok != c.wantOK {
+			t.Errorf("%s: firstNonFlagArg(%q) = (%q, %v), want (%q, %v)", c.name, c.args, got, ok, c.want, c.wantOK)
+		}
+	}
+}
+
+// TestIssueDeprecatedAliasDetectedFlagsFirst is CC-7's end-to-end half: a
+// global-style flag BEFORE the deprecated subcommand name (`monitor issue
+// --store S list ...`) still delegates to `monitor issues`, instead of
+// falling through to single-id parsing and failing on "list" as an id.
+func TestIssueDeprecatedAliasDetectedFlagsFirst(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	store := openIssueCLIStore(t, storePath)
+	issue, _, err := store.UpsertOccurrence(issues.OccurrenceInput{
+		ObservedAt: time.Now().UTC(), Project: "polyglot", Message: "boom",
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	closeIssueCLIStore(t, store)
+
+	cmd := newIssueCmd()
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--store", storePath, "list", "--all", "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("issue --store S list: %v", err)
+	}
+	if !strings.Contains(out.String(), issue.ID) {
+		t.Fatalf("issue --store S list output = %q, want it to contain %s", out.String(), issue.ID)
+	}
+	if !strings.Contains(errOut.String(), "deprecated") {
+		t.Errorf("stderr = %q, want a deprecation note", errOut.String())
+	}
+}
+
 func TestIssueCommandRegisteredAtTopLevel(t *testing.T) {
 	root := Root()
 	for _, cmd := range root.Commands() {
@@ -780,10 +836,9 @@ func TestIssueDeprecatedSubcommandsDelegateToIssues(t *testing.T) {
 	closeIssueCLIStore(t, store)
 
 	// --store goes AFTER the deprecated subcommand name (e.g. "monitor
-	// issue list --store X"), same as every pre-E2.5 example: newIssueCmd's
-	// deprecation check only looks at the FIRST raw arg (see its own doc
-	// comment), so a global-style flag placed before the subcommand name
-	// falls through to the (non-deprecated) single-id parsing path instead.
+	// issue list --store X"), same as every pre-E2.5 example. Flags
+	// BEFORE the subcommand name work too (CC-7's firstNonFlagArg scans
+	// past them) -- see TestIssueDeprecatedAliasDetectedFlagsFirst.
 	run := func(args ...string) (stdout, stderr string, err error) {
 		t.Helper()
 		cmd := newIssueCmd()
@@ -931,6 +986,41 @@ func TestIssuesListDefaultsToCurrentProject(t *testing.T) {
 	}
 	if bare != human {
 		t.Fatalf("bare issues output differs from issues list:\nbare:\n%s\nlist:\n%s", bare, human)
+	}
+}
+
+// TestIssuesListEmptyCwdProjectHintsAtOtherProjects is LUX-9's regression:
+// an empty human list under the silently-defaulted cwd project must not
+// read as "the store is empty" when other projects hold issues -- it names
+// the defaulted project and points at --all instead.
+func TestIssuesListEmptyCwdProjectHintsAtOtherProjects(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	store := openIssueCLIStore(t, storePath)
+	if _, _, err := store.UpsertOccurrence(issues.OccurrenceInput{
+		ObservedAt: time.Now().UTC(), Project: "other-project", Message: "elsewhere",
+	}); err != nil {
+		t.Fatalf("seed other-project issue: %v", err)
+	}
+	closeIssueCLIStore(t, store)
+
+	// The cwd resolves to "acme-project" (bare .git marker, as in
+	// TestIssuesListDefaultsToCurrentProject), which holds no issues.
+	cwd := filepath.Join(t.TempDir(), "acme-project")
+	if err := os.MkdirAll(filepath.Join(cwd, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+
+	human, err := executeIssuesCommand(t, storePath, "list")
+	if err != nil {
+		t.Fatalf("human list: %v", err)
+	}
+	want := "No issues in project acme-project. (1 in other projects; monitor issues --all)"
+	if !strings.Contains(human, want) {
+		t.Errorf("human list = %q, want it to contain %q", human, want)
+	}
+	if strings.Contains(human, "No issues found.") {
+		t.Errorf("human list = %q, want no bare misleading empty message", human)
 	}
 }
 
@@ -1148,21 +1238,29 @@ func TestWriteIssuePageHumanHeaderFitsWidthWithLongTitle(t *testing.T) {
 // TestTruncatePathDisplayKeepsTail asserts the WHERE-column truncation
 // keeps the filename/line (the part someone actually needs), unlike
 // truncateDisplay's own right-truncation.
-func TestTruncatePathDisplayKeepsTail(t *testing.T) {
+func TestTruncateLocationKeepsTail(t *testing.T) {
 	long := "examples/polyglot/js/workload.js:49"
-	got := truncatePathDisplay(long, 20)
+	got := truncateLocation(long, 20)
 	if len([]rune(got)) > 20 {
-		t.Errorf("truncatePathDisplay result is %d runes, want at most 20: %q", len([]rune(got)), got)
+		t.Errorf("truncateLocation result is %d runes, want at most 20: %q", len([]rune(got)), got)
 	}
 	if !strings.HasSuffix(got, "workload.js:49") {
-		t.Errorf("truncatePathDisplay(%q) = %q, want the filename:line kept at the tail", long, got)
+		t.Errorf("truncateLocation(%q) = %q, want the filename:line kept at the tail", long, got)
 	}
 	if !strings.HasPrefix(got, "…") {
-		t.Errorf("truncatePathDisplay(%q) = %q, want a leading ellipsis marking the cut", long, got)
+		t.Errorf("truncateLocation(%q) = %q, want a leading ellipsis marking the cut", long, got)
 	}
 	// Already-short input passes through unchanged.
-	if got := truncatePathDisplay("a.go:1", 20); got != "a.go:1" {
-		t.Errorf("truncatePathDisplay(short) = %q, want it unchanged", got)
+	if got := truncateLocation("a.go:1", 20); got != "a.go:1" {
+		t.Errorf("truncateLocation(short) = %q, want it unchanged", got)
+	}
+	// LUX-8: the cut lands on a path-segment boundary, never
+	// mid-directory -- the review's own revenue.js example.
+	if got := truncateLocation("src/components/dashboard/widgets/revenue.js:2", 40); got != "…/dashboard/widgets/revenue.js:2" {
+		t.Errorf("truncateLocation(segment) = %q, want %q", got, "…/dashboard/widgets/revenue.js:2")
+	}
+	if got := truncateLocation("src/components/dashboard/widgets/revenue.js:2", 25); got != "…/widgets/revenue.js:2" {
+		t.Errorf("truncateLocation(segment) = %q, want %q", got, "…/widgets/revenue.js:2")
 	}
 }
 
@@ -1203,7 +1301,7 @@ func TestWriteIssuesListHumanRowsFitRealisticWidth(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	storePath := filepath.Join(t.TempDir(), "issues.veclite") // deliberately unopened: activityBucketsFor degrades gracefully.
-	if err := writeIssuesListHuman(&buf, storePath, entries, "polyglot"); err != nil {
+	if err := writeIssuesListHuman(&buf, storePath, entries, "polyglot", ""); err != nil {
 		t.Fatalf("writeIssuesListHuman: %v", err)
 	}
 	for _, line := range strings.Split(buf.String(), "\n") {

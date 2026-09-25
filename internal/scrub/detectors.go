@@ -223,9 +223,18 @@ func redactURLCredentials(s string, counter *int64) string {
 		}
 		b.WriteString(s[last:schemeEnd])
 		b.WriteString("://")
+		// SEC-9: count a redaction only when the userinfo being
+		// replaced differs from the token. Re-scrubbing already-redacted
+		// text (explain's read-time pass over a title stored
+		// pre-redacted) writes the same token back and must not report a
+		// redaction that did not happen -- otherwise privacy.scrubbed
+		// over-reports and misleads an agent auditing whether a read-time
+		// leak was caught.
+		if s[authStart:atPos] != tokenURLCreds {
+			atomic.AddInt64(counter, 1)
+		}
 		b.WriteString(tokenURLCreds)
 		b.WriteByte('@')
-		atomic.AddInt64(counter, 1)
 		last = atPos + 1
 		pos = atPos + 1
 	}

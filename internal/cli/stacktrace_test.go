@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 )
 
@@ -33,6 +35,33 @@ func decodeEvents(t *testing.T, out string) []parsedEvent {
 		evs = append(evs, ev)
 	}
 	return evs
+}
+
+// TestStacktraceParseIsVisible is LUX-13's regression: `stacktrace parse`
+// is the documented replay path (`--record` replays a saved log into the
+// store), so the parse subcommand must not be Hidden -- while the
+// stacktrace parent itself stays hidden, as does the experimental
+// `stacktrace watch` (see newStacktraceWatchCmd's own stability note).
+func TestStacktraceParseIsVisible(t *testing.T) {
+	parent := newStacktraceCmd()
+	if !parent.Hidden {
+		t.Errorf("stacktrace parent Hidden = false, want it to stay hidden")
+	}
+	var parse *cobra.Command
+	for _, sub := range parent.Commands() {
+		if sub.Name() == "parse" {
+			parse = sub
+		}
+	}
+	if parse == nil {
+		t.Fatal("stacktrace has no parse subcommand")
+	}
+	if parse.Hidden {
+		t.Error("stacktrace parse is Hidden, want it visible (LUX-13)")
+	}
+	if strings.TrimSpace(parse.Short) == "" {
+		t.Error("stacktrace parse has no Short help text")
+	}
 }
 
 func TestStacktraceParseFile(t *testing.T) {
@@ -357,6 +386,43 @@ func TestStacktraceRecordRequiresFile(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "--record requires --file") {
 		t.Fatalf("Execute: got %v, want an error naming --file", err)
+	}
+}
+
+// TestStacktraceRecordProjectDefaultsToRootFlag is LUX-3's regression:
+// with --root but no --project, the replayed issue takes the --root
+// repo's slug (not the log file's directory, which is just where a
+// one-shot redirect happened to land) -- so a crash replayed from a log
+// outside the checkout lands on the same project (and fingerprint) as
+// the same crash seen live by `monitor run` from that checkout.
+func TestStacktraceRecordProjectDefaultsToRootFlag(t *testing.T) {
+	store := recordEnv(t)
+	root := filepath.Join(t.TempDir(), "myservice")
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "app.log")
+	content := "Error: flakyParse: boom\n    at flakyParse (" + root + "/app/workload.js:31:11)\n"
+	writeSettledFixture(t, logPath, content)
+
+	out := runRecord(t, "--record", "--file", logPath, "--root", root)
+	if !strings.Contains(out, "1 occurrences written") {
+		t.Fatalf("summary = %q, want 1 occurrence written", out)
+	}
+
+	db := openIssuesForTest(t, store)
+	list, err := db.List(issues.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("got %d issues, want 1: %+v", len(list), list)
+	}
+	if list[0].Project != "myservice" {
+		t.Errorf("project = %q, want the --root repo's slug myservice", list[0].Project)
+	}
+	if list[0].Culprit == nil || list[0].Culprit.File != "app/workload.js" || list[0].Culprit.Line != 31 {
+		t.Errorf("culprit = %+v, want app/workload.js:31", list[0].Culprit)
 	}
 }
 

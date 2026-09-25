@@ -176,6 +176,43 @@ func TestAnalyzeWindowContextCancelled(t *testing.T) {
 	}
 }
 
+// TestListIssuesForMCPSchrubsRows is SEC-5's Service-side regression: a
+// list row is untrusted process text, and legacy records may never have
+// been redacted at ingest (UpsertOccurrence stores its input verbatim),
+// so listIssuesForMCP re-scrubs every row's Title/Message/Value against
+// the environment's secret values and reports the total redaction count.
+func TestListIssuesForMCPSchrubsRows(t *testing.T) {
+	secret := "opaque-test-token-abc123"
+	t.Setenv("MONITOR_TEST_API_TOKEN", secret)
+	path := filepath.Join(t.TempDir(), "issues.veclite")
+	t.Setenv(issues.StorePathEnv, path)
+	store, err := issues.OpenStore(path)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	if _, _, err := store.UpsertOccurrence(issues.OccurrenceInput{
+		Project: "monitor", Kind: issues.KindException, Message: "boom " + secret,
+	}); err != nil {
+		t.Fatalf("seed exception issue: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	got, err := listIssuesForMCP(context.Background(), monitormcp.IssuesListFilter{})
+	if err != nil {
+		t.Fatalf("listIssuesForMCP: %v", err)
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(got.Items))
+	}
+	if strings.Contains(got.Items[0].Title, secret) || strings.Contains(got.Items[0].Message, secret) {
+		t.Fatalf("secret survived the read-time scrub: %+v", got.Items[0])
+	}
+	if got.Scrubbed < 1 {
+		t.Fatalf("Scrubbed = %d, want at least 1", got.Scrubbed)
+	}
+}
+
 // TestListIssuesForMCPForwardsWindowFiltersToStore verifies the
 // mcp.Service.IssuesList wiring (E2.6): listIssuesForMCP just opens the
 // resolved store read-only and forwards opts to Store.List -- the filters
@@ -206,7 +243,7 @@ func TestListIssuesForMCPForwardsWindowFiltersToStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listIssuesForMCP: %v", err)
 	}
-	if len(got) != 1 || got[0].Kind != issues.KindException {
+	if len(got.Items) != 1 || got.Items[0].Kind != issues.KindException {
 		t.Fatalf("Kind=exception results = %+v", got)
 	}
 
@@ -214,7 +251,7 @@ func TestListIssuesForMCPForwardsWindowFiltersToStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listIssuesForMCP: %v", err)
 	}
-	if len(got) != 1 || got[0].Kind != issues.KindException {
+	if len(got.Items) != 1 || got.Items[0].Kind != issues.KindException {
 		t.Fatalf("RunID=run-a results = %+v", got)
 	}
 
@@ -222,7 +259,7 @@ func TestListIssuesForMCPForwardsWindowFiltersToStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listIssuesForMCP: %v", err)
 	}
-	if len(all) != 2 {
+	if len(all.Items) != 2 {
 		t.Fatalf("unfiltered results = %+v, want 2", all)
 	}
 
@@ -236,7 +273,7 @@ func TestListIssuesForMCPForwardsWindowFiltersToStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listIssuesForMCP Since=24h: %v", err)
 	}
-	if len(sinceMatch) != 2 {
+	if len(sinceMatch.Items) != 2 {
 		t.Fatalf("Since=24h results = %+v, want both issues", sinceMatch)
 	}
 	if _, err := listIssuesForMCP(context.Background(), monitormcp.IssuesListFilter{Since: "not-a-time"}); err == nil {
@@ -863,22 +900,41 @@ func TestBuildProfileServiceLinesTrueKeepsDefaultTargetBeyondTopN(t *testing.T) 
 	if got := len(hm.Functions); got > mcpHeatmapMaxFunctions {
 		t.Errorf("len(Functions) = %d, want <= %d", got, mcpHeatmapMaxFunctions)
 	}
-	var sawHotFunc bool
+	// LUX-1: for a pprof proto the default target is the highest-CUM
+	// in-app function -- one of the three 100%-cum wrappers here -- NOT
+	// the highest-self leaf (main.hot). Whichever wrapper won that tie
+	// MUST be the survivor, with its own hottest line intact.
+	if hm.DefaultTarget == nil {
+		t.Fatalf("DefaultTarget is nil: %+v", hm.Functions)
+	}
+	want := hm.DefaultTarget.Name
+	switch want {
+	case "main.handler", "main.service", "main.repo":
+	default:
+		t.Fatalf("DefaultTarget = %q, want one of the 100%%-cum in-app wrappers", want)
+	}
+	bestLine := hm.DefaultTarget.Lines[0].Line
+	bestCum, bestSelf := hm.DefaultTarget.Lines[0].Cum, hm.DefaultTarget.Lines[0].Self
+	for _, l := range hm.DefaultTarget.Lines[1:] {
+		if l.Cum > bestCum || (l.Cum == bestCum && l.Self > bestSelf) {
+			bestLine, bestCum, bestSelf = l.Line, l.Cum, l.Self
+		}
+	}
 	for _, f := range hm.Functions {
-		if f.Name != "main.hot" {
+		if f.Name == "main.hot" {
+			t.Fatalf("main.hot (highest self, lower cum) survived the top-%d cap, want only the LUX-1 default target: %+v", mcpHeatmapMaxFunctions, hm.Functions)
+		}
+		if f.Name != want {
 			continue
 		}
-		sawHotFunc = true
 		for _, l := range f.Lines {
-			if l.Line == 3 {
+			if l.Line == bestLine {
 				return
 			}
 		}
+		t.Fatalf("DefaultTarget %q survived the cap but its hottest line (%d) did not: %+v", want, bestLine, hm.Functions)
 	}
-	if !sawHotFunc {
-		t.Fatalf("expected main.hot (the real leaf, highest self) to survive the top-%d cap: %+v", mcpHeatmapMaxFunctions, hm.Functions)
-	}
-	t.Fatalf("main.hot survived the cap but its hot line (3) did not: %+v", hm.Functions)
+	t.Fatalf("DefaultTarget %q did not survive the top-%d cap: %+v", want, mcpHeatmapMaxFunctions, hm.Functions)
 }
 
 func writeFakeDeepPprofCPU(t *testing.T) string {
@@ -920,8 +976,10 @@ func writeFakeDeepPprofCPU(t *testing.T) string {
 	addSample := func(stack []*gpprof.Location, weight int64) {
 		prof.Sample = append(prof.Sample, &gpprof.Sample{Location: stack, Value: []int64{weight}})
 	}
-	// main.hot itself: the real leaf, one big self-time weight, so it's
-	// unambiguously DefaultTarget (highest SELF of anything in this proto).
+	// main.hot itself: the real leaf, one big self-time weight -- the
+	// highest SELF of anything in this proto, yet NOT the DefaultTarget:
+	// LUX-1 picks the highest-CUM in-app function for pprof data, so one
+	// of the three 100%-cum wrappers wins instead.
 	addSample([]*gpprof.Location{hotLoc, repoLoc, serviceLoc, handlerLoc}, 1000)
 	// Three OTHER same-ancestor leaves (siblings main.hot's own stack never
 	// shares) that between them push handler/service/repo's own CUMULATIVE

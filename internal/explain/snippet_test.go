@@ -2,6 +2,7 @@ package explain
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -86,5 +87,77 @@ func TestReadSnippetMissingRootOrFile(t *testing.T) {
 	}
 	if snippet, reason := readSnippet(t.TempDir(), "app.go", 0, 2); snippet != nil || reason == "" {
 		t.Fatalf("zero line: snippet = %+v, reason = %q", snippet, reason)
+	}
+}
+
+// TestReadSnippetGateTracksGitProvenance is SEC-2's regression test: inside
+// a git work tree only tracked files get snippets -- a forged frame naming
+// a gitignored .env (the review's log-injection shape) or an untracked
+// scratch file is refused instead of leaking its contents into the brief.
+func TestReadSnippetGateTracksGitProvenance(t *testing.T) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not on PATH")
+	}
+	root := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(gitPath, append([]string{"-C", root}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=spec", "GIT_AUTHOR_EMAIL=spec@example.com",
+			"GIT_COMMITTER_NAME=spec", "GIT_COMMITTER_EMAIL=spec@example.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte(".env\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "app.go"), []byte("a\nb\nc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-qm", "seed")
+	// .env is ignored and scratch.go stays untracked: both must be
+	// refused even though they exist on disk under the root.
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("DB_PASSWORD=dummy-value-for-test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "scratch.go"), []byte("x\ny\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if snippet, reason := readSnippet(root, "app.go", 2, 1); snippet == nil || reason != "" {
+		t.Fatalf("tracked app.go: snippet = %+v, reason = %q, want a snippet", snippet, reason)
+	}
+	if snippet, reason := readSnippet(root, ".env", 1, 1); snippet != nil || reason == "" {
+		t.Fatalf("ignored .env: snippet = %+v, reason = %q, want a refusal", snippet, reason)
+	} else if !strings.Contains(reason, "not tracked by git") {
+		t.Fatalf("ignored .env reason = %q, want the tracked-gate refusal", reason)
+	}
+	if snippet, reason := readSnippet(root, "scratch.go", 1, 1); snippet != nil || reason == "" {
+		t.Fatalf("untracked scratch.go: snippet = %+v, reason = %q, want a refusal", snippet, reason)
+	}
+}
+
+// TestReadSnippetGateDegradesOutsideGitRepo pins the gate's honest
+// degradation: a root that is not a git work tree has no provenance to
+// verify, so ordinary files still get snippets while dotfiles stay
+// refused.
+func TestReadSnippetGateDegradesOutsideGitRepo(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "app.go"), []byte("a\nb\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("DB_PASSWORD=dummy-value-for-test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if snippet, reason := readSnippet(root, "app.go", 1, 1); snippet == nil || reason != "" {
+		t.Fatalf("non-repo app.go: snippet = %+v, reason = %q, want a snippet", snippet, reason)
+	}
+	if snippet, reason := readSnippet(root, ".env", 1, 1); snippet != nil || reason == "" {
+		t.Fatalf("non-repo .env: snippet = %+v, reason = %q, want a refusal", snippet, reason)
 	}
 }

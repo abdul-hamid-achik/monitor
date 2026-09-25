@@ -3,11 +3,14 @@
 package devrun
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/abdul-hamid-achik/monitor/internal/procbind"
 	"github.com/charmbracelet/x/term"
 )
 
@@ -82,10 +85,19 @@ func forwardSignals(cmd *exec.Cmd, ttyShared bool, done <-chan struct{}) {
 // leaf, or it is silently orphaned while monitor waits on it (see
 // devrun.go's WaitDelay-bounded reap for the rest of that fix -- this half
 // is what makes the signal arrive at all instead of merely bounding the
-// hang if it doesn't). In the ttyShared case the child stays in monitor's
-// OWN process group (configureProcessGroup leaves SysProcAttr nil), so a
-// group kill here would also hit monitor itself; that case keeps signaling
-// only cmd.Process directly, unchanged.
+// hang if it doesn't).
+//
+// In the ttyShared case the child stays in monitor's OWN process group
+// (configureProcessGroup leaves SysProcAttr nil), so a group kill is not an
+// option: Kill(0, sig) would also signal monitor itself and every pipeline
+// sibling in that group (`monitor run -- x | tee`) and, under a
+// non-job-control shell, the parent shell too. Instead the signal goes to
+// cmd.Process AND to every descendant of cmd.Process.Pid taken from one
+// process-tree snapshot, deepest first (CC-9): a wrapper child that dies
+// without passing the signal on must not leave the real leaf server
+// orphaned, still holding its port. When the snapshot cannot be built
+// (enumeration error or timeout), the signal still reaches the direct
+// child -- the pre-CC-9 ttyShared behavior -- rather than nothing.
 func deliverSignal(cmd *exec.Cmd, ttyShared bool, sig os.Signal) {
 	if cmd.Process == nil {
 		return
@@ -96,7 +108,38 @@ func deliverSignal(cmd *exec.Cmd, ttyShared bool, sig os.Signal) {
 			return
 		}
 	}
+	signalDescendants(cmd.Process.Pid, sig)
 	_ = cmd.Process.Signal(sig)
+}
+
+// descendantSignalTimeout bounds the process-table enumeration behind
+// ttyShared signal delivery: shutdown must never hang on a stalled /proc
+// or sysctl read, only degrade to signaling the direct child.
+const descendantSignalTimeout = 2 * time.Second
+
+// signalDescendants sends sig to every descendant of rootPid, deepest
+// first, from ONE process-table snapshot (procbind.BuildTree, the same
+// single-enumeration walk `monitor resolve` uses). Deepest-first means a
+// leaf gets the signal before the wrapper parent above it can exit or
+// otherwise interfere; pids in the snapshot stay valid regardless, since
+// reparenting on a parent's death does not change them. Errors degrade
+// silently to "no descendants signaled", which leaves the direct-child
+// signal in deliverSignal as the fallback.
+func signalDescendants(rootPid int, sig os.Signal) {
+	sysSig, ok := sig.(syscall.Signal)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), descendantSignalTimeout)
+	defer cancel()
+	tree, err := procbind.BuildTree(ctx, nil)
+	if err != nil {
+		return
+	}
+	descendants := tree.Descendants(int32(rootPid)) // breadth-first, nearest first
+	for i := len(descendants) - 1; i >= 0; i-- {    // ...so reversed walks leaves first
+		_ = syscall.Kill(int(descendants[i].PID), sysSig)
+	}
 }
 
 // exitCodeFor derives the process exit code from state, matching a shell's

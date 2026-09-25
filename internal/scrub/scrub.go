@@ -195,12 +195,65 @@ func (s *Scrubber) redactKnownValues(input string) string {
 	}
 	out := input
 	for _, v := range s.values {
-		n := strings.Count(out, v)
-		if n == 0 {
-			continue
+		n := 0
+		out = replaceAllExceptURLScheme(out, v, tokenValue, &n)
+		if n > 0 {
+			atomic.AddInt64(&s.count, int64(n))
 		}
-		out = strings.ReplaceAll(out, v, tokenValue)
-		atomic.AddInt64(&s.count, int64(n))
 	}
 	return out
+}
+
+// schemeSep is the delimiter whose presence after a value marks that value
+// as a URL scheme rather than a secret occurrence (SEC-1).
+const schemeSep = "://"
+
+// replaceAllExceptURLScheme replaces every occurrence of v in s with repl,
+// counting replacements into *n -- except an occurrence immediately
+// followed by "://", which is a URL scheme the value happens to equal
+// (SEC-1: with POSTGRES_PASSWORD=postgres, the "postgres" in
+// "postgres://u:pw@host/db" is the scheme, not the password). Redacting it
+// would destroy the scheme redactURLCredentials needs to see in the next
+// pass, leaving the URL's userinfo -- the actual password -- in plain text.
+// Keeping the scheme lets redactURLCredentials replace the whole userinfo.
+func replaceAllExceptURLScheme(s, v, repl string, n *int) string {
+	var b strings.Builder
+	// last marks s[:last] as already emitted (once started); from is the
+	// search position. A skipped scheme advances from but NOT last, so
+	// its own bytes are still emitted with the next replacement's
+	// prefix -- otherwise a scheme before a real secret occurrence
+	// would silently swallow the scheme text.
+	last := 0
+	from := 0
+	count := 0
+	started := false
+	for {
+		i := strings.Index(s[from:], v)
+		if i < 0 {
+			break
+		}
+		i += from
+		end := i + len(v)
+		if strings.HasPrefix(s[end:], schemeSep) {
+			// A scheme-shaped occurrence: leave it for the prefix
+			// of the next replacement (or the tail below).
+			from = end
+			continue
+		}
+		if !started {
+			started = true
+			b.Grow(len(s))
+		}
+		b.WriteString(s[last:i])
+		b.WriteString(repl)
+		last = end
+		from = end
+		count++
+	}
+	*n = count
+	if !started {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }

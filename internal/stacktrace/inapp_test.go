@@ -1,6 +1,8 @@
 package stacktrace
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -204,4 +206,65 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// TestInAppMatchesEitherRootSpelling is CC-4's regression: a repo reached
+// through a symlink (macOS /tmp -> /private/tmp, a symlinked ~/code) must
+// still classify frames in-app no matter which spelling the root was
+// resolved from and which the runtime printed. A logical root with
+// physical frame paths (Node realpaths, Python's os.getcwd) and the
+// reverse must both match, and ApplyGitRoot must store the SAME relative
+// Filename either way, so the fingerprint never depends on the spelling.
+func TestInAppMatchesEitherRootSpelling(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "app.js"), []byte("boom\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	physFile := filepath.Join(real, "app.js")
+	logFile := filepath.Join(link, "app.js")
+	// The TRUE physical spelling (on macOS t.TempDir itself sits under
+	// /var -> /private/var, so `real` above is still logical).
+	physBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(base): %v", err)
+	}
+	truePhysFile := filepath.Join(physBase, "real", "app.js")
+
+	// Logical root + physical frame (the review's /tmp vs /private/tmp
+	// evidence shape).
+	if !InApp(Frame{AbsPath: physFile}, link) {
+		t.Errorf("InApp(physical frame, logical root) = false, want true")
+	}
+	// Fully-resolved frame against the logical root: the root's own
+	// physical spelling must match it with no frame resolution.
+	if !InApp(Frame{AbsPath: truePhysFile}, link) {
+		t.Errorf("InApp(resolved frame, logical root) = false, want true")
+	}
+	// Physical root + logical frame.
+	if !InApp(Frame{AbsPath: logFile}, real) {
+		t.Errorf("InApp(logical frame, physical root) = false, want true")
+	}
+	// A frame genuinely outside either spelling stays out.
+	outside := filepath.Join(base, "elsewhere", "x.js")
+	if InApp(Frame{AbsPath: outside}, link) || InApp(Frame{AbsPath: outside}, real) {
+		t.Errorf("InApp(outside frame) = true, want false in both spellings")
+	}
+	// ApplyGitRoot stores the identical relative Filename either way.
+	for _, root := range []string{link, real} {
+		ex := &Exception{Frames: []Frame{{AbsPath: physFile}, {AbsPath: logFile}}}
+		ApplyGitRoot(ex, root)
+		for _, f := range ex.Frames {
+			if !f.InApp || f.Filename != "app.js" {
+				t.Errorf("root %s: frame %+v, want in-app app.js", root, f)
+			}
+		}
+	}
 }

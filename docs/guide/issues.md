@@ -17,6 +17,10 @@ Python, Ruby, and Go are all covered) into a structured exception, and
 is symbolicate source maps for that exception path, accept a Sentry SDK
 envelope over the wire, or send issue data to a cloud service.
 
+For the end-to-end crash-to-explained-issue journey (`monitor run --`,
+`monitor issues`, `monitor issue latest`), see
+[Your First Issue](./first-issue).
+
 ## The data model
 
 ```text
@@ -175,14 +179,20 @@ monitor issues ignore ISS-0123456789ABCDEF
 monitor issues reopen ISS-0123456789ABCDEF
 ```
 
-`issue` is an alias for `issues`. Lists are newest-first. `--status` is
-repeatable and accepts `open`, `resolved`, or `ignored`; list and occurrence
-limits default to 50 and 20 respectively and must be between 1 and 200.
+`monitor issue list|show|resolve|reopen|ignore ...` — the pre-epic alias
+form — still works during its deprecation: it prints a note to stderr and
+delegates to `monitor issues <same args>`. (`monitor issue <id>` itself is
+now the issue *context* page; see below.) Lists are newest-first. `--status`
+is repeatable and accepts `open`, `resolved`, or `ignored`; list and
+occurrence limits default to 50 and 20 respectively and must be between 1
+and 200. The human list is scoped to the current directory's project;
+`--all` lists every project.
 
 `list` also takes window filters:
 
 | Flag | Matches |
 |------|---------|
+| `--at` | an issue whose culprit is inside the function containing (or exactly at) this `file:line`. `--root` overrides the git/codebase root used for the lookup. |
 | `--since` / `--until` | an issue whose activity window (`first_seen`..`last_seen`) overlaps the given bound. Accepts an RFC3339 timestamp or a duration (`10m`, `24h`) meaning "that long ago". |
 | `--run-id` | an issue that has this run id among its 25 most recently seen (see below). |
 | `--release` | an issue that has this release among its 25 most recently seen. |
@@ -237,8 +247,8 @@ The two MCP tools are read-only and do not take `confirm`:
 
 | Tool | Input | Result |
 |------|-------|--------|
-| `monitor_issues` | `statuses`, `project`, `service`, `since`, `until`, `run_id`, `release`, `kind`, `limit` | `{issues, total, truncated}`; default 50, max 200 |
-| `monitor_issue` | required `id`, optional `occurrence_limit` | `{issue, occurrences, occurrences_truncated}`; default 20, max 200 |
+| `monitor_issues` | `statuses`, `project`, `service`, `since`, `until`, `run_id`, `release`, `kind`, `limit` | `{issues, total, truncated, privacy}`; default 50, max 200. The `privacy` block (`{text_is_untrusted: true, scrubbed: N}`) marks row text as untrusted and counts read-time redactions. |
+| `monitor_issue` | required `id` (full id, short id, or `latest`, narrowed by `project`/`service`/`kind`), optional `occurrence_limit` | By default the `monitor.issue_context.v1` **brief**: schema, budget, trimmed issue, culprit with snippet, causes, frames, impact, timeline, privacy, degraded, and next. With `occurrence_limit` > 0 (default 20, max 200) the response also carries the full `issue` record plus `occurrences` and `occurrences_truncated` — the legacy shape. |
 
 `monitor_issues`'s `since`/`until`/`run_id`/`release`/`kind` are the exact
 same filters the CLI's `--since`/`--until`/`--run-id`/`--release`/`--kind`

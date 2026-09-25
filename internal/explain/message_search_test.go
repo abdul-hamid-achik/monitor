@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -161,17 +162,46 @@ func TestGitGrepFragmentPrefersSourceOverTestFixture(t *testing.T) {
 	}
 }
 
-// TestGitGrepFragmentFallsBackToNoisyMatchWhenNothingElseMatches: every hit
-// looking like test/fixture noise still returns the first one rather than
-// reporting no result at all.
-func TestGitGrepFragmentFallsBackToNoisyMatchWhenNothingElseMatches(t *testing.T) {
+// TestGitGrepFragmentRejectsAllNoisyMatches (LUX-2): when every git grep
+// hit looks like test/fixture noise, the search must return no result
+// (surfaced as a degraded note naming the noise) instead of blaming the
+// fixture -- a golden fixture that reproduces the rendered message is not
+// evidence about the code that printed it.
+func TestGitGrepFragmentRejectsAllNoisyMatches(t *testing.T) {
 	root := newGitRepo(t, map[string]string{"tests/only.go": "// TARGET FRAGMENT ONLY HERE\n"})
 	result, err := gitGrepFragment(context.Background(), root, "TARGET FRAGMENT ONLY HERE")
-	if err != nil {
+	if result != nil {
+		t.Fatalf("result = %+v, want no result for an all-noisy match set", result)
+	}
+	if err == nil || !strings.Contains(err.Error(), "noise") {
+		t.Fatalf("err = %v, want the noise-naming error", err)
+	}
+}
+
+// TestCulpritForMessageDegradesWhenOnlyNoiseMatches (LUX-2): a healthy
+// vecgrep whose only hit is a fixture, followed by a git grep that finds
+// the same fixture, must degrade with a note that says so -- never a
+// culprit pointing at the fixture.
+func TestCulpritForMessageDegradesWhenOnlyNoiseMatches(t *testing.T) {
+	root := newGitRepo(t, map[string]string{"tests/only.go": "// TARGET FRAGMENT ONLY HERE\n"})
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+  status) printf '%s' '{"stats":{"chunks":1},"freshness":{"state":"ready"}}'; exit 0 ;;
+  search) printf '%s' '{"schema_version":1,"index":{"indexed":true,"fresh":true,"chunks":1},"hits":[{"relative_path":"tests/only.go","start_line":1,"end_line":1,"content":"// TARGET FRAGMENT ONLY HERE"}]}'; exit 0 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "vecgrep"), []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if result.File != "tests/only.go" {
-		t.Fatalf("result = %+v, want the only match even though it looks noisy", result)
+	setToolPATH(t, binDir)
+
+	result, degraded := culpritForMessage(context.Background(), root, "TARGET FRAGMENT ONLY HERE")
+	if result != nil {
+		t.Fatalf("result = %+v, want nil (the only match is fixture noise)", result)
+	}
+	if degraded == nil || !strings.Contains(degraded.Detail, "noise") {
+		t.Fatalf("degraded = %+v, want a note naming the fixture-only match set", degraded)
 	}
 }
 

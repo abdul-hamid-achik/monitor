@@ -2,8 +2,10 @@ package stacktrace
 
 import (
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // dependencySegments are path components that mark vendored or installed
@@ -104,6 +106,63 @@ func relToRoot(abs, root string) (string, bool) {
 	return a[len(prefix):], true
 }
 
+// physRootCache memoizes EvalSymlinks per git root: InApp/ApplyGitRoot run
+// per frame, but a process resolves ~1 distinct root, so this keeps the
+// symlink fallback (CC-4) from re-statting the root for every frame. Roots
+// never change spelling mid-process; resolution failures are not cached
+// (an empty string IS cached: it means "only the logical spelling").
+var physRootCache sync.Map // string -> string
+
+// physicalRoot returns gitRoot's EvalSymlinks-resolved spelling, or "" when
+// it cannot be resolved (then only the logical spelling matches).
+func physicalRoot(gitRoot string) string {
+	if gitRoot == "" {
+		return ""
+	}
+	if v, ok := physRootCache.Load(gitRoot); ok {
+		return v.(string)
+	}
+	phys := ""
+	if resolved, err := filepath.EvalSymlinks(gitRoot); err == nil {
+		phys = resolved
+	}
+	physRootCache.Store(gitRoot, phys)
+	return phys
+}
+
+// matchRoot matches abs against gitRoot in either spelling (CC-4): the root
+// as found (logical: /tmp/x on macOS, from a logical $PWD), its physical
+// spelling (/private/tmp/x), and -- for absolute frame paths that exist on
+// disk -- the frame's own resolved spelling against the physical root. Node
+// realpaths its main module and Python prints os.getcwd's physical path, so
+// without this every frame under a symlinked root reads as not-in-app: no
+// culprit, no file:line, an unstable message-based fingerprint. The common
+// case (both spellings already equal) costs no filesystem call at all; the
+// fallbacks run only after the plain string match misses. Returns the
+// root-relative path on match, so the stored Filename (and the fingerprint
+// built on it) never depends on how the cwd was spelled.
+func matchRoot(abs, gitRoot string) (string, bool) {
+	if rel, ok := relToRoot(abs, gitRoot); ok {
+		return rel, true
+	}
+	phys := physicalRoot(gitRoot)
+	if phys == "" || phys == gitRoot {
+		// Unresolvable root, or already physical: the only spelling
+		// left to try is the frame's own (below), against gitRoot.
+		phys = gitRoot
+	} else if rel, ok := relToRoot(abs, phys); ok {
+		return rel, true
+	}
+	if isAbsPath(abs) {
+		if rabs, err := filepath.EvalSymlinks(abs); err == nil && rabs != abs {
+			if rel, ok := relToRoot(rabs, phys); ok {
+				return rel, true
+			}
+		}
+	}
+	return "", false
+}
+
 func hasDependencySegment(rel string) bool {
 	for _, seg := range strings.Split(rel, "/") {
 		if dependencySegments[seg] || strings.Contains(seg, "@v") {
@@ -141,7 +200,9 @@ func relativeInApp(rel string) bool {
 // Python/Ruby/Node installation, global gems) are never in-app, and neither
 // is anything when gitRoot is unknown ("").
 //
-// It never touches the filesystem; gitRoot is compared as a path string.
+// The root comparison is a path string match first; only when that misses
+// does matchRoot consult the filesystem (resolving symlinked spellings of
+// the root and the frame, CC-4).
 func InApp(f Frame, gitRoot string) bool {
 	if gitRoot == "" {
 		return false
@@ -158,7 +219,7 @@ func InApp(f Frame, gitRoot string) bool {
 	if !isAbsPath(p) {
 		return relativeInApp(p)
 	}
-	rel, ok := relToRoot(p, gitRoot)
+	rel, ok := matchRoot(p, gitRoot)
 	if !ok {
 		return false
 	}
@@ -167,7 +228,8 @@ func InApp(f Frame, gitRoot string) bool {
 
 // ApplyGitRoot finishes an Exception once the caller knows the git root:
 // every frame (outer and chained) gets InApp, and a frame whose absolute
-// path lies under gitRoot gets Filename rewritten to the root-relative,
+// path lies under gitRoot -- in either spelling when the root is symlinked
+// (CC-4, see matchRoot) -- gets Filename rewritten to the root-relative,
 // slash-separated form with the absolute path kept in AbsPath. With an empty
 // gitRoot it only resets InApp to false.
 func ApplyGitRoot(ex *Exception, gitRoot string) {
@@ -181,7 +243,7 @@ func ApplyGitRoot(ex *Exception, gitRoot string) {
 		if abs == "" && isAbsPath(f.Filename) {
 			abs = f.Filename
 		}
-		if rel, ok := relToRoot(abs, gitRoot); ok {
+		if rel, ok := matchRoot(abs, gitRoot); ok {
 			f.AbsPath = abs
 			f.Filename = rel
 		}

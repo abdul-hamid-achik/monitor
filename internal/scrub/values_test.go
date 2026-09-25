@@ -72,3 +72,36 @@ func TestSecretEnvValuesMalformedEntriesIgnored(t *testing.T) {
 		t.Fatalf("malformed/empty entries should yield nothing, got %#v", got)
 	}
 }
+
+// TestSecretEnvValuesSelectsPassPwdKeyShorthand is SEC-6's regression:
+// the name heuristic covers the *_PASS/*_PWD shorthand (DB_PASS,
+// MYSQL_PWD) and the bare *_KEY suffix (STRIPE_KEY), while bare PWD
+// stays excluded and near-misses (COMPASS, MONKEY, PASSING) never match.
+func TestSecretEnvValuesSelectsPassPwdKeyShorthand(t *testing.T) {
+	environ := []string{
+		"DB_PASS=opaqueSecretValue99",
+		"REDIS_PASS=redisSecretValue88",
+		"SMTP_PASS=smtpSecretValue77",
+		"MYSQL_PWD=mysqlPwdValue77",
+		"STRIPE_KEY=opaque-live-key-000111",
+		"OPENAI_KEY=opaque-openai-key-1",
+		"ENCRYPTION_KEY=opaque-enc-key-22",
+		"SIGNING_KEY=opaque-sign-key-33",
+		"PWD=/repo/should-stay-excluded",
+		"COMPASS=not-a-secret",
+		"MONKEY=not-a-secret-either",
+		"PASSING=also-not-a-secret",
+	}
+
+	got := SecretEnvValues(environ, nil)
+	want := []string{
+		"opaqueSecretValue99", "redisSecretValue88", "smtpSecretValue77",
+		"mysqlPwdValue77", "opaque-live-key-000111", "opaque-openai-key-1",
+		"opaque-enc-key-22", "opaque-sign-key-33",
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("SecretEnvValues() = %#v, want %#v", got, want)
+	}
+}

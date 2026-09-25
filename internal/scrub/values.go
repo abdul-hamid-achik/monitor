@@ -6,11 +6,14 @@ import (
 )
 
 // secretNameRE matches environment variable NAMEs that conventionally carry
-// a secret value: token, secret, password/passwd, api_key/apikey,
-// private_key/privatekey, access_key/accesskey, dsn, credential, or a
-// standalone "pat" segment (e.g. GITHUB_PAT, MY_PAT_TOKEN), all
-// case-insensitive.
-var secretNameRE = regexp.MustCompile(`(?i)(token|secret|passw(or)?d|api_?key|private_?key|access_?key|dsn|credential|(^|_)pat(_|$))`)
+// a secret value: token, secret, password/passwd (and the *_PASS/*_PWD
+// shorthand SEC-6 added: DB_PASS, REDIS_PASS, SMTP_PASS, MYSQL_PWD),
+// api_key/apikey (and the generic *_KEY suffix: STRIPE_KEY, OPENAI_KEY,
+// ENCRYPTION_KEY, SIGNING_KEY), private_key/privatekey, access_key/
+// accesskey, dsn, credential, or a standalone "pat" segment (e.g.
+// GITHUB_PAT, MY_PAT_TOKEN), all case-insensitive. The 8-rune minimum in
+// WithValues, not this regex, is what keeps short false positives out.
+var secretNameRE = regexp.MustCompile(`(?i)(token|secret|passw(or)?d|api_?key|private_?key|access_?key|dsn|credential|(^|_)(pass|pwd)(_|$)|_key$|(^|_)pat(_|$))`)
 
 // alwaysExcludedNames are never treated as secrets even if their name would
 // otherwise match secretNameRE (it never does, in practice) or is listed in

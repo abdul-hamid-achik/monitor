@@ -103,6 +103,7 @@ func runHotService(cmd *cobra.Command, name, projectFlag, funcName, ptypeFlag, e
 	if sampleFallback {
 		hm, err = profiler.BuildHeatmapFromSample(ctx, prof, profiler.HeatOptions{
 			Func: funcName, Top: top, Runtime: string(binding.Runtime),
+			CodeRoots: []string{binding.CodebaseRoot}, // SEC-8: the leaf's own codebase stays readable when monitor runs elsewhere
 		})
 		if err != nil {
 			return fmt.Errorf("monitor hot %s: %w", name, err)
@@ -117,6 +118,7 @@ func runHotService(cmd *cobra.Command, name, projectFlag, funcName, ptypeFlag, e
 
 		hm, err = profiler.BuildHeatmap(ctx, src, profiler.HeatOptions{
 			Func: funcName, Top: top, ProfileType: heatType, Runtime: string(binding.Runtime),
+			CodeRoots: []string{binding.CodebaseRoot}, // SEC-8: the leaf's own codebase stays readable when monitor runs elsewhere
 		})
 		if err != nil {
 			return err
@@ -339,7 +341,10 @@ func hotServiceHeaderLine(ctx context.Context, name string, launchedPID int32, b
 	}
 	switch {
 	case method == "sample":
-		parts = append(parts, "sampling 1s")
+		// LUX-15: captureSample runs `sample <pid> <secs>` with the
+		// clamped request, so the banner prints that same clamped
+		// value -- what a person reads is what actually ran.
+		parts = append(parts, fmt.Sprintf("sampling %ds", profiler.SampleSeconds(duration)))
 	case heatType == profiler.HeatCPU:
 		parts = append(parts, "sampling "+duration.String())
 	default:

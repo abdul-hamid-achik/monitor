@@ -119,8 +119,12 @@ type Result struct {
 	// detector.firstNewIssueFullID's doc comment for why the exit
 	// summary's "next:" hint needs this instead of NewIssueIDs[0].
 	FirstNewIssueFullID string
-	Occurrences         int64
-	Pid                 int
+	// RegressedIDs are the display short IDs of every write this run that
+	// reopened a previously resolved issue (LUX-14, detector.regressedIDs)
+	// -- counted by the exit summary's "N regressed (...)" clause.
+	RegressedIDs []string
+	Occurrences  int64
+	Pid          int
 	// FailedWrites is how many detected exceptions could not be recorded
 	// into the issues store (almost always a contended writer lock at
 	// shutdown -- see detector.flushAllPending's bounded budget): counted,
@@ -507,6 +511,14 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	waitStart := time.Now()
 	waitErr := cmd.Wait()
 	close(sigDone)
+	// LUX-11: hand the detector the reaped child's exit code BEFORE the
+	// lines channel closes, so the shutdown flush (and any coalesce timer
+	// still pending) can downgrade a "<module>"-rooted fatal traceback to
+	// handled/error when the child exited 0. exitCodeFor is a pure read of
+	// cmd.ProcessState, safe to evaluate ahead of the later exitCode use.
+	if det != nil {
+		det.noteChildExit(exitCodeFor(cmd.ProcessState))
+	}
 	// One shared grace window: cmd.Wait may already have spent up to
 	// childIOGrace (via WaitDelay) on an exec-managed passthrough pipe that
 	// an orphan holds, so only the remainder is spent here -- but never less
@@ -528,6 +540,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if det != nil {
 		result.NewIssueIDs = det.newIssueIDs
 		result.FirstNewIssueFullID = det.firstNewIssueFullID
+		result.RegressedIDs = det.regressedIDs
 		result.Occurrences = det.occurrences
 		result.FailedWrites = det.failedWrites
 	}
@@ -539,6 +552,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			Duration:            time.Since(start),
 			NewIssueIDs:         result.NewIssueIDs,
 			FirstNewIssueFullID: result.FirstNewIssueFullID,
+			RegressedIDs:        result.RegressedIDs,
 			Dropped:             dropped,
 			FailedWrites:        result.FailedWrites,
 		}))

@@ -205,3 +205,141 @@ func TestCopyStreamReturnsNilOnEOF(t *testing.T) {
 		t.Fatal("copyStream did not return after the writer closed")
 	}
 }
+
+// TestScanChunkCapsPartialAndDiscardsUntilNewline pins CC-10's bounded
+// buffer algorithm deterministically: an unterminated line grows partial
+// only up to maxPartialLineBytes, the bytes past the cap are dropped
+// (discarding mode) until the next newline, and delivery then resumes with
+// the line AFTER the oversized one.
+func TestScanChunkCapsPartialAndDiscardsUntilNewline(t *testing.T) {
+	lines := make(chan streamLine, 16)
+	var dropped int64
+	fill := bytes.Repeat([]byte("x"), pumpReadBufSize)
+
+	var partial []byte
+	var pendingGap bool
+	var discarding bool
+	steps := 0
+	for ; steps < 8; steps++ { // 8 x 32 KiB = 256 KiB, well past the 64 KiB cap
+		partial, pendingGap, discarding = scanChunk(partial, fill, discarding, streamStderr, lines, &dropped, pendingGap)
+		if len(partial) > maxPartialLineBytes {
+			t.Fatalf("step %d: partial grew to %d bytes, want <= %d (CC-10)", steps, len(partial), maxPartialLineBytes)
+		}
+	}
+	if len(partial) != maxPartialLineBytes {
+		t.Errorf("partial = %d bytes after %d KiB with no newline, want exactly the %d-byte cap", len(partial), steps*pumpReadBufSize/1024, maxPartialLineBytes)
+	}
+	if !discarding {
+		t.Error("discarding = false after the cap was hit; the pump must enter discarding mode (CC-10)")
+	}
+
+	// Still inside the oversized line: a chunk with no newline changes
+	// nothing, and one that ends the line resumes delivery after it.
+	partial, pendingGap, discarding = scanChunk(partial, []byte("still-no-newline"), discarding, streamStderr, lines, &dropped, pendingGap)
+	if !discarding || len(partial) != maxPartialLineBytes {
+		t.Fatalf("discarding mode did not hold: discarding=%v partial=%d", discarding, len(partial))
+	}
+	partial, pendingGap, discarding = scanChunk(partial, []byte("TAIL-BYTES\nafter line\n"), discarding, streamStderr, lines, &dropped, pendingGap)
+	if discarding {
+		t.Fatal("discarding still set after the oversized line's newline; delivery must resume")
+	}
+	close(lines)
+	got := linesOf(drainFrom(lines))
+	// The capped prefix of the oversized line is delivered (the Joiner
+	// truncates to 8 KiB anyway), then the line after it, verbatim.
+	want := []string{strings.Repeat("x", maxPartialLineBytes), "after line"}
+	if len(got) != len(want) {
+		t.Fatalf("lines after discarding = %d (%q...), want %d", len(got), got[0][:min(32, len(got[0]))], len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("line %d after discarding = %.32q..., want %.32q...", i, got[i], want[i])
+		}
+	}
+}
+
+// drainFrom is drainLines for a channel the test has already closed after
+// filling, so it only collects what is buffered.
+func drainFrom(lines chan streamLine) []streamLine {
+	var got []streamLine
+	for sl := range lines {
+		got = append(got, sl)
+	}
+	return got
+}
+
+// countWriter counts the bytes copyStream passes through to the terminal,
+// proving the bounded line buffer never eats output.
+type countWriter struct{ n int64 }
+
+func (w *countWriter) Write(p []byte) (int, error) {
+	w.n += int64(len(p))
+	return len(p), nil
+}
+
+// bigLineReader yields size bytes with no newline, then "\nfin\n" -- the
+// shape of a child hammering one enormous line into fd 2 (CC-10's repro).
+// It materializes only one pumpReadBufSize chunk at a time.
+type bigLineReader struct {
+	remaining int
+	drained   bool
+}
+
+func (r *bigLineReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		if r.drained {
+			return 0, io.EOF
+		}
+		r.drained = true
+		tail := []byte("\nfin\n")
+		return copy(p, tail), nil
+	}
+	n := min(len(p), r.remaining)
+	for i := range n {
+		p[i] = 'x'
+	}
+	r.remaining -= n
+	return n, nil
+}
+
+// TestCopyStreamBoundedAndFastOnHugeNewlineFreeWrite is CC-10's end-to-end
+// property: a multi-MiB newline-free write must keep the pump's buffer
+// bounded and stay fast (the old code rescanned and re-appended the whole
+// accumulated partial on every 32 KiB read, which the finding measured at
+// 4 s / 403 MB RSS for 128 MiB; the chunk-scanned pump does one linear
+// pass). The emitted giant line is exactly maxPartialLineBytes long, the
+// byte stream still reaches the terminal in full, and the line after the
+// giant one is still delivered.
+func TestCopyStreamBoundedAndFastOnHugeNewlineFreeWrite(t *testing.T) {
+	const size = 128 << 20 // 128 MiB
+	in := &bigLineReader{remaining: size}
+	out := &countWriter{}
+	lines := make(chan streamLine, 8)
+	var dropped int64
+	start := time.Now()
+	if err := copyStream(out, in, streamStderr, lines, &dropped); err != nil {
+		t.Fatalf("copyStream: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	close(lines)
+	got := linesOf(drainFrom(lines))
+	if len(got) != 2 {
+		t.Fatalf("got %d lines, want 2 (the capped giant line + fin): %v", len(got), got)
+	}
+	if len(got[0]) != maxPartialLineBytes {
+		t.Errorf("giant line delivered at %d bytes, want exactly the %d-byte cap", len(got[0]), maxPartialLineBytes)
+	}
+	if got[1] != "fin" {
+		t.Errorf("line after the giant one = %q, want \"fin\"", got[1])
+	}
+	if want := int64(size) + int64(len("\nfin\n")); out.n != want {
+		t.Errorf("terminal received %d bytes, want all %d (the cap must bound the buffer, never the copy)", out.n, want)
+	}
+	if dropped != 0 {
+		t.Errorf("dropped = %d, want 0 (size-capping is not a channel drop)", dropped)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("copyStream took %v for a %d MiB newline-free write; the chunk scan must stay linear (CC-10)", elapsed, size>>20)
+	}
+}
