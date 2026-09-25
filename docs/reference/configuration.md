@@ -115,8 +115,11 @@ and the processes it launches can detect the observed run:
 
 | Variable | Set by | Meaning |
 |----------|--------|---------|
-| `MONITOR` | `monitor run` | Always set to `1` in the glyphrun child, mirroring glyphrun's `GLYPHRUN` pattern. |
-| `MONITOR_RUN_DIR` | `monitor run` | Reuses a non-empty inherited value; otherwise points to a temporary directory that Monitor removes after glyphrun exits. |
+| `MONITOR` | `monitor run <spec.yml>` | Always set to `1` in the glyphrun child, mirroring glyphrun's `GLYPHRUN` pattern. |
+| `MONITOR_RUN_DIR` | `monitor run <spec.yml>` | Reuses a non-empty inherited value; otherwise points to a temporary directory that Monitor removes after glyphrun exits. |
+| `MONITOR_LAUNCH_ID` | `monitor run -- <cmd>` | Unique ID of this launch, exported in the child's environment. |
+| `MONITOR_LAUNCH_SERVICE` | `monitor run -- <cmd>` | Service name for the launch (`--name`, else the resolved project service, else the command name). |
+| `MONITOR_LAUNCH_ROOT` | `monitor run -- <cmd>` | ID of the outermost launch (nested runs dedupe under it; siblings get their own). |
 | `MONITOR_LOG_STORE` | `monitor logs capture/search` | Shared override for the log database path. A command-level `--store` flag takes precedence; the default is `~/.local/share/monitor/logs.veclite`. |
 | `MONITOR_ISSUES_STORE` | issue CLI, investigate, watch, MCP | Shared override for the issue database path. `issues --store` takes precedence for CLI reads/mutations; the default follows `$XDG_DATA_HOME/monitor/issues.veclite` or `~/.local/share/monitor/issues.veclite`. |
 

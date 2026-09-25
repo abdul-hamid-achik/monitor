@@ -1,8 +1,8 @@
 # Monitor
 
 A terminal-based, **agent-harnessable** system monitor for macOS and Linux,
-built in Go with the Charm ecosystem (Bubble Tea v2) and a Nord theme —
-with local, SDK-free error tracking built in.
+built in Go with the Charm ecosystem (Bubble Tea v2) and the docs site's
+own palette — with local, SDK-free error tracking built in.
 
 Monitor exposes the same system data three ways: an interactive TUI
 (`monitor studio`), JSON CLI commands, and an MCP stdio server — for humans,
@@ -41,7 +41,7 @@ scripts, and agents alike. Running bare `monitor` prints help.
 - 🧩 **Ecosystem integration** — file.cheap incident evidence, Chalupa CI
   correlation, codemap symbol impact, vecgrep semantic context, tinyvault
   secret injection, and glyphrun specs
-- 🎨 **Nord theme** + full keyboard & mouse navigation
+- 🎨 **Site-matched theme** (dark + light) + full keyboard & mouse navigation
 
 ## Quickstart: crash to explained issue
 
@@ -318,4 +318,3 @@ MIT — see LICENSE.
 
 - [Charm](https://charm.sh/) for the TUI libraries
 - [gopsutil](https://github.com/shirou/gopsutil) for system metrics
-- [Nord Theme](https://www.nordtheme.com/) for the palette

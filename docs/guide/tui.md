@@ -1,7 +1,9 @@
 # The TUI
 
 `monitor studio` launches the interactive TUI — a Bubble Tea v2 application
-with a Nord theme, nine tabs, and full keyboard and mouse navigation. (Running
+with the docs site's own palette (brand red on warm dark/light backgrounds,
+auto-detected from the terminal), nine tabs, and full keyboard and mouse
+navigation. (Running
 bare `monitor` prints help instead.)
 
 ```bash
@@ -104,12 +106,16 @@ These keys are active only on the Processes tab (tab `7`):
 | `Ctrl+D` | Clear the selection |
 | `c` | Sort by CPU (press again to reverse) |
 | `m` | Sort by memory (press again to reverse) |
-| `k` | Terminate (SIGTERM) the selection, with confirmation |
-| `x` | Force-kill (SIGKILL) the selection, with confirmation |
+| `K` (Shift+K) | Terminate (SIGTERM) the selection, with confirmation |
+| `X` (Shift+X) | Force-kill (SIGKILL) the selection, with confirmation |
 
-The table itself responds to the usual arrow keys for moving the highlight up
-and down. Its columns adapt to terminal width, preserving PID, name, and CPU on
-narrow screens and progressively adding memory, threads, I/O, and user details.
+Termination deliberately needs the Shift key: lowercase `j`/`k` move the
+highlight up and down (vim-style, alongside the arrow keys), so a navigation
+keystroke can never be mistaken for a kill request. The hint bar under the
+title shows the full map: `↑/↓ or j/k navigate · enter details · space
+select · / filter · c/m sort · K/X terminate`. The table's columns adapt to
+terminal width, preserving PID, name, and CPU on narrow screens and
+progressively adding memory, threads, I/O, and user details.
 
 ## Inspecting process diagnostics
 
@@ -159,17 +165,19 @@ You can act on either a single highlighted row or a multi-row selection:
 
 1. **Select** rows with `Space` (toggling each one), `Ctrl+A` (select all
    filtered rows), or `Ctrl+D` (clear). Selected rows are marked with a `▸`
-   and the Processes panel heading shows the count, e.g.
-   `Processes - 3 selected │ k:kill x:force-kill`.
-2. **Kill** with `k` (SIGTERM) or `x` (SIGKILL). If you haven't explicitly
+   and the panel heading shows the count, e.g.
+   `Processes · 50 shown · sort cpu↑ · 3 selected`.
+2. **Kill** with `K` (SIGTERM) or `X` (SIGKILL). If you haven't explicitly
    selected anything, the currently highlighted row is used.
-3. A **confirmation dialog** appears, listing each target PID and a safety
-   label: `OK`, `CAUTION` for system processes, or `CRITICAL` for
-   protected ones. Force-kill adds a warning that the process won't be allowed
-   to clean up.
+3. A **confirmation dialog** appears: a `TERMINATE (SIGTERM) CONFIRMATION`
+   (or `FORCE KILL (SIGKILL) CONFIRMATION`) title, a `N requested ·
+   N eligible · N blocked` summary, and one row per target PID labeled
+   `[ELIGIBLE]` or `[BLOCKED ]`. Force-kill adds a `SIGKILL does not allow
+   process cleanup` warning.
 4. Press `y` to confirm or `n` / `Esc` to cancel. Verification runs
-   asynchronously so Studio stays responsive, then reports terminated,
-   still-running, failed, and spared counts in the status bar.
+   asynchronously so Studio stays responsive, then reports `terminated`,
+   `still running` (with a `use X to force` hint), `unverified`,
+   `failed`, and `spared protected/system` counts in the status bar.
 
 Termination goes through the same shared safety check used by the CLI and MCP
 server: **protected processes are never killed**, even if you confirm. See

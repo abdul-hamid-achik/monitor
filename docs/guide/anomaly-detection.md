@@ -34,7 +34,7 @@ Every alert carries the same shape regardless of which rule fired:
     "summary": "node pinned a core for 45s while RSS stayed flat — consistent with a hot loop",
     "evidence": ["cpu 150% for 45s", "rss flat"],
     "confidence": "medium",
-    "next_actions": ["monitor profile 1133 --type cpu", "monitor investigate 1133"]
+    "next_actions": ["monitor_profile_capture pid:1133 type:cpu confirm:true", "monitor_investigate pid:1133 confirm:true"]
   }
 }
 ```
@@ -101,7 +101,7 @@ what to do next*. Every diagnosis has four fields:
 | `summary` | One plain-language sentence, e.g. "RSS grew 42%/10min while CPU stayed flat — consistent with a memory leak (slope 3.2MB/min, R²=0.94)". |
 | `evidence` | The numbers behind the claim (regression slope, R², durations, sample counts) — never discarded, so an agent can double-check the reasoning. |
 | `confidence` | `low`, `medium`, or `high`, graded from the strength of the evidence: regression fit (R², sample count) for a trend, the level for a flat-but-high signal, or the reversal count for a sawtooth. |
-| `next_actions` | At most two concrete next steps — a `monitor` CLI command or MCP tool invocation. |
+| `next_actions` | At most two concrete next steps, each a `monitor` MCP tool invocation (e.g. `monitor_profile_capture pid:1133 type:cpu confirm:true`). |
 
 The analyzer (`internal/analyzer/diagnosis.go`) correlates RSS and CPU trend
 classes over the per-PID history it already holds, using a small ordered rule

@@ -1,13 +1,11 @@
 # `monitor.line_heatmap.v1`
 
-> **Status: Implemented for `monitor hot --file <path>`** (E3.1,
-> `profiler.BuildHeatmap`, the `heat.Build` this document originally
-> drafted). Resolving a live `<pid|service>` target — the `hot <pid>` /
-> `hot <service>` forms the naming ADR also documents — is E3.2, a later
-> wave; today's `--file`-only CLI gives that combination a clear
-> "not implemented yet" error rather than doing nothing silently. The full
-> `monitor hot <pid|service|--file>` command shape is specified by the
-> internal naming ADR (see the repo's AGENTS.md), not this document.
+> **Status: Implemented** (E3.1, `profiler.BuildHeatmap`, the
+> `heat.Build` this document originally drafted; E3.2 added live
+> `<pid|service>` resolution on top of the same document). `monitor hot`
+> serves this schema from `--file`, `<pid>`, and `<service>` alike. The
+> full `monitor hot <pid|service|--file>` command shape is specified by
+> the internal naming ADR (see the repo's AGENTS.md), not this document.
 
 ## Why this exists
 
@@ -116,8 +114,8 @@ caller's own `callees`, by name, with its real cumulative weight.
   (`monitor hot --file`): Node, Deno, and Bun all write the identical CDP
   wire shape, so it is genuinely not determinable from the file's content
   alone — degrading honestly to `"unknown"` rather than guessing `"node"`.
-  A live capture (E3.2, `monitor hot <pid|service>`) can set it from
-  `procbind`'s own runtime detection once that wiring lands. `"go"` is
+  A live capture (`monitor hot <pid|service>`) sets it from
+  `procbind`'s own runtime detection. `"go"` is
   hard-coded for a pprof-sourced heatmap: every pprof proto `monitor hot
   --file` is actually handed, in this codebase, comes from `monitor
   profile`/`net/http/pprof` capturing a Go process — but `LoadFile` itself

@@ -25,23 +25,34 @@ monitor/
 ├── internal/
 │   ├── collector/             # pub/sub metric collector (canonical pattern)
 │   ├── telemetry/             # bounded, identity-free NDJSON metric windows
-│   ├── cli/                   # cobra subcommands (snapshot, watch, kill, ...)
+│   ├── cli/                   # cobra subcommands (run, issues, hot, snapshot, ...)
 │   ├── mcp/                   # MCP stdio server (10 tools, mutations confirm-gated)
 │   ├── analyzer/              # anomaly rules (CPU spike, RSS growth)
 │   ├── capture/               # process stdout/stderr → veclite log store
 │   ├── logger/                # bounded veclite log store + keyword search
-│   ├── profiler/              # pprof scrape + macOS `sample`
+│   ├── history/               # persistent metric history + trends
+│   ├── baseline/              # labeled snapshots + diffs with verdicts
+│   ├── profiler/              # CDP/pprof/sample capture + line heatmaps
 │   ├── procbind/              # process runtime/codebase binding
 │   ├── contextids/            # Monitor/Chalupa run correlation
+│   ├── devrun/                # `monitor run -- <cmd>`: launch + crash detector
+│   ├── stacktrace/            # SDK-free stack-trace parsers (V8/Python/Ruby/Go)
+│   ├── scrub/                 # secret/PII redaction for recorded text
+│   ├── project/               # project/service identity resolution
 │   ├── issues/                # Run/Event/Issue/Evidence persistence
+│   ├── explain/               # issue-context pages (culprit, causes, impact)
+│   ├── sourcemap/             # Source Map v3 decoder for JS hot lines
 │   ├── incidents/             # integrity-hashed file.cheap evidence
 │   ├── reload/                # localhost HTTP /reload endpoint
 │   ├── temperature/           # real SMC temperature via powermetrics (+fallback)
 │   ├── ecosystem/             # CLI wrappers for codemap/fcheap/tvault/glyphrun
 │   ├── kill/                  # safe process termination
+│   ├── notify/                # desktop + webhook alert sinks
+│   ├── cgroup/                # Linux cgroup v2 detection
+│   ├── capability/            # host capability probing
 │   ├── config/                # JSON settings (~/.config/monitor/config.json)
 │   ├── ui/studio/             # the TUI (Bubble Tea v2 / charm.land)
-│   └── widgets/               # sparklines, gauges (lipgloss v2)
+│   └── widgets/               # sparklines, gauges, CodeFrame (lipgloss v2)
 ├── specs/                     # glyphrun behavioral specs
 ├── Taskfile.yml
 └── README.md
@@ -53,15 +64,26 @@ monitor/
 |---------|------|
 | `internal/collector` | Pub/sub metric collector — publishes an `Event` on every tick; the canonical pattern other packages follow. Holds the metric types (`CPUInfo`, `MemoryInfo`, `ProcessInfo`, ...) and a generic ring buffer. |
 | `internal/telemetry` | Fixed, bounded `monitor.telemetry_window` V1 aggregation and NDJSON serialization. This package is the privacy boundary for external adapters and contains no transport or persistence. |
-| `internal/cli` | Cobra subcommands (`snapshot`, `watch`, `telemetry`, `analyze`, `process`, `processes`, `resolve`, `tree`, `kill`, `profile`, `investigate`, `issues`, `stash`, `incidents`, `logs`, `history`, `baseline`, `diff`, `config`, `doctor`, `run`, `reload`, `mcp`, `vault`, `studio`) plus the JSON/NDJSON output helpers. |
+| `internal/cli` | Cobra subcommands (`snapshot`, `watch`, `telemetry`, `analyze`, `process`, `processes`, `resolve`, `tree`, `kill`, `profile`, `hot`, `investigate`, `issue`, `issues`, `stacktrace`, `stash`, `incidents`, `logs`, `history`, `baseline`, `diff`, `config`, `doctor`, `run`, `reload`, `mcp`, `vault`, `studio`) plus the JSON/NDJSON output helpers. |
 | `internal/mcp` | MCP stdio server: 10 tools (6 read-only, 4 mutating) over the standard Model Context Protocol transport, with confirm-gated mutation. |
 | `internal/analyzer` | Pluggable anomaly rules — `CPUSpikeRule` (current CPU versus a rolling per-PID median plus an absolute floor), `RSSGrowthRule` (wall-clock-normalized RSS regression), `ZombieRule`, `DiskFillRule`, `SwapPressureRule`, and a config-driven `ThresholdRule`. Per-process alerts attach a `Diagnosis` when their cross-signal history can interpret the signal; `internal/analyzer/diagnosis.go` classifies memory-leak / hot-loop / load / GC-pressure patterns for CLI, MCP, and watch consumers. |
 | `internal/capture` | Log capture pipeline — pumps a child process's stdout/stderr into the veclite log store. |
-| `internal/logger` | Durable veclite-backed log store with metadata/time filtering and export; default retention is 7 days / 100,000 FIFO records, and searches are capped at 1,000. `logs capture` holds the writer while search opens read-only with shared-read. |
+| `internal/logger` | Durable veclite-backed log store with metadata/time filtering and export; default retention is 7 days / 100,000 FIFO records, and `logs search` defaults to 50 results (`--limit`). `logs capture` holds the writer while search opens read-only with shared-read. |
 | `internal/profiler` | Runtime-aware process profiling — Node/Bun/Deno CPU and bounded heap capture over a loopback CDP inspector, Go `net/http/pprof`, and macOS `sample` fallback. |
 | `internal/procbind` | Inspects or safely resolves one process, classifies its runtime, detects Node inspector metadata, and resolves the nearest codebase root. Argv is used in memory and redacted from serialized bindings. |
 | `internal/contextids` | Resolves explicit, `MONITOR_*`, and `CHALUPA_CI_*` identifiers into run context and searchable incident tags without changing telemetry V1. |
-| `internal/issues` | Groups occurrences into issues using Fingerprint V1 and stores Run/Event/Issue/Evidence data in a private veclite database. Resolved issues reopen on a later occurrence; ignored issues continue accumulating without reopening. |
+| `internal/devrun` | `monitor run -- <cmd>`: launches the child, mirrors its output, detects crashes on the scanned stream, and records grouped issues. |
+| `internal/stacktrace` | SDK-free stack-trace detection: stream joiner plus parsers for V8/Deno/Bun, Python, Ruby, and Go (panics, zap, wrapped errors), with in-app classification. |
+| `internal/scrub` | Default secret/PII redaction (provider-shaped secrets, emails, card numbers, secret env values) applied before error text is persisted or served. |
+| `internal/project` | Resolves one project/service identity (flag → env → git root → markers → process) for grouping and display. |
+| `internal/explain` | Builds `monitor.issue_context.v1` pages: culprit snippet, causes, in-app stack, codemap impact, last-touched commit, and next steps. |
+| `internal/sourcemap` | Dependency-free Source Map v3 decoder mapping bundled/transpiled JS positions back to original lines. |
+| `internal/history` | Persists metric samples over time for queries and the Trends tab. |
+| `internal/baseline` | Labeled system snapshots with diffs and confidence-graded verdicts. |
+| `internal/notify` | Desktop (`osascript`/`notify-send`) and webhook POST sinks for watch alerts. |
+| `internal/cgroup` | Linux cgroup v2 detection for container-aware metrics. |
+| `internal/capability` | Host capability probing (what this machine can collect). |
+| `internal/issues` | Groups occurrences into issues — Fingerprint V1 for watch alerts and investigations, Fingerprint V2 for parsed application exceptions — and stores Run/Event/Issue/Evidence data in a private veclite database. Resolved issues reopen on a later occurrence; ignored issues continue accumulating without reopening. |
 | `internal/incidents` | Integrity-hashed incident evidence — bundles a snapshot and optional profile/code context, validates regular-file layout, and saves it to fcheap. Failed archival uses a private, 20-entry recovery registry; successful saves may yield validated ArtifactRefV1. |
 | `internal/reload` | Localhost HTTP `/reload` endpoint (POST on `127.0.0.1:7351`) signalling external processes that data changed. |
 | `internal/temperature` | Real SMC temperature via `sudo powermetrics`, with a transparent CPU-load estimate fallback and a `real`/`est` source badge. |
@@ -122,9 +144,17 @@ Chalupa/Monitor Run context ─┘                              └── lifecy
 
 `monitor investigate` creates an occurrence in its seventh `issue` step.
 `monitor watch --stash` creates one after capturing an alert bundle. Stable
-identity uses project, service, kind, normalized message/exception type, and
-symbols. Run, release, PID, tree hash, timestamp, and artifact references stay
-on the occurrence so retries and restarts group correctly.
+identity (Fingerprint V1) uses project, service, kind, normalized
+message/exception type, and symbols. Run, release, PID, tree hash, timestamp,
+and artifact references stay on the occurrence so retries and restarts group
+correctly.
+
+Parsed application exceptions (`monitor run --`, `stacktrace parse --record`)
+group under Fingerprint V2 instead: the outer exception type, the top in-app
+frames of the outer exception, and the innermost cause type — no line numbers,
+no PIDs, no releases. Each V2 issue also gets a culprit `file:line` (the
+innermost cause's last in-app frame) rendered with a source snippet by
+`internal/explain`.
 
 The MCP issue tools are read-only. CLI commands own lifecycle mutations
 (`resolve`, `ignore`, `reopen`), while evidence bytes remain in file.cheap or

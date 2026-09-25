@@ -21,7 +21,7 @@ was flagged.
 
 | Surface | How you confirm |
 |---------|-----------------|
-| **TUI** | A confirmation dialog appears (`k` = SIGTERM, `x` = SIGKILL); confirm with `y`, cancel with `n`/`esc`. Protected **and** system PIDs stay refused even at the dialog, matching the CLI and MCP. |
+| **TUI** | A confirmation dialog appears (`K` = SIGTERM, `X` = SIGKILL — Shift is required, since lowercase `j`/`k` navigate the table); confirm with `y`, cancel with `n`/`esc`. Protected **and** system PIDs stay refused even at the dialog, matching the CLI and MCP. |
 | **CLI** | `monitor kill <pid>` refuses protected/system PIDs. `--yes` is accepted for compatibility but never overrides the safety classification. |
 | **MCP** | `monitor_kill` requires `confirm: true` in its typed input, *and* still refuses protected/system PIDs with a structured `{ "refused": true }` payload. |
 
@@ -30,7 +30,7 @@ was flagged.
 By default Monitor sends `SIGTERM`, giving the process a chance to shut down
 cleanly. Force-kill (`SIGKILL`) is always an explicit, separate action:
 
-- TUI: `x` instead of `k`
+- TUI: `X` instead of `K` (both need Shift)
 - CLI: `monitor kill <pid> --force`
 - MCP: `force: true` in the `monitor_kill` input
 
@@ -58,14 +58,32 @@ $ monitor kill 1 --json
 {
   "killed": false,
   "protected": true,
+  "reason": "protected or system processes cannot be terminated by monitor",
+  "refused": true,
+  "safety": {
+    "processes": [
+      {
+        "is_protected": true,
+        "is_system": false,
+        "name": "launchd",
+        "pid": 1,
+        "user": "root"
+      }
+    ],
+    "has_protected": true,
+    "has_system": false,
+    "safety_warnings": [
+      "launchd (pid 1) is a protected system process"
+    ]
+  },
   "safety_warnings": [
     "launchd (pid 1) is a protected system process"
-  ],
-  "refused": true,
-  "reason": "protected or system processes cannot be terminated by monitor",
-  "safety": { "has_protected": true, "has_system": true }
+  ]
 }
 ```
+
+(The per-process entries carry the full metric detail — CPU, memory,
+threads — trimmed here to the safety fields.)
 
 (The MCP `monitor_kill` tool returns a different shape — `{ "killed": false,
 "refused": true, "reason": ..., "pid": ... }` — for the same refusal.)
