@@ -255,9 +255,10 @@ func TestDiscardTempProfilePathClearsOnlyPath(t *testing.T) {
 
 // TestDiscardTempProfilePathKeepsSoleEvidence is CC-2's keep-rules half:
 // the temp file is deleted only when Text/Symbols already carry the
-// evidence. A pprof CPU profile (Text always empty -- the .pb.gz is what
-// `go tool pprof` reads) and a CDP heap snapshot (no Text, no Symbols)
-// both keep their Path, so --json still returns usable raw evidence.
+// evidence. A capture with NEITHER (a CDP heap snapshot) keeps its Path,
+// so --json still returns usable raw evidence; a pprof CPU capture WITH
+// symbols deletes like everything else (E1.7), since Symbols carry the
+// evidence and VerifyArtifact verifies symbols-only profiles.
 func TestDiscardTempProfilePathKeepsSoleEvidence(t *testing.T) {
 	mkpath := func(t *testing.T) string {
 		t.Helper()
@@ -274,13 +275,24 @@ func TestDiscardTempProfilePathKeepsSoleEvidence(t *testing.T) {
 		return f.Name()
 	}
 	cpu := &profiler.Profile{Method: "pprof_cpu", Path: mkpath(t), Symbols: []profiler.Symbol{{Func: "main.f"}}}
-	if discardTempProfilePath(cpu) {
-		t.Error("pprof_cpu with symbols: discard = true, want false (the .pb.gz stays the primary artifact)")
+	cpuPath := cpu.Path
+	if !discardTempProfilePath(cpu) {
+		t.Error("pprof_cpu with symbols: discard = false, want true (Symbols carry the evidence; E1.7 removes the temp file)")
 	}
-	if cpu.Path == "" {
-		t.Error("pprof_cpu: Path cleared, want it kept")
-	} else if _, err := os.Stat(cpu.Path); err != nil {
-		t.Errorf("pprof_cpu temp file gone: %v", err)
+	if cpu.Path != "" {
+		t.Errorf("pprof_cpu: Path = %q, want cleared", cpu.Path)
+	}
+	if _, err := os.Stat(cpuPath); !os.IsNotExist(err) {
+		t.Errorf("pprof_cpu temp file %s still exists: %v", cpuPath, err)
+	}
+	// A pprof CPU capture that produced NO symbols either keeps its file:
+	// with no Text and no Symbols the .pb.gz is the sole evidence.
+	bare := &profiler.Profile{Method: "pprof_cpu", Path: mkpath(t)}
+	if discardTempProfilePath(bare) {
+		t.Error("pprof_cpu without symbols: discard = true, want false (the file is the sole evidence)")
+	}
+	if bare.Path == "" {
+		t.Error("pprof_cpu without symbols: Path cleared, want it kept")
 	}
 	heap := &profiler.Profile{Method: "cdp_heap", Path: mkpath(t)}
 	if discardTempProfilePath(heap) {
