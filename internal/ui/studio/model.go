@@ -636,12 +636,12 @@ func fitText(value string, width int) string {
 	return string(runes[:width-1]) + "…"
 }
 
-func tempBadge(source string) string {
+func (m Model) tempBadge(source string) string {
 	switch source {
 	case "powermetrics":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#A3BE8C")).Render(" ● real")
+		return lipgloss.NewStyle().Foreground(m.theme.Good).Render(" ● real")
 	default:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#4C566A")).Render(" ● est")
+		return lipgloss.NewStyle().Foreground(m.theme.Muted).Render(" ● est")
 	}
 }
 
@@ -687,7 +687,7 @@ func (m Model) renderSettings() string {
 		fmt.Sprintf("  Memory Alert Threshold: %s", memAlert),
 	}
 	// Mark the selected row.
-	sel := lipgloss.NewStyle().Foreground(lipgloss.Color("#88C0D0")).Bold(true)
+	sel := lipgloss.NewStyle().Foreground(m.theme.Accent).Bold(true)
 	for i := range rows {
 		if i == m.settingsCursor {
 			rows[i] = sel.Render("▸" + rows[i][1:])
@@ -702,7 +702,7 @@ func (m Model) renderSettings() string {
 	} else if m.settingsDirty {
 		hint += "   ● unsaved"
 	}
-	footer := "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("#4C566A")).Render(hint)
+	footer := "\n" + lipgloss.NewStyle().Foreground(m.theme.Muted).Render(hint)
 	return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Settings ") + "\n\n" + body + footer)
 }
 
@@ -728,7 +728,7 @@ func (m Model) renderTemperature() string {
 		return m.renderMetricStatePanel("Temperature", "Unavailable", reason, true)
 	}
 
-	badge := tempBadge(temp.Source)
+	badge := m.tempBadge(temp.Source)
 	rows := []string{m.titleStyle.Render(" Sensor Readings "), "", "  Source:" + badge,
 		fmt.Sprintf("  CPU Package  %s · %s", m.formatTemp(temp.CPUPackage), gaugeLabel(temp.CPUPackage)),
 		fmt.Sprintf("  CPU Cores    %s · %s", m.formatTemp(temp.CPUCores), gaugeLabel(temp.CPUCores)),

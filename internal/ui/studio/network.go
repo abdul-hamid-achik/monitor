@@ -77,7 +77,7 @@ func (m Model) renderNetwork() string {
 			history := widgets.NewMultiSparkline()
 			history.Data = [][]float64{net.DownloadHistory, net.UploadHistory}
 			history.Labels = []string{"download", "upload"}
-			history.Colors = []string{"#88C0D0", "#A3BE8C"}
+			history.Colors = []string{m.theme.hex(m.theme.Accent), m.theme.hex(m.theme.Good)}
 			history.Width = panelWidth - 18
 			if history.Width < 8 {
 				history.Width = 8

@@ -98,7 +98,7 @@ func (m Model) renderCPUHistory(cpu collector.CPUInfo, height int) string {
 	spark.Min = 0
 	spark.Max = 100
 	spark.AutoScale = false
-	spark.Color = "#88C0D0"
+	spark.Color = m.theme.hex(m.theme.Accent)
 	return spark.Render()
 }
 
@@ -151,7 +151,7 @@ func (m Model) renderCoreGrid(cpu collector.CPUInfo, width, maxRows int) string 
 			bar.Value = cpu.PerCoreUsage[i]
 			bar.Width = barWidth
 			bar.ShowPercent = true
-			bar.ColorFunc = cpuGaugeColor
+			bar.ColorFunc = func(v float64) string { return m.theme.gaugeHex(v, 50, 80) }
 			cell := fmt.Sprintf("  Core %-2d %s", i, bar.Render())
 			cells = append(cells, lipgloss.NewStyle().Width(cellWidth).Render(cell))
 		}
@@ -205,16 +205,6 @@ func metricIssue(statuses map[string]collector.MetricStatus, key string) string 
 		return reason
 	}
 	return string(status.State)
-}
-
-func cpuGaugeColor(v float64) string {
-	if v >= 80 {
-		return "#BF616A"
-	}
-	if v >= 50 {
-		return "#EBCB8B"
-	}
-	return "#A3BE8C"
 }
 
 func maxInt(a, b int) int {

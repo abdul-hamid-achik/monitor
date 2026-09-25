@@ -78,16 +78,7 @@ func (m Model) renderMemory() string {
 		memBar.Value = mem.UsagePercent
 		memBar.Width = metricBarWidth(m.width)
 		memBar.ShowPercent = true
-		memBar.ColorFunc = func(v float64) string {
-			switch {
-			case v >= 90:
-				return "#BF616A"
-			case v >= 70:
-				return "#EBCB8B"
-			default:
-				return "#A3BE8C"
-			}
-		}
+		memBar.ColorFunc = func(v float64) string { return m.theme.gaugeHex(v, 70, 90) }
 		stats := fmt.Sprintf("  Total: %s    Used: %s    Available: %s",
 			collector.FormatBytes(mem.TotalBytes), collector.FormatBytes(mem.UsedBytes), collector.FormatBytes(mem.AvailableBytes))
 		if m.width < 64 {

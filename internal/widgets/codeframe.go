@@ -109,12 +109,16 @@ const DefaultCodeFrameWidth = 100
 // column out of alignment.
 const codeColumnWidth = 58
 
+// CodeFrame's fixed palette follows the docs site's dark tokens (see
+// internal/ui/studio/theme.go): brand red for the hot line and bars,
+// muted gray for annotations. Widgets carry no light/dark theme of their
+// own; these are tuned for dark terminals like the old Nord set was.
 var (
-	frameHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#607089"))
-	frameHotStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#E5C07B")).Bold(true)
-	frameBarStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#88C0D0"))
-	frameCumBarStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#A3BE8C"))
-	frameDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#607089"))
+	frameHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6AEBA"))
+	frameHotStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8A80")).Bold(true)
+	frameBarStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8A80"))
+	frameCumBarStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#62B891"))
+	frameDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6AEBA"))
 )
 
 func (f CodeFrame) style(s lipgloss.Style, text string) string {

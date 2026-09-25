@@ -24,6 +24,41 @@ func TestStudioThemeHasDistinctLightAndDarkRoles(t *testing.T) {
 	}
 }
 
+func TestThemeHexRoundTripsRoles(t *testing.T) {
+	for _, dark := range []bool{true, false} {
+		th := newStudioTheme(dark)
+		for name, role := range map[string]color.Color{
+			"accent": th.Accent, "good": th.Good,
+			"warning": th.Warning, "critical": th.Critical,
+		} {
+			got := th.hex(role)
+			if len(got) != 7 || got[0] != '#' {
+				t.Errorf("dark=%v %s hex = %q, want #rrggbb", dark, name, got)
+			}
+		}
+	}
+}
+
+func TestThemeGaugeHexFollowsThresholds(t *testing.T) {
+	th := newStudioTheme(true)
+	cases := []struct {
+		v, warn, crit float64
+		role          color.Color
+	}{
+		{95, 70, 90, th.Critical},
+		{90, 70, 90, th.Critical},
+		{89, 70, 90, th.Warning},
+		{70, 70, 90, th.Warning},
+		{69, 70, 90, th.Good},
+		{0, 70, 90, th.Good},
+	}
+	for _, c := range cases {
+		if got, want := th.gaugeHex(c.v, c.warn, c.crit), th.hex(c.role); got != want {
+			t.Errorf("gaugeHex(%v, %v, %v) = %s, want %s", c.v, c.warn, c.crit, got, want)
+		}
+	}
+}
+
 func TestBackgroundColorMessageRebuildsStudioStyles(t *testing.T) {
 	m := NewModelWithOptions(Options{DisableTemperatureSource: true})
 	t.Cleanup(m.cancel)

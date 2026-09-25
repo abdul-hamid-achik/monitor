@@ -26,7 +26,7 @@ var (
 	sparklineStyleCache = make(map[string]lipgloss.Style)
 	sparklineGlyphCache = make(map[string][]string)
 	barFilledStyleCache = make(map[string]lipgloss.Style)
-	barEmptyStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#607089"))
+	barEmptyStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#3A4356"))
 )
 
 func getSparklineStyle(color string) lipgloss.Style {
@@ -69,7 +69,7 @@ func NewSparkline() *Sparkline {
 		Width:     40,
 		Height:    5,
 		AutoScale: true,
-		Color:     "#88C0D0", // Nord blue
+		Color:     "#FF8A80", // site brand red (dark)
 		ShowAxis:  true,
 	}
 }

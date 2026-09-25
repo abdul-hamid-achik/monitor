@@ -30,7 +30,7 @@ func diskPartitionLimit(width, height int) int {
 	return 12
 }
 
-func diskPartitionLine(partition collector.DiskPartitionInfo, panelWidth int, narrow bool) string {
+func (m Model) diskPartitionLine(partition collector.DiskPartitionInfo, panelWidth int, narrow bool) string {
 	innerWidth := panelWidth - 4
 	if narrow {
 		stats := fmt.Sprintf("%5.1f%% · %s", partition.UsagePercent, collector.FormatBytes(partition.TotalBytes))
@@ -45,16 +45,7 @@ func diskPartitionLine(partition collector.DiskPartitionInfo, panelWidth int, na
 	bar.Value = partition.UsagePercent
 	bar.Width = 12
 	bar.ShowValue = false
-	bar.ColorFunc = func(v float64) string {
-		switch {
-		case v >= 90:
-			return "#BF616A"
-		case v >= 70:
-			return "#EBCB8B"
-		default:
-			return "#A3BE8C"
-		}
-	}
+	bar.ColorFunc = func(v float64) string { return m.theme.gaugeHex(v, 70, 90) }
 	stats := fmt.Sprintf("%5.1f%% %s/%s", partition.UsagePercent,
 		collector.FormatBytes(partition.UsedBytes), collector.FormatBytes(partition.TotalBytes))
 	mountWidth := innerWidth - lipgloss.Width(bar.Render()) - len([]rune(stats)) - 4
@@ -112,7 +103,7 @@ func (m Model) renderDisk() string {
 				visible = limit
 			}
 			for _, partition := range partitions[:visible] {
-				lines = append(lines, diskPartitionLine(partition, panelWidth, narrow))
+				lines = append(lines, m.diskPartitionLine(partition, panelWidth, narrow))
 			}
 			if hidden := len(partitions) - visible; hidden > 0 {
 				if narrow {
@@ -149,7 +140,7 @@ func (m Model) renderDisk() string {
 			history := widgets.NewMultiSparkline()
 			history.Data = [][]float64{disk.ReadHistory, disk.WriteHistory}
 			history.Labels = []string{"read", "write"}
-			history.Colors = []string{"#88C0D0", "#A3BE8C"}
+			history.Colors = []string{m.theme.hex(m.theme.Accent), m.theme.hex(m.theme.Good)}
 			history.Width = panelWidth - 18
 			if history.Width < 8 {
 				history.Width = 8
