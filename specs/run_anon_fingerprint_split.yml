@@ -1,0 +1,91 @@
+version: 1
+name: monitor_run_anon_fingerprint_split
+
+intent: |
+  CC-5 (the naming ADR §6 fingerprint-rule revision): two DIFFERENT truly
+  anonymous callbacks in ONE file -- the normal Express/Koa/Fastify
+  Map-registered route style, where V8 prints "at /path/routes.js:3:50"
+  with no symbol at all -- used to render the same fingerprint token
+  "@routes.js", so both bugs merged into a single issue whose culprit
+  flipped between their lines and the second bug was invisible. The token
+  now carries a short hash of the frame's source context line
+  ("<anon>:<ctx>@routes.js"), so the two crashes below must land as TWO
+  issues, each with occurrence_count 1 and its own culprit line, and the
+  crash line still points at the exact anonymous callback (the display
+  culprit is unchanged by the revision).
+
+  Setup notes (both load-bearing for what this spec proves):
+
+  - The workload lives INSIDE the repo (gitignored .glyphrun/tmp-anon-fp/),
+    so its frames classify as in-app and the fingerprint is built from
+    frame tokens -- not from the no-in-app message fallback, which would
+    split (or merge) on message text instead of on the <ctx> token.
+  - Both callbacks throw the IDENTICAL message (both read `u.name`; only
+    the Map keys 'a'/'b' differ, keeping the two context lines distinct),
+    so two issues can only come from the context-line token: with CC-5
+    reverted both tokens collapse to "@anon.js" and this spec fails with
+    one merged issue.
+  - The script is invoked by ABSOLUTE path (via a generated run.sh, since
+    the target command is static), so the frames carry AbsPath and the
+    token hashes the real source line rather than falling back to the
+    line number.
+
+target:
+  cmd:
+    [
+      "sh",
+      ".glyphrun/tmp-anon-fp/run.sh",
+    ]
+  cwd: "."
+  env: {}
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v node"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "rm -rf .glyphrun/tmp-anon-fp && mkdir -p .glyphrun/tmp-anon-fp/state .glyphrun/tmp-anon-fp/data"
+      timeoutMs: 5000
+    - run: "cat > .glyphrun/tmp-anon-fp/anon.js <<'JS'\nconst routes = new Map();\nroutes.set('a', () => { const u = null; return u.name; });\nroutes.set('b', () => { const u = null; return u.name; });\nfor (const k of ['a', 'b']) {\n  try { routes.get(k)(); } catch (e) { console.error(e.stack); }\n}\nJS"
+      timeoutMs: 5000
+    - run: "cat > .glyphrun/tmp-anon-fp/run.sh <<'SH'\n#!/bin/sh\nset -e\ncd \"$(dirname \"$0\")/../..\" 2>/dev/null || true\nROOT=\"$PWD\"\nexport XDG_STATE_HOME=\"$ROOT/.glyphrun/tmp-anon-fp/state\"\nexport MONITOR_ISSUES_STORE=\"$ROOT/.glyphrun/tmp-anon-fp/data/issues.veclite\"\nexec ./bin/monitor run --quiet -- node \"$ROOT/.glyphrun/tmp-anon-fp/anon.js\"\nSH\nchmod +x .glyphrun/tmp-anon-fp/run.sh"
+      timeoutMs: 5000
+    - run: "cat > .glyphrun/tmp-anon-fp/check.sh <<'SH'\n#!/bin/sh\nset -e\nROOT=\"$PWD\"\nMONITOR_ISSUES_STORE=\"$ROOT/.glyphrun/tmp-anon-fp/data/issues.veclite\" ./bin/monitor issues list --json > .glyphrun/tmp-anon-fp/issues.json\npython3 -c \"\nimport json\nd = json.load(open('.glyphrun/tmp-anon-fp/issues.json'))\nassert len(d) == 2, f'want 2 separate issues for the 2 anonymous callbacks, got {len(d)}: {[i[\\\"id\\\"] for i in d]}'\nlines = sorted(i['culprit']['line'] for i in d)\nassert lines == [2, 3], f'culprit lines {lines}, want the two distinct callback lines [2, 3]'\nfor i in d:\n    assert i['occurrence_count'] == 1, f'issue {i[\\\"id\\\"]} merged crashes: occurrence_count {i[\\\"occurrence_count\\\"]}'\n    assert i['culprit']['file'].endswith('anon.js'), i['culprit']\nprint('ok')\n\"\nrm -rf .glyphrun/tmp-anon-fp\nSH\nchmod +x .glyphrun/tmp-anon-fp/check.sh"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      screen:
+        contains: "reading 'name'"
+      timeoutMs: 15000
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 15000
+
+outcomes:
+  - id: two_anon_callbacks_are_two_issues
+    description: |
+      Two different anonymous callbacks in one file group apart (CC-5):
+      exactly two issues, each occurrence_count 1, culprits at lines 2
+      and 3 -- not one merged issue with count 2 and a flipping culprit.
+      Both crashes print the identical message, so the split proves the
+      context-line token, not the message fallback.
+    timeoutMs: 15000
+    verify:
+      command:
+        timeoutMs: 15000
+        run: ".glyphrun/tmp-anon-fp/check.sh"
+  - id: clean_exit
+    description: the workload catches both errors, so monitor exits 0
+    verify:
+      process:
+        exitCode: 0

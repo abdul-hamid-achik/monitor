@@ -1,0 +1,21 @@
+40 | switch (name) {
+41 |   case 'err-code':
+42 |     fs.readFileSync(undefined);
+43 |     break;
+44 |   case 'assert':
+45 |     assert.strictEqual(1, 2);
+                ^
+AssertionError: Expected values to be strictly equal:
+
+1 !== 2
+
+ generatedMessage: true,
+     actual: 1,
+   expected: 2,
+   operator: "strictEqual",
+       diff: "simple",
+       code: "ERR_ASSERTION"
+
+      at /repo/app/src/scenarios.mjs:45:12
+
+Bun v1.4.2 (macOS arm64)

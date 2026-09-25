@@ -1,0 +1,26 @@
+83 |   case 'typeerror':
+84 |     new Server().handle({});
+85 |     break;
+86 |   case 'props-cause': {
+87 |     const inner = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET', retries: 3 });
+88 |     const err = new Error('upstream request failed', { cause: inner });
+                         ^
+error: upstream request failed
+ status: 502,
+
+      at /repo/app/src/scenarios.mjs:88:21
+
+82 |     break;
+83 |   case 'typeerror':
+84 |     new Server().handle({});
+85 |     break;
+86 |   case 'props-cause': {
+87 |     const inner = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET', retries: 3 });
+                                         ^
+error: socket hang up
+ retries: 3,
+    code: "ECONNRESET"
+
+      at /repo/app/src/scenarios.mjs:87:37
+
+Bun v1.4.2 (macOS arm64)

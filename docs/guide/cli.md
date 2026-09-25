@@ -18,8 +18,8 @@ The subcommands group into four purposes:
   [`processes`](#processes), [`tree`](#tree).
 - **Act** — change something: [`kill`](#kill).
 - **Diagnose** — capture and analyze: [`analyze`](#analyze), [`profile`](#profile),
-  [`investigate`](#investigate), [`stash`](#stash), [`incidents`](#incidents),
-  [`issues`](#issues), [`logs`](#logs), [`history`](#history), [`baseline`](#baseline),
+  [`hot`](#hot), [`investigate`](#investigate), [`stash`](#stash), [`incidents`](#incidents),
+  [`issues`](#issues), [`issue`](#issue), [`logs`](#logs), [`history`](#history), [`baseline`](#baseline),
   [`diff`](#diff).
 - **Ecosystem & runtime** — talk to sibling tools and the running TUI:
   [`config`](#config), [`doctor`](#doctor), [`run`](#run), [`reload`](#reload),
@@ -495,9 +495,10 @@ refused rather than reported as a hollow success.
 |------|---------|--------|
 | `-t`, `--type` | `heap` | Profile type: `heap`, `cpu`, `goroutine`, `sample`. |
 | `--pprof-addr` | `localhost:6060` | `host:port` of the target's pprof server (heap/cpu/goroutine only). Passing this flag explicitly asserts the endpoint belongs to the target pid and skips the ownership check. |
-| `--inspect-addr` | process argv | Node/Bun/Deno inspector address. Non-loopback addresses are always refused. |
+| `--inspect-addr` | process argv | Node/Bun/Deno inspector host:port. Non-loopback addresses are always refused. |
 | `--duration` | `5s` | CPU sampling duration (maximum two minutes). |
-| `--output` | unset | Persist raw evidence at the requested path with mode `0600`. |
+| `--output` | unset | Persist the raw profile at this path with mode `0600`. |
+| `--keep` | `false` | Keep the on-disk temp file a pprof/CDP-heap capture writes to `$TMPDIR`. Without it (or `--output`, which already persists elsewhere), the temp artifact is deleted once the `--json`/text output is verified. |
 | `--json` | `false` | Emit JSON output. |
 
 ```bash
@@ -519,6 +520,33 @@ monitor profile 1234 -t goroutine --pprof-addr localhost:7070 --json
   "context": {"environment": "chalupa-pr-42", "run_id": "a1b2c3"}
 }
 ```
+
+
+`path` is set when `--output` (as above) or `--keep` persists the artifact.
+Without either, a pprof or CDP-heap capture still writes a temp file to
+`$TMPDIR` to produce the verified receipt, then removes it — pass `--keep`
+to retain that file (for example to open a `.pb.gz` with
+`go tool pprof`) or `--output` to put it somewhere durable.
+
+### `hot`
+
+Answer "which **line** inside this function", not just which function. Works
+from a saved profile (`--file`), a live `<pid>` (resolving yarn/npm/`go run`
+wrappers to the real runtime leaf), or a `<service>` name registered by
+`monitor run --name`. The per-function CodeFrame highlights the hot line with
+per-line percentages, marks recorded issues' culprits on the table
+(errors × heat), resolves bundled JavaScript through source maps, and stays
+honest about inlined callees, idle captures, and stale maps. `--json` emits
+the versioned `monitor.line_heatmap.v1` document.
+
+```bash
+monitor hot --file out.cpuprofile
+monitor hot 1234 --type goroutine --pprof-addr localhost:6060
+monitor hot web-api --duration 3s
+```
+
+See the [Hot Lines](/guide/hot-lines) guide for the three modes, the
+launch-time `--inspect`/`--profile` wiring, and the honesty rules.
 
 ### `resolve`
 
@@ -682,10 +710,14 @@ archiving or deleting local evidence. Prefer a registry ID over a raw path.
 
 ### `issues`
 
-List and manage recurring observations grouped by Fingerprint V1. `issue` is
-an alias. Investigations always attempt to record an occurrence; alerts do so
-when `watch --stash` captures their evidence. The default private store is
-`~/.local/share/monitor/issues.veclite`; `issues --store <path>` overrides it.
+List and manage durable grouped issues — investigate results and watch
+alerts (Fingerprint V1) as well as parsed application exceptions
+(Fingerprint V2, from `monitor run --` and `stacktrace parse --record`).
+Investigations always attempt to record an occurrence; alerts do so when
+`watch --stash` captures their evidence. The human list is scoped to the
+current directory's project; `--all` lists every project. The default
+private store is `~/.local/share/monitor/issues.veclite`;
+`issues --store <path>` overrides it.
 
 ```bash
 monitor issues list --status open --project checkout --service api
@@ -697,11 +729,49 @@ monitor issues reopen ISS-0123456789ABCDEF
 
 `list` is newest-first and accepts repeatable `--status` values (`open`,
 `resolved`, `ignored`), `--project`, `--service`, and `--limit` (default 50,
-range 1–200). `show` returns the issue plus recent occurrences; its
-`--occurrences` default is 20 with the same 200 maximum. A later occurrence
-automatically reopens a resolved issue, while ignored issues keep accumulating
-occurrences until explicitly reopened. See [Local Issues](./issues) for the
-Run/Event/Issue/Evidence model and MCP tools.
+range 1–200), plus window and context filters (`--since`/`--until`,
+`--run-id`, `--release`, `--kind`) and `--at <file:line>` for issues whose
+culprit is inside the function containing that location. `show` returns the
+issue plus recent occurrences; its `--occurrences` default is 20 with the
+same 200 maximum. A later occurrence automatically reopens a resolved
+issue, while ignored issues keep accumulating occurrences until explicitly
+reopened. See [Local Issues](./issues) for the Run/Event/Issue/Evidence
+model and MCP tools, and [Your First Issue](./first-issue) for the
+crash-to-issue journey.
+
+### `issue`
+
+Show one issue's full context: the culprit line and snippet, the exception
+chain's causes, the in-app stack, codemap's blast radius (impact), the last
+commit that touched the culprit line, and proposed next steps — the
+`monitor.issue_context.v1` page. `<id>` may be a full id, an unambiguous
+short id or prefix, or the literal `latest` (narrowed by
+`--project`/`--service`/`--kind`). `--json` emits the full contract at the
+"standard" budget; `--md` emits a paste-ready markdown page for an agent.
+
+```bash
+monitor issue latest
+monitor issue 9fbe --md | pbcopy
+```
+
+`monitor issue list|show|resolve|reopen|ignore ...` — the pre-epic alias of
+`monitor issues` — still works during the deprecation: it prints a note to
+stderr and delegates to `monitor issues <same args>`.
+
+### `stacktrace`
+
+The low-level stack-trace detector (hidden from the main help). Its one
+subcommand, `parse`, reads raw stderr/stdout/log text — from `--file`, or
+stdin when `--file` is omitted — and prints one JSON object per detected
+exception. Detection only by default; with `--record`, every detected
+exception is recorded into the issues store through the same pipeline
+`monitor run --` uses, idempotently (per-file checkpoints plus dedupe
+keys; `--from-start` replays the whole file). Recorded occurrences take
+their timestamp from the log line or the file's mtime, never "now".
+
+```bash
+monitor stacktrace parse --record --file app.log
+```
 
 ### `logs`
 
@@ -1068,13 +1138,36 @@ monitor doctor --require fcheap,codemap
 
 ### `run`
 
-Run a glyphrun behavioral spec against monitored services. Takes exactly one
-argument — the path to a spec — and prints glyphrun's output. The spawned spec
-sees `MONITOR=1` and `MONITOR_RUN_DIR`.
+One verb, two commands, distinguished by whether a `--` is present:
 
-```bash
-monitor run specs/version.yml
-```
+- **`monitor run <spec.yml>`** — the legacy glyphrun behavioral-spec runner.
+  Takes exactly one argument (the path to a spec), prints glyphrun's output,
+  and the spawned spec sees `MONITOR=1` and `MONITOR_RUN_DIR`.
+
+  ```bash
+  monitor run specs/version.yml
+  ```
+
+- **`monitor run [flags] -- <cmd> [args...]`** — launch a command and watch
+  it crash. The child's stdout/stderr are copied to the terminal untouched,
+  and the scanned stream (`--scan stderr` by default, `stdout`, or `both`)
+  also feeds the stack-trace detector: an uncaught exception or a
+  caught-and-printed error from Node, Deno, Bun, Python, Ruby or Go becomes
+  a durable, grouped issue with a culprit `file:line` — no SDK. The child's
+  exit code becomes monitor's. `--name` registers the launch for
+  `monitor hot <service>`, `--inspect` opens a debugger inspector for live
+  Node/Deno hot lines, and `--profile` writes an exit-time `.cpuprofile`
+  for Node/Bun. `--redact-env` adds environment variable names whose exact
+  values must be redacted from recorded text.
+
+  ```bash
+  monitor run -- node server.js
+  monitor run --name api --inspect -- yarn start
+  monitor stacktrace parse --record --file app.log   # replay a log instead
+  ```
+
+See [Your First Issue](./first-issue) for the full journey and
+[Runtimes Matrix](./runtimes) for per-runtime support.
 
 ### `reload`
 

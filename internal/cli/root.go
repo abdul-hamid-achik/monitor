@@ -47,8 +47,10 @@ child can detect it is being observed.`,
 		newResolveCmd(),
 		newKillCmd(),
 		newProfileCmd(),
+		newHotCmd(),
 		newInvestigateCmd(),
 		newIssuesCmd(),
+		newIssueCmd(),
 		newStashCmd(),
 		newIncidentsCmd(),
 		newLogsCmd(),
@@ -63,6 +65,7 @@ child can detect it is being observed.`,
 		newDiffCmd(),
 		newTreeCmd(),
 		newConfigCmd(),
+		newStacktraceCmd(),
 	)
 
 	return root

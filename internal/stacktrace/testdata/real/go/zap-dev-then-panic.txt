@@ -1,0 +1,15 @@
+2026-09-22T22:30:26.346-0600	ERROR	app/main.go:110	request failed	{"error": "load failed: db timeout", "errorVerbose": "db timeout\nexample.com/app/internal/svc.fetch\n\t/repo/app/internal/svc/svc.go:24\nexample.com/app/internal/svc.(*Store).Load\n\t/repo/app/internal/svc/svc.go:20\nmain.zapErr\n\t/repo/app/main.go:57\nmain.main\n\t/repo/app/main.go:110\nruntime.main\n\t/usr/local/go/src/runtime/proc.go:290\nruntime.goexit\n\t/usr/local/go/src/runtime/asm_arm64.s:1447\nload failed\nexample.com/app/internal/svc.(*Store).Load\n\t/repo/app/internal/svc/svc.go:20\nmain.zapErr\n\t/repo/app/main.go:57\nmain.main\n\t/repo/app/main.go:110\nruntime.main\n\t/usr/local/go/src/runtime/proc.go:290\nruntime.goexit\n\t/usr/local/go/src/runtime/asm_arm64.s:1447"}
+main.main
+	/repo/app/main.go:110
+runtime.main
+	/usr/local/go/src/runtime/proc.go:290
+2026-09-22T22:30:26.346-0600	INFO	app/main.go:111	retrying
+2026-09-22T22:30:26.346-0600	INFO	app/main.go:112	retrying again
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x2 addr=0x0 pc=0x1024a7d48]
+
+goroutine 1 [running]:
+example.com/app/internal/svc.(*Server).Handle(...)
+	/repo/app/internal/svc/svc.go:13
+main.main()
+	/repo/app/main.go:114 +0x1138

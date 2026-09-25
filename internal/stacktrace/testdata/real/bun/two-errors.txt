@@ -1,0 +1,21 @@
+3 |   return new Error('first unrelated failure');
+4 | }
+5 | function second() {
+6 |   return new Error('second unrelated failure');
+7 | }
+8 | console.error(first());
+                  ^
+error: first unrelated failure
+      at /repo/app/src/two-errors.mjs:8:15
+
+4 | }
+5 | function second() {
+6 |   return new Error('second unrelated failure');
+7 | }
+8 | console.error(first());
+9 | console.error(second());
+                  ^
+error: second unrelated failure
+      at /repo/app/src/two-errors.mjs:9:15
+
+still running

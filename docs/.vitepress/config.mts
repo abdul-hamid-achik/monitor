@@ -47,7 +47,7 @@ export default defineConfig({
       name: 'Monitor',
       applicationCategory: 'DeveloperApplication',
       operatingSystem: 'macOS, Linux',
-      softwareVersion: '1.15.1',
+      softwareVersion: '2.0.0',
       description: 'A terminal-based, agent-harnessable system monitor for macOS and Linux. Interactive TUI, JSON CLI, and MCP server.',
       url: 'https://monitorcli.dev',
       downloadUrl: 'https://github.com/abdul-hamid-achik/monitor/releases',
@@ -76,11 +76,11 @@ export default defineConfig({
       { text: 'Guide', link: '/guide/getting-started' },
       { text: 'Reference', link: '/reference/architecture' },
       {
-        text: 'v1.15.1',
+        text: 'v2.0.0',
         items: [
           {
             text: 'Release notes',
-            link: 'https://github.com/abdul-hamid-achik/monitor/releases/tag/v1.15.1',
+            link: 'https://github.com/abdul-hamid-achik/monitor/releases/tag/v2.0.0',
           },
           {
             text: 'All releases',
@@ -97,7 +97,16 @@ export default defineConfig({
           items: [
             { text: 'Installation', link: '/guide/installation' },
             { text: 'Getting Started', link: '/guide/getting-started' },
+            { text: 'Your First Issue', link: '/guide/first-issue' },
             { text: 'The TUI', link: '/guide/tui' },
+          ],
+        },
+        {
+          text: 'Error tracking',
+          items: [
+            { text: 'Runtimes Matrix', link: '/guide/runtimes' },
+            { text: 'Hot Lines', link: '/guide/hot-lines' },
+            { text: 'Local Issues', link: '/guide/issues' },
           ],
         },
         {
@@ -105,7 +114,6 @@ export default defineConfig({
           items: [
             { text: 'CLI Reference', link: '/guide/cli' },
             { text: 'MCP Server', link: '/guide/mcp' },
-            { text: 'Local Issues', link: '/guide/issues' },
             { text: 'Ecosystem Integration', link: '/guide/ecosystem' },
           ],
         },
@@ -133,6 +141,9 @@ export default defineConfig({
           text: 'Contracts',
           items: [
             { text: 'Monitor Incident v1', link: '/contracts/monitor-incident-v1' },
+            { text: 'Doctor v1', link: '/contracts/doctor-v1' },
+            { text: 'Issue Context v1 (Draft)', link: '/contracts/issue-context-v1' },
+            { text: 'Line Heatmap v1 (Draft)', link: '/contracts/line-heatmap-v1' },
           ],
         },
       ],

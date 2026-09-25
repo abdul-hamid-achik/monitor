@@ -1,0 +1,76 @@
+version: 1
+name: monitor_doctor_codemap_health
+
+intent: |
+  `monitor doctor --json` classifies a codemap index written by a newer
+  schema than the codemap binary on PATH as schema_skew (never index_corrupt,
+  and never recommending `codemap index --reindex`, which would rewrite the
+  shared global index with an older schema for every other consumer). A fake
+  codemap on PATH prints the exact JSON codemap's own CLI emits for this case
+  (verified live against a real schema-skewed codemap install, 2026-09-22).
+
+target:
+  cmd:
+    - "/bin/sh"
+    - "-lc"
+    - "PATH=/tmp/monitor-spec-fake-codemap-health:$PATH exec ./bin/monitor doctor --json"
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: |
+        mkdir -p /tmp/monitor-spec-fake-codemap-health
+        cat > /tmp/monitor-spec-fake-codemap-health/codemap <<'SCRIPT'
+        #!/bin/sh
+        printf '%s' '{"ok":false,"error":"graph db schema v9 is newer than this codemap (supports v7); upgrade codemap","code":"index_corrupt","hint":"back it up, then run: codemap index --reindex"}'
+        exit 4
+        SCRIPT
+        chmod +x /tmp/monitor-spec-fake-codemap-health/codemap
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 15000
+
+outcomes:
+  - id: doctor_runs
+    description: doctor --json completes cleanly with a schema-skewed codemap on PATH
+    verify:
+      process:
+        exitCode: 0
+  - id: reports_schema_skew
+    description: code_intel.codemap.state is schema_skew, not index_corrupt
+    verify:
+      command:
+        run: "PATH=/tmp/monitor-spec-fake-codemap-health:$PATH ./bin/monitor doctor --json | grep -q '\"state\": \"schema_skew\"'"
+  - id: carries_schema_skew_detail
+    description: the schema-newer error text survives into detail
+    verify:
+      command:
+        run: "PATH=/tmp/monitor-spec-fake-codemap-health:$PATH ./bin/monitor doctor --json | grep -q 'schema v9 is newer than this codemap'"
+  - id: never_recommends_reindex_to_fix_it
+    description: |
+      the recovery text explicitly forbids --reindex for a schema skew (it
+      would rewrite the shared global index with an older schema)
+    verify:
+      command:
+        run: "PATH=/tmp/monitor-spec-fake-codemap-health:$PATH ./bin/monitor doctor --json | grep -q 'do NOT run codemap index --reindex'"
+  - id: still_reports_binaries_section
+    description: the additive binaries.self section is present alongside code_intel
+    verify:
+      command:
+        run: "PATH=/tmp/monitor-spec-fake-codemap-health:$PATH ./bin/monitor doctor --json | grep -q '\"self\": {'"
+  - id: never_reports_index_corrupt
+    description: a schema skew must never surface as index_corrupt to a consumer
+    verify:
+      command:
+        run: "! (PATH=/tmp/monitor-spec-fake-codemap-health:$PATH ./bin/monitor doctor --json | grep -q '\"state\": \"index_corrupt\"')"

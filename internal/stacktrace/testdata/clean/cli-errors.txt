@@ -1,0 +1,18 @@
+Error: unknown flag: --verbose
+Usage:
+  app serve [flags]
+
+Flags:
+  -h, --help   help for serve
+
+Error: config file not found: /repo/app/config.yml
+error: could not find `Cargo.toml` in `/repo` or any parent directory
+Exception
+ValueError: bad input (will retry)
+retry 1 succeeded
+TypeError: Cannot read properties of undefined
+see the docs for details
+Warning: the --legacy flag is deprecated
+make: *** [Makefile:12: build] Error 2
+ERROR: failed to solve: process "/bin/sh -c go build ./..." did not complete successfully: exit code: 1
+docker: Error response from daemon: Conflict. The container name "/app" is already in use.

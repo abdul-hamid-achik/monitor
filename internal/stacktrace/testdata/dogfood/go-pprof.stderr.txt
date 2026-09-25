@@ -1,0 +1,16 @@
+[go-pprof] pid=13469 workload starting
+[go-pprof] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-pprof] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-pprof] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-pprof] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-pprof] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-pprof] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-pprof] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-pprof] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-pprof] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+[go-pprof] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+panic: go-pprof workload: intentional uncaught failure at t=40.0s
+
+goroutine 1 [running]:
+main.main()
+	/repo/examples/polyglot/go-pprof/main.go:90 +0x1a0

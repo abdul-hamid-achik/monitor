@@ -1,0 +1,2405 @@
+// heat.go builds monitor.line_heatmap.v1 (see docs/contracts/line-heatmap-v1.md)
+// from a loaded profile (LoadFile, in loadfile.go): which LINE inside a
+// function is hot, not just which function. Two producers feed one shared
+// model:
+//
+//   - FromCDP walks a V8/Bun .cpuprofile's call tree. Per-line SELF comes
+//     straight from positionTicks (already statement-granular); per-line
+//     CUM is not computable at that granularity — V8 positionTicks are
+//     self-time only — so a line's Cum always equals its Self, and a
+//     wrapper function's real cost surfaces instead under its Callees.
+//     Function-level Cum, by contrast, IS computable, by summing the
+//     call-tree subtree each function's node(s) root.
+//   - FromPprof walks a decoded pprof proto's samples directly (no
+//     dependency on the go toolchain or `go tool pprof`), crediting flat
+//     to a sample's leaf line and cum to every (func,line) on its stack
+//     once per sample — the same rules pprof.go's symbolsFromPprof uses for
+//     the flat, ungrouped `monitor profile` view, restructured here into
+//     BuildHeatmap's per-function model with raw integer counts (the
+//     schema's self/cum fields), not just percentages.
+package profiler
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/google/pprof/profile"
+
+	"github.com/abdul-hamid-achik/monitor/internal/ecosystem"
+	"github.com/abdul-hamid-achik/monitor/internal/scrub"
+	"github.com/abdul-hamid-achik/monitor/internal/sourcemap"
+)
+
+// HeatSchema is the schema id stamped on every monitor.line_heatmap.v1
+// document BuildHeatmap produces.
+const HeatSchema = "monitor.line_heatmap.v1"
+
+// HeatProfileType is the heatmap's own profile-type discriminator. It is
+// richer than ProfileType (which has one undifferentiated ProfileHeap):
+// heap has two genuinely different questions ("what's using memory right
+// now" vs "what has ever been allocated"), and a heatmap has to pick one
+// pprof sample-value column to weight lines by, so it needs to say which.
+type HeatProfileType string
+
+const (
+	HeatCPU       HeatProfileType = "cpu"
+	HeatHeapInuse HeatProfileType = "heap_inuse"
+	HeatHeapAlloc HeatProfileType = "heap_alloc"
+	HeatGoroutine HeatProfileType = "goroutine"
+)
+
+// HeatMethod identifies which producer, and which fidelity of it, built a
+// Heatmap.
+type HeatMethod string
+
+const (
+	// MethodV8PositionTicks means every FUNCTION this heatmap reports (i.e.
+	// every node that got its own Functions row — excluding pseudo-frames
+	// like (idle), runtime bootstrap frames, and location-less native
+	// builtins such as Bun's own JSON.stringify, none of which carry
+	// positionTicks and none of which are reported as a function; see
+	// buildFromCDP) carried real positionTicks wherever it contributed
+	// self time: the reported hot line is a genuine statement-level
+	// attribution.
+	MethodV8PositionTicks HeatMethod = "v8_position_ticks"
+	// MethodCPUProfileFile means the loaded .cpuprofile had no
+	// positionTicks anywhere (an older V8/inspector build): self time
+	// degrades to each node's function-declaration line, the same
+	// lower-fidelity fallback flattenCDPProfile itself uses when a node
+	// carries no positionTicks. Reported honestly as a distinct method
+	// rather than silently passed off as v8_position_ticks.
+	MethodCPUProfileFile HeatMethod = "cpuprofile_file"
+	// MethodPprofProto means the profile came from a decoded pprof proto
+	// (Go cpu/heap/goroutine), read in-process with no `go` toolchain
+	// dependency.
+	MethodPprofProto HeatMethod = "pprof_proto"
+	// MethodDarwinSample means the profile came from a macOS `sample <pid>`
+	// capture (see BuildHeatmapFromSample): FUNCTION-LEVEL only — macOS
+	// `sample` carries no per-line detail at all (no positionTicks, no
+	// pprof line table), only a self/cum weight per function name, so a
+	// Heatmap built this way always has empty Lines/StartLine/EndLine on
+	// every function. It exists so a target `hot` otherwise has no working
+	// CPU capture path for at all — Python, Ruby, or a Go binary with no
+	// reachable pprof endpoint — still gets a real, honestly-labeled
+	// answer on macOS instead of a dead end (AC-1's own documented
+	// requirement for the `sample` producer).
+	MethodDarwinSample HeatMethod = "darwin_sample"
+)
+
+// sampleFunctionLevelOnlyWarning is BuildHeatmapFromSample's own honesty
+// disclosure, appended to every Heatmap it produces: macOS `sample` has no
+// source-line detail at all (see MethodDarwinSample), so a caller (`monitor
+// hot`) must not render this the way it renders a real per-line CodeFrame —
+// the warning is what tells it (and any JSON/MCP consumer) so.
+const sampleFunctionLevelOnlyWarning = "function-level only: macOS `sample` reports functions, not source lines — no positionTicks or pprof proto is available for this target"
+
+// Heatmap is monitor.line_heatmap.v1: heat.Build's per-line CPU/heap/
+// goroutine attribution model. See docs/contracts/line-heatmap-v1.md.
+type Heatmap struct {
+	Schema      string          `json:"schema"`
+	ProfileType HeatProfileType `json:"profile_type"`
+	Unit        string          `json:"unit"`
+	Method      HeatMethod      `json:"method"`
+	Runtime     string          `json:"runtime"`
+
+	Samples       int     `json:"samples"`
+	ActiveSamples int     `json:"active_samples"`
+	IdlePct       float64 `json:"idle_pct"`
+	GCPct         float64 `json:"gc_pct"`
+
+	Functions []HeatFunction `json:"functions"`
+
+	Warnings    []string `json:"warnings,omitempty"`
+	Limitations []string `json:"limitations,omitempty"`
+
+	// InlinedCallees is additive to monitor.line_heatmap.v1 (a new field,
+	// never a rename or a schema break -- see docs/contracts/
+	// line-heatmap-v1.md's compatibility rule): one entry per (caller,
+	// callee) pair addInliningWarnings flagged as likely JIT-inlined. Each
+	// entry's own one-line summary is ALSO appended to Warnings (so a
+	// consumer that only reads Warnings still sees the finding); this field
+	// exists so a renderer that wants the callee's own source as a
+	// secondary frame (the roadmap polish note's "if the callee's source is
+	// readable, optionally show its body") doesn't have to re-parse
+	// Warnings' free text to get the caller/callee/line back out.
+	InlinedCallees []InlinedCallee `json:"inlined_callees,omitempty"`
+
+	// DefaultTarget is the function CodeFrame renders by default when the
+	// caller (monitor hot) is given no --func: whichever function has the
+	// highest SELF share, computed from the FULL function list BEFORE
+	// --func/--top filter/cap Functions. Populated by addWarnings, on the
+	// same full list its own "diffuse" check reads, so a small --top can
+	// never silently swap in some other, cooler function's CodeFrame (or a
+	// false "diffuse" warning) just because it truncated the real hot one
+	// out of Functions. nil only when the profile produced zero functions
+	// at all. Excluded from JSON (json:"-") — the monitor.line_heatmap.v1
+	// schema doesn't define it; it duplicates one entry of Functions.
+	DefaultTarget *HeatFunction `json:"-"`
+	// IdleMeasured is true when IdlePct reflects a real off-CPU share this
+	// package actually computed — always true for a CDP source (which
+	// always carries an (idle) pseudo-frame bucket, even at 0%), and true
+	// for a pprof CPU source only when the proto's own DurationNanos let
+	// IdlePct be derived from wall-clock time vs. CPU time consumed. false
+	// for a pprof heap/goroutine source (an instant snapshot has no
+	// "idle" concept) or a CPU pprof proto with no DurationNanos at all —
+	// a caller must not print "idle 0%" in that case, since 0 there means
+	// "not measured", not "fully utilized". Excluded from JSON: it's a
+	// rendering hint, not part of the monitor.line_heatmap.v1 schema.
+	IdleMeasured bool `json:"-"`
+	// CaptureDurationNanos is the real wall-clock span this profile
+	// covers: EndTime-StartTime (converted from V8's microseconds) for a
+	// CDP source, or the pprof proto's own DurationNanos for a pprof
+	// source. 0 when unknown (a CDP profile with no start/end times, or a
+	// pprof source that doesn't set DurationNanos, e.g. most heap/
+	// goroutine snapshots) — a caller must not print a duration in that
+	// case. Excluded from JSON: display-only, not part of the
+	// monitor.line_heatmap.v1 schema.
+	CaptureDurationNanos int64 `json:"-"`
+}
+
+// MostlyIdle reports whether this Heatmap's IdlePct crossed AC-5's honesty
+// threshold for "CPU heat can't explain this target's slowness" (the same
+// threshold addWarnings' own "mostly idle" warning uses). A caller
+// (monitor hot) uses this to decide whether rendering a confident-looking
+// CodeFrame on what's mostly sampler noise would be dishonest.
+func (hm *Heatmap) MostlyIdle() bool {
+	return hm != nil && hm.IdlePct > idleWarningThresholdPct
+}
+
+// HeatFunction is one function's line-level breakdown within a Heatmap.
+type HeatFunction struct {
+	Name        string  `json:"name"`
+	File        string  `json:"file"`
+	StartLine   int     `json:"start_line,omitempty"`
+	EndLine     int     `json:"end_line,omitempty"`
+	RangeSource string  `json:"range_source,omitempty"` // "codemap" | "observed"
+	SelfPct     float64 `json:"self_pct"`
+	CumPct      float64 `json:"cum_pct"`
+
+	Lines   []HeatLine   `json:"lines,omitempty"`
+	Callees []HeatCallee `json:"callees,omitempty"`
+
+	// rangeHintFile/rangeHintLine carry no json tag (unexported, so
+	// encoding/json skips them automatically): the function's own
+	// generated (file, declaration-or-representative line), used by
+	// resolveRanges as the codemap symbol-at input and as the last-resort
+	// observed range for a function with zero attributed Lines (a pure
+	// ancestor whose only signal is its Callees).
+	rangeHintFile string
+	rangeHintLine int
+}
+
+// HeatLine is one line's contribution within its enclosing HeatFunction.
+type HeatLine struct {
+	Line int `json:"line"`
+	// Self/Cum are raw sample counts (or bytes, for heap profiles — see
+	// Heatmap.Unit), never percentages, so a consumer can re-derive any
+	// ratio it needs instead of trusting a lossy pre-rounded one.
+	Self int64 `json:"self"`
+	Cum  int64 `json:"cum"`
+	// PctOfFunction is this line's share of its OWN function's weight
+	// (self when the function has any self samples, else cum for a pure
+	// wrapper) — never the overall profile total. See
+	// docs/contracts/line-heatmap-v1.md's "Notes on specific fields".
+	PctOfFunction float64 `json:"pct_of_function"`
+	Code          string  `json:"code,omitempty"`
+	// Mapping is "" (no source map applies), "exact", or "ambiguous" — the
+	// two outcomes internal/sourcemap.Resolver itself ever returns; see the
+	// naming ADR's shared Frame.Mapping enum. Never fabricated as
+	// "transpiled" or "inferred" here: those describe a guess made in the
+	// ABSENCE of a map, which is stacktrace.Frame's business, not this
+	// package's.
+	Mapping string `json:"mapping,omitempty"`
+	Stale   bool   `json:"stale,omitempty"`
+	// Issues is additive (v1.17, E3.4): always empty here. heat.Build never
+	// computes or caches issue membership itself — a future caller
+	// overlays it from the issues store at render time, so a heatmap and
+	// the store never disagree about an issue's current status. The field
+	// exists now purely so a later, additive change doesn't need another
+	// schema bump.
+	Issues []HeatLineIssue `json:"issues,omitempty"`
+}
+
+// HeatLineIssue is one issue whose culprit lands on this line (E3.4;
+// unused by BuildHeatmap itself — see HeatLine.Issues).
+type HeatLineIssue struct {
+	ShortID string `json:"short_id"`
+	Count   int    `json:"count"`
+	Status  string `json:"status"`
+}
+
+// InlinedCallee is one entry in Heatmap.InlinedCallees — see
+// addInliningWarnings' own doc comment for the heuristic that produces it.
+type InlinedCallee struct {
+	// Caller/Callee/Line identify the finding: Caller's own hottest line
+	// (Line) is textually a call to Callee, which this profile never
+	// sampled separately (or sampled with ~0 self of its own).
+	Caller string `json:"caller"`
+	Callee string `json:"callee"`
+	Line   int    `json:"line"`
+	// File is the caller's own resolved File — the OPTIONAL secondary-frame
+	// lookup (buildInlinedCallee) only ever scans this same file for
+	// Callee's declaration, never the whole profile/repo, so File also
+	// documents that scope for a consumer of this field.
+	File string `json:"file,omitempty"`
+	// Body is Callee's own source, read live from disk, when
+	// buildInlinedCallee could find a declaration-shaped line naming Callee
+	// in File. nil/empty — never an error — when File couldn't be read or
+	// no such line was found: this secondary frame is explicitly optional
+	// (see addInliningWarnings), so its absence is not a degradation.
+	Body      []string `json:"body,omitempty"`
+	BodyStart int      `json:"body_start,omitempty"`
+	// DefaultFrame is set when BuildHeatmap pointed the default CodeFrame
+	// target (Heatmap.DefaultTarget) at this callee's located range
+	// (LUX-16): the caller this callee was inlined into was itself the
+	// default target, so the frame a person sees first names the callee —
+	// where the time is actually spent — with a "mapping: inferred
+	// (inlined into <caller>:<line>)" attribution, instead of the caller's
+	// call-site line. Additive; false (omitted) for every finding whose
+	// caller was NOT the default target.
+	DefaultFrame bool `json:"default_frame,omitempty"`
+}
+
+// HeatCallee is one function this HeatFunction called, and how much
+// cumulative weight flowed through that call.
+type HeatCallee struct {
+	Func string `json:"func"`
+	Cum  int64  `json:"cum"`
+}
+
+// Default caps, exported so callers (monitor hot --top) can reference them
+// in help text instead of hard-coding the number again.
+const (
+	DefaultTopFunctions = 25
+	maxCalleesPerFunc   = 5
+)
+
+// idleWarningThresholdPct and diffuseWarningThresholdPct are AC-5's honesty
+// thresholds: past idleWarningThresholdPct idle, CPU heat can't explain
+// slowness (it's off-CPU); below diffuseWarningThresholdPct for the top
+// function, no single line dominates enough to call it "the" hot line.
+const (
+	idleWarningThresholdPct    = 50.0
+	diffuseWarningThresholdPct = 5.0
+)
+
+// HeatOptions configures BuildHeatmap.
+type HeatOptions struct {
+	// Func filters to one function by exact, case-sensitive name match. ""
+	// keeps every function BuildHeatmap found.
+	Func string
+	// Top caps how many functions remain after filtering and sorting
+	// (by Cum% desc, then Self% desc, then Name). <=0 uses
+	// DefaultTopFunctions.
+	Top int
+	// ProfileType selects the pprof sample-value column (cpu/heap_inuse/
+	// heap_alloc/goroutine). Ignored for a CDP source, which is always cpu.
+	// "" defaults to HeatCPU.
+	ProfileType HeatProfileType
+	// Runtime is a caller-supplied hint (e.g. from procbind, for a live
+	// capture) for the CDP path, which cannot distinguish Node/Bun/Deno
+	// from a .cpuprofile's shape alone. "" degrades honestly to "unknown"
+	// rather than guessing.
+	Runtime string
+	// Codebase scopes codemap symbol-at lookups exactly as `codemap -C
+	// <path>` does. "" uses codemap's own cwd resolution.
+	Codebase string
+	// CodeRoots lists extra directories readCode may read source text
+	// from, on top of the git root of the working directory it always
+	// derives itself (SEC-8's confinement — see readCode). A caller that
+	// knows where the profile's own files live (a live leaf's codebase
+	// root) passes them here so confinement keeps permitting exactly
+	// those reads; a crafted profile naming ~/.aws/credentials is still
+	// refused regardless. `hot --file` deliberately passes none: a shared
+	// profile must not whitelist its own directory (that IS the SEC-8
+	// evidence shape), so --file reads only resolve under the cwd the
+	// user ran from, with an honest warning otherwise.
+	CodeRoots []string
+	// Sourcemaps resolves CDP frames through internal/sourcemap (E3.3a
+	// wiring). nil disables source-map resolution outright (tests that
+	// want purely-generated coordinates); BuildHeatmap otherwise builds one
+	// lazily the first time a CDP source needs it, so callers normally
+	// leave this nil and still get resolution for free.
+	Sourcemaps *sourcemap.Resolver
+	// NoSourcemaps disables source-map resolution even though Sourcemaps
+	// is nil (BuildHeatmap would otherwise lazily construct one). Set by
+	// tests that want to assert the un-mapped, generated-coordinate
+	// fallback.
+	NoSourcemaps bool
+	// NoCodemap forces range_source "observed" even when codemap is
+	// healthy, for tests that don't want a real `codemap` subprocess.
+	NoCodemap bool
+	// NoReadCode skips reading HeatLine.Code from disk.
+	NoReadCode bool
+}
+
+func (o HeatOptions) top() int {
+	if o.Top > 0 {
+		return o.Top
+	}
+	return DefaultTopFunctions
+}
+
+func (o HeatOptions) profileType() HeatProfileType {
+	if o.ProfileType == "" {
+		return HeatCPU
+	}
+	return o.ProfileType
+}
+
+// BuildHeatmap is heat.Build: it dispatches to FromCDP or FromPprof
+// depending on src.Kind, then applies the shared post-processing every
+// producer needs — function-range resolution (codemap, falling back to an
+// observed min/max), reading Code from disk, filtering/sorting/capping
+// Functions, and the idle/diffuse honesty warnings.
+func BuildHeatmap(ctx context.Context, src *Source, opts HeatOptions) (*Heatmap, error) {
+	if src == nil {
+		return nil, fmt.Errorf("heat.Build: nil source")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var hm *Heatmap
+	var err error
+	switch src.Kind {
+	case SourceCDP:
+		hm, err = buildFromCDP(src.CDP, opts)
+	case SourcePprof:
+		hm, err = buildFromPprof(src.Pprof, opts)
+	default:
+		return nil, fmt.Errorf("heat.Build: unknown source kind %q", src.Kind)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	resolveRanges(ctx, hm, opts)
+	if !opts.NoReadCode {
+		readCode(hm, opts)
+	}
+	// addWarnings must run BEFORE finalizeFunctions: it picks
+	// DefaultTarget and computes the "diffuse" check from the FULL
+	// function list. Running it after --func/--top already filtered and
+	// capped Functions would judge "how spread out is this profile" (and
+	// pick monitor hot's default CodeFrame target) from whatever sliver of
+	// functions survived filtering, not the real profile.
+	addWarnings(hm, opts)
+	// addInliningWarnings, like addWarnings just above, must run on the
+	// FULL function list before finalizeFunctions filters/caps it — a
+	// caller's hottest line can only be judged "textually a call to a
+	// function this profile never sampled" against every function
+	// BuildHeatmap actually found, not whatever slice --top left visible.
+	addInliningWarnings(hm)
+	// retargetDefaultToInlinedCallee closes the loop addWarnings opened:
+	// it reads the InlinedCallees the pass above produced, so it must run
+	// after it (and still before finalizeFunctions, since it can replace
+	// DefaultTarget).
+	retargetDefaultToInlinedCallee(hm)
+	finalizeFunctions(hm, opts)
+	return hm, nil
+}
+
+// BuildHeatmapFromSample builds a Heatmap from an already-captured macOS
+// `sample <pid>` Profile (profiler.Profile.Symbols, from parseSampleTree) —
+// the AC-1/AC-5 "darwin sample fallback" for a target with no working CDP
+// or pprof capture path at all (Python, Ruby, an unlinked Go binary, or any
+// process whose pprof endpoint isn't owned/explicit). Unlike BuildHeatmap,
+// this is NOT dispatched from a Source/SourceKind: `sample`'s own call-graph
+// text carries no file:line at all (see internal/profiler/sample_parse.go's
+// own doc comment — Symbol.Line is always 0 here), so there is no
+// SourceSample kind for it to join, and no per-line model to build —
+// FUNCTION-LEVEL ONLY, honestly disclosed via MethodDarwinSample and
+// sampleFunctionLevelOnlyWarning rather than silently degrading into a
+// misleadingly empty-but-otherwise-normal-looking per-line Heatmap.
+//
+// A caller renders this exactly like any other Heatmap (the same CodeFrame,
+// table, and --json shapes `monitor hot` always uses): every HeatFunction's
+// Lines stays empty (CodeFrame.Render already handles that honestly, with
+// "(no lines to show)"), and StartLine/EndLine/RangeSource stay unset (0/"")
+// since there is no line to anchor a range to.
+func BuildHeatmapFromSample(ctx context.Context, prof Profile, opts HeatOptions) (*Heatmap, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(prof.Symbols) == 0 {
+		return nil, fmt.Errorf("heat.Build: this sample capture has no symbols to build a heatmap from")
+	}
+
+	rt := opts.Runtime
+	if rt == "" {
+		rt = "unknown"
+	}
+	hm := &Heatmap{
+		Schema:      HeatSchema,
+		ProfileType: HeatCPU, // `sample` only ever measures CPU; there is no heap/goroutine sample capture.
+		Unit:        "samples",
+		Method:      MethodDarwinSample,
+		Runtime:     rt,
+	}
+	if prof.Stats != nil {
+		hm.Samples = prof.Stats.Samples
+		hm.ActiveSamples = prof.Stats.ActiveSamples
+		hm.IdlePct = prof.Stats.IdlePct
+		hm.GCPct = prof.Stats.GCPct
+		hm.IdleMeasured = true
+	} else {
+		// parseSampleTree only omits Stats when it found nothing at all
+		// (allTotal<=0) — which would already have left prof.Symbols empty
+		// too (see its own early return), so this branch is defensive only.
+		hm.Samples = len(prof.Symbols)
+		hm.ActiveSamples = hm.Samples
+	}
+
+	for _, sym := range prof.Symbols {
+		hm.Functions = append(hm.Functions, HeatFunction{
+			Name: sym.Func,
+			// File is `sample`'s own "image" (containing binary/dylib) —
+			// the closest thing to a location this format has, never a
+			// real source path — surfaced honestly as the table's
+			// LOCATION column would otherwise be blank.
+			File:    sym.File,
+			SelfPct: sym.Weight,
+			CumPct:  sym.Cum,
+		})
+	}
+
+	resolveRanges(ctx, hm, opts) // no-op here (no rangeHintLine ever set), kept for pipeline symmetry with BuildHeatmap.
+	if !opts.NoReadCode {
+		readCode(hm, opts) // no-op here too (every function's Lines is empty).
+	}
+	addWarnings(hm, opts)
+	hm.Warnings = append(hm.Warnings, sampleFunctionLevelOnlyWarning)
+	finalizeFunctions(hm, opts)
+	return hm, nil
+}
+
+// ---------------------------------------------------------------------------
+// FromCDP: V8/Bun .cpuprofile call tree
+// ---------------------------------------------------------------------------
+
+// heatFuncKey identifies one function across a CDP call tree — the same
+// identity flattenCDPProfile (inspector.go) keys its flat per-line list by:
+// (Func, File, FuncLine). FuncLine (the function's own declaration line)
+// disambiguates two textually-identical anonymous closures in one file,
+// which V8 labels "" / "(anonymous)" indiscriminately — without it they'd
+// collide into one, wrong, merged function.
+type heatFuncKey struct {
+	Func     string
+	File     string
+	FuncLine int
+}
+
+// cdpFuncAccum accumulates one function's data across every node in the
+// call tree that shares its heatFuncKey, as buildFromCDP walks the tree.
+type cdpFuncAccum struct {
+	lineSelf    map[int]int64
+	lineOrder   []int
+	cum         int64
+	callees     map[heatFuncKey]int64
+	calleeOrder []heatFuncKey
+}
+
+// isRuntimeInternalCDPFile reports whether file names a JS runtime's own
+// bootstrap/module-loader machinery rather than user code: Node's
+// "node:internal/..." built-in module specifiers, and the analogous
+// "ext:"/"deno:" schemes Deno's isolate uses for the same purpose. See the
+// call site in buildFromCDP for why these are excluded from Functions
+// while still counting toward Stats.ActiveSamples.
+func isRuntimeInternalCDPFile(file string) bool {
+	for _, prefix := range [...]string{"node:", "ext:", "deno:"} {
+		if strings.HasPrefix(file, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func newCDPFuncAccum() *cdpFuncAccum {
+	return &cdpFuncAccum{lineSelf: map[int]int64{}, callees: map[heatFuncKey]int64{}}
+}
+
+func (a *cdpFuncAccum) addSelf(line int, ticks int64) {
+	if _, ok := a.lineSelf[line]; !ok {
+		a.lineOrder = append(a.lineOrder, line)
+	}
+	a.lineSelf[line] += ticks
+}
+
+func (a *cdpFuncAccum) addCallee(k heatFuncKey, cum int64) {
+	if cum <= 0 {
+		return
+	}
+	if _, ok := a.callees[k]; !ok {
+		a.calleeOrder = append(a.calleeOrder, k)
+	}
+	a.callees[k] += cum
+}
+
+// buildFromCDP is FromCDP: the V8/Bun .cpuprofile producer.
+func buildFromCDP(cp *cdpProfile, opts HeatOptions) (*Heatmap, error) {
+	if cp == nil || len(cp.Nodes) == 0 {
+		return nil, fmt.Errorf("heat.Build: empty CDP profile")
+	}
+	nodeByID := make(map[int64]*cdpNode, len(cp.Nodes))
+	for i := range cp.Nodes {
+		nodeByID[cp.Nodes[i].ID] = &cp.Nodes[i]
+	}
+
+	funcs := map[heatFuncKey]*cdpFuncAccum{}
+	var funcOrder []heatFuncKey
+	getFunc := func(k heatFuncKey) *cdpFuncAccum {
+		a, ok := funcs[k]
+		if !ok {
+			a = newCDPFuncAccum()
+			funcs[k] = a
+			funcOrder = append(funcOrder, k)
+		}
+		return a
+	}
+
+	// hits gives each node's sample count via cdpNodeHits (inspector.go) —
+	// the ONE shared per-node hit rule, also used by flattenCDPProfile:
+	// the node's own hitCount when positive, else its occurrences in the
+	// flat per-tick samples array, else 0. Sharing it is what keeps a live
+	// CDP capture and a file-loaded .cpuprofile attributing the same
+	// numbers for the same data.
+	hits := cdpNodeHits(cp)
+
+	// Pass 1: per-node self attribution, mirroring flattenCDPProfile's own
+	// rules exactly (inspector.go) — the shared cdpNodeHits count for how
+	// many samples each node contributes, positionTicks when present, else
+	// the node's own declaration line with its whole hit count — plus the
+	// same idle/gc/program/root pseudo-frame bookkeeping, so a live CDP
+	// capture and a file-loaded one report identical Stats for the same
+	// data.
+	nodeFunc := make(map[int64]heatFuncKey, len(cp.Nodes)) // absent entry marks a pseudo/excluded/unattributed node
+	var totalHits, idleHits, gcHits, excludedHits int64
+	anyPositionTicks := false
+	for i := range cp.Nodes {
+		n := &cp.Nodes[i]
+		hc := hits[n.ID]
+		totalHits += hc
+		fn := n.CallFrame.FunctionName
+		if fn == "" {
+			fn = "(anonymous)"
+		}
+		if isPseudoCDPFrame(fn) {
+			excludedHits += hc
+			switch fn {
+			case "(idle)":
+				idleHits += hc
+			case "(garbage collector)":
+				gcHits += hc
+			}
+			continue
+		}
+		file := decodeCDPFileURL(n.CallFrame.URL)
+		if isRuntimeInternalCDPFile(file) {
+			// Real code, real CPU time (already counted in totalHits
+			// above), but not a "function" worth its own row: Node's CJS
+			// loader wraps every entry point in several such frames (see
+			// testdata/v8-hot.cpuprofile — module require plumbing sits
+			// directly on the path to heavyStringify), and since every
+			// sample's stack passes through them, including them would
+			// bury real user functions under a wall of zero-self
+			// "(anonymous)" bootstrap wrappers. nodeFunc simply has no
+			// entry for this node's ID; pass 3's tree walk still descends
+			// into its children unconditionally, so a real function
+			// further down the stack is unaffected.
+			continue
+		}
+		funcLine := int(n.CallFrame.LineNumber) + 1
+		k := heatFuncKey{Func: fn, File: file, FuncLine: funcLine}
+		// nodeFunc is still set for a native builtin with no url and
+		// lineNumber -1 (Bun's own JSON.stringify/String.prototype.repeat
+		// and similar) so pass 3 can list it as a CALLEE of whichever
+		// function invoked it — its real CPU cost (already counted toward
+		// totalHits/active above) shouldn't just vanish. It never gets a
+		// Functions row of its own, though (see the funcOrder emission
+		// loop below): there is no real source location to report, and
+		// giving it one would fabricate "line 0 of an empty file" as a
+		// real, rankable location.
+		nodeFunc[n.ID] = k
+		acc := getFunc(k)
+		if file == "" && funcLine <= 0 {
+			continue
+		}
+		if len(n.PositionTicks) > 0 {
+			anyPositionTicks = true
+			for _, pt := range n.PositionTicks {
+				if pt.Ticks <= 0 {
+					continue
+				}
+				acc.addSelf(pt.Line, pt.Ticks)
+			}
+			continue
+		}
+		if hc > 0 {
+			acc.addSelf(funcLine, hc)
+		}
+	}
+	if totalHits <= 0 {
+		return nil, fmt.Errorf("heat.Build: CDP profile has no samples")
+	}
+	active := totalHits - excludedHits
+
+	// Pass 2: subtree hit-sum per node, bottom-up. A CDP call tree is a
+	// proper tree (each node has exactly one parent), so this plain
+	// post-order sum can never double-count — the recursion hazard only
+	// shows up one step later, in pass 3, when the SAME function occurs at
+	// more than one tree node.
+	subtree := make(map[int64]int64, len(cp.Nodes))
+	visiting := make(map[int64]bool, len(cp.Nodes))
+	var sumSubtree func(id int64) (int64, error)
+	sumSubtree = func(id int64) (int64, error) {
+		if v, ok := subtree[id]; ok {
+			return v, nil
+		}
+		n, ok := nodeByID[id]
+		if !ok {
+			return 0, nil
+		}
+		if visiting[id] {
+			return 0, fmt.Errorf("heat.Build: CDP profile node %d cycles back to itself", id)
+		}
+		visiting[id] = true
+		total := hits[id]
+		for _, c := range n.Children {
+			cv, err := sumSubtree(c)
+			if err != nil {
+				return 0, err
+			}
+			total += cv
+		}
+		visiting[id] = false
+		subtree[id] = total
+		return total, nil
+	}
+	var roots []int64
+	childOf := make(map[int64]bool, len(cp.Nodes))
+	for i := range cp.Nodes {
+		for _, c := range cp.Nodes[i].Children {
+			childOf[c] = true
+		}
+	}
+	for i := range cp.Nodes {
+		if !childOf[cp.Nodes[i].ID] {
+			roots = append(roots, cp.Nodes[i].ID)
+		}
+	}
+	for _, r := range roots {
+		if _, err := sumSubtree(r); err != nil {
+			return nil, err
+		}
+	}
+	for id := range nodeByID {
+		if _, err := sumSubtree(id); err != nil {
+			return nil, err
+		}
+	}
+
+	// Pass 3: function-level Cum and Callees, walked from every root with
+	// the ancestor-identity guard recursion needs: a node's subtree Cum is
+	// only credited to its function's total the first time that function
+	// appears along THIS root-to-node path (the "outermost occurrence").
+	// Without the guard, direct or mutual recursion would let an inner
+	// occurrence's subtree — already included in its own outer occurrence's
+	// subtree sum — double up the function's reported Cum.
+	var walk func(id int64, ancestors map[heatFuncKey]bool)
+	walk = func(id int64, ancestors map[heatFuncKey]bool) {
+		n := nodeByID[id]
+		if n == nil {
+			return
+		}
+		k, isFunc := nodeFunc[id]
+		if isFunc {
+			if !ancestors[k] {
+				getFunc(k).cum += subtree[id]
+			}
+			for _, c := range n.Children {
+				if ck, ok := nodeFunc[c]; ok {
+					getFunc(k).addCallee(ck, subtree[c])
+				}
+			}
+			next := make(map[heatFuncKey]bool, len(ancestors)+1)
+			for a := range ancestors {
+				next[a] = true
+			}
+			next[k] = true
+			ancestors = next
+		}
+		for _, c := range n.Children {
+			walk(c, ancestors)
+		}
+	}
+	for _, r := range roots {
+		walk(r, map[heatFuncKey]bool{})
+	}
+
+	method := MethodV8PositionTicks
+	if !anyPositionTicks {
+		method = MethodCPUProfileFile
+	}
+	runtime := opts.Runtime
+	if runtime == "" {
+		runtime = "unknown"
+	}
+
+	hm := &Heatmap{
+		Schema:        HeatSchema,
+		ProfileType:   HeatCPU,
+		Unit:          "samples",
+		Method:        method,
+		Runtime:       runtime,
+		Samples:       int(totalHits),
+		ActiveSamples: int(active),
+		// A CDP capture always carries an (idle) pseudo-frame bucket, even
+		// at 0% — unlike a pprof CPU proto, which only measures idle when
+		// it happens to carry a DurationNanos (see buildFromPprof) — so
+		// IdlePct here is always a real measurement, never "not measured".
+		IdleMeasured: true,
+	}
+	if totalHits > 0 {
+		hm.IdlePct = float64(idleHits) / float64(totalHits) * 100
+		hm.GCPct = float64(gcHits) / float64(totalHits) * 100
+	}
+	if cp.EndTime > cp.StartTime {
+		hm.CaptureDurationNanos = int64((cp.EndTime - cp.StartTime) * 1000) // V8 times are microseconds
+	}
+
+	resolver := opts.Sourcemaps
+	if resolver == nil && !opts.NoSourcemaps {
+		resolver = sourcemap.NewResolver()
+	}
+	smCache := map[string]resolvedLoc{}
+	genLines := map[string][]string{}
+
+	// staleFiles collects, in first-seen order, every generated file whose
+	// source map resolved at least one line as stale — deduped so a hot
+	// function with many stale lines gets one warning, not one per line.
+	var staleFiles []string
+	seenStale := map[string]bool{}
+	// spanAmbiguousFiles is staleFiles' mirror for resolveCDPLoc's span-
+	// ambiguity downgrade (see resolvedLoc.spanAmbiguous): one warning per
+	// generated file, not one per downgraded line.
+	var spanAmbiguousFiles []string
+	seenSpanAmbiguous := map[string]bool{}
+
+	for _, k := range funcOrder {
+		if k.File == "" && k.FuncLine <= 0 {
+			// A native builtin (see above): no Functions row of its own —
+			// it already appears in its caller's Callees, via addCallee
+			// below, keyed by this same heatFuncKey.
+			continue
+		}
+		acc := funcs[k]
+		var selfTotal int64
+		for _, line := range acc.lineOrder {
+			selfTotal += acc.lineSelf[line]
+		}
+		var selfPct, cumPct float64
+		if active > 0 {
+			selfPct = float64(selfTotal) / float64(active) * 100
+			cumPct = float64(acc.cum) / float64(active) * 100
+		}
+
+		f := HeatFunction{Name: k.Func, File: k.File, SelfPct: selfPct, CumPct: cumPct}
+		sort.Ints(acc.lineOrder)
+
+		// Resolve every line up front, BEFORE deciding the function's own
+		// File: a real build can map a function's body while leaving its
+		// own declaration line unmapped (a bare comment, or a line the
+		// bundler dropped), so trusting only the declaration line's own
+		// resolution would leave File pointing at the generated file while
+		// every line number underneath it is already in original
+		// coordinates — the wrong file paired with the right-looking line.
+		lineResolved := make([]resolvedLoc, len(acc.lineOrder))
+		for i, line := range acc.lineOrder {
+			lineResolved[i] = resolveCDPLoc(resolver, smCache, genLines, k.File, line)
+		}
+		declRL := resolveCDPLoc(resolver, smCache, genLines, k.File, k.FuncLine)
+
+		rangeFile, rangeLine := k.File, k.FuncLine
+		switch {
+		case declRL.resolved:
+			f.File, rangeFile, rangeLine = declRL.file, declRL.file, declRL.line
+		default:
+			for _, rl := range lineResolved {
+				if rl.resolved {
+					f.File, rangeFile, rangeLine = rl.file, rl.file, rl.line
+					break
+				}
+			}
+		}
+		f.setInternalRangeHint(rangeFile, rangeLine)
+
+		// rawLines carries one entry per GENERATED line before merging: a
+		// source map that compresses several generated lines onto one
+		// original line (common in a minified or one-statement-per-line
+		// bundle) would otherwise produce several HeatLines that all claim
+		// the same Line number instead of one properly summed row.
+		rawLines := make([]HeatLine, 0, len(acc.lineOrder))
+		for i, line := range acc.lineOrder {
+			self := acc.lineSelf[line]
+			outLine, mapping, stale := line, "", false
+			// Only trust a line's own resolution when it lands in the
+			// SAME resolved file as the function itself: HeatLine has no
+			// File of its own (lines nest under HeatFunction.File — see
+			// the schema doc), so a line that maps somewhere else
+			// entirely is kept in generated coordinates instead of
+			// pairing the wrong file with the wrong line number.
+			if rl := lineResolved[i]; rl.resolved && rl.file == f.File {
+				outLine, mapping, stale = rl.line, rl.mapping, rl.stale
+				if rl.spanAmbiguous && k.File != "" && !seenSpanAmbiguous[k.File] {
+					seenSpanAmbiguous[k.File] = true
+					spanAmbiguousFiles = append(spanAmbiguousFiles, k.File)
+				}
+			}
+			if stale && f.File != "" && !seenStale[f.File] {
+				seenStale[f.File] = true
+				staleFiles = append(staleFiles, f.File)
+			}
+			rawLines = append(rawLines, HeatLine{Line: outLine, Self: self, Cum: self, Mapping: mapping, Stale: stale})
+		}
+		f.Lines = mergeHeatLines(rawLines, selfTotal)
+
+		sort.Slice(acc.calleeOrder, func(i, j int) bool {
+			return acc.callees[acc.calleeOrder[i]] > acc.callees[acc.calleeOrder[j]]
+		})
+		for i, ck := range acc.calleeOrder {
+			if i >= maxCalleesPerFunc {
+				break
+			}
+			f.Callees = append(f.Callees, HeatCallee{Func: ck.Func, Cum: acc.callees[ck]})
+		}
+
+		hm.Functions = append(hm.Functions, f)
+	}
+	for _, file := range spanAmbiguousFiles {
+		hm.Warnings = append(hm.Warnings, fmt.Sprintf(
+			"one-line/minified bundle (%s): V8 positionTicks carry no column; per-line attribution not possible, only ambiguous", file))
+	}
+	for _, file := range staleFiles {
+		hm.Warnings = append(hm.Warnings, fmt.Sprintf("source map older than %s: resolved lines may be wrong", file))
+	}
+	if method == MethodCPUProfileFile {
+		hm.Limitations = append(hm.Limitations,
+			"this .cpuprofile has no positionTicks; self time degrades to each function's declaration line instead of its actual hot statement")
+	} else {
+		hm.Limitations = append(hm.Limitations,
+			"V8 positionTicks are self-time; a callee's own time is listed under callees, not folded into the caller's line")
+	}
+	return hm, nil
+}
+
+// mergeHeatLines groups raw, possibly-duplicate lines — several GENERATED
+// lines that resolved to the same ORIGINAL line — by their final Line
+// number: summing Self/Cum, keeping the LEAST-certain Mapping of the group
+// (claiming the group's best-case certainty would overstate how precisely
+// it was actually located), and OR-ing Stale. Returns them sorted by Line
+// ascending, which resolveRanges' observed-range fallback (min/max of
+// Lines) and a human reading the CodeFrame top to bottom both assume. A
+// no-source-map source (every raw Line already unique, one per generated
+// line) merges to a no-op, byte-for-byte the same as before.
+func mergeHeatLines(raw []HeatLine, selfTotal int64) []HeatLine {
+	type agg struct {
+		self, cum int64
+		mapping   string
+		stale     bool
+	}
+	byLine := map[int]*agg{}
+	var order []int
+	for _, l := range raw {
+		a, ok := byLine[l.Line]
+		if !ok {
+			a = &agg{mapping: l.Mapping, stale: l.Stale}
+			byLine[l.Line] = a
+			order = append(order, l.Line)
+		} else {
+			a.mapping = leastCertainMapping(a.mapping, l.Mapping)
+			a.stale = a.stale || l.Stale
+		}
+		a.self += l.Self
+		a.cum += l.Cum
+	}
+	sort.Ints(order)
+	out := make([]HeatLine, 0, len(order))
+	for _, line := range order {
+		a := byLine[line]
+		hl := HeatLine{Line: line, Self: a.self, Cum: a.cum, Mapping: a.mapping, Stale: a.stale}
+		if selfTotal > 0 {
+			hl.PctOfFunction = float64(a.self) / float64(selfTotal) * 100
+		}
+		out = append(out, hl)
+	}
+	return out
+}
+
+// mappingRank orders Mapping confidence from least to most certain: ""
+// (generated coordinates; no source map applies) < "ambiguous" < "exact" —
+// the same three outcomes internal/sourcemap.Resolver (plus this package's
+// own span-ambiguity downgrade, see resolveCDPLoc) ever produces here.
+func mappingRank(m string) int {
+	switch m {
+	case "exact":
+		return 2
+	case "ambiguous":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// leastCertainMapping returns whichever of a, b is the LESS certain
+// mapping, per mappingRank.
+func leastCertainMapping(a, b string) string {
+	if mappingRank(b) < mappingRank(a) {
+		return b
+	}
+	return a
+}
+
+// resolvedLoc is the (possibly unchanged) result of trying to resolve one
+// generated (file,line) through a source map.
+type resolvedLoc struct {
+	resolved bool
+	file     string
+	line     int
+	mapping  string
+	stale    bool
+	// spanAmbiguous is true only when resolveCDPLoc itself downgraded an
+	// otherwise-"exact" resolver result to "ambiguous" because the
+	// generated line's segments span more than one original line (see
+	// resolveCDPLoc) — distinct from the resolver returning "ambiguous" on
+	// its own, so buildFromCDP can warn specifically about the ONE-LINE/
+	// MINIFIED-BUNDLE case rather than a merely-uncertain-but-real mapping.
+	spanAmbiguous bool
+}
+
+// resolveCDPLoc resolves one generated CDP (file,line) through resolver,
+// memoized per (file,line) since the same generated line is often visited
+// by several call-tree nodes (recursion, or several call paths into one
+// hot statement). A resolver of nil (source maps disabled) or any
+// resolution failure (no map, unmapped line, file missing) returns
+// resolved:false — never an error — so a JS profile with no build step at
+// all degrades to its own generated coordinates exactly like plain Go does.
+//
+// V8 positionTicks carry only a line, never a column, but Resolver.Resolve
+// needs one: col<=0 deterministically picks a generated line's FIRST
+// segment, which real bundler output (verified live against a bun-built
+// .cpuprofile fixture, see testdata/tssrc) often spends on the line's
+// leading indentation — several bundlers carry that whitespace's mapping
+// over from the tail of the PREVIOUS statement, so col=0 on
+// "    const s = JSON.stringify(...)" resolved one full original line too
+// early. Querying at the column of the line's first non-blank character
+// instead — read once from the generated file itself via genLines — lands
+// on the segment for the statement that's actually there.
+func resolveCDPLoc(resolver *sourcemap.Resolver, cache map[string]resolvedLoc, genLines map[string][]string, file string, line int) resolvedLoc {
+	if resolver == nil || file == "" || line <= 0 {
+		return resolvedLoc{}
+	}
+	key := fmt.Sprintf("%s\x00%d", file, line)
+	if v, ok := cache[key]; ok {
+		return v
+	}
+	col := firstCodeColumn(genLines, file, line)
+	pos, err := resolver.Resolve(file, line, col)
+	var out resolvedLoc
+	if err == nil && pos.Source != "" {
+		mapping := string(pos.Mapping)
+		spanAmbiguous := false
+		// A generated line whose segments span MORE than one original
+		// line — a minified or one-statement-per-line bundle — can't
+		// honestly be called "exact" attribution just because col landed
+		// on a real segment: V8 positionTicks carry no column at all, so
+		// col here is itself only a guess (see above). Re-querying the
+		// SAME generated line at its LAST non-blank column and comparing
+		// catches this: when the far end of the line resolves to a
+		// different original (file, line) than the near end did, the
+		// whole line's attribution is ambiguous, not exact — verified
+		// live against a `bun build --minify` output, which puts an
+		// entire loop body on one generated line.
+		if endCol := lastCodeColumn(genLines, file, line); endCol > col {
+			if endPos, endErr := resolver.Resolve(file, line, endCol); endErr == nil && endPos.Source != "" {
+				if endPos.Source != pos.Source || endPos.Line != pos.Line {
+					mapping = string(sourcemap.MappingAmbiguous)
+					spanAmbiguous = true
+				}
+			}
+		}
+		out = resolvedLoc{resolved: true, file: pos.Source, line: pos.Line, mapping: mapping, stale: pos.Stale, spanAmbiguous: spanAmbiguous}
+	}
+	cache[key] = out
+	return out
+}
+
+// firstCodeColumn returns the 1-based column of the first non-blank
+// (not space/tab) rune on the generated file's given 1-based line, reading
+// (and memoizing in cache) the file at most once. Returns 0 — Resolve's own
+// "no column known" query — when the file can't be read, the line is out
+// of range, or the line is entirely blank, so a missing/unreadable
+// generated file degrades to the old, less precise behavior instead of
+// losing the resolution outright.
+func firstCodeColumn(cache map[string][]string, file string, line int) int {
+	lines, ok := cache[file]
+	if !ok {
+		lines, _ = readFileLines(file) // nil on any error; cached so a missing file isn't re-opened per line
+		cache[file] = lines
+	}
+	if line < 1 || line > len(lines) {
+		return 0
+	}
+	text := lines[line-1]
+	for i, r := range text {
+		if r != ' ' && r != '\t' {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// lastCodeColumn is firstCodeColumn's mirror: the 1-based column of the
+// LAST non-blank (not space/tab) rune on the generated file's given
+// 1-based line. Used alongside firstCodeColumn to detect a generated line
+// whose mapped segments span more than one original line — see
+// resolveCDPLoc's span-ambiguity check.
+func lastCodeColumn(cache map[string][]string, file string, line int) int {
+	lines, ok := cache[file]
+	if !ok {
+		lines, _ = readFileLines(file)
+		cache[file] = lines
+	}
+	if line < 1 || line > len(lines) {
+		return 0
+	}
+	text := []rune(lines[line-1])
+	for i := len(text) - 1; i >= 0; i-- {
+		if text[i] != ' ' && text[i] != '\t' {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// setInternalRangeHint stashes the function's own generated (file,
+// funcLine) — the fallback range-resolution input when no line resolved
+// through a source map at all — as observed start/end. resolveRanges
+// overwrites StartLine/EndLine/RangeSource afterward when codemap (or a
+// wider observed line span) has something better to say.
+func (f *HeatFunction) setInternalRangeHint(genFile string, genLine int) {
+	f.rangeHintFile = genFile
+	f.rangeHintLine = genLine
+}
+
+// ---------------------------------------------------------------------------
+// FromPprof: decoded pprof proto samples
+// ---------------------------------------------------------------------------
+
+// pprofFuncKey identifies one function for a pprof-sourced heatmap. Unlike
+// CDP's heatFuncKey, Go function names are already globally unique — no
+// V8-style anonymous-closure collision is possible — so (Func, File) alone
+// is enough; there is no declaration-line disambiguator to carry.
+type pprofFuncKey struct {
+	Func string
+	File string
+}
+
+type pprofLineAgg struct{ self, cum int64 }
+
+type pprofFuncAccum struct {
+	lines     map[int]*pprofLineAgg
+	lineOrder []int
+	self      int64
+	cum       int64
+}
+
+// findPprofSampleType returns the index of prof's first SampleType whose
+// Type matches name case-insensitively.
+func findPprofSampleType(prof *profile.Profile, name string) (int, bool) {
+	for i, st := range prof.SampleType {
+		if strings.EqualFold(st.Type, name) {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// pprofLooksLikeCPUOrHeap reports whether prof carries a SampleType this
+// package recognizes, by name, as CPU or heap data.
+func pprofLooksLikeCPUOrHeap(prof *profile.Profile) bool {
+	for _, name := range [...]string{"cpu", "samples", "inuse_space", "alloc_space", "inuse_objects", "alloc_objects"} {
+		if _, ok := findPprofSampleType(prof, name); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// heatFindValueIndex resolves an EXPLICITLY requested HeatProfileType
+// (monitor hot --type) to a real sample-value column, or reports that it
+// couldn't. Unlike pprof.go's pprofValueIndex — built for `monitor
+// profile`'s unconditional flat summary, where falling back to the last
+// column is the right default — this never silently substitutes a
+// different column for a request that named a specific one: doing so would
+// mislabel the heatmap's own profile_type/unit fields as something the
+// profile never measured (see the E3.5 review).
+func heatFindValueIndex(prof *profile.Profile, want HeatProfileType) (int, bool) {
+	switch want {
+	case HeatHeapInuse:
+		return findPprofSampleType(prof, "inuse_space")
+	case HeatHeapAlloc:
+		return findPprofSampleType(prof, "alloc_space")
+	case HeatCPU:
+		if idx, ok := findPprofSampleType(prof, "cpu"); ok {
+			return idx, true
+		}
+		return findPprofSampleType(prof, "samples")
+	case HeatGoroutine:
+		if idx, ok := findPprofSampleType(prof, "goroutine"); ok {
+			return idx, true
+		}
+		// No column is literally named "goroutine" — some Go versions'
+		// writers emit a single unnamed count column instead. Accept that
+		// shape only when the profile carries no cpu/heap signature at
+		// all, so `--type goroutine` against an actual cpu or heap
+		// capture still fails instead of silently reporting whatever
+		// column happens to be last.
+		if !pprofLooksLikeCPUOrHeap(prof) && len(prof.SampleType) > 0 {
+			return len(prof.SampleType) - 1, true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
+}
+
+// detectPprofProfileType picks a HeatProfileType and its sample-value
+// column from the profile's OWN SampleType names, for the common case
+// where the caller (monitor hot with no --type) didn't ask for one
+// explicitly — auto-detecting what the profile actually measured instead
+// of hard-defaulting to "cpu" regardless of what was captured, which used
+// to mislabel a heap or goroutine .pb.gz as a cpu one (see the E3.5
+// review).
+func detectPprofProfileType(prof *profile.Profile) (HeatProfileType, int) {
+	if idx, ok := findPprofSampleType(prof, "inuse_space"); ok {
+		return HeatHeapInuse, idx
+	}
+	if idx, ok := findPprofSampleType(prof, "alloc_space"); ok {
+		return HeatHeapAlloc, idx
+	}
+	if idx, ok := findPprofSampleType(prof, "cpu"); ok {
+		return HeatCPU, idx
+	}
+	if idx, ok := findPprofSampleType(prof, "samples"); ok {
+		return HeatCPU, idx
+	}
+	if idx, ok := findPprofSampleType(prof, "goroutine"); ok {
+		return HeatGoroutine, idx
+	}
+	if len(prof.SampleType) == 1 {
+		// A single, unnamed count column with none of the signatures
+		// above: Go's own convention for a goroutine/threadcreate-shaped
+		// snapshot profile.
+		return HeatGoroutine, 0
+	}
+	// Genuinely unrecognized shape: fall back to pprof's own "last column"
+	// display convention rather than refusing outright.
+	idx := 0
+	if n := len(prof.SampleType); n > 0 {
+		idx = n - 1
+	}
+	return HeatCPU, idx
+}
+
+// describePprofSampleTypes renders prof's SampleType columns for an error
+// message, e.g. "cpu/nanoseconds, samples/count".
+func describePprofSampleTypes(prof *profile.Profile) string {
+	if len(prof.SampleType) == 0 {
+		return "(none)"
+	}
+	parts := make([]string, len(prof.SampleType))
+	for i, st := range prof.SampleType {
+		parts[i] = fmt.Sprintf("%s/%s", st.Type, st.Unit)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// buildFromPprof is FromPprof: the decoded-pprof-proto producer.
+func buildFromPprof(prof *profile.Profile, opts HeatOptions) (*Heatmap, error) {
+	if prof == nil {
+		return nil, fmt.Errorf("heat.Build: nil pprof profile")
+	}
+	var ptype HeatProfileType
+	var valueIdx int
+	if opts.ProfileType != "" {
+		idx, ok := heatFindValueIndex(prof, opts.ProfileType)
+		if !ok {
+			return nil, fmt.Errorf("heat.Build: this pprof profile has no %s sample column (available: %s)",
+				opts.ProfileType, describePprofSampleTypes(prof))
+		}
+		ptype, valueIdx = opts.ProfileType, idx
+	} else {
+		ptype, valueIdx = detectPprofProfileType(prof)
+	}
+
+	funcs := map[pprofFuncKey]*pprofFuncAccum{}
+	var funcOrder []pprofFuncKey
+	getFunc := func(k pprofFuncKey) *pprofFuncAccum {
+		a, ok := funcs[k]
+		if !ok {
+			a = &pprofFuncAccum{lines: map[int]*pprofLineAgg{}}
+			funcs[k] = a
+			funcOrder = append(funcOrder, k)
+		}
+		return a
+	}
+	lineOf := func(k pprofFuncKey, line int) *pprofLineAgg {
+		a := getFunc(k)
+		la, ok := a.lines[line]
+		if !ok {
+			la = &pprofLineAgg{}
+			a.lines[line] = la
+			a.lineOrder = append(a.lineOrder, line)
+		}
+		return la
+	}
+
+	var total int64
+	for _, s := range prof.Sample {
+		if valueIdx < 0 || valueIdx >= len(s.Value) {
+			continue
+		}
+		v := s.Value[valueIdx]
+		if v == 0 {
+			continue
+		}
+		total += v
+
+		// Flat: credited only to the leaf location's innermost inlined
+		// line — mirrors symbolsFromPprof (pprof.go) exactly.
+		if len(s.Location) > 0 && len(s.Location[0].Line) > 0 {
+			id := pprofLineIdentity(s.Location[0].Line[0])
+			k := pprofFuncKey{Func: id.Func, File: id.File}
+			la := lineOf(k, id.Line)
+			la.self += v
+			getFunc(k).self += v
+		}
+
+		// Cum: every (func,line) on the stack, once per sample — the same
+		// recursion guard symbolsFromPprof uses — PLUS a coarser,
+		// function-only guard for the function-level total below (a
+		// function with several of its own lines/recursive frames on one
+		// stack must still only count that sample once toward its own
+		// Cum, or direct/mutual recursion would inflate it past the
+		// sample's own weight).
+		seenLine := map[pprofFuncKey]map[int]bool{}
+		seenFunc := map[pprofFuncKey]bool{}
+		for _, loc := range s.Location {
+			for _, ln := range loc.Line {
+				id := pprofLineIdentity(ln)
+				k := pprofFuncKey{Func: id.Func, File: id.File}
+				if seenLine[k] == nil {
+					seenLine[k] = map[int]bool{}
+				}
+				if !seenLine[k][id.Line] {
+					seenLine[k][id.Line] = true
+					lineOf(k, id.Line).cum += v
+				}
+				if !seenFunc[k] {
+					seenFunc[k] = true
+					getFunc(k).cum += v
+				}
+			}
+		}
+	}
+	// A CPU proto with a real capture DURATION but zero samples in the
+	// selected column is an honestly, fully idle target — not an error:
+	// AC-5 says point at nothing (with an idle warning) rather than refuse
+	// to render at all, the same rule a mostly-idle CDP capture already
+	// gets.
+	idleCapture := ptype == HeatCPU && prof.DurationNanos > 0
+	if total <= 0 && !idleCapture {
+		return nil, fmt.Errorf("heat.Build: pprof profile has no samples for the selected value column")
+	}
+
+	unit := "samples"
+	if valueIdx >= 0 && valueIdx < len(prof.SampleType) && prof.SampleType[valueIdx].Unit != "" {
+		unit = prof.SampleType[valueIdx].Unit
+	}
+
+	hm := &Heatmap{
+		Schema:      HeatSchema,
+		ProfileType: ptype,
+		Unit:        unit,
+		Method:      MethodPprofProto,
+		Runtime:     "go",
+		// Samples/ActiveSamples are the raw value-column total, measured
+		// in Unit — the contract's own rule for the field
+		// (docs/contracts/line-heatmap-v1.md: a pprof CPU source's
+		// `samples` is the nanosecond total across the selected value
+		// column, a heap source's is bytes — never literally a count, and
+		// never the wall-clock window DurationNanos carries). A pprof
+		// proto also has no (idle)/(program)/(GC) pseudo-frames, so
+		// ActiveSamples always equals Samples; an off-CPU share is
+		// reported through IdlePct below instead.
+		Samples:       int(total),
+		ActiveSamples: int(total),
+	}
+	if prof.DurationNanos > 0 {
+		hm.CaptureDurationNanos = prof.DurationNanos
+	}
+	if idleCapture {
+		// CC-11: idle math needs `total` expressed as a real nanosecond
+		// duration before it can be compared against DurationNanos. A
+		// "nanoseconds" value column already IS one (periodNanos=1 below
+		// is a no-op conversion). A "count" column — the documented
+		// HeatCPU fallback for a pprof proto whose only column is
+		// samples/count (see heatFindValueIndex/detectPprofProfileType)
+		// — only converts when the profile's own PeriodType says the
+		// sampling period is itself nanoseconds and Period is set
+		// (activeNanos = total*Period). Any other unit (bytes, or a count
+		// column with no nanosecond period) has no honest conversion, so
+		// idle math is skipped entirely and Samples/ActiveSamples keep
+		// reporting the raw total set above — never treating a bare
+		// count as if it were already nanoseconds, which used to make a
+		// fully-busy samples/count capture (100 samples over a 10ms
+		// period = 1s of real CPU in a 1s window) look ~100% idle.
+		//
+		// The off-CPU share is reported through IdlePct/IdleMeasured
+		// ONLY, never by overwriting Samples/ActiveSamples with the
+		// window capacity or the duration: the contract says `samples`
+		// is the selected value column's total, so a busy and an idle
+		// capture of the same window stay comparable under one unit.
+		var periodNanos int64
+		switch {
+		case total <= 0:
+			// Zero of anything is zero active time, regardless of unit —
+			// no conversion needed to call this honestly idle.
+			periodNanos = 1
+		case unit == "nanoseconds":
+			periodNanos = 1
+		case unit == "count" && prof.PeriodType != nil && prof.PeriodType.Unit == "nanoseconds" && prof.Period > 0:
+			periodNanos = prof.Period
+		}
+		if periodNanos > 0 {
+			dur := prof.DurationNanos
+			activeNanos := total * periodNanos
+			if activeNanos > dur {
+				// Multi-core CPU time can exceed one wall-clock window's
+				// worth of nanoseconds; report full utilization instead of a
+				// nonsensical negative idle share.
+				activeNanos = dur
+			}
+			hm.IdleMeasured = true
+			hm.IdlePct = float64(dur-activeNanos) / float64(dur) * 100
+		}
+	}
+
+	for _, k := range funcOrder {
+		acc := funcs[k]
+		var selfPct, cumPct float64
+		if total > 0 {
+			selfPct = float64(acc.self) / float64(total) * 100
+			cumPct = float64(acc.cum) / float64(total) * 100
+		}
+		f := HeatFunction{Name: k.Func, File: k.File, SelfPct: selfPct, CumPct: cumPct}
+
+		sort.Ints(acc.lineOrder)
+		normBy := acc.self
+		if normBy <= 0 {
+			normBy = acc.cum // a pure wrapper with zero self: normalize the (still-informative) cum share instead.
+		}
+		for _, line := range acc.lineOrder {
+			la := acc.lines[line]
+			hl := HeatLine{Line: line, Self: la.self, Cum: la.cum}
+			if normBy > 0 {
+				basis := la.self
+				if acc.self <= 0 {
+					basis = la.cum
+				}
+				hl.PctOfFunction = float64(basis) / float64(normBy) * 100
+			}
+			f.Lines = append(f.Lines, hl)
+		}
+
+		var repLine int
+		if len(acc.lineOrder) > 0 {
+			repLine = acc.lineOrder[0]
+		}
+		f.setInternalRangeHint(k.File, repLine)
+		hm.Functions = append(hm.Functions, f)
+	}
+	return hm, nil
+}
+
+// ---------------------------------------------------------------------------
+// Shared post-processing: ranges, code, sorting, warnings
+// ---------------------------------------------------------------------------
+
+// codemapRangeCache dedupes symbol-at calls within one BuildHeatmap run:
+// several functions in the same file (or the same function looked up via
+// more than one representative line) would otherwise each pay a codemap
+// subprocess round trip.
+type codemapRangeCache struct {
+	entries map[string]ecosystem.SymbolAt
+	errs    map[string]error
+}
+
+func resolveRanges(ctx context.Context, hm *Heatmap, opts HeatOptions) {
+	codemapOK := !opts.NoCodemap && ecosystem.CodemapAvailable()
+	if codemapOK {
+		health := ecosystem.ProbeCodemap(ctx, opts.Codebase)
+		codemapOK = health.State == ecosystem.HealthOK
+	}
+	cache := &codemapRangeCache{entries: map[string]ecosystem.SymbolAt{}, errs: map[string]error{}}
+	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+
+	for i := range hm.Functions {
+		f := &hm.Functions[i]
+		file, line := f.rangeHintFile, f.rangeHintLine
+		if len(f.Lines) > 0 {
+			file, line = f.File, f.Lines[0].Line
+		}
+		if codemapOK && cctx.Err() == nil && file != "" && line > 0 {
+			sym, err := lookupCodemapRange(cctx, cache, file, line, opts.Codebase)
+			if err == nil && sym.Resolution != "" && sym.Resolution != "none" && sym.StartLine > 0 {
+				f.StartLine, f.EndLine, f.RangeSource = sym.StartLine, sym.EndLine, "codemap"
+				continue
+			}
+		}
+		// Observed fallback: the min/max line actually seen for this
+		// function, or (for a function with zero attributed lines — an
+		// ancestor whose only signal is its callees) the single generated
+		// declaration line as both start and end, honestly marked observed
+		// rather than left as a fabricated range.
+		if len(f.Lines) > 0 {
+			f.StartLine, f.EndLine = f.Lines[0].Line, f.Lines[len(f.Lines)-1].Line
+		} else if line > 0 {
+			f.StartLine, f.EndLine = line, line
+		}
+		if f.StartLine > 0 {
+			f.RangeSource = "observed"
+		}
+	}
+}
+
+func lookupCodemapRange(ctx context.Context, cache *codemapRangeCache, file string, line int, codebase string) (ecosystem.SymbolAt, error) {
+	key := fmt.Sprintf("%s\x00%d", file, line)
+	if sym, ok := cache.entries[key]; ok {
+		return sym, nil
+	}
+	if err, ok := cache.errs[key]; ok {
+		return ecosystem.SymbolAt{}, err
+	}
+	sym, err := ecosystem.CodemapSymbolAtPath(ctx, file, line, ecosystem.CodemapOpts{Path: codebase})
+	if err != nil {
+		cache.errs[key] = err
+		return ecosystem.SymbolAt{}, err
+	}
+	cache.entries[key] = sym
+	return sym, nil
+}
+
+// readCode fills HeatLine.Code from disk, one open+scan per distinct file
+// (never per line). A missing file, an out-of-range line, or any read
+// error just leaves Code empty — per AC-5, a profile taken against a
+// binary that has since moved or been rebuilt must still render, honestly
+// missing only the source snippet, not the whole heatmap.
+//
+// (SEC-8) Every path here comes from the profile itself — callFrame urls
+// or source-map sources for CDP, build-time filenames for pprof — so a
+// crafted or shared .cpuprofile must never turn readCode into an
+// arbitrary file reader: each read is confined to a project root
+// (EvalSymlinks on both sides plus a prefix check, the same rule
+// explain.readSnippet applies to the git root), dotfile and .env* paths
+// are refused outright even inside a root (untracked secret files live in
+// dotfiles), and whatever text IS read goes through a scrub.Scrubber
+// carrying the exact values of this process's secret env vars before it
+// can reach a terminal, --json, or MCP. A file the rules refuse
+// contributes no Code lines plus one honesty warning instead.
+func readCode(hm *Heatmap, opts HeatOptions) {
+	roots := CodeReadRoots(opts.CodeRoots...)
+	scr := scrub.New(scrub.WithValues(scrub.SecretEnvValues(os.Environ(), nil)))
+	cache := map[string][]string{}
+	loaded := map[string]bool{}
+	var refused []string
+	for fi := range hm.Functions {
+		f := &hm.Functions[fi]
+		if f.File == "" {
+			continue
+		}
+		if !loaded[f.File] {
+			loaded[f.File] = true
+			if !CodeReadAllowed(f.File, roots) {
+				refused = append(refused, f.File)
+				continue
+			}
+			if lines, err := readFileLines(f.File); err == nil {
+				cache[f.File] = lines
+			}
+		}
+		lines := cache[f.File]
+		if lines == nil {
+			continue
+		}
+		for li := range f.Lines {
+			l := &f.Lines[li]
+			if l.Line >= 1 && l.Line <= len(lines) {
+				l.Code = truncateCode(scr.String(lines[l.Line-1]))
+			}
+		}
+	}
+	if len(refused) > 0 {
+		hm.Warnings = append(hm.Warnings, codeRefusalWarning(refused))
+	}
+}
+
+// codeRefusalWarning renders readCode's (SEC-8) honesty note for files the
+// confinement rules refused: the heatmap still points at the line NUMBER
+// (that comes from the profile, not the disk), but its text was not read,
+// and the warning is what tells a person why.
+func codeRefusalWarning(refused []string) string {
+	return fmt.Sprintf("source text omitted: %d file(s) named by the profile are outside the readable project root (e.g. %s); nothing outside it is read", len(refused), refused[0])
+}
+
+// CodeReadRoots resolves the directories readCode treats as project roots
+// for (SEC-8) source reads: the git root of the working directory when one
+// exists (else the working directory itself), plus every extra entry a
+// caller knows the profile's own files live under — the directory of a
+// `--file` target, a live leaf's codebase root. Each root is resolved with
+// EvalSymlinks so a symlinked spelling of a directory (/tmp vs
+// /private/tmp on macOS) confines the same tree the real path would; a
+// root that cannot be resolved, or that resolves to the filesystem root
+// itself (a cwd of "/" must never whitelist the whole disk), is dropped.
+// The result is deduplicated, first-seen order.
+func CodeReadRoots(extra ...string) []string {
+	var roots []string
+	add := func(dir string) {
+		if dir == "" {
+			return
+		}
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err != nil || resolved == string(filepath.Separator) {
+			return
+		}
+		for _, r := range roots {
+			if r == resolved {
+				return
+			}
+		}
+		roots = append(roots, resolved)
+	}
+	if root, ok := gitRootOfCwd(); ok {
+		add(root)
+	} else if wd, err := os.Getwd(); err == nil {
+		add(wd)
+	}
+	for _, e := range extra {
+		add(e)
+	}
+	return roots
+}
+
+// gitRootOfCwd walks up from the working directory looking for a .git
+// entry (a directory for a normal clone, a file for a worktree) — the same
+// discovery git itself performs. ok is false outside any repository.
+func gitRootOfCwd() (string, bool) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+// CodeReadAllowed reports whether path may be read as heatmap source text
+// under (SEC-8)'s confinement. A path that does not exist is simply not
+// readable (the caller degrades to an empty snippet, as it always did for
+// a missing file); an existing one is allowed only when it is not a
+// dotfile or .env* path (a dot component anywhere: .git, .env, .aws,
+// .ssh, ... — untracked secret files live in exactly those names even
+// inside an otherwise trusted root) and its EvalSymlinks-resolved self
+// sits under one of the equally-resolved roots — both sides resolved, so a
+// symlink planted inside a root cannot walk the read back outside it (the
+// same rule explain.readSnippet applies).
+func CodeReadAllowed(path string, roots []string) bool {
+	if !filepath.IsAbs(path) {
+		// Profile-named paths are usually absolute, but a capture can
+		// name a repo-relative file (the committed inlined-caller
+		// fixture does): resolve it against the directory the user
+		// ran from, exactly as readFileLines below would open it.
+		// EvalSymlinks alone would NOT do this (it keeps a relative
+		// path relative), which would refuse every relative path.
+		// A relative escape (../.., .env) still has to pass the
+		// dot-segment refusal and the root-prefix check below, like
+		// any other path.
+		if wd, err := os.Getwd(); err == nil {
+			path = filepath.Join(wd, path)
+		}
+	}
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	if neverReadableSourcePath(path) {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	for _, root := range roots {
+		if resolved == root || strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// neverReadableSourcePath reports whether any component of path starts
+// with a dot, so .git/, .env, .env.local, ~/.aws/credentials and every
+// other dot-named file or directory is refused as heatmap source text no
+// matter which root it sits under (SEC-8; the same denylist shape
+// explain.readSnippet's git-unavailable fallback uses).
+func neverReadableSourcePath(path string) bool {
+	clean := filepath.Clean(path)
+	if clean == "" || clean == "." || clean == string(filepath.Separator) {
+		return true
+	}
+	for _, part := range strings.Split(clean, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		if strings.HasPrefix(part, ".") {
+			return true
+		}
+	}
+	return false
+}
+
+// maxHeatLineCodeRunes caps HeatLine.Code so one pathological source line —
+// a minified bundle's whole body on one line, seen for real against a `bun
+// build --minify` fixture — can't blow up the JSON document's size (this
+// matters for the E3.6 MCP payload budget, which the whole heatmap has to
+// fit inside).
+const maxHeatLineCodeRunes = 240
+
+// truncateCode caps code at maxHeatLineCodeRunes runes, an ellipsis marking
+// a truncation so a consumer can tell "this is the whole line" from "this
+// was cut off" — never silently swallowing bytes past the cap.
+func truncateCode(code string) string {
+	r := []rune(code)
+	if len(r) <= maxHeatLineCodeRunes {
+		return code
+	}
+	return string(r[:maxHeatLineCodeRunes]) + "…"
+}
+
+func readFileLines(path string) ([]string, error) {
+	fh, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer fh.Close()
+	var lines []string
+	sc := bufio.NewScanner(fh)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		lines = append(lines, sc.Text())
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return lines, nil
+}
+
+// finalizeFunctions applies the Func filter, sorts by Cum% desc / Self%
+// desc / Name, and caps at Top — the same shape order the roadmap's
+// TOTAL/SELF/FUNCTION table renders in (sorted by TOTAL=cum, a wrapper's
+// near-zero self doesn't bury it below its own callee).
+func finalizeFunctions(hm *Heatmap, opts HeatOptions) {
+	fns := hm.Functions
+	if opts.Func != "" {
+		filtered := fns[:0:0]
+		for _, f := range fns {
+			if f.Name == opts.Func {
+				filtered = append(filtered, f)
+			}
+		}
+		fns = filtered
+	}
+	sort.SliceStable(fns, func(i, j int) bool {
+		if fns[i].CumPct != fns[j].CumPct {
+			return fns[i].CumPct > fns[j].CumPct
+		}
+		if fns[i].SelfPct != fns[j].SelfPct {
+			return fns[i].SelfPct > fns[j].SelfPct
+		}
+		return fns[i].Name < fns[j].Name
+	})
+	if top := opts.top(); len(fns) > top {
+		fns = fns[:top]
+	}
+	hm.Functions = fns
+}
+
+// addWarnings appends AC-5's two honesty warnings when the data calls for
+// them: idle_pct past idleWarningThresholdPct (CPU heat can't explain
+// off-CPU slowness) and a top function whose own self share is under
+// diffuseWarningThresholdPct (no single line dominates enough to call it
+// "the" hot line). It also picks DefaultTarget — see defaultTargetFunction.
+func addWarnings(hm *Heatmap, opts HeatOptions) {
+	if hm.IdlePct > idleWarningThresholdPct {
+		hm.Warnings = append(hm.Warnings, "mostly idle: slowness is off-CPU")
+	}
+	if len(hm.Functions) == 0 {
+		return
+	}
+	top := defaultTargetFunction(hm, opts)
+	// Stash it as DefaultTarget too: this runs on the FULL, pre-filter/cap
+	// list (see BuildHeatmap's ordering comment), so a caller (monitor hot
+	// with no --func) that reads DefaultTarget instead of re-deriving
+	// "hottest" from the already-filtered/capped Functions gets the real
+	// answer even when --top truncated the real hot function out of the
+	// visible table.
+	topCopy := top
+	hm.DefaultTarget = &topCopy
+	basis := top.SelfPct
+	if basis <= 0 {
+		basis = top.CumPct
+	}
+	if basis < diffuseWarningThresholdPct {
+		hm.Warnings = append(hm.Warnings, fmt.Sprintf(
+			"diffuse: the hottest function (%s) has only %.1f%% of active samples; this profile may be too spread out to point at one line",
+			nonEmpty(top.Name, "(unknown)"), basis))
+	}
+}
+
+// defaultTargetFunction picks the function the default CodeFrame shows
+// (Heatmap.DefaultTarget). "The hottest function" must mean the same thing
+// `monitor hot` actually renders: the highest SELF share for a CDP source —
+// not Functions[0] (sorted by CUM, so a near-zero-self wrapper that merely
+// calls a genuinely hot function would otherwise be the default target).
+//
+// For a pprof proto (LUX-1) it is the highest-CUM IN-APP function instead:
+// in Go the expensive work is routinely cum-only (a main.* function whose
+// whole cost flows through json.Marshal and the allocator), so max-self
+// lands on idle waits (runtime.kevent, runtime.pthread_cond_wait,
+// runtime.gopark) or allocator internals and never names the program's own
+// function. pprofFunctionInApp defines "in-app"; when no function passes
+// it (a pure-runtime profile), the old max-self rule still applies, minus
+// the known idle frames.
+func defaultTargetFunction(hm *Heatmap, opts HeatOptions) HeatFunction {
+	if hm.Method == MethodPprofProto {
+		if f, ok := highestCumInAppFunction(hm.Functions, opts); ok {
+			return f
+		}
+	}
+	return maxSelfFunction(hm.Functions)
+}
+
+// highestCumInAppFunction returns the highest-CumPct in-app function in
+// fns (ties broken by SelfPct, then first occurrence), for LUX-1's pprof
+// default target. ok is false when nothing qualifies.
+func highestCumInAppFunction(fns []HeatFunction, opts HeatOptions) (HeatFunction, bool) {
+	var best HeatFunction
+	found := false
+	for _, f := range fns {
+		if !pprofFunctionInApp(f, opts) {
+			continue
+		}
+		if !found || f.CumPct > best.CumPct || (f.CumPct == best.CumPct && f.SelfPct > best.SelfPct) {
+			best, found = f, true
+		}
+	}
+	return best, found
+}
+
+// maxSelfFunction returns the highest-SelfPct function in fns, never a
+// known idle/wait frame when any alternative exists (LUX-1): an all-idle
+// profile keeps its (honest) max-self answer rather than nothing.
+func maxSelfFunction(fns []HeatFunction) HeatFunction {
+	for _, skipIdle := range []bool{true, false} {
+		var best HeatFunction
+		found := false
+		for _, f := range fns {
+			if skipIdle && isKnownIdleWaitFrame(f.Name) {
+				continue
+			}
+			if !found || f.SelfPct > best.SelfPct {
+				best, found = f, true
+			}
+		}
+		if found {
+			return best
+		}
+	}
+	return fns[0] // unreachable for a non-empty fns; the loop above always finds one.
+}
+
+// pprofIdleFramePrefixes are the sampler frames LUX-1 must never pick as
+// the default CodeFrame target, whatever their self share: they are where
+// a Go thread WAITS, not where it works, so "the hot line" would name a
+// syscall trampoline instead of the program.
+var pprofIdleFramePrefixes = []string{
+	"runtime.kevent", "runtime.pthread_cond_wait", "runtime.gopark",
+	"runtime.netpoll", "runtime.usleep", "syscall.syscall",
+}
+
+// isKnownIdleWaitFrame reports whether name is one of
+// pprofIdleFramePrefixes (prefix match, so runtime.netpollBreak and
+// syscall.syscall_unix are covered too).
+func isKnownIdleWaitFrame(name string) bool {
+	for _, p := range pprofIdleFramePrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// pprofFunctionInApp reports whether f is one of the profiled program's
+// own functions rather than the Go runtime, its standard library, or a
+// module dependency (LUX-1). A file under an explicitly known project root
+// (opts.Codebase, opts.CodeRoots — e.g. the resolved codebase root of a
+// live leaf) counts as in-app outright; otherwise the runtime's own
+// prefixes (runtime./internal/), GOROOT (including a GOROOT/src-relative
+// filename, the shape older or trimmed toolchains emit) and the module
+// cache (GOMODCACHE, default ~/go/pkg/mod) disqualify, and so does every
+// known idle/wait frame. A function with no File at all cannot be placed
+// and is conservatively not in-app.
+func pprofFunctionInApp(f HeatFunction, opts HeatOptions) bool {
+	if isKnownIdleWaitFrame(f.Name) {
+		return false
+	}
+	if f.File == "" {
+		return false
+	}
+	roots := append([]string{opts.Codebase}, opts.CodeRoots...)
+	for _, root := range CodeReadRoots(roots...) {
+		if underResolvedRoot(f.File, root) {
+			return true
+		}
+	}
+	if strings.HasPrefix(f.Name, "runtime.") || strings.HasPrefix(f.Name, "internal/") {
+		return false
+	}
+	if fileUnderGoRoot(f.File) {
+		return false
+	}
+	return !fileUnderGoModCache(f.File)
+}
+
+// underResolvedRoot reports whether path's EvalSymlinks-resolved self sits
+// under the equally-resolved root (a path that cannot be resolved — it
+// does not exist — never does).
+func underResolvedRoot(path, root string) bool {
+	if path == "" || root == "" {
+		return false
+	}
+	r, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	// A repo-relative profile path (the committed inlined-caller fixture
+	// names one) resolves against the directory the user ran from --
+	// EvalSymlinks alone keeps it relative, which can never prefix-match
+	// an absolute root (see CodeReadAllowed).
+	if !filepath.IsAbs(path) {
+		if wd, err := os.Getwd(); err == nil {
+			path = filepath.Join(wd, path)
+		}
+	}
+	p, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	return p == r || strings.HasPrefix(p, r+string(filepath.Separator))
+}
+
+// fileUnderGoRoot reports whether file names Go's own source: an absolute
+// path under runtime.GOROOT(), or a relative one that exists under
+// GOROOT/src (the "runtime/proc.go"/"encoding/json/encode.go" shape a
+// stripped or older toolchain emits).
+func fileUnderGoRoot(file string) bool {
+	root := runtime.GOROOT()
+	if root == "" {
+		return false
+	}
+	if underResolvedRoot(file, root) {
+		return true
+	}
+	if !filepath.IsAbs(file) {
+		if _, err := os.Stat(filepath.Join(root, "src", file)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// fileUnderGoModCache reports whether file sits under the Go module cache
+// (GOMODCACHE when set, ~/go/pkg/mod otherwise) — dependency code, not the
+// program's own.
+func fileUnderGoModCache(file string) bool {
+	cache := os.Getenv("GOMODCACHE")
+	if cache == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		cache = filepath.Join(home, "go", "pkg", "mod")
+	}
+	return underResolvedRoot(file, cache)
+}
+
+func nonEmpty(s, fallback string) string {
+	if strings.TrimSpace(s) == "" {
+		return fallback
+	}
+	return s
+}
+
+// ---------------------------------------------------------------------------
+// JIT-inlining honesty heuristic (polish wave)
+// ---------------------------------------------------------------------------
+
+// inlineHotLineThresholdPct/inlineCalleeSelfThresholdPct are
+// addInliningWarnings' own honesty thresholds: a caller's own line has to
+// dominate its function almost completely (inlineHotLineThresholdPct) —
+// the same order of magnitude the dogfood evidence showed (99.9% on one
+// call-site line) — before this heuristic even looks at it, and a callee
+// that DOES appear with real self time of its own
+// (inlineCalleeSelfThresholdPct or more) is treated as genuinely,
+// separately sampled, not inlined away.
+const (
+	inlineHotLineThresholdPct    = 90.0
+	inlineCalleeSelfThresholdPct = 1.0
+	// inlineCallerMinSelfPct/inlineCallerMinSelfSamples are the minimum
+	// evidence addInliningWarnings requires from the CALLER's own line
+	// before treating a "no separately-sampled callee" shape as anything
+	// worth flagging at all — see the polish-wave review (heat.go:1773): a
+	// dispatcher/wrapper whose call line only ever received a handful of
+	// samples reaches PctOfFunction>=inlineHotLineThresholdPct trivially
+	// (it's the only line that function ever self-sampled at all), which is
+	// not evidence of inlining, just of a thin sample. A caller passes this
+	// gate when EITHER its own self share of the whole profile OR the raw
+	// sample count on that one line clears a real minimum.
+	inlineCallerMinSelfPct     = 5.0
+	inlineCallerMinSelfSamples = int64(5)
+	// inlineCalleeCumRatioGuard is the other half of that same review
+	// finding: a callee that already carries real CUMULATIVE weight under
+	// THIS caller (HeatCallee.Cum — meaning it has its own node in the
+	// sampled call tree, with real subtree weight flowing through it) is
+	// positive evidence it was NOT inlined away, however small its own
+	// SELF time is. "Comparable to or larger than the caller's self on this
+	// line" is approximated as at least half of it.
+	inlineCalleeCumRatioGuard = 0.5
+)
+
+// InlineWarningPrefix is the fixed lead-in every addInliningWarnings message
+// starts with — exported so a renderer (monitor hot's renderHeatBody) can
+// recognize and re-route these specific Warnings entries (it renders them
+// under the CodeFrame, alongside the optional InlinedCallees secondary
+// frame, rather than in the generic top-of-output warnings block) without
+// hard-coding the whole message text a second time in a different package.
+const InlineWarningPrefix = "likely JIT-inlined:"
+
+// maxInlinedCalleeBodyLines caps how many lines of a located callee's own
+// source the OPTIONAL secondary frame (InlinedCallee.Body) carries. This is
+// a plain text scan, not a real function-range resolution (no codemap
+// symbol-at call here — see buildInlinedCallee), so it is deliberately a
+// small, fixed window rather than an attempt to find the callee's real
+// closing brace.
+const maxInlinedCalleeBodyLines = 12
+
+// inlineCallRe matches a bare-identifier call expression — "heavyStringify("
+// in "return heavyStringify(items);" — but deliberately NOT a property/
+// method call such as "JSON.stringify(" or "'x'.repeat(": requiring the
+// character immediately before the identifier to be neither '.' nor a word
+// character nor '$' excludes exactly that case, since a real property
+// access always has one of those immediately before the method name.
+var inlineCallRe = regexp.MustCompile(`(?:^|[^.\w$])([A-Za-z_$][A-Za-z0-9_$]*)\s*\(`)
+
+// inlineCallExcluded is calleeCallOnLine's denylist: JS control-flow
+// keywords (which this regex would otherwise mistake for a bare call —
+// "if (", "for (", "catch (" all match the same shape) and a short list of
+// well-known globals/builtins that are never the user's own in-app
+// function, so flagging them as "likely inlined" would be pure noise, not
+// a finding.
+var inlineCallExcluded = map[string]bool{
+	"if": true, "for": true, "while": true, "switch": true, "catch": true,
+	"function": true, "return": true, "typeof": true, "new": true, "do": true,
+	"else": true, "await": true, "yield": true, "in": true, "of": true,
+	"JSON": true, "Math": true, "Array": true, "Object": true, "console": true,
+	"parseInt": true, "parseFloat": true, "Number": true, "String": true,
+	"Boolean": true, "Promise": true, "RegExp": true, "Map": true, "Set": true,
+	"Date": true, "Error": true, "TypeError": true, "RangeError": true,
+	"setTimeout": true, "setInterval": true, "clearTimeout": true, "clearInterval": true,
+	"require": true, "module": true, "exports": true, "Buffer": true,
+	"process": true, "isNaN": true, "isFinite": true,
+	"encodeURIComponent": true, "decodeURIComponent": true,
+	"structuredClone": true, "fetch": true, "Symbol": true, "WeakMap": true,
+	"WeakSet": true, "Proxy": true, "Reflect": true,
+	// Additional keywords the regex's shape ("identifier followed by an
+	// optionally-whitespace-separated '(') would otherwise mistake for a
+	// bare call -- "async (x) =>", "super(...)", "import(...)",
+	// "void 0", "delete obj[k]" (never parenthesized like this in real
+	// code, but excluded defensively), "throw(...)"-shaped macros, and a
+	// "case (" style guard clause -- see the polish-wave review's blocker
+	// finding (heat.go:1688).
+	"async": true, "super": true, "import": true, "void": true,
+	"delete": true, "throw": true, "case": true,
+}
+
+// inlineNewCallRe matches a bare "new" keyword immediately (only whitespace
+// between) preceding the point calleeCallOnLine is about to treat as a
+// function-call identifier — "new Uint8Array(" — so a constructor
+// invocation is never mistaken for the caller-inlines-callee shape this
+// heuristic targets: a typed-array or other well-known constructor can't
+// all be enumerated in inlineCallExcluded by name, but "preceded by new" is
+// a single, general rule that catches all of them.
+var inlineNewCallRe = regexp.MustCompile(`\bnew\s*$`)
+
+// calleeCallOnLine returns the first bare-identifier function-call name on
+// code that survives inlineCallExcluded's denylist and isn't a `new X(...)`
+// constructor call, or "" when the line has no such call at all (a plain
+// assignment, a loop header with no call, a property access only, a
+// constructor call, ...). code is stripped of `//`/`/* */` comments and
+// string/template-literal contents first — see stripJSCommentsAndStrings —
+// so a trailing comment or a string literal that happens to LOOK like a
+// call (the polish-wave review's exact false-positive: a "// HOT LINE (line
+// 16)" comment on a real hot line matched "LINE(" as a bogus callee name)
+// can never be mistaken for real code.
+func calleeCallOnLine(code string) string {
+	code = stripJSCommentsAndStrings(code)
+	for _, m := range inlineCallRe.FindAllStringSubmatchIndex(code, -1) {
+		name := code[m[2]:m[3]]
+		if inlineCallExcluded[name] {
+			continue
+		}
+		if inlineNewCallRe.MatchString(code[:m[2]]) {
+			continue // `new Name(...)`: a constructor call, not a plain function call.
+		}
+		return name
+	}
+	return ""
+}
+
+// stripJSCommentsAndStrings returns code with every `//...` line comment,
+// `/*...*/` block comment, and single/double/backtick string or template
+// literal's CONTENTS removed — a small, line-local (never multi-line) text
+// scan, not a real JS tokenizer, but enough for calleeCallOnLine's own
+// purpose: it must never mistake a word inside a comment or a string for a
+// real function-call identifier. An unterminated string or block comment on
+// this one line (the rest having already been cut off elsewhere, e.g. by
+// HeatLine.Code's own truncation) just drops everything from that point on,
+// rather than misinterpreting whatever follows as code.
+func stripJSCommentsAndStrings(code string) string {
+	var b strings.Builder
+	var quote byte
+	n := len(code)
+	for i := 0; i < n; i++ {
+		c := code[i]
+		if quote != 0 {
+			if c == '\\' && i+1 < n {
+				i++ // skip the escaped character too, so \" doesn't end the string early.
+				continue
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch {
+		case c == '\'' || c == '"' || c == '`':
+			quote = c
+		case c == '/' && i+1 < n && code[i+1] == '/':
+			return b.String() // the rest of the line is a line comment.
+		case c == '/' && i+1 < n && code[i+1] == '*':
+			if end := strings.Index(code[i+2:], "*/"); end >= 0 {
+				i += 2 + end + 1 // skip past the closing "*/".
+				continue
+			}
+			return b.String() // unterminated block comment: drop the rest.
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// hottestLineOf returns f's own hottest line by PctOfFunction (ties broken
+// by Self, then the first occurrence) — the exact line monitor hot's own
+// CodeFrame would mark '>' for this function, so the heuristic below judges
+// the same line a person actually sees.
+func hottestLineOf(f *HeatFunction) (HeatLine, bool) {
+	if len(f.Lines) == 0 {
+		return HeatLine{}, false
+	}
+	best := f.Lines[0]
+	for _, l := range f.Lines[1:] {
+		if l.PctOfFunction > best.PctOfFunction || (l.PctOfFunction == best.PctOfFunction && l.Self > best.Self) {
+			best = l
+		}
+	}
+	return best, true
+}
+
+// addInliningWarnings is the polish-wave JIT-inlining honesty heuristic:
+// live V8/Bun CPU profiles routinely attribute almost all of a wrapper
+// function's self time to its OWN call-site line once TurboFan inlines the
+// function it calls there — positionTicks then lands on the call, not
+// inside the callee, because the callee's own frame never existed in the
+// sampled call tree at all. The dogfood evidence: examples/polyglot/js/
+// workload.js's processBatch (line 26, "return heavyStringify(items);")
+// shows ~99% self time on that one line, with heavyStringify itself
+// completely absent from the profile's own Functions — not because it
+// didn't run (it clearly did — that's where the CPU time went), but
+// because it was inlined into processBatch before V8 ever sampled it.
+// Without this warning, a person reading only the per-line CodeFrame would
+// see line 26 marked as the hot line with no indication that the real work
+// is actually inside a different, unlisted function.
+//
+// This is a heuristic over TEXT, not a fact V8's own profile format
+// records (a .cpuprofile carries no "this frame was inlined" bit at all):
+// it fires only when ALL of the following hold —
+//
+//  1. one line already accounts for inlineHotLineThresholdPct+ of its own
+//     function's weight (hottestLineOf);
+//  2. that line's source, already read from disk by readCode, is
+//     (textually) a bare call to another named function — not a keyword,
+//     not a well-known global/builtin, and not a property/method access
+//     (calleeCallOnLine);
+//  3. that named function is not this function itself (excludes ordinary,
+//     correctly-attributed recursion);
+//  4. it either never got a Functions row of its own anywhere in this
+//     SAME profile (the common, fully-inlined case) or got one with
+//     essentially zero self time of its own (inlineCalleeSelfThresholdPct)
+//     — SELF time specifically, not cum: a real dogfood capture routinely
+//     still shows a thin trickle of genuinely-sampled cum for the callee
+//     (JIT warmup, an occasional deopt) even while TurboFan inlines the
+//     overwhelming majority of calls, so cum alone would under-fire on
+//     exactly the shape this heuristic exists to catch.
+//
+// Runs only for a CDP-sourced Heatmap (buildFromCDP's own Method values —
+// v8_position_ticks or the no-positionTicks cpuprofile_file fallback): a
+// pprof-sourced one already resolves Go's inlining through the binary's own
+// debug info (see MethodPprofProto's "inlining-aware" label — its Location
+// list already carries one Line entry per inlined frame), so this
+// heuristic would have nothing to add there and could only misfire on Go's
+// very different call-expression syntax.
+//
+// Never asserts certainty — every message this produces says "likely": the
+// exact same shape (one dominant line calling a function with no separate
+// entry of its own) is also just what a single, genuinely expensive
+// statement looks like, and a .cpuprofile alone cannot distinguish the two.
+func addInliningWarnings(hm *Heatmap) {
+	if hm.Method != MethodV8PositionTicks && hm.Method != MethodCPUProfileFile {
+		return
+	}
+	// The callee bodies this pass reads from disk are rendered (the
+	// inlined-callee secondary frame) and serialized (--json), so they get
+	// the same (SEC-8) scrub readCode applies to HeatLine.Code.
+	scr := scrub.New(scrub.WithValues(scrub.SecretEnvValues(os.Environ(), nil)))
+	selfPctByName := make(map[string]float64, len(hm.Functions))
+	for _, f := range hm.Functions {
+		selfPctByName[f.Name] = f.SelfPct
+	}
+	for i := range hm.Functions {
+		f := &hm.Functions[i]
+		line, ok := hottestLineOf(f)
+		if !ok || line.PctOfFunction < inlineHotLineThresholdPct || strings.TrimSpace(line.Code) == "" {
+			continue
+		}
+		// Minimum caller evidence (the review's "no minimum on the
+		// caller's own self time" finding): a caller whose own self share
+		// of the WHOLE profile is negligible AND whose hot line's raw
+		// sample count is negligible hasn't earned a confident-looking
+		// finding just because it's the only line that function ever
+		// self-sampled at all -- see inlineCallerMinSelfPct's own doc
+		// comment for the false-positive shape this guards against (a
+		// 1-sample dispatcher whose call line trivially "dominates" its
+		// own function).
+		if f.SelfPct < inlineCallerMinSelfPct && line.Self < inlineCallerMinSelfSamples {
+			continue
+		}
+		callee := calleeCallOnLine(line.Code)
+		if callee == "" || callee == f.Name {
+			continue
+		}
+		if selfPct, present := selfPctByName[callee]; present && selfPct >= inlineCalleeSelfThresholdPct {
+			continue // a real, separately-sampled function -- not inlined away.
+		}
+		// Ratio guard (the same review finding's other half): a callee
+		// that already carries real CUMULATIVE weight under THIS caller —
+		// meaning it has its own node in the sampled call tree at all,
+		// with real subtree weight flowing through it — is positive
+		// evidence it was NOT inlined away, however small its own SELF
+		// time is (a genuinely inlined callee has NO node of its own at
+		// all, so its Cum here is exactly 0 — see
+		// TestAddInliningWarningsDetectsFullyInlinedCallee — while a real,
+		// separately-sampled-but-mostly-callee-bound function like the
+		// review's run()/work() dispatcher example carries substantial
+		// cum despite ~0 self).
+		if calleeCum := calleeCumUnderCaller(f, callee); calleeCum > 0 &&
+			float64(calleeCum) >= float64(line.Self)*inlineCalleeCumRatioGuard {
+			continue
+		}
+		// Hard precondition (the review's other blocker half): the callee
+		// must have a READABLE DECLARATION in the caller's own in-app
+		// file, via the exact same lookup the optional secondary frame
+		// uses (buildInlinedCallee) — never just "some bare identifier
+		// followed by a paren". Without this, an imported function
+		// (`import { transform } from './lib'`), a builtin the denylist
+		// doesn't happen to enumerate, or any other name that merely LOOKS
+		// like an in-app call gets silently, falsely flagged. When no
+		// declaration is found, this heuristic has nothing left to stand
+		// on and stays silent rather than guessing.
+		ic := buildInlinedCallee(f, callee, line.Line, scr)
+		if len(ic.Body) == 0 {
+			continue
+		}
+		hm.Warnings = append(hm.Warnings, fmt.Sprintf(
+			"%s %s() was inlined into %s; the time on line %d is spent inside %s",
+			InlineWarningPrefix, callee, nonEmpty(f.Name, "(unknown)"), line.Line, callee))
+		hm.InlinedCallees = append(hm.InlinedCallees, ic)
+	}
+}
+
+// calleeCumUnderCaller returns name's own Cum entry within f's Callees (0
+// when name never appears there at all) — see addInliningWarnings' ratio
+// guard, which reads this as evidence a "no separately-sampled callee"
+// finding is actually wrong: real, non-zero cum under THIS specific caller
+// means the callee DID get its own node in the sampled call tree.
+func calleeCumUnderCaller(f *HeatFunction, name string) int64 {
+	for _, c := range f.Callees {
+		if c.Func == name {
+			return c.Cum
+		}
+	}
+	return 0
+}
+
+// inlineCalleeDeclPattern builds buildInlinedCallee's own declaration-line
+// regex for one specific callee name: "function NAME(", "NAME = function",
+// "NAME = async function", or "NAME = (...) =>"/"NAME = async (...) =>" —
+// the common ways a JS/TS source declares a named function, in whatever
+// order a real file happens to declare processBatch and heavyStringify in
+// (see the naming ADR fixture: both live in one file, callee declared
+// AFTER its caller).
+func inlineCalleeDeclPattern(callee string) *regexp.Regexp {
+	name := regexp.QuoteMeta(callee)
+	return regexp.MustCompile(`(?:\bfunction\s+` + name + `\s*\(|\b` + name + `\s*=\s*(?:async\s+)?(?:function\b|\())`)
+}
+
+// buildInlinedCallee is addInliningWarnings' OPTIONAL secondary-frame
+// lookup: a best-effort text scan of the CALLER's own file (never the
+// whole repo — see InlinedCallee.File's own doc comment) for a
+// declaration-shaped line naming callee, reading up to
+// maxInlinedCalleeBodyLines lines from there. scr scrubs each body line
+// the same way readCode scrubs HeatLine.Code (SEC-8) — the body is
+// rendered and serialized too — and caps it at maxHeatLineCodeRunes.
+// Returns a Body-less InlinedCallee — never an error — when File is
+// empty, unreadable, or no such declaration is found: the primary warning
+// above already carries the whole finding; this secondary body is
+// explicitly optional, so its absence degrades silently rather than
+// failing anything.
+func buildInlinedCallee(f *HeatFunction, callee string, line int, scr *scrub.Scrubber) InlinedCallee {
+	ic := InlinedCallee{Caller: f.Name, Callee: callee, Line: line, File: f.File}
+	if f.File == "" {
+		return ic
+	}
+	lines, err := readFileLines(f.File)
+	if err != nil {
+		return ic
+	}
+	decl := inlineCalleeDeclPattern(callee)
+	for i, l := range lines {
+		if !decl.MatchString(l) {
+			continue
+		}
+		end := i + maxInlinedCalleeBodyLines
+		if end > len(lines) {
+			end = len(lines)
+		}
+		ic.BodyStart = i + 1
+		ic.Body = append([]string(nil), lines[i:end]...)
+		for j := range ic.Body {
+			ic.Body[j] = truncateCode(scr.String(ic.Body[j]))
+		}
+		return ic
+	}
+	return ic
+}
+
+// retargetDefaultToInlinedCallee is LUX-16's answer to the Node/Deno half
+// of the success metric: when V8 inlines the callee into the caller, a
+// fresh capture attributes ~all of the caller's self time to its own
+// call-site line, so the DEFAULT CodeFrame names "processBatch:26" while
+// the planted hot line lives inside heavyStringify. addInliningWarnings
+// already detects that shape (one line ≥ inlineHotLineThresholdPct of the
+// caller, textually a call, callee unsampled or near-zero, declaration
+// readable in the same file); this pass points DefaultTarget at the
+// CALLEE instead when the flagged caller IS the default target:
+//
+//   - a callee with real per-line rows of its own (the "trickle" case)
+//     becomes the target directly, so its genuinely-sampled percentages
+//     render;
+//   - a fully-inlined callee gets a synthetic function over its located
+//     declaration window (BodyStart..end), whose lines carry Code but no
+//     fabricated weights — a renderer shows it HideMetrics-style, with the
+//     "mapping: inferred (inlined into <caller>:<line>)" attribution
+//     (InlinedCallee.DefaultFrame marks the finding).
+//
+// The warning itself stays (a renderer keeps printing it under the frame);
+// a --func caller view is untouched, since DefaultTarget only drives the
+// no---func default.
+func retargetDefaultToInlinedCallee(hm *Heatmap) {
+	if hm.DefaultTarget == nil {
+		return
+	}
+	caller := *hm.DefaultTarget
+	for i := range hm.InlinedCallees {
+		ic := &hm.InlinedCallees[i]
+		if ic.Caller != caller.Name || len(ic.Body) == 0 {
+			continue
+		}
+		ic.DefaultFrame = true
+		for fi := range hm.Functions {
+			f := &hm.Functions[fi]
+			if f.Name == ic.Callee && len(f.Lines) > 0 {
+				real := *f
+				hm.DefaultTarget = &real
+				return
+			}
+		}
+		synthetic := HeatFunction{
+			Name:      ic.Callee,
+			File:      ic.File,
+			StartLine: ic.BodyStart,
+			EndLine:   ic.BodyStart + len(ic.Body) - 1,
+		}
+		for j, code := range ic.Body {
+			synthetic.Lines = append(synthetic.Lines, HeatLine{Line: ic.BodyStart + j, Code: code})
+		}
+		hm.DefaultTarget = &synthetic
+		return
+	}
+}

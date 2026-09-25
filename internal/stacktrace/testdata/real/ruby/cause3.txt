@@ -1,0 +1,13 @@
+scenarios.rb:26:in 'Object#outer': outer failure (RuntimeError)
+	from scenarios.rb:37:in '<main>'
+scenarios.rb:20:in 'Object#middle': middle failure (ArgumentError)
+
+  raise ArgumentError, 'middle failure'
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+	from scenarios.rb:24:in 'Object#outer'
+	from scenarios.rb:37:in '<main>'
+scenarios.rb:14:in 'Hash#fetch': key not found: :a (KeyError)
+	from scenarios.rb:14:in 'Object#root'
+	from scenarios.rb:18:in 'Object#middle'
+	from scenarios.rb:24:in 'Object#outer'
+	from scenarios.rb:37:in '<main>'

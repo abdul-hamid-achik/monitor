@@ -1,0 +1,160 @@
+version: 1
+name: monitor_hot_file
+
+intent: |
+  `monitor hot --file <path>` (E3.1, heat.Build) names the real hot LINE
+  inside a function, not just the function, from a saved profile — the
+  AC-5 "which line" bar — across every producer this slice wires:
+
+  - a V8 `.cpuprofile` (testdata/v8-hot.cpuprofile): heavyStringify's hot
+    line is 5, not its line-1 declaration.
+  - a Bun `.cpuprofile` (testdata/bun-cpu-prof.cpuprofile): same function,
+    same hot line, a different producer.
+  - a real, freshly-captured pprof CPU proto (examples/polyglot/go-pprof,
+    captured with `monitor profile --output`, mirroring
+    specs/profile_go_pprof.yml's own build/capture steps): the hot line is
+    the json.Marshal call inside main.heavyStringify, in-process pprof
+    proto parsing, no `go tool pprof` dependency.
+  - a real bun-built .ts source map (testdata/tssrc): the hot line resolves
+    through it to the ORIGINAL .ts line, marked mapping exact — not the
+    generated .js line.
+  - an idle profile (testdata/idle.cpuprofile, 98% (idle)): the AC-5
+    honesty warning ("CPU heat only: this process is mostly idle, so its
+    slowness is off-CPU") appears instead of a fabricated hot line — the
+    E3.5 review's own mandated wording, replacing the older two-line
+    "mostly idle: slowness is off-CPU" / "this process is mostly idle..."
+    pair (see renderHeatBody, internal/cli/hot.go), which this outcome's
+    own assertion below was updated to match.
+
+  Each outcome greps the plain human CodeFrame render for its `>` marker
+  line, rather than parsing --json, so the check exercises the same output
+  a person actually reads.
+
+target:
+  cmd: ["./bin/monitor", "hot", "--file", "internal/profiler/testdata/v8-hot.cpuprofile"]
+  cwd: "."
+  env:
+    NO_COLOR: "1"
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "test -f internal/profiler/testdata/v8-hot.cpuprofile"
+      timeoutMs: 5000
+    - run: "test -f internal/profiler/testdata/bun-cpu-prof.cpuprofile"
+      timeoutMs: 5000
+    - run: "test -f internal/profiler/testdata/idle.cpuprofile"
+      timeoutMs: 5000
+    - run: "command -v go"
+      timeoutMs: 5000
+    - run: "mkdir -p /tmp/monitor-spec-hot-file && (cd examples/polyglot/go-pprof && go build -o /tmp/monitor-spec-hot-file/go-pprof .)"
+      timeoutMs: 60000
+    # A real bun-built .ts source map fixture, copied to a scratch path and
+    # its one committed placeholder URL (see testdata/tssrc/README.md)
+    # rewritten to that copy's real path — `sed 's/…/…/' in > out`, not
+    # `-i`, so this stays portable between BSD sed (macOS) and GNU sed (CI).
+    - run: >-
+        mkdir -p /tmp/monitor-spec-hot-file/tssrc/dist &&
+        cp internal/profiler/testdata/tssrc/hot.ts /tmp/monitor-spec-hot-file/tssrc/hot.ts &&
+        cp internal/profiler/testdata/tssrc/dist/hot.js /tmp/monitor-spec-hot-file/tssrc/dist/hot.js &&
+        cp internal/profiler/testdata/tssrc/dist/hot.js.map /tmp/monitor-spec-hot-file/tssrc/dist/hot.js.map &&
+        sed 's#file:///repo/internal/profiler/testdata/tssrc/dist/hot.js#file:///tmp/monitor-spec-hot-file/tssrc/dist/hot.js#g' internal/profiler/testdata/tssrc/dist/hot.cpuprofile > /tmp/monitor-spec-hot-file/tssrc/dist/hot.cpuprofile
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: v8_names_hot_line_5
+    description: heavyStringify's hot line is 5 (s += JSON.stringify(o)), not the line-1 declaration
+    verify:
+      command:
+        run: >-
+          ./bin/monitor hot --file internal/profiler/testdata/v8-hot.cpuprofile --func heavyStringify |
+          grep -qE '^>[[:space:]]+5[[:space:]]*\|'
+
+  - id: bun_names_hot_line_5
+    description: Bun's own .cpuprofile output (same V8 wire shape) also names line 5
+    verify:
+      command:
+        run: >-
+          ./bin/monitor hot --file internal/profiler/testdata/bun-cpu-prof.cpuprofile --func heavyStringify |
+          grep -qE '^>[[:space:]]+5[[:space:]]*\|'
+
+  - id: idle_profile_warns_instead_of_naming_a_line
+    description: >-
+      a 98%-idle profile prints the AC-5 honesty warning AND never prints a
+      '>' hot-line marker — the warning replaces a fabricated hot line
+      instead of merely accompanying one
+    verify:
+      command:
+        run: >-
+          OUT=$(./bin/monitor hot --file internal/profiler/testdata/idle.cpuprofile) &&
+          echo "$OUT" | grep -q 'CPU heat only: this process is mostly idle, so its slowness is off-CPU' &&
+          ! echo "$OUT" | grep -qE '^>'
+
+  - id: bun_default_output_without_func_names_hot_line
+    description: >-
+      the DEFAULT `monitor hot --file` output (no --func) on the Bun
+      fixture names the real hot line, not a location-less native builtin
+      (Bun's own stringify/repeat) rendered as line 0 of an empty file
+    verify:
+      command:
+        run: >-
+          OUT=$(./bin/monitor hot --file internal/profiler/testdata/bun-cpu-prof.cpuprofile) &&
+          echo "$OUT" | grep -qE '^>[[:space:]]+5[[:space:]]*\|' &&
+          ! echo "$OUT" | grep -qE '^>[[:space:]]+0[[:space:]]*\|'
+
+  - id: json_line_heatmap_v1_schema
+    description: --json emits the monitor.line_heatmap.v1 schema id
+    verify:
+      command:
+        run: >-
+          ./bin/monitor hot --file internal/profiler/testdata/v8-hot.cpuprofile --json |
+          grep -q '"schema":[[:space:]]*"monitor.line_heatmap.v1"'
+
+  - id: go_pprof_names_json_marshal_line
+    description: |
+      a REAL pprof CPU capture (not a synthetic profile.Profile) of
+      examples/polyglot/go-pprof, taken the same way
+      specs/profile_go_pprof.yml does, names main.heavyStringify's hot line
+      as 19 — the json.Marshal call — via heat.Build's in-process pprof
+      proto parsing, no `go tool pprof` dependency.
+    verify:
+      command:
+        run: >-
+          /tmp/monitor-spec-hot-file/go-pprof >/tmp/monitor-spec-hot-file/stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor profile "$P" --type cpu --pprof-addr 127.0.0.1:6069 --duration 2s --output /tmp/monitor-spec-hot-file/cpu.pb.gz >/dev/null;
+          kill "$P" 2>/dev/null;
+          ./bin/monitor hot --file /tmp/monitor-spec-hot-file/cpu.pb.gz --func main.heavyStringify |
+          grep -qE '^>[[:space:]]+19[[:space:]]*\|'
+
+  - id: ts_source_map_resolves_to_original_line
+    description: |
+      the hot generated line resolves, through a real bun --sourcemap=external
+      build's .map, to its ORIGINAL hot.ts line (4, the "// HOT LINE"
+      comment) with mapping exact — not the generated .js line.
+    verify:
+      command:
+        run: >-
+          JSON=$(./bin/monitor hot --file /tmp/monitor-spec-hot-file/tssrc/dist/hot.cpuprofile --func heavyWork --json) &&
+          echo "$JSON" | grep -q '"file":[[:space:]]*"/tmp/monitor-spec-hot-file/tssrc/hot.ts"' &&
+          echo "$JSON" | grep -q '"mapping":[[:space:]]*"exact"' &&
+          ./bin/monitor hot --file /tmp/monitor-spec-hot-file/tssrc/dist/hot.cpuprofile --func heavyWork |
+          grep -qE '^>[[:space:]]+4[[:space:]]*\|'
+
+  - id: clean_exit
+    description: the binary exits cleanly
+    verify:
+      command:
+        run: "./bin/monitor hot --file internal/profiler/testdata/v8-hot.cpuprofile >/dev/null"

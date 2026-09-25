@@ -1,0 +1,64 @@
+version: 1
+name: monitor_resolve
+
+intent: |
+  `monitor resolve --codebase-root <dir>` disambiguates a live process by
+  safe identity selectors (never a raw, mutable PID). This is a black-box
+  spec: each outcome starts its own plain `sleep`-style process(es) in a
+  fresh temp directory carrying a go.mod marker (so FindCodebaseRoot resolves
+  cleanly), points --codebase-root at that directory, and checks the three
+  documented outcomes — exact match, no match, and ambiguous match — then
+  kills whatever it started.
+
+target:
+  cmd: ["./bin/monitor", "--version"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: exact_match
+    description: a single process rooted at the given codebase-root resolves by pid
+    timeoutMs: 15000
+    verify:
+      command:
+        timeoutMs: 15000
+        run: "D=$(mktemp -d); touch \"$D/go.mod\"; (cd \"$D\" && exec sleep 30) & P=$!; sleep 0.3; OUT=$(./bin/monitor resolve --codebase-root \"$D\" --json 2>&1); kill \"$P\" 2>/dev/null || true; rm -rf \"$D\"; echo \"$OUT\" | grep -q \"\\\"pid\\\": $P\\b\""
+  - id: no_match_errors
+    description: a codebase-root with no live process errors instead of guessing
+    timeoutMs: 15000
+    verify:
+      command:
+        timeoutMs: 15000
+        run: "D=$(mktemp -d); touch \"$D/go.mod\"; OUT=$(./bin/monitor resolve --codebase-root \"$D\" 2>&1); RC=$?; rm -rf \"$D\"; [ \"$RC\" -ne 0 ] && echo \"$OUT\" | grep -qi 'no process matched'"
+  - id: ambiguous_match_refused
+    description: two processes sharing a codebase-root are refused as ambiguous rather than picking one
+    timeoutMs: 15000
+    verify:
+      command:
+        timeoutMs: 15000
+        run: "D=$(mktemp -d); touch \"$D/go.mod\"; (cd \"$D\" && exec sleep 30) & P1=$!; (cd \"$D\" && exec sleep 30) & P2=$!; sleep 0.3; OUT=$(./bin/monitor resolve --codebase-root \"$D\" 2>&1); RC=$?; kill \"$P1\" \"$P2\" 2>/dev/null || true; rm -rf \"$D\"; [ \"$RC\" -ne 0 ] && echo \"$OUT\" | grep -qi 'ambiguous' && echo \"$OUT\" | grep -q \"$P1\" && echo \"$OUT\" | grep -q \"$P2\""
+  - id: no_selector_refused
+    description: calling resolve with zero selectors is refused up front (never scans blindly)
+    verify:
+      command:
+        run: "! ./bin/monitor resolve >/dev/null 2>&1 && ./bin/monitor resolve 2>&1 | grep -qi 'at least one process selector'"
+  - id: clean_exit
+    description: the baseline target command exits cleanly
+    verify:
+      process:
+        exitCode: 0

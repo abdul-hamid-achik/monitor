@@ -1,0 +1,17 @@
+Traceback (most recent call last):
+  File "/repo/internal/stacktrace/testdata/chained/py-during-handling.py", line 7, in wrap_it
+    root_cause()
+    ~~~~~~~~~~^^
+  File "/repo/internal/stacktrace/testdata/chained/py-during-handling.py", line 2, in root_cause
+    raise ValueError("root cause boom")
+ValueError: root cause boom
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/repo/internal/stacktrace/testdata/chained/py-during-handling.py", line 12, in <module>
+    wrap_it()
+    ~~~~~~~^^
+  File "/repo/internal/stacktrace/testdata/chained/py-during-handling.py", line 9, in wrap_it
+    raise RuntimeError("work failed while handling")
+RuntimeError: work failed while handling

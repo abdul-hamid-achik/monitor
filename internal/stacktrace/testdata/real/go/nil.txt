@@ -1,0 +1,8 @@
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x2 addr=0x0 pc=0x1003c6c84]
+
+goroutine 1 [running]:
+example.com/app/internal/svc.(*Server).Handle(...)
+	/repo/app/internal/svc/svc.go:13
+main.main()
+	/repo/app/main.go:63 +0x74

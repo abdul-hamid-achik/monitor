@@ -1,0 +1,11 @@
+2026/09/22 10:00:00 [error] 123#0: *1 connect() failed (111: Connection refused) while connecting to upstream, client: 127.0.0.1
+127.0.0.1 - - [22/Sep/2026:10:00:01 +0000] "GET /error HTTP/1.1" 500 12 "-" "curl/8.0"
+[2026-09-22 10:00:02] production.ERROR: Undefined variable $user {"exception":"[object] (ErrorException(code: 0))"}
+ ❯ src/sum.test.ts:4:17
+      2|
+      3| test('adds', () => {
+      4|   expect(1 + 2).toBe(4)
+       |                 ^
+      5| })
+AssertionError: expected 3 to be 4 // Object.is equality
+ FAIL  src/sum.test.ts > adds

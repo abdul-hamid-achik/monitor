@@ -1,0 +1,11 @@
+24 |   return fs.readFileSync('does-not-exist.json', 'utf8');
+25 | }
+26 | 
+27 | async function fetchUser() {
+28 |   await null;
+29 |   throw new TypeError('user payload is not an object');
+                 ^
+TypeError: user payload is not an object
+      at fetchUser (/repo/app/src/scenarios.mjs:29:13)
+
+Bun v1.4.2 (macOS arm64)

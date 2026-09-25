@@ -1,0 +1,80 @@
+version: 1
+name: monitor_issues_concurrent_writers
+
+intent: |
+  E1.2 (local-sentry roadmap, bug 12): `watch --stash` must never hold the
+  issue store's exclusive writer lock for its whole process lifetime.
+  Before the fix, passing --stash alone opened the store once and held it
+  until the process exited, so any concurrent `issues resolve` failed with
+  ErrFileLocked even if no alert ever fired. This spec starts a long-running
+  `watch --stash` in the background, races an `issues resolve` against it,
+  and requires the resolve to exit 0 -- it must open the store fresh for
+  its one write (via issues.WithWriter / OpenStoreWait's jittered retry)
+  and never see the concurrent writer's brief lock as a hard failure.
+
+target:
+  cmd:
+    - "/bin/sh"
+    - "-lc"
+    - |
+      set -e
+      d="$(mktemp -d)"
+      export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state"
+      export MONITOR_ISSUES_STORE="$d/issues.veclite"
+      mkdir -p "$HOME"
+
+      # Seed one issue so there is something to resolve. --no-save skips
+      # the fcheap stash step but the pipeline's "issue" step still runs.
+      id=$(./bin/monitor investigate 1 --no-save --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["issue"]["id"])')
+
+      # Long-running watch --stash: before E1.2 this alone opened and held
+      # the issue store's exclusive lock for as long as the process ran.
+      # stdin/stdout/stderr are all detached from the pty (nohup + redirect
+      # all three) so this background job never keeps the session alive.
+      nohup ./bin/monitor watch --stash --interval 1s --json </dev/null >/dev/null 2>&1 &
+      watch_pid=$!
+      trap 'kill "$watch_pid" >/dev/null 2>&1 || true; wait "$watch_pid" >/dev/null 2>&1 || true; rm -rf "$d"' EXIT
+
+      # Give watch a moment to start before racing it.
+      sleep 0.3
+
+      ./bin/monitor issues resolve "$id" --json
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 80
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 20000
+
+outcomes:
+  - id: clean_exit
+    description: issues resolve exits 0 while watch --stash is running concurrently
+    verify:
+      process:
+        exitCode: 0
+  - id: resolve_reports_updated
+    description: the concurrent resolve call actually applied, not just exited 0
+    verify:
+      command:
+        run: |
+          d="$(mktemp -d)"
+          export HOME="$d/home" XDG_DATA_HOME="$d/data" XDG_STATE_HOME="$d/state"
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          mkdir -p "$HOME"
+          id=$(./bin/monitor investigate 1 --no-save --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["issue"]["id"])')
+          nohup ./bin/monitor watch --stash --interval 1s --json </dev/null >/dev/null 2>&1 &
+          watch_pid=$!
+          trap 'kill "$watch_pid" >/dev/null 2>&1 || true; wait "$watch_pid" >/dev/null 2>&1 || true; rm -rf "$d"' EXIT
+          sleep 0.3
+          ./bin/monitor issues resolve "$id" --json | python3 -c 'import json,sys; p=json.load(sys.stdin); assert p["updated"] is True and p["issue"]["status"] == "resolved", p'

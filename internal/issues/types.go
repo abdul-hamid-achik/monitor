@@ -4,6 +4,8 @@ package issues
 import (
 	"errors"
 	"time"
+
+	"github.com/abdul-hamid-achik/monitor/internal/stacktrace"
 )
 
 // Status is the lifecycle state of an issue.
@@ -19,6 +21,20 @@ const (
 )
 
 const FingerprintVersionV1 = "v1"
+
+// FingerprintVersionV2 marks issues grouped by FingerprintV2Exception (the
+//
+//	exception-chain rule; see fingerprint.go and naming ADR §6). Existing FingerprintVersionV1
+//
+// issues
+// (investigate's dominant in-app function, watch's alert rules) are
+// untouched by this scheme and keep hashing under v1.
+const FingerprintVersionV2 = "v2"
+
+// KindException is the Issue/Occurrence Kind literal RecordException
+// writes; see the naming ADR's Issue.Kind row ("exception", "investigation",
+// "monitor.alert.<rule>").
+const KindException = "exception"
 
 var (
 	// ErrIssueNotFound is returned when an issue ID does not exist.
@@ -46,6 +62,115 @@ type Issue struct {
 	OccurrenceCount    int64      `json:"occurrence_count"`
 	ReopenedCount      int64      `json:"reopened_count"`
 	ResolvedAt         *time.Time `json:"resolved_at,omitempty"`
+
+	// The fields below are additive (E2.3/E2.6): a v1.15 issue JSON decodes
+	// unchanged into a zero-valued set of these (see fingerprint_test.go's
+	// TestIssueOccurrenceDecodeV1_15Unchanged).
+
+	// Culprit is the exception-chain rule's pick (docs/contracts/
+	// the naming ADR §6; see culpritFor/lastInAppFrame in
+	// exception.go): the innermost cause's last in-app frame, walking
+	// backward from its crash frame; when the innermost cause has no
+	// in-app frame at all, the outer exception's last in-app frame (same
+	// walk); nil only when no frame anywhere in the chain is in-app.
+	// Tracks the ISSUE'S LATEST occurrence (like LatestException below),
+	// not necessarily the occurrence that first opened the issue.
+	Culprit *Culprit `json:"culprit,omitempty"`
+	// LatestException mirrors the most recently recorded occurrence's
+	// exception detail. Unlike Title/Message/ExceptionType/Severity/Level/
+	// Handled (frozen at issue creation, like every other Issue field
+	// before E2.3), this one field is intentionally kept current: frames
+	// can shift line numbers, and a chain's shape can change slightly
+	// between occurrences of the same issue.
+	LatestException *ExceptionInfo `json:"latest_exception,omitempty"`
+	// FirstGitSHA is contextids.IDs.GitSHA (MONITOR_GIT_SHA, GIT_SHA, or
+	// GITHUB_SHA -- whichever is set; see internal/contextids.FromEnv) at
+	// the time this issue was FIRST observed -- set once, at creation,
+	// never touched by a later occurrence. It is NOT resolved from the
+	// local git HEAD: an ordinary local dev session with none of those
+	// environment variables set leaves it empty.
+	FirstGitSHA string `json:"first_git_sha,omitempty"`
+	// Level classifies an exception in the stacktrace vocabulary ("fatal",
+	// "error", "warning"; see stacktrace.Exception.Level) -- a closed set,
+	// distinct from the free-form Severity field above. Set once, at
+	// creation.
+	Level string `json:"level,omitempty"`
+	// Handled mirrors the outer exception's stacktrace.Exception.Handled at
+	// creation: true for a caught-and-printed error, false for an uncaught
+	// crash, nil when the parser gave no signal.
+	Handled *bool `json:"handled,omitempty"`
+	// Runs and Releases are small, bounded (maxIssueRunsReleases),
+	// deduplicated sets of every distinct Occurrence.RunID / Occurrence.
+	// Release this issue has seen, oldest evicted first. They exist so
+	// ListOptions.RunID / ListOptions.Release (E2.6) can filter issues in
+	// O(1) per issue without scanning the occurrences collection -- a
+	// window query stays fast even against a store holding tens of
+	// thousands of occurrences.
+	Runs     []string `json:"runs,omitempty"`
+	Releases []string `json:"releases,omitempty"`
+}
+
+// Culprit is the single frame a reader (the CLI, MCP, and later
+// internal/explain) blames as the most actionable line for an issue: the
+// innermost cause's last in-app frame (walking backward from its crash
+// frame), falling back to the outer exception's last in-app frame, and
+// nil only when no frame anywhere in the chain is in-app -- the walk-back
+// rule culpritFor/lastInAppFrame implement. See
+// the naming ADR §6 (the selection rule) and §7
+// (Source).
+type Culprit struct {
+	Function string `json:"function,omitempty"`
+	// FQN is filled in later by a codemap-aware reader (internal/explain,
+	// E2.5); RecordException and the fingerprint/culprit rule in this
+	// package never call codemap, so FQN always starts empty here.
+	FQN  string `json:"fqn,omitempty"`
+	File string `json:"file,omitempty"`
+	Line int    `json:"line,omitempty"`
+	// Source is "stack" (a real parsed frame; see FingerprintV2Exception's
+	// culprit rule) or "message_search" (inferred from message text by
+	// internal/explain's E2.8, which has vecgrep/git grep available). This
+	// package only ever produces "stack" or a nil *Culprit.
+	Source string `json:"source,omitempty"`
+}
+
+// CauseInfo is one entry in ExceptionInfo.Causes: a chain link's type and,
+// when that cause has any in-app frame, its own culprit -- the same
+// walk-back rule the issue-level Culprit uses (lastInAppFrame), not a
+// crash-frame-only pick.
+type CauseInfo struct {
+	Type    string   `json:"type,omitempty"`
+	Culprit *Culprit `json:"culprit,omitempty"`
+}
+
+// ExceptionInfo is the bounded (~2 KB serialized) exception detail
+// RecordException derives from a stacktrace.Exception: enough to render a
+// culprit, causes, and an in-app frame list without retaining every
+// occurrence's full (possibly hundreds-of-frames-long) stack forever. See
+// Occurrence.Exception and Issue.LatestException.
+type ExceptionInfo struct {
+	Type    string `json:"type,omitempty"`
+	Value   string `json:"value,omitempty"`
+	Runtime string `json:"runtime,omitempty"`
+	Handled *bool  `json:"handled,omitempty"`
+	// Frames holds at most maxExceptionFrames in-app frames (oldest to
+	// newest, crash frame last -- stacktrace.Exception's own convention),
+	// pre-filtered so a page render never has to walk the raw stack again.
+	Frames []stacktrace.Frame `json:"frames,omitempty"`
+	// Causes holds at most maxExceptionCauses chain entries, outer to
+	// innermost (mirrors stacktrace.Exception.Chained's ordering).
+	Causes []CauseInfo `json:"causes,omitempty"`
+	// DroppedFrames counts the in-app frames the ingest-time bounds
+	// removed: maxExceptionFrames' cap plus every frame
+	// truncateExceptionInfo's size backstop dropped after it (CC-4). A
+	// reader can then report honest truncation ("9 more frames were cut")
+	// instead of silently showing fewer frames than the crash had. Old
+	// records decode as 0, which is additive.
+	DroppedFrames int `json:"dropped_frames,omitempty"`
+	// DroppedCauses counts the chain entries the ingest-time bounds
+	// removed: maxExceptionCauses' cap plus the entries
+	// truncateExceptionInfo's backstop dropped after it (CC-4) -- the
+	// same honesty rule as DroppedFrames.
+	DroppedCauses int `json:"dropped_causes,omitempty"`
 }
 
 // RunContext correlates a local event with an ephemeral/CI run without
@@ -92,6 +217,22 @@ type Occurrence struct {
 	Metadata      map[string]string `json:"metadata,omitempty"`
 	Run           *RunContext       `json:"run,omitempty"`
 	Evidence      []EvidenceRef     `json:"evidence"`
+	// Count is how many raw events this occurrence subsumes. A coalesced
+	// burst (e.g. the same stack trace repeated within a short window)
+	// writes one Occurrence with Count > 1 instead of one row per event.
+	Count int64 `json:"count,omitempty"`
+	// Exception is the structured exception detail (E2.3). It is retained
+	// ONLY on an issue's FIRST occurrence -- see Store.upsertOccurrenceLocked
+	// -- to bound store size; every later occurrence leaves this nil and
+	// relies on Issue.LatestException for the current shape.
+	Exception *ExceptionInfo `json:"exception,omitempty"`
+	// DedupeKey identifies the exact raw event this occurrence represents
+	// (the naming ADR §5: a live launch's ±3s window
+	// key, or a replay's inode+offset key). When a later
+	// OccurrenceInput.DedupeKey matches one already retained for the same
+	// issue, the store folds the repeat into this existing row instead of
+	// inserting a duplicate -- see UpsertResult.Deduped.
+	DedupeKey string `json:"dedupe_key,omitempty"`
 }
 
 // Event is the local-Sentry event model. Each persisted event is an
@@ -117,6 +258,65 @@ type OccurrenceInput struct {
 	Metadata      map[string]string
 	Run           *RunContext
 	Evidence      []EvidenceRef
+	// Count is how many raw events this single occurrence write represents.
+	// Zero or negative defaults to 1 (normalizeOccurrenceInput). A coalesced
+	// burst passes the real count so the issue's cumulative
+	// OccurrenceCount reflects every raw event, not just every write.
+	Count int64
+
+	// The fields below are E2.3 additions for exception occurrences
+	// (RecordException sets all of them). They are all optional: a caller
+	// that never sets them (investigate, watch) gets byte-for-byte the same
+	// behavior as before this package added them.
+
+	// Fingerprint, precomputed by the caller, is used as-is instead of
+	// UpsertOccurrence deriving one from FingerprintV1. RecordException
+	// passes FingerprintV2Exception's result here.
+	Fingerprint string
+	// FingerprintVersion tags which scheme produced Fingerprint (see
+	// FingerprintVersionV1/V2). Only meaningful together with a non-empty
+	// Fingerprint; an empty Fingerprint always hashes under V1 regardless
+	// of this field, matching UpsertOccurrence's historical behavior.
+	FingerprintVersion string
+	// Exception becomes ExceptionInfo detail: retained on the occurrence
+	// only when it is an issue's first (see Occurrence.Exception), and
+	// always mirrored onto Issue.LatestException.
+	Exception *ExceptionInfo
+	// Culprit, when set, becomes the issue's Culprit (tracks the latest
+	// occurrence, alongside Exception/LatestException above).
+	Culprit *Culprit
+	// Level classifies the occurrence in the stacktrace vocabulary
+	// ("fatal", "error", "warning"); see Issue.Level.
+	Level string
+	// DedupeKey, when non-empty, is checked against the issue's retained
+	// occurrences before inserting a new one -- see UpsertResult.Deduped
+	// and the naming ADR §5.
+	DedupeKey string
+	// DedupeAliases are extra keys that fold into the same occurrence as
+	// DedupeKey. CC-3: two detectors observing one event can land on
+	// either side of a 1-second bucket boundary, so the caller passes the
+	// neighbor buckets as aliases; only the primary DedupeKey is retained
+	// on the occurrence.
+	DedupeAliases []string
+}
+
+// UpsertResult is UpsertOccurrence's richer sibling return
+// (UpsertOccurrenceResult): the same Issue/Occurrence pair, plus whether the
+// write was folded into an already-retained occurrence via
+// OccurrenceInput.DedupeKey instead of creating a new one.
+type UpsertResult struct {
+	Issue      Issue
+	Occurrence Occurrence
+
+	// Reopened is true when this write flipped a resolved issue back to
+	// open (the reopen branch above): a caller watching for regressions
+	// (LUX-14's REGRESSED banner) reports it instead of "again".
+	Reopened bool
+	// Deduped is true when OccurrenceInput.DedupeKey already matched one of
+	// the issue's retained occurrences: that existing occurrence is
+	// returned unchanged -- no new row, no OccurrenceCount increment, no
+	// Runs/Releases aggregate update.
+	Deduped bool
 }
 
 // ListOptions filters issues. Empty fields match all issues.
@@ -124,5 +324,39 @@ type ListOptions struct {
 	Statuses []Status
 	Project  string
 	Service  string
-	Limit    int
+	// Since and Until (E2.6) bound an issue's activity window: an issue
+	// matches when [FirstSeen, LastSeen] overlaps [Since, Until]. A zero
+	// time.Time on either side leaves that side unbounded.
+	//
+	// This is a window-SPAN overlap test, not "did an occurrence actually
+	// land inside [Since, Until]": an issue whose occurrences sit at
+	// FirstSeen and LastSeen ten hours apart, with nothing in between,
+	// still matches a [Since, Until] that falls entirely inside that gap.
+	// List only reads the issues collection (never occurrences) to stay
+	// fast over a large store -- see Issue.Runs's doc comment for the same
+	// tradeoff applied to RunID/Release below -- so a caller correlating
+	// against a precise time window (e.g. joining with cairntrace) should
+	// still expect an occasional false positive and confirm against the
+	// issue's own Occurrences when precision matters.
+	Since time.Time
+	Until time.Time
+	// RunID and Release (E2.6) match against an issue's Runs/Releases
+	// aggregate sets (case-insensitive) -- see Issue.Runs's doc comment for
+	// why this stays fast even over a large occurrences collection. Because
+	// that aggregate is bounded to the most recently seen maxIssueRunsReleases
+	// (25) distinct values, a RunID/Release seen only on an issue's OLDER
+	// occurrences (evicted from the aggregate by newer ones) will not match
+	// even though the occurrence itself is still retained; an issue written
+	// before this aggregate existed has an empty Runs/Releases and never
+	// matches a RunID/Release filter at all.
+	RunID   string
+	Release string
+	// Kind filters by Issue.Kind: "" or "any" matches every kind,
+	// "exception" and "investigation" match Issue.Kind exactly, "alert"
+	// matches any Issue.Kind with the "monitor.alert." prefix watch.go
+	// writes (see the naming ADR's Issue.Kind row).
+	// Any other value is rejected the same way an invalid Statuses entry
+	// is.
+	Kind  string
+	Limit int
 }

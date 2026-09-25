@@ -1,0 +1,43 @@
+AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
++ actual - expected
+... Skipped lines
+
+  {
+    key0: 0,
+    key10: 10,
+    key11: 11,
+    key1: 1,
+...
+    key4: 4,
++   key5: 5,
+-   key5: 99,
+    key6: 6,
+    key7: 7,
+    key8: 8,
+    key9: 9,
+    nested: {
+...
+        2,
++       3
+-       4
+      ],
+      y: 'hello'
+    }
+  }
+
+    at Object.<anonymous> (/repo/app/src/assertdiff.js:7:16)
+    at Module._compile (node:internal/modules/cjs/loader:1934:14)
+    at Object..js (node:internal/modules/cjs/loader:2074:10)
+    at Module.load (node:internal/modules/cjs/loader:1656:32)
+    at Module._load (node:internal/modules/cjs/loader:1448:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:261:19)
+    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)
+    at node:internal/main/run_main_module:33:47 {
+  generatedMessage: true,
+  code: 'ERR_ASSERTION',
+  actual: [Object],
+  expected: [Object],
+  operator: 'deepStrictEqual',
+  diff: 'simple'
+}
+continuing

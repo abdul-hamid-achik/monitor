@@ -10,7 +10,7 @@ import (
 
 // TestIncidentsCommandTree verifies the incidents command is wired with its
 // "incident" alias and pending/resume-stash subcommands, each documenting
-// --json. Per CLAUDE.md, never call cobra.Execute() on the root in tests.
+// --json. Per AGENTS.md, never call cobra.Execute() on the root in tests.
 func TestIncidentsCommandTree(t *testing.T) {
 	root := Root()
 	for _, c := range root.Commands() {

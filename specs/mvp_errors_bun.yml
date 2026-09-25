@@ -1,0 +1,65 @@
+version: 1
+name: monitor_mvp_errors_bun
+
+intent: |
+  Golden-table coverage (the naming ADR,
+  "bun 10 -> 2"): `monitor run -- bun examples/polyglot/js/workload.js`
+  must group the repeated handled flakyParse errors into ONE issue and
+  the single uncaught detonate() crash into a SECOND, each with the
+  right culprit file:line. WORKLOAD_SECONDS=3 (the short knob) crashes
+  the workload in ~3s instead of 40s.
+
+target:
+  cmd: ["./bin/monitor", "run", "--", "bun", "examples/polyglot/js/workload.js"]
+  cwd: "."
+  env:
+    XDG_STATE_HOME: "/tmp/monitor-spec-mvp-bun/state"
+    MONITOR_ISSUES_STORE: "/tmp/monitor-spec-mvp-bun/data/issues.veclite"
+    WORKLOAD_SECONDS: "3"
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v bun"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "test -f examples/polyglot/js/workload.js"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-mvp-bun && mkdir -p /tmp/monitor-spec-mvp-bun/state /tmp/monitor-spec-mvp-bun/data"
+      timeoutMs: 5000
+    - run: "cat > /tmp/monitor-spec-mvp-bun/check.sh <<'SH'\n#!/bin/sh\nset -e\nMONITOR_ISSUES_STORE=/tmp/monitor-spec-mvp-bun/data/issues.veclite ./bin/monitor issues list --json > /tmp/monitor-spec-mvp-bun/issues.json\npython3 -c \"\nimport json\nd = json.load(open('/tmp/monitor-spec-mvp-bun/issues.json'))\nassert len(d) == 2, d\nfatal = [i for i in d if i['occurrence_count'] == 1 and i['culprit'] is not None and i['culprit']['line'] == 49]\nhandled = [i for i in d if i['culprit'] is not None and i['culprit']['line'] == 31]\nassert len(fatal) == 1, d\nassert fatal[0]['culprit']['function'] == 'detonate', fatal[0]\nassert len(handled) == 1, d\nassert handled[0]['occurrence_count'] >= 1, handled[0]\nassert handled[0]['culprit']['function'] == 'flakyParse', handled[0]\nprint('ok')\n\"\nSH\nchmod +x /tmp/monitor-spec-mvp-bun/check.sh"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      screen:
+        contains: "workload: intentional uncaught failure"
+      timeoutMs: 15000
+  - wait:
+      process:
+        exitCode: 1
+      timeoutMs: 15000
+
+outcomes:
+  - id: new_issue_banners_printed
+    description: at least one NEW issue banner is printed
+    verify:
+      screen:
+        contains: "monitor > NEW"
+  - id: exit_code_propagated
+    description: monitor's own exit code is bun's uncaught-exception exit code (1)
+    verify:
+      process:
+        exitCode: 1
+  - id: two_grouped_issues_with_correct_culprits
+    description: the handled flakyParse repeats group into one issue and the fatal detonate crash into a second, each with the right culprit
+    verify:
+      command:
+        run: "/tmp/monitor-spec-mvp-bun/check.sh"

@@ -1,0 +1,12 @@
+panic: first failure [recovered]
+	panic: re-panic after: first failure
+
+goroutine 1 [running]:
+main.recovered.func1()
+	/repo/app/main.go:18 +0x60
+panic({0x1007e5460?, 0x100834e08?})
+	/usr/local/go/src/runtime/panic.go:860 +0x12c
+main.recovered()
+	/repo/app/main.go:21 +0x48
+main.main()
+	/repo/app/main.go:65 +0x478

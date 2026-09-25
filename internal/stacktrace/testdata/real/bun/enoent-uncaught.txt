@@ -1,0 +1,16 @@
+70 |       console.error(err);
+71 |     }
+72 |     console.error('still running');
+73 |     break;
+74 |   case 'enoent-uncaught':
+75 |     readConfig();
+         ^
+ENOENT: no such file or directory, open 'does-not-exist.json'
+    path: "does-not-exist.json",
+ syscall: "open",
+   errno: -2,
+    code: "ENOENT"
+
+      at /repo/app/src/scenarios.mjs:75:5
+
+Bun v1.4.2 (macOS arm64)

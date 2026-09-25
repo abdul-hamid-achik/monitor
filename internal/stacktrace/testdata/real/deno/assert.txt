@@ -1,0 +1,7 @@
+error: Uncaught (in promise) AssertionError: Expected values to be strictly equal:
+
+1 !== 2
+
+    assert.strictEqual(1, 2);
+           ^
+    at file:///repo/app/src/scenarios.mjs:45:12

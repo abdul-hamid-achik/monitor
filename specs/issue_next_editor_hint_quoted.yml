@@ -1,0 +1,174 @@
+version: 1
+name: monitor_issue_next_editor_hint_quoted
+
+intent: |
+  SEC-4 (branch review 2026-09-24): the `$EDITOR +<line> <path>` hint in
+  `monitor issue`'s NEXT section quotes the culprit path with POSIX
+  single-quote semantics. The path is untrusted stderr text -- a forged
+  frame can embed `$(...)` command substitution and quotes -- and the
+  unquoted hint was a command monitor itself proposed, ready to run via
+  `sh -c`. The hint is also omitted entirely when the snippet read failed
+  (the culprit file is not readable under the root), because "jump
+  straight to the culprit line" promises a line the page just showed.
+
+  The culprit file here is a real, committed file whose NAME embeds
+  `$(touch PWNED_BY_HINT)` and a single quote: the seeded issue's hint
+  must render shell-quoted, and running it through `sh -c` with
+  EDITOR=true must not execute the substitution. The companion outcome
+  seeds a culprit pointing at a file that does not exist and asserts no
+  $EDITOR hint is offered at all.
+
+target:
+  cmd:
+    - "/bin/sh"
+    - "-lc"
+    - |
+      set -e
+      d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+      export MONITOR_ISSUES_STORE="$d/issues.veclite"
+      r="$d/repo"; mkdir -p "$r"
+      git -C "$r" init -q -b main
+      git -C "$r" config user.email spec@example.com
+      git -C "$r" config user.name Spec
+      evil="evil\$(touch PWNED_BY_HINT)'q.js"
+      printf 'function boom() {\n  throw new Error("pwn");\n}\n' > "$r/$evil"
+      git -C "$r" add -A
+      git -C "$r" commit -qm "seed evil-named culprit file"
+      go run ./internal/explain/testdata/seed \
+        --store "$MONITOR_ISSUES_STORE" --scenario stack \
+        --project specrepo --service workload --root "$r" \
+        --file "$evil" --line 2 --function boom \
+        --type Error --value pwn --level error --handled=true >/dev/null
+      echo seeded
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v go"
+      timeoutMs: 5000
+    - run: "command -v git"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 30000
+
+outcomes:
+  - id: seeded_repo_exits_clean
+    description: seeding a stack-culprit issue whose file name embeds command substitution and a quote exits 0
+    timeoutMs: 30000
+    verify:
+      command:
+        timeoutMs: 30000
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          r="$d/repo"; mkdir -p "$r"
+          git -C "$r" init -q -b main
+          git -C "$r" config user.email spec@example.com
+          git -C "$r" config user.name Spec
+          evil="evil\$(touch PWNED_BY_HINT)'q.js"
+          printf 'function boom() {\n  throw new Error("pwn");\n}\n' > "$r/$evil"
+          git -C "$r" add -A
+          git -C "$r" commit -qm "seed evil-named culprit file"
+          id=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project specrepo --service workload --root "$r" \
+            --file "$evil" --line 2 --function boom \
+            --type Error --value pwn --level error --handled=true)
+          [ -n "$id" ]
+
+  - id: editor_hint_is_shell_quoted_and_cannot_break_out
+    description: the $EDITOR next-action hint shell-quotes the culprit path, and sh -c on it executes no embedded command substitution
+    timeoutMs: 30000
+    verify:
+      command:
+        timeoutMs: 30000
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          r="$d/repo"; mkdir -p "$r"
+          git -C "$r" init -q -b main
+          git -C "$r" config user.email spec@example.com
+          git -C "$r" config user.name Spec
+          evil="evil\$(touch PWNED_BY_HINT)'q.js"
+          printf 'function boom() {\n  throw new Error("pwn");\n}\n' > "$r/$evil"
+          git -C "$r" add -A
+          git -C "$r" commit -qm "seed evil-named culprit file"
+          id=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project specrepo --service workload --root "$r" \
+            --file "$evil" --line 2 --function boom \
+            --type Error --value pwn --level error --handled=true)
+          short=$(echo "$id" | sed -E 's/^ISS-(....).*/\1/' | tr '[:upper:]' '[:lower:]')
+          # The CLI resolves the snippet root from the reader's own cwd (a
+          # user runs `monitor issue` from inside the checkout), so read
+          # the page from the seeded repo, where the evil file is tracked.
+          root="$PWD"
+          cli=$( ( cd "$r" && "$root/bin/monitor" issue "$short" --json ) | python3 -c '
+          import json, sys
+          c = json.load(sys.stdin)
+          hints = [n["cli"] for n in c["next"] if n.get("cli", "").startswith("$EDITOR ")]
+          assert hints, c["next"]
+          print(hints[0])
+          ')
+          # The hint must be $EDITOR +2 <POSIX-quoted path>: parsed as a
+          # shell word list it must be exactly ["$EDITOR", "+2", <evil
+          # name>] -- the quoting IDIOM is not pinned (POSIX '\''-inside-
+          # quotes and shlex's mixed '"'"' form are both correct), only
+          # that the substitution cannot break out of its quoting.
+          python3 -c '
+          import shlex, sys
+          evil = "evil$(touch PWNED_BY_HINT)" + chr(39) + "q.js"
+          toks = shlex.split(sys.argv[1])
+          assert toks == ["$EDITOR", "+2", evil], toks
+          ' "$cli"
+          # Running the hint exactly as a user would must not execute the
+          # embedded substitution (no marker file appears in the repo).
+          ( cd "$r" && EDITOR=true sh -c "$cli" )
+          test ! -e "$r/PWNED_BY_HINT" || { echo "command substitution executed: $cli"; exit 1; }
+
+  - id: editor_hint_omitted_when_snippet_unreadable
+    description: a culprit whose file cannot be read under the root gets no $EDITOR hint, only a degraded snippet entry
+    timeoutMs: 30000
+    verify:
+      command:
+        timeoutMs: 30000
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          r="$d/repo"; mkdir -p "$r"
+          git -C "$r" init -q -b main
+          git -C "$r" config user.email spec@example.com
+          git -C "$r" config user.name Spec
+          printf 'package m\n' > "$r/m.go"
+          git -C "$r" add -A
+          git -C "$r" commit -qm "seed"
+          id=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project specrepo --service workload --root "$r" \
+            --file ghost.js --line 2 --function boom \
+            --type Error --value boom --level error --handled=true)
+          short=$(echo "$id" | sed -E 's/^ISS-(....).*/\1/' | tr '[:upper:]' '[:lower:]')
+          # Read from the seeded repo (as in the quoting outcome): ghost.js
+          # is untracked there, so the SEC-2 gate -- not a cwd mismatch --
+          # is what refuses the snippet.
+          root="$PWD"
+          ( cd "$r" && "$root/bin/monitor" issue "$short" --json > "$d/out.json" )
+          python3 -c '
+          import json
+          with open("'"$d"'/out.json") as f:
+              c = json.load(f)
+          assert not any(n.get("cli", "").startswith("$EDITOR") for n in c["next"]), c["next"]
+          assert any(d.get("component") == "snippet" for d in c["degraded"]), c["degraded"]
+          '

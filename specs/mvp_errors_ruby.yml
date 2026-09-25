@@ -1,0 +1,70 @@
+version: 1
+name: monitor_mvp_errors_ruby
+
+intent: |
+  Golden-table coverage (the naming ADR,
+  "ruby: 1 fatal + 9 handled"): `monitor run -- ruby examples/polyglot/
+  ruby/workload.rb` must group the repeated handled flaky_parse
+  rescue-printed backtraces into ONE issue and the single uncaught
+  RuntimeError (a bare `raise "..."` in detonate) into a SECOND, each
+  with the right culprit file:line. Ruby's rescue-printed backtrace
+  carries no Type/Value (ruby.go's rubyBacktraceGrammar; see the golden
+  table's `ruby/ruby error handled ""` entries), so the handled issue's
+  exception_type is empty -- this asserts on culprit function/line
+  instead, which IS present. WORKLOAD_SECONDS=3 (the short knob) crashes
+  the workload in ~3s instead of 40s.
+
+target:
+  cmd: ["./bin/monitor", "run", "--", "ruby", "examples/polyglot/ruby/workload.rb"]
+  cwd: "."
+  env:
+    XDG_STATE_HOME: "/tmp/monitor-spec-mvp-ruby/state"
+    MONITOR_ISSUES_STORE: "/tmp/monitor-spec-mvp-ruby/data/issues.veclite"
+    WORKLOAD_SECONDS: "3"
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v ruby"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "test -f examples/polyglot/ruby/workload.rb"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-mvp-ruby && mkdir -p /tmp/monitor-spec-mvp-ruby/state /tmp/monitor-spec-mvp-ruby/data"
+      timeoutMs: 5000
+    - run: "cat > /tmp/monitor-spec-mvp-ruby/check.sh <<'SH'\n#!/bin/sh\nset -e\nMONITOR_ISSUES_STORE=/tmp/monitor-spec-mvp-ruby/data/issues.veclite ./bin/monitor issues list --json > /tmp/monitor-spec-mvp-ruby/issues.json\npython3 -c \"\nimport json\nd = json.load(open('/tmp/monitor-spec-mvp-ruby/issues.json'))\nassert len(d) == 2, d\nfatal = [i for i in d if i['exception_type'] == 'RuntimeError']\nhandled = [i for i in d if i['culprit'] is not None and i['culprit']['line'] == 26]\nassert len(fatal) == 1, d\nassert fatal[0]['occurrence_count'] == 1, fatal[0]\nassert fatal[0]['culprit']['line'] == 42, fatal[0]\nassert 'detonate' in fatal[0]['culprit']['function'], fatal[0]\nassert len(handled) == 1, d\nassert handled[0]['occurrence_count'] >= 1, handled[0]\nassert 'flaky_parse' in handled[0]['culprit']['function'], handled[0]\nprint('ok')\n\"\nSH\nchmod +x /tmp/monitor-spec-mvp-ruby/check.sh"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      screen:
+        contains: "workload: intentional uncaught failure"
+      timeoutMs: 15000
+  - wait:
+      process:
+        exitCode: 1
+      timeoutMs: 15000
+
+outcomes:
+  - id: new_issue_banners_printed
+    description: at least one NEW issue banner is printed
+    verify:
+      screen:
+        contains: "monitor > NEW"
+  - id: exit_code_propagated
+    description: monitor's own exit code is ruby's uncaught-exception exit code (1)
+    verify:
+      process:
+        exitCode: 1
+  - id: two_grouped_issues_with_correct_culprits
+    description: the handled flaky_parse repeats group into one issue and the fatal RuntimeError crash into a second, each with the right culprit
+    verify:
+      command:
+        run: "/tmp/monitor-spec-mvp-ruby/check.sh"

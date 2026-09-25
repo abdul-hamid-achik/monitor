@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/shirou/gopsutil/v4/process"
 	"github.com/spf13/cobra"
 
 	"github.com/abdul-hamid-achik/monitor/internal/analyzer"
@@ -20,6 +20,7 @@ import (
 	"github.com/abdul-hamid-achik/monitor/internal/incidents"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/notify"
+	"github.com/abdul-hamid-achik/monitor/internal/project"
 )
 
 // Event is the NDJSON event type emitted by `monitor watch --json`.
@@ -216,32 +217,31 @@ durable issue index with their run context and evidence reference.`,
 			c := NewCollector(interval)
 			ctx, cancel := Context()
 			defer cancel()
-			var issueStore *issues.Store
+			// The issue store is opened fresh for each delivery below (via
+			// issues.WithWriter), never held for the watch loop's lifetime:
+			// holding it here would keep this process's exclusive writer
+			// lock for as long as `watch --stash` runs, starving investigate
+			// / issues resolve / the MCP investigate path with
+			// veclite.ErrFileLocked the whole time (bug 12). Only the path
+			// is resolved once, up front.
+			var issueStorePath string
 			if stash {
-				if path, err := issues.ResolvePath(""); err == nil {
-					issueStore, err = issues.OpenStore(path)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "monitor: issue store unavailable: %v\n", err)
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "monitor: issue store unavailable: %v\n", err)
-				}
-				if issueStore != nil {
-					defer issueStore.Close()
+				var pathErr error
+				issueStorePath, pathErr = issues.ResolvePath("")
+				if pathErr != nil {
+					fmt.Fprintf(os.Stderr, "monitor: issue store unavailable: %v\n", pathErr)
+					issueStorePath = ""
 				}
 			}
 
-			// Build the analyzer and wire the OnAlert hook.
-			engine := analyzer.NewEngine()
-			engine.AddRule(&analyzer.CPUSpikeRule{Factor: 3.0})
-			engine.AddRule(&analyzer.RSSGrowthRule{})
-			engine.AddRule(&analyzer.DiskFillRule{})
-			engine.AddRule(&analyzer.SwapPressureRule{})
-			engine.AddRule(&analyzer.ZombieRule{})
-			// Give the config.json cpu/memory alert thresholds teeth.
-			if cfg, err := config.Load(); err == nil && (cfg.CPUAlertThreshold > 0 || cfg.MemoryAlertThreshold > 0) {
-				engine.AddRule(&analyzer.ThresholdRule{CPUPercent: cfg.CPUAlertThreshold, MemPercent: cfg.MemoryAlertThreshold})
+			// Build the analyzer and wire the OnAlert hook. NewDefaultEngine is
+			// the single rule-set source shared with Studio and the MCP/CLI
+			// analyze window (bug 17: they used to drift apart).
+			settings, err := config.Load()
+			if err != nil || settings == nil {
+				settings = config.Default()
 			}
+			engine := analyzer.NewDefaultEngine(*settings)
 
 			// Each enabled sink is one alert handler; all run in goroutines so
 			// the watch loop never blocks on I/O. A WaitGroup tracks every
@@ -273,8 +273,8 @@ durable issue index with their run context and evidence reference.`,
 						if err != nil {
 							ev2.StashErr = err.Error()
 						}
-						if issueStore != nil {
-							issue, occurrence, issueErr := recordAlertOccurrence(issueStore, ev, a, d, res)
+						if issueStorePath != "" {
+							issue, occurrence, issueErr := recordAlertOccurrence(ctx2, issueStorePath, ev, a, d, res)
 							if issueErr != nil {
 								ev2.IssueErr = issueErr.Error()
 							} else {
@@ -350,7 +350,7 @@ durable issue index with their run context and evidence reference.`,
 				deliveries.wait()
 				return err
 			}
-			err := watchLoop(ctx, c, engine, interval, gate, handlers)
+			err = watchLoop(ctx, c, engine, interval, gate, handlers)
 			// On shutdown (ctx cancel), let the final tick's deliveries finish.
 			deliveries.wait()
 			return err
@@ -374,18 +374,35 @@ durable issue index with their run context and evidence reference.`,
 	return cmd
 }
 
-func recordAlertOccurrence(store *issues.Store, ev collector.Event, alert collector.Alert, diagnosis *incidents.Diagnosis, stash incidents.CaptureResult) (issues.Issue, issues.Occurrence, error) {
-	context := contextids.FromEnv(contextids.IDs{})
-	project := strings.TrimSpace(os.Getenv("MONITOR_PROJECT"))
-	if project == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			project = filepath.Base(cwd)
-		}
-	}
-	if project == "" {
-		project = "local"
-	}
-	service := firstNonEmpty(context.Service, alert.Process)
+// recordAlertOccurrence opens the issue store fresh for this one delivery
+// (via issues.WithWriter), so it never holds the store's exclusive writer
+// lock across ticks or alerts (bug 12). project.Resolve replaces the ad hoc
+// MONITOR_PROJECT/cwd-basename derivation this used to do inline, so watch
+// and investigate agree on the same project/service identity (bug 15); a
+// PID-less alert (a system-wide rule with no attached process) resolves to
+// project "host" instead of whatever directory monitor happened to be
+// launched from.
+//
+// Dir comes from the ALERTED process's own cwd (alertProcessCwd), never
+// monitor's own os.Getwd(): the earlier version read monitor's cwd, so
+// watch and investigate disagreed on the same PID whenever monitor was
+// launched from a different directory than the alerted process -- the
+// normal case (verified: a real child with cwd <tmp>/acme/web-api,
+// monitor launched from an unrelated directory, gave watch
+// project=sleep/service=sleep while investigate gave
+// project=acme/service=web-api for the SAME pid). project.Resolve
+// itself never falls back to monitor's cwd either (Hints.UseWorkingDir is
+// intentionally left unset here), so a process whose cwd can't be read
+// degrades to the service/process-name/"local" fallback instead of
+// misattributing the alert to monitor's own directory.
+func recordAlertOccurrence(ctx context.Context, path string, ev collector.Event, alert collector.Alert, diagnosis *incidents.Diagnosis, stash incidents.CaptureResult) (issues.Issue, issues.Occurrence, error) {
+	ids := contextids.FromEnv(contextids.IDs{})
+	identity := project.Resolve(project.Hints{
+		ExplicitService: ids.Service,
+		ProcessName:     alert.Process,
+		Dir:             alertProcessCwd(ctx, alert.PID),
+		PID:             alert.PID,
+	})
 	message := alert.Detail
 	title := alert.Rule
 	if diagnosis != nil && diagnosis.Summary != "" {
@@ -410,26 +427,61 @@ func recordAlertOccurrence(store *issues.Store, ev collector.Event, alert collec
 	}
 	metadata := map[string]string{}
 	for key, value := range map[string]string{
-		"environment": context.Environment, "deployment_id": context.DeploymentID,
-		"step_id": context.StepID, "suite": context.Suite, "attempt": context.Attempt,
-		"git_sha": context.GitSHA, "trigger": "alert",
+		"environment": ids.Environment, "deployment_id": ids.DeploymentID,
+		"step_id": ids.StepID, "suite": ids.Suite, "attempt": ids.Attempt,
+		"git_sha": ids.GitSHA, "trigger": "alert",
 	} {
 		if value != "" {
 			metadata[key] = value
 		}
 	}
-	return store.UpsertOccurrence(issues.OccurrenceInput{
-		ObservedAt: ev.Timestamp, Project: project, Service: service,
+	input := issues.OccurrenceInput{
+		ObservedAt: ev.Timestamp, Project: identity.Slug, Service: identity.Service,
 		Kind:  "monitor.alert." + firstNonEmpty(alert.Rule, "unknown"),
 		Title: title, Message: message, Severity: alert.Severity,
-		RunID: context.RunID, Release: context.Release, PID: alert.PID,
+		RunID: ids.RunID, Release: ids.Release, PID: alert.PID,
 		TreeHash: stash.TreeHash, EvidenceRefs: evidence, Evidence: typedEvidence, Metadata: metadata,
 		Run: &issues.RunContext{
-			ID: context.RunID, Environment: context.Environment, DeploymentID: context.DeploymentID,
-			StepID: context.StepID, Suite: context.Suite, Attempt: context.Attempt,
-			Release: context.Release, GitSHA: context.GitSHA,
+			ID: ids.RunID, Environment: ids.Environment, DeploymentID: ids.DeploymentID,
+			StepID: ids.StepID, Suite: ids.Suite, Attempt: ids.Attempt,
+			Release: ids.Release, GitSHA: ids.GitSHA,
 		},
+	}
+	var issue issues.Issue
+	var occurrence issues.Occurrence
+	err := issues.WithWriter(ctx, path, issues.DefaultWriterWait, func(store *issues.Store) error {
+		var writeErr error
+		issue, occurrence, writeErr = store.UpsertOccurrence(input)
+		return writeErr
 	})
+	return issue, occurrence, err
+}
+
+// alertProcessCwd reads the ALERTED process's own working directory,
+// bounded by a short timeout so a stuck or zombie process never delays
+// alert delivery. It deliberately does NOT fall back to monitor's own cwd
+// on any failure (unknown pid, permission denied, already exited): the
+// caller's project.Resolve Hints describe the alerted process, not the
+// watcher, and falling back here would silently reintroduce the same
+// misattribution bug 15's fix removed. Empty on any error or when pid <= 0
+// (a system-wide alert with no attached process); project.Resolve then
+// falls through its own precedence (marker/service/process/"local")
+// instead of misattributing the alert to monitor's cwd.
+func alertProcessCwd(ctx context.Context, pid int32) string {
+	if pid <= 0 {
+		return ""
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	proc, err := process.NewProcessWithContext(cctx, pid)
+	if err != nil {
+		return ""
+	}
+	cwd, err := proc.CwdWithContext(cctx)
+	if err != nil {
+		return ""
+	}
+	return cwd
 }
 
 func watchLoop(ctx context.Context, c *collector.Collector, engine *analyzer.Engine, interval time.Duration, gate *alertCooldownGate, handlers []watchAlertHandler) error {

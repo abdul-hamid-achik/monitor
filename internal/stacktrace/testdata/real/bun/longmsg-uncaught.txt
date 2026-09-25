@@ -1,0 +1,39 @@
+32 |     break;
+33 |   }
+34 |   case 'longmsg-uncaught': {
+35 |     const issues = [];
+36 |     for (let i = 0; i < 3; i++) issues.push({ code: 'invalid_type', expected: 'string', received: 'undefined', path: ['field' + i], message: 'Required' });
+37 |     const e = new Error(JSON.stringify(issues, null, 2));
+                       ^
+ZodError: [
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "undefined",
+    "path": [
+      "field0"
+    ],
+    "message": "Required"
+  },
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "undefined",
+    "path": [
+      "field1"
+    ],
+    "message": "Required"
+  },
+  {
+    "code": "invalid_type",
+    "expected": "string",
+    "received": "undefined",
+    "path": [
+      "field2"
+    ],
+    "message": "Required"
+  }
+]
+      at /repo/app/app.js:37:19
+
+Bun v1.4.2 (macOS arm64)

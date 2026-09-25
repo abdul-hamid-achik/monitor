@@ -86,6 +86,12 @@ func TestDiagnosePatterns(t *testing.T) {
 		wantSummarySub  string // substring the Summary must contain; "" if !wantMatch
 		wantConfidence  string
 		wantFirstAction string // substring NextActions[0] must contain
+		// maxNextActions overrides the default "1..2" NextActions length
+		// bound. 0 keeps the default. memory_leak carries two extra E3.5
+		// line-level-heap hints ("monitor hot ... --type heap" / "monitor
+		// profile ... -t heap") on top of the two monitor_-prefixed MCP
+		// actions every other rule still caps at 2.
+		maxNextActions int
 	}{
 		{
 			name:            "leak_rss_rising_cpu_flat",
@@ -95,6 +101,7 @@ func TestDiagnosePatterns(t *testing.T) {
 			wantSummarySub:  "memory leak",
 			wantConfidence:  ConfidenceHigh, // r2~1.0, n=20
 			wantFirstAction: "type:heap",
+			maxNextActions:  4,
 		},
 		{
 			name: "leak_with_subthreshold_jitter",
@@ -110,6 +117,7 @@ func TestDiagnosePatterns(t *testing.T) {
 			wantSummarySub:  "memory leak", // 1MB jitter < minAmp(~3.3MB) -> 0 reversals
 			wantConfidence:  ConfidenceHigh,
 			wantFirstAction: "type:heap",
+			maxNextActions:  4,
 		},
 		{
 			name:            "spin_cpu_high_flat_rss_flat",
@@ -190,15 +198,23 @@ func TestDiagnosePatterns(t *testing.T) {
 			if d.Confidence != tc.wantConfidence {
 				t.Errorf("Confidence = %q, want %q", d.Confidence, tc.wantConfidence)
 			}
-			if len(d.NextActions) == 0 || len(d.NextActions) > 2 {
-				t.Fatalf("NextActions len = %d, want 1..2: %v", len(d.NextActions), d.NextActions)
+			maxActions := tc.maxNextActions
+			if maxActions == 0 {
+				maxActions = 2
+			}
+			if len(d.NextActions) == 0 || len(d.NextActions) > maxActions {
+				t.Fatalf("NextActions len = %d, want 1..%d: %v", len(d.NextActions), maxActions, d.NextActions)
 			}
 			if !strings.Contains(d.NextActions[0], tc.wantFirstAction) {
 				t.Errorf("NextActions[0] = %q, want substring %q", d.NextActions[0], tc.wantFirstAction)
 			}
 			for _, a := range d.NextActions {
-				if !strings.HasPrefix(a, "monitor_") {
-					t.Errorf("NextAction %q does not reference a monitor tool", a)
+				// Either an MCP tool call ("monitor_profile_capture ...",
+				// agent-facing) or a bare CLI command ("monitor hot ...",
+				// human-facing, E3.5's line-level-heap hint) — both are
+				// genuine "next" pointers a reader can act on.
+				if !strings.HasPrefix(a, "monitor_") && !strings.HasPrefix(a, "monitor ") {
+					t.Errorf("NextAction %q does not reference a monitor tool or command", a)
 				}
 			}
 			if len(d.Evidence) < 2 {
@@ -211,6 +227,73 @@ func TestDiagnosePatterns(t *testing.T) {
 				t.Errorf("Summary should name the process: %q", d.Summary)
 			}
 		})
+	}
+}
+
+// TestMemoryLeakNextActionsIncludeLineLevelHeapHints is the E3.5 regression:
+// a memory_leak diagnosis must point at the line-level heap view
+// (`monitor hot <pid> --type heap`) for a process whose name gives no
+// reason to think it's NOT Go, since that command only ever names a real
+// line for a Go target — the generic function-level fallback (`monitor
+// profile <pid> -t heap`) is a worse recommendation there, not a
+// complementary one (see the E3.5 review: unconditionally offering both
+// points a Node target at a command that pauses its isolate for nothing).
+func TestMemoryLeakNextActionsIncludeLineLevelHeapHints(t *testing.T) {
+	e := NewEngine()
+	pushSeries(e, 42, "proc", rampU(100*mb, 1*mb, 20), flatF(10, 20))
+	diags := e.Diagnose()
+	if len(diags) != 1 {
+		t.Fatalf("expected 1 diagnosis, got %d: %+v", len(diags), diags)
+	}
+	actions := diags[0].NextActions
+	wantHot := "monitor hot 42 --type heap"
+	notWantProfile := "monitor profile 42 -t heap"
+	var haveHot, haveProfile bool
+	for _, a := range actions {
+		if a == wantHot {
+			haveHot = true
+		}
+		if a == notWantProfile {
+			haveProfile = true
+		}
+	}
+	if !haveHot {
+		t.Errorf("NextActions = %v, want %q", actions, wantHot)
+	}
+	if haveProfile {
+		t.Errorf("NextActions = %v, must NOT include %q for a non-Go-looking process name", actions, notWantProfile)
+	}
+}
+
+// TestMemoryLeakNextActionsOmitHotHintForKnownNonGoProcess is
+// TestMemoryLeakNextActionsIncludeLineLevelHeapHints' mirror: a process
+// plainly named after a non-Go runtime (e.g. "node") gets the generic
+// `monitor profile <pid> -t heap` hint instead, never the Go-only `monitor
+// hot --type heap` one.
+func TestMemoryLeakNextActionsOmitHotHintForKnownNonGoProcess(t *testing.T) {
+	e := NewEngine()
+	pushSeries(e, 42, "node", rampU(100*mb, 1*mb, 20), flatF(10, 20))
+	diags := e.Diagnose()
+	if len(diags) != 1 {
+		t.Fatalf("expected 1 diagnosis, got %d: %+v", len(diags), diags)
+	}
+	actions := diags[0].NextActions
+	wantProfile := "monitor profile 42 -t heap"
+	notWantHot := "monitor hot 42 --type heap"
+	var haveProfile, haveHot bool
+	for _, a := range actions {
+		if a == wantProfile {
+			haveProfile = true
+		}
+		if a == notWantHot {
+			haveHot = true
+		}
+	}
+	if !haveProfile {
+		t.Errorf("NextActions = %v, want %q", actions, wantProfile)
+	}
+	if haveHot {
+		t.Errorf("NextActions = %v, must NOT include %q for a known non-Go process name", actions, notWantHot)
 	}
 }
 

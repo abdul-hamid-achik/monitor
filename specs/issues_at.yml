@@ -1,0 +1,182 @@
+version: 1
+name: monitor_issues_at
+
+intent: |
+  E3.4 / roadmap "errores x calor": `monitor issues --at <file:line>` lists
+  issues whose culprit lands exactly on that line (the honest fallback when
+  codemap can't resolve the enclosing function's range -- this spec's CI/dev
+  environment is not assumed to have a codemap index for this repo, so the
+  exact-line path is what's actually asserted) or, once codemap has a range,
+  anywhere inside the enclosing function.
+
+target:
+  cmd:
+    - "/bin/sh"
+    - "-lc"
+    - |
+      set -e
+      d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+      export MONITOR_ISSUES_STORE="$d/issues.veclite"
+
+      go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+        --project polyglot --service workload --root "$(pwd)" \
+        --file examples/polyglot/js/workload.js --line 31 --function flakyParse \
+        --type Error --value "flakyParse: malformed payload" --level error --handled=true --count 10 >/dev/null
+      go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+        --project polyglot --service workload --root "$(pwd)" \
+        --file examples/polyglot/js/workload.js --line 49 --function detonate \
+        --type Error --value "node workload intentional uncaught failure" --level fatal --handled=false >/dev/null
+      echo seeded
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v go"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 20000
+
+outcomes:
+  - id: clean_exit
+    description: seeding two issues at two different lines of the same file exits 0
+    verify:
+      process:
+        exitCode: 0
+
+  - id: at_exact_line_matches_only_that_lines_issue
+    description: --at file:31 returns only the flakyParse issue, not the detonate one at line 49
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          want=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 31 --function flakyParse \
+            --type Error --value "flakyParse: malformed payload" --level error --handled=true --count 10)
+          go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 49 --function detonate \
+            --type Error --value "node workload intentional uncaught failure" --level fatal --handled=false >/dev/null
+
+          ./bin/monitor issues --at examples/polyglot/js/workload.js:31 --json > "$d/out.json"
+          python3 -c '
+          import json
+          with open("'"$d"'/out.json") as f:
+              o = json.load(f)
+          assert o["file"] == "examples/polyglot/js/workload.js", o
+          assert o["line"] == 31, o
+          ids = [i["id"] for i in o["issues"]]
+          assert ids == ["'"$want"'"], ids
+          '
+
+  - id: at_human_output_names_the_line_and_falls_back_honestly
+    description: the human --at view names LINE/ID/EVENTS/STATUS/TITLE and, without a codemap index for this repo, says so (no range resolved) rather than inventing a function range
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 31 --function flakyParse \
+            --type Error --value "flakyParse: malformed payload" --level error --handled=true --count 10 >/dev/null
+
+          out=$(./bin/monitor issues --at examples/polyglot/js/workload.js:31 --all)
+          echo "$out" | grep -q "^LINE" || { echo "missing LINE header: $out"; exit 1; }
+          echo "$out" | grep -qE "no range resolved" || { echo "missing an honest no-range-resolved status note: $out"; exit 1; }
+
+  - id: at_no_match_returns_empty_not_every_issue
+    description: a line with no culprit returns zero issues, never every issue in the store
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 31 --function flakyParse \
+            --type Error --value "flakyParse: malformed payload" --level error --handled=true >/dev/null
+
+          n=$(./bin/monitor issues --at examples/polyglot/js/workload.js:9999 --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["issues"]))')
+          [ "$n" = "0" ]
+
+  - id: at_resolves_the_enclosing_function_range_via_codemap
+    description: with a healthy codemap on PATH, --at resolves the enclosing function's range (not just an exact-line fallback) and matches an issue anywhere inside it
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          want=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 31 --function flakyParse \
+            --type Error --value "flakyParse: malformed payload" --level error --handled=true --count 10)
+          go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 49 --function detonate \
+            --type Error --value "node workload intentional uncaught failure" --level fatal --handled=false >/dev/null
+
+          # A fake, healthy `codemap` on PATH: status/symbol-at report the
+          # flakyParse function as indexed and spanning lines 28-35, so
+          # --at:31 (a line INSIDE that range, not the range's own start)
+          # must resolve via the range, not the exact-line fallback.
+          fakebin="$d/fakebin"; mkdir -p "$fakebin"
+          cat > "$fakebin/codemap" <<'SCRIPT'
+          #!/bin/sh
+          case "$*" in
+            *--version*) echo "codemap 0.66.0 (fake)"; exit 0 ;;
+            *"status --json --skip-stale"*) printf '{"registered":true,"project":"polyglot","nodes":1}'; exit 0 ;;
+            *"symbol-at "*) printf '{"file":"examples/polyglot/js/workload.js","line":31,"symbol":"flakyParse","fqn":"workload.flakyParse","kind":"function","start_line":28,"end_line":35,"resolution":"exact","indexed":true}'; exit 0 ;;
+            *) exit 1 ;;
+          esac
+          SCRIPT
+          chmod +x "$fakebin/codemap"
+
+          PATH="$fakebin:$PATH" ./bin/monitor issues --at examples/polyglot/js/workload.js:31 --all --json > "$d/out.json"
+          python3 -c '
+          import json
+          with open("'"$d"'/out.json") as f:
+              o = json.load(f)
+          assert o["range_resolved"] is True, o
+          assert o["symbol"] == "flakyParse", o
+          assert o["start"] == 28 and o["end"] == 35, o
+          ids = [i["id"] for i in o["issues"]]
+          assert ids == ["'"$want"'"], ids
+          '
+
+          human=$(PATH="$fakebin:$PATH" ./bin/monitor issues --at examples/polyglot/js/workload.js:31 --all)
+          echo "$human" | grep -qE "flakyParse.*\(codemap\)" || { echo "human output missing the codemap-resolved range: $human"; exit 1; }
+
+  - id: at_different_file_same_line_does_not_match
+    description: --at requires BOTH the file and the line to match, not just the line number
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 31 --function flakyParse \
+            --type Error --value "flakyParse: malformed payload" --level error --handled=true >/dev/null
+
+          n=$(./bin/monitor issues --at examples/polyglot/python/workload.py:31 --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["issues"]))')
+          [ "$n" = "0" ]

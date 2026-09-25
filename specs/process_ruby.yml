@@ -1,0 +1,83 @@
+version: 1
+name: monitor_process_ruby
+
+intent: |
+  `monitor process <pid> --json` recognizes a live Ruby (MRI) interpreter:
+  the binding reports runtime "ruby" and resolves main_script to the
+  workload's real entry point (examples/polyglot/ruby/workload.rb), the same
+  way it already does for node/bun/deno/python.
+
+  This spec spawns examples/polyglot/ruby/workload.rb (which prints a
+  startup line, then sleeps in background threads before eventually raising)
+  as a detached process, inspects it, and kills it — it never waits for the
+  workload's own 40s sleep or its intentional crash.
+
+  Runtime note: this spec invokes the bare "ruby" from PATH. glyph's outcome
+  verify-command PATH is its own construction, not the invoking shell's: it
+  puts /usr/bin ahead of ~/.asdf/shims (confirmed by printing $PATH from
+  inside an outcome's verify.command), so on a plain macOS install "ruby"
+  resolves to the system /usr/bin/ruby (2.6.x) rather than an asdf-managed
+  version, even when the invoking shell's own PATH has asdf shims first. CI
+  (or any runner image without a system ruby) relies on the infra group
+  provisioning a real "ruby" on PATH instead. The `ruby -v` precondition
+  below is non-fatal and exists only so the resolved interpreter is visible
+  in the run's artifacts.
+
+  The resolve_runtime_ruby_gemfile_marker outcome additionally exercises
+  `monitor resolve --runtime ruby` end to end (previously only checked by
+  hand): it starts a disposable ruby process rooted at a fresh temp dir that
+  carries a Gemfile marker, resolves it back to that exact pid, and checks
+  that `monitor process --json` lists "Gemfile" among the binding's markers.
+
+target:
+  cmd: ["./bin/monitor", "--version"]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v ruby >/dev/null 2>&1"
+      timeoutMs: 5000
+    - run: "ruby -v >&2 || true"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: runtime_ruby
+    description: process --json reports runtime "ruby" for a live MRI interpreter
+    verify:
+      command:
+        run: "P=$(sh -c 'nohup ruby examples/polyglot/ruby/workload.rb >/dev/null 2>&1 & echo $!'); sleep 1; OUT=$(./bin/monitor process \"$P\" --json 2>&1); kill \"$P\" 2>/dev/null || true; echo \"$OUT\" | grep -q '\"runtime\": \"ruby\"'"
+  - id: main_script_resolved
+    description: process --json resolves main_script to workload.rb, not the interpreter itself
+    verify:
+      command:
+        run: "P=$(sh -c 'nohup ruby examples/polyglot/ruby/workload.rb >/dev/null 2>&1 & echo $!'); sleep 1; OUT=$(./bin/monitor process \"$P\" --json 2>&1); kill \"$P\" 2>/dev/null || true; echo \"$OUT\" | grep -q '\"main_script\":.*workload.rb\"'"
+  - id: codebase_root_resolves_from_cwd
+    description: process --json resolves a non-empty codebase_root by walking up from cwd (this spec's cwd is the repo root, so the marker found here is go.mod/.git, not Gemfile; resolve_runtime_ruby_gemfile_marker below exercises the Gemfile marker specifically)
+    verify:
+      command:
+        run: "P=$(sh -c 'nohup ruby examples/polyglot/ruby/workload.rb >/dev/null 2>&1 & echo $!'); sleep 1; OUT=$(./bin/monitor process \"$P\" --json 2>&1); kill \"$P\" 2>/dev/null || true; echo \"$OUT\" | grep -q '\"codebase_root\"'"
+  - id: resolve_runtime_ruby_gemfile_marker
+    description: resolve --runtime ruby --codebase-root <dir> finds a live ruby process rooted at a Gemfile-marked dir, and process --json lists Gemfile among its markers
+    timeoutMs: 15000
+    verify:
+      command:
+        timeoutMs: 15000
+        run: "D=$(mktemp -d); touch \"$D/Gemfile\"; printf 'sleep 30\\n' > \"$D/svc.rb\"; (cd \"$D\" && exec ruby svc.rb >/dev/null 2>&1) & P=$!; sleep 1; OUT=$(./bin/monitor resolve --runtime ruby --codebase-root \"$D\" --json 2>&1); PROC=$(./bin/monitor process \"$P\" --json 2>&1); kill \"$P\" 2>/dev/null || true; rm -rf \"$D\"; echo \"$OUT\" | grep -q \"\\\"pid\\\": $P\\b\" && echo \"$PROC\" | grep -q '\"Gemfile\"'"
+  - id: clean_exit
+    description: --version still exits cleanly (baseline sanity check for the target command)
+    verify:
+      process:
+        exitCode: 0

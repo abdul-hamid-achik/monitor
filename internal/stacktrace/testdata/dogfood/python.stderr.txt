@@ -1,0 +1,88 @@
+[python] pid=17605 workload starting
+[python] caught in tick_errors: flaky_parse: malformed payload near token 'bad-payl'
+Traceback (most recent call last):
+  File "/repo/examples/polyglot/python/workload.py", line 38, in tick_errors
+    flaky_parse(p)
+    ~~~~~~~~~~~^^^
+  File "/repo/examples/polyglot/python/workload.py", line 31, in flaky_parse
+    raise ValueError(f"flaky_parse: malformed payload near token {raw[:8]!r}")
+ValueError: flaky_parse: malformed payload near token 'bad-payl'
+[python] caught in tick_errors: flaky_parse: malformed payload near token 'bad-payl'
+Traceback (most recent call last):
+  File "/repo/examples/polyglot/python/workload.py", line 38, in tick_errors
+    flaky_parse(p)
+    ~~~~~~~~~~~^^^
+  File "/repo/examples/polyglot/python/workload.py", line 31, in flaky_parse
+    raise ValueError(f"flaky_parse: malformed payload near token {raw[:8]!r}")
+ValueError: flaky_parse: malformed payload near token 'bad-payl'
+[python] caught in tick_errors: flaky_parse: malformed payload near token 'bad-payl'
+Traceback (most recent call last):
+  File "/repo/examples/polyglot/python/workload.py", line 38, in tick_errors
+    flaky_parse(p)
+    ~~~~~~~~~~~^^^
+  File "/repo/examples/polyglot/python/workload.py", line 31, in flaky_parse
+    raise ValueError(f"flaky_parse: malformed payload near token {raw[:8]!r}")
+ValueError: flaky_parse: malformed payload near token 'bad-payl'
+[python] caught in tick_errors: flaky_parse: malformed payload near token 'bad-payl'
+Traceback (most recent call last):
+  File "/repo/examples/polyglot/python/workload.py", line 38, in tick_errors
+    flaky_parse(p)
+    ~~~~~~~~~~~^^^
+  File "/repo/examples/polyglot/python/workload.py", line 31, in flaky_parse
+    raise ValueError(f"flaky_parse: malformed payload near token {raw[:8]!r}")
+ValueError: flaky_parse: malformed payload near token 'bad-payl'
+[python] caught in tick_errors: flaky_parse: malformed payload near token 'bad-payl'
+Traceback (most recent call last):
+  File "/repo/examples/polyglot/python/workload.py", line 38, in tick_errors
+    flaky_parse(p)
+    ~~~~~~~~~~~^^^
+  File "/repo/examples/polyglot/python/workload.py", line 31, in flaky_parse
+    raise ValueError(f"flaky_parse: malformed payload near token {raw[:8]!r}")
+ValueError: flaky_parse: malformed payload near token 'bad-payl'
+[python] caught in tick_errors: flaky_parse: malformed payload near token 'bad-payl'
+Traceback (most recent call last):
+  File "/repo/examples/polyglot/python/workload.py", line 38, in tick_errors
+    flaky_parse(p)
+    ~~~~~~~~~~~^^^
+  File "/repo/examples/polyglot/python/workload.py", line 31, in flaky_parse
+    raise ValueError(f"flaky_parse: malformed payload near token {raw[:8]!r}")
+ValueError: flaky_parse: malformed payload near token 'bad-payl'
+[python] caught in tick_errors: flaky_parse: malformed payload near token 'bad-payl'
+Traceback (most recent call last):
+  File "/repo/examples/polyglot/python/workload.py", line 38, in tick_errors
+    flaky_parse(p)
+    ~~~~~~~~~~~^^^
+  File "/repo/examples/polyglot/python/workload.py", line 31, in flaky_parse
+    raise ValueError(f"flaky_parse: malformed payload near token {raw[:8]!r}")
+ValueError: flaky_parse: malformed payload near token 'bad-payl'
+[python] caught in tick_errors: flaky_parse: malformed payload near token 'bad-payl'
+Traceback (most recent call last):
+  File "/repo/examples/polyglot/python/workload.py", line 38, in tick_errors
+    flaky_parse(p)
+    ~~~~~~~~~~~^^^
+  File "/repo/examples/polyglot/python/workload.py", line 31, in flaky_parse
+    raise ValueError(f"flaky_parse: malformed payload near token {raw[:8]!r}")
+ValueError: flaky_parse: malformed payload near token 'bad-payl'
+[python] caught in tick_errors: flaky_parse: malformed payload near token 'bad-payl'
+Traceback (most recent call last):
+  File "/repo/examples/polyglot/python/workload.py", line 38, in tick_errors
+    flaky_parse(p)
+    ~~~~~~~~~~~^^^
+  File "/repo/examples/polyglot/python/workload.py", line 31, in flaky_parse
+    raise ValueError(f"flaky_parse: malformed payload near token {raw[:8]!r}")
+ValueError: flaky_parse: malformed payload near token 'bad-payl'
+[python] caught in tick_errors: flaky_parse: malformed payload near token 'bad-payl'
+Traceback (most recent call last):
+  File "/repo/examples/polyglot/python/workload.py", line 38, in tick_errors
+    flaky_parse(p)
+    ~~~~~~~~~~~^^^
+  File "/repo/examples/polyglot/python/workload.py", line 31, in flaky_parse
+    raise ValueError(f"flaky_parse: malformed payload near token {raw[:8]!r}")
+ValueError: flaky_parse: malformed payload near token 'bad-payl'
+Traceback (most recent call last):
+  File "/repo/examples/polyglot/python/workload.py", line 72, in <module>
+    detonate()
+    ~~~~~~~~^^
+  File "/repo/examples/polyglot/python/workload.py", line 45, in detonate
+    raise RuntimeError(f"python workload: intentional uncaught failure at t={time.time() - START:.1f}s")
+RuntimeError: python workload: intentional uncaught failure at t=40.0s

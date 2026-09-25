@@ -1,0 +1,37 @@
+14 | }
+15 | function outer() {
+16 |   try {
+17 |     middle();
+18 |   } catch (err) {
+19 |     throw new Error('outer failure', { cause: err });
+                   ^
+error: outer failure
+      at outer (/repo/app/src/scenarios.mjs:19:15)
+      at /repo/app/src/scenarios.mjs:48:5
+
+ 7 | }
+ 8 | function middle() {
+ 9 |   try {
+10 |     root();
+11 |   } catch (err) {
+12 |     throw new Error('middle failure', { cause: err });
+                   ^
+error: middle failure
+      at middle (/repo/app/src/scenarios.mjs:12:15)
+      at outer (/repo/app/src/scenarios.mjs:17:5)
+      at /repo/app/src/scenarios.mjs:48:5
+
+1 | // Scenario driver shared by node, deno and bun. Usage: <runtime> scenarios.mjs <name>
+2 | import fs from 'node:fs';
+3 | import assert from 'node:assert';
+4 | 
+5 | function root() {
+6 |   throw new Error('root failure');
+                ^
+error: root failure
+      at root (/repo/app/src/scenarios.mjs:6:13)
+      at middle (/repo/app/src/scenarios.mjs:10:5)
+      at outer (/repo/app/src/scenarios.mjs:17:5)
+      at /repo/app/src/scenarios.mjs:48:5
+
+Bun v1.4.2 (macOS arm64)

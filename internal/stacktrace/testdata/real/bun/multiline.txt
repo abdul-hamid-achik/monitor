@@ -1,0 +1,12 @@
+90 |     throw err;
+91 |   }
+92 |   case 'throw-string':
+93 |     throw 'plain string failure';
+94 |   case 'multiline':
+95 |     throw new Error('first line of message\nsecond line of message');
+                   ^
+error: first line of message
+second line of message
+      at /repo/app/src/scenarios.mjs:95:15
+
+Bun v1.4.2 (macOS arm64)

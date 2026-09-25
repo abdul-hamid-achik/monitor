@@ -1,0 +1,20 @@
+52 |   case 'aggregate': {
+53 |     Promise.any([Promise.reject(new Error('a')), Promise.reject(new TypeError('b'))]).catch(e => console.error(e));
+54 |     break;
+55 |   }
+56 |   case 'aggregate-uncaught': {
+57 |     Promise.any([Promise.reject(new Error('a')), Promise.reject(new TypeError('b'))]);
+                                         ^
+error: a
+      at /repo/app/app.js:57:37
+52 |   case 'aggregate': {
+53 |     Promise.any([Promise.reject(new Error('a')), Promise.reject(new TypeError('b'))]).catch(e => console.error(e));
+54 |     break;
+55 |   }
+56 |   case 'aggregate-uncaught': {
+57 |     Promise.any([Promise.reject(new Error('a')), Promise.reject(new TypeError('b'))]);
+                                                                         ^
+TypeError: b
+      at /repo/app/app.js:57:69
+
+Bun v1.4.2 (macOS arm64)

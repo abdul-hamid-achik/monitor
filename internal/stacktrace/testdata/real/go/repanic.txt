@@ -1,0 +1,11 @@
+panic: same value [recovered, repanicked]
+
+goroutine 1 [running]:
+main.repanicSame.func1()
+	/repo/app/main.go:27 +0x20
+panic({0x1003c9460?, 0x100418e18?})
+	/usr/local/go/src/runtime/panic.go:860 +0x12c
+main.repanicSame()
+	/repo/app/main.go:29 +0x48
+main.main()
+	/repo/app/main.go:67 +0x144

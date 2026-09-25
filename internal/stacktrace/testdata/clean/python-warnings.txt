@@ -1,0 +1,8 @@
+/repo/app/settings.py:3: DeprecationWarning: the imp module is deprecated in favour of importlib
+  import imp
+/repo/app/client.py:41: UserWarning: Unverified HTTPS request is being made
+  warnings.warn(
+2026-09-22 10:00:00,001 INFO app: Traceback logging enabled for the worker pool
+2026-09-22 10:00:00,002 INFO app: ERROR budget at 0.1%
+INFO:root:worker started
+DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): example.test:443

@@ -1,0 +1,88 @@
+version: 1
+name: monitor_run_scan_stdout
+
+intent: |
+  `monitor run --scan both -- <cmd>` (E2.4) also scans stdout, which real
+  zap setups need: some configurations point OutputPaths/ErrorOutputPaths
+  at stdout instead of stderr (the naming ADR §3).
+  This spec runs the go-zap-stdout polyglot example (examples/polyglot/
+  go-zap-stdout), which prints a zap-style console ERROR entry followed by
+  a pkg/errors-shaped "%+v" stack dump, all to stdout. --scan both must:
+  (a) still pass the ordinary startup text through to the terminal on
+  stdout ("[go-zap-stdout] starting"), proving the pipe conversion did not
+  swallow anything, and (b) record exactly one issue with the culprit at
+  main.(*worker).doWork's call site (main.go:67), proving the detector
+  actually saw stdout. The process itself exits 0 (the error is printed,
+  not a crash), so monitor's own exit code must also be 0.
+
+target:
+  cmd:
+    [
+      "./bin/monitor",
+      "run",
+      "--scan",
+      "both",
+      "--",
+      "/tmp/monitor-spec-run-scan-stdout/go-zap-stdout",
+    ]
+  cwd: "."
+  env:
+    XDG_STATE_HOME: "/tmp/monitor-spec-run-scan-stdout/state"
+    MONITOR_ISSUES_STORE: "/tmp/monitor-spec-run-scan-stdout/data/issues.veclite"
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v go"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-run-scan-stdout && mkdir -p /tmp/monitor-spec-run-scan-stdout/state /tmp/monitor-spec-run-scan-stdout/data"
+      timeoutMs: 5000
+    - run: "(cd examples/polyglot/go-zap-stdout && go build -o /tmp/monitor-spec-run-scan-stdout/go-zap-stdout .)"
+      timeoutMs: 60000
+    - run: "cat > /tmp/monitor-spec-run-scan-stdout/check.sh <<'SH'\n#!/bin/sh\nset -e\nMONITOR_ISSUES_STORE=/tmp/monitor-spec-run-scan-stdout/data/issues.veclite ./bin/monitor issues list --json > /tmp/monitor-spec-run-scan-stdout/issues.json\npython3 -c \"\nimport json\nd = json.load(open('/tmp/monitor-spec-run-scan-stdout/issues.json'))\nassert len(d) == 1, d\ni = d[0]\nassert i['culprit']['file'] == 'examples/polyglot/go-zap-stdout/main.go', i['culprit']\nassert i['culprit']['line'] == 67, i['culprit']\nassert i['culprit']['function'] == 'main.(*worker).doWork', i['culprit']\nassert i['occurrence_count'] == 1, i\nprint('ok')\n\"\nSH\nchmod +x /tmp/monitor-spec-run-scan-stdout/check.sh"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      screen:
+        contains: "request failed"
+      timeoutMs: 10000
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 10000
+
+outcomes:
+  - id: readiness_text_still_on_stdout
+    description: ordinary stdout text still reaches the terminal once stdout becomes a scanned pipe
+    verify:
+      screen:
+        contains: "[go-zap-stdout] starting"
+  - id: banner_notes_stdout_is_a_pipe
+    description: the start banner says stdout became a pipe under --scan both
+    verify:
+      screen:
+        contains: "stdout is a pipe now"
+  - id: new_issue_banner
+    description: a NEW issue banner is printed for the zap+pkg/errors error
+    verify:
+      screen:
+        contains: "monitor > NEW"
+  - id: clean_exit
+    description: go-zap-stdout exits 0 (a printed error, not a crash), and monitor propagates that
+    verify:
+      process:
+        exitCode: 0
+  - id: issue_recorded_with_stdout_culprit
+    description: exactly one issue lands with the culprit resolved from stdout-only text
+    verify:
+      command:
+        run: "/tmp/monitor-spec-run-scan-stdout/check.sh"

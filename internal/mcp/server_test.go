@@ -1,10 +1,13 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/explain"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/kill"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
@@ -451,9 +455,9 @@ func TestHandleKillStillRunningSurfacesNextAction(t *testing.T) {
 // TestHandleProfileCaptureRefusesWithoutConfirm mirrors TestHandleKill.
 func TestHandleProfileCaptureRefusesWithoutConfirm(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Profile: func(context.Context, int32, profiler.ProfileType) (profiler.Profile, error) {
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
 			t.Fatalf("Profile must not be called without confirm")
-			return profiler.Profile{}, nil
+			return ProfileCaptureResult{}, nil
 		},
 	})
 	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 1234, Type: "heap"})
@@ -474,9 +478,14 @@ func TestHandleProfileCaptureRefusesWithoutConfirm(t *testing.T) {
 func TestHandleProfileCaptureDefaultsType(t *testing.T) {
 	got := profiler.ProfileType("")
 	s := newTestServer(t, &Service{
-		Profile: func(_ context.Context, pid int32, ptype profiler.ProfileType) (profiler.Profile, error) {
+		Profile: func(_ context.Context, pid int32, ptype profiler.ProfileType, _ string, keep, _ bool) (ProfileCaptureResult, error) {
 			got = ptype
-			return profiler.Profile{PID: pid, Type: ptype, Taken: time.Now(), Text: "heap profile: 1"}, nil
+			prof := profiler.Profile{PID: pid, Type: ptype, Taken: time.Now(), Text: "heap profile: 1"}
+			receipt := prof.VerifyArtifact()
+			if !keep {
+				_ = prof.DiscardRawArtifact()
+			}
+			return ProfileCaptureResult{Profile: prof, Receipt: receipt}, nil
 		},
 	})
 	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Confirm: true})
@@ -495,13 +504,47 @@ func TestHandleProfileCaptureDefaultsType(t *testing.T) {
 	}
 }
 
+// TestHandleProfileCaptureLinesTrueDefaultsTypeToCpu is LUX-6's regression:
+// lines:true asks a line-level question a heap snapshot can never answer,
+// so the omitted-type default becomes "cpu" instead of pausing a JS
+// isolate for a guaranteed line_heatmap "skipped".
+func TestHandleProfileCaptureLinesTrueDefaultsTypeToCpu(t *testing.T) {
+	got := profiler.ProfileType("")
+	s := newTestServer(t, &Service{
+		Profile: func(_ context.Context, pid int32, ptype profiler.ProfileType, _ string, keep, _ bool) (ProfileCaptureResult, error) {
+			got = ptype
+			prof := profiler.Profile{PID: pid, Type: ptype, Taken: time.Now(), Text: "cpu profile: 1"}
+			receipt := prof.VerifyArtifact()
+			if !keep {
+				_ = prof.DiscardRawArtifact()
+			}
+			return ProfileCaptureResult{Profile: prof, Receipt: receipt}, nil
+		},
+	})
+	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Confirm: true, Lines: true})
+	if err != nil {
+		t.Fatalf("handleProfileCapture returned hard error: %v", err)
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("handleProfileCapture should produce a structured payload; got %T", payload)
+	}
+	if captured, _ := m["captured"].(bool); !captured {
+		t.Fatalf("success payload should set captured=true; got %v", m)
+	}
+	if got != "cpu" {
+		t.Fatalf("lines:true default profile type should be 'cpu'; got %q", got)
+	}
+}
+
 // TestHandleProfileCaptureRefusesEmptyArtifact verifies that a profile with
 // no evidence (no text, symbols, or file) is reported as captured=false with
 // a limitation, never as a blind success.
 func TestHandleProfileCaptureRefusesEmptyArtifact(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Profile: func(context.Context, int32, profiler.ProfileType) (profiler.Profile, error) {
-			return profiler.Profile{PID: 7, Type: "heap"}, nil
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
+			prof := profiler.Profile{PID: 7, Type: "heap"}
+			return ProfileCaptureResult{Profile: prof, Receipt: prof.VerifyArtifact()}, nil
 		},
 	})
 	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Confirm: true})
@@ -527,8 +570,9 @@ func TestHandleProfileCaptureRefusesEmptyArtifact(t *testing.T) {
 // is reported as captured=true with a verified artifact receipt.
 func TestHandleProfileCaptureVerifiedArtifact(t *testing.T) {
 	s := newTestServer(t, &Service{
-		Profile: func(context.Context, int32, profiler.ProfileType) (profiler.Profile, error) {
-			return profiler.Profile{PID: 7, Type: "heap", Text: "heap profile: 1"}, nil
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
+			prof := profiler.Profile{PID: 7, Type: "heap", Text: "heap profile: 1"}
+			return ProfileCaptureResult{Profile: prof, Receipt: prof.VerifyArtifact()}, nil
 		},
 	})
 	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Confirm: true})
@@ -548,6 +592,142 @@ func TestHandleProfileCaptureVerifiedArtifact(t *testing.T) {
 	}
 	if verified, _ := artifact["verified"].(bool); !verified {
 		t.Errorf("artifact.verified should be true; got %v", artifact)
+	}
+}
+
+// TestHandleProfileCaptureLinesTrueEmbedsHeatmapAndDropsSymbols is the E3.6
+// handler-level regression: with lines:true and the Service returning a
+// Heatmap, the payload carries line_heatmap (the monitor.line_heatmap.v1
+// shape) AND the embedded profile's own Symbols are cleared — "a bounded
+// line_heatmap ... instead of raw symbols" — while profile.text/other
+// fields are untouched (this test's Profile carries none, but the point is
+// the clearing is scoped to Symbols only, done on a COPY, never mutating
+// what the Service itself returned).
+func TestHandleProfileCaptureLinesTrueEmbedsHeatmapAndDropsSymbols(t *testing.T) {
+	hm := &profiler.Heatmap{
+		Schema: "monitor.line_heatmap.v1", ProfileType: profiler.HeatCPU, Method: profiler.MethodV8PositionTicks,
+		Functions: []profiler.HeatFunction{{Name: "heavyStringify", File: "js/workload.js", Lines: []profiler.HeatLine{{Line: 17, Self: 100, PctOfFunction: 99.9}}}},
+	}
+	s := newTestServer(t, &Service{
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
+			prof := profiler.Profile{PID: 7, Type: "cpu", Method: "inspector_cpu", Symbols: []profiler.Symbol{{Func: "heavyStringify", File: "js/workload.js", Line: 17}}}
+			receipt := prof.VerifyArtifact()
+			// A real Service (internal/cli/mcp.go's buildProfileService)
+			// clears Symbols itself, AFTER computing the receipt, since
+			// LineHeatmapPayload (hm below) replaces rather than
+			// supplements it; this stub mirrors that by hand.
+			prof.Symbols = nil
+			return ProfileCaptureResult{Profile: prof, Receipt: receipt, LineHeatmapPayload: hm}, nil
+		},
+	})
+	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Type: "cpu", Lines: true, Confirm: true})
+	if err != nil {
+		t.Fatalf("handleProfileCapture returned hard error: %v", err)
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", payload)
+	}
+	lh, ok := m["line_heatmap"].(map[string]any)
+	if !ok {
+		t.Fatalf("line_heatmap missing or wrong type; payload=%v", m)
+	}
+	if lh["schema"] != "monitor.line_heatmap.v1" {
+		t.Errorf("line_heatmap.schema = %v, want monitor.line_heatmap.v1", lh["schema"])
+	}
+	profMap, ok := m["profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("profile missing or wrong type; payload=%v", m)
+	}
+	if _, ok := profMap["symbols"]; ok {
+		t.Errorf("profile.symbols should be dropped when lines:true returns a heatmap; payload=%v", profMap)
+	}
+	if strings.Contains(fmt.Sprintf("%v", m), "ws://") {
+		t.Errorf("payload must never carry a ws:// inspector URL: %v", m)
+	}
+}
+
+// TestHandleProfileCaptureLinesTrueSkipsHonestly is lines:true's honest
+// degradation half: when the Service can't build a heatmap for this capture
+// (e.g. a macOS `sample`, which carries no file:line detail at all),
+// line_heatmap reports status:"skipped" with a detail/recovery, never an
+// empty or fabricated monitor.line_heatmap.v1 document, and the call still
+// reports captured:true (the underlying profile capture itself succeeded).
+func TestHandleProfileCaptureLinesTrueSkipsHonestly(t *testing.T) {
+	s := newTestServer(t, &Service{
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
+			prof := profiler.Profile{PID: 7, Type: "sample", Method: "sample", Text: "sample dump"}
+			return ProfileCaptureResult{
+				Profile: prof, Receipt: prof.VerifyArtifact(),
+				LineHeatmapPayload: map[string]any{
+					"status":   "skipped",
+					"detail":   "sample carries no file:line detail",
+					"recovery": "use type:cpu or type:heap instead",
+				},
+			}, nil
+		},
+	})
+	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Type: "cpu", Lines: true, Confirm: true})
+	if err != nil {
+		t.Fatalf("handleProfileCapture returned hard error: %v", err)
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", payload)
+	}
+	if captured, _ := m["captured"].(bool); !captured {
+		t.Fatalf("captured should stay true when only the heatmap was skipped; got %v", m)
+	}
+	lh, ok := m["line_heatmap"].(map[string]any)
+	if !ok {
+		t.Fatalf("line_heatmap missing or wrong type; payload=%v", m)
+	}
+	if lh["status"] != "skipped" {
+		t.Errorf("line_heatmap.status = %v, want skipped", lh["status"])
+	}
+	if lh["detail"] == "" {
+		t.Errorf("line_heatmap.detail should be non-empty; payload=%v", lh)
+	}
+}
+
+// TestHandleProfileCaptureUnavailableStatus verifies a Service.Profile
+// error satisfying errors.As(err, *UnavailableError) (Bun's "speaks JSC,
+// not CDP" case being the only producer today) surfaces as a distinguishable
+// status:"unavailable" payload with its own limitation/recovery fields,
+// never the bare "error" string an ordinary failure gets — an agent must be
+// able to tell "this will never work as asked" apart from "an attempt
+// failed, retry might help".
+func TestHandleProfileCaptureUnavailableStatus(t *testing.T) {
+	s := newTestServer(t, &Service{
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
+			return ProfileCaptureResult{}, &UnavailableError{
+				Limitation: "Bun speaks the WebKit/JSC inspector protocol, not V8 CDP",
+				Recovery:   "run the app with `bun --cpu-prof`",
+			}
+		},
+	})
+	_, payload, err := s.handleProfileCapture(context.Background(), nil, &profileInput{PID: 7, Type: "cpu", Confirm: true})
+	if err != nil {
+		t.Fatalf("handleProfileCapture returned hard error: %v", err)
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", payload)
+	}
+	if captured, _ := m["captured"].(bool); captured {
+		t.Fatalf("captured should be false for unavailable; got %v", m)
+	}
+	if status, _ := m["status"].(string); status != "unavailable" {
+		t.Fatalf("status = %q, want \"unavailable\"; payload=%v", m["status"], m)
+	}
+	if lim, _ := m["limitation"].(string); !strings.Contains(lim, "JSC") {
+		t.Errorf("limitation = %q, want it to carry the Bun-specific message; payload=%v", lim, m)
+	}
+	if rec, _ := m["recovery"].(string); rec == "" {
+		t.Errorf("recovery should be non-empty; payload=%v", m)
+	}
+	if _, hasError := m["error"]; hasError {
+		t.Errorf("an unavailable capture should not also set the bare \"error\" field; payload=%v", m)
 	}
 }
 
@@ -1029,18 +1209,86 @@ func TestHandleAnalyze(t *testing.T) {
 	}
 }
 
+// TestHandleAnalyzeSurfacesAlerts is the wire regression for bug 17's second
+// half: AnalyzeResult.Alerts (the plain rule findings analyzeWindow now
+// collects from the same NewDefaultEngine rules `monitor watch` runs) must
+// reach the monitor_analyze JSON payload as an additive "alerts" field, and
+// must count toward "healthy"/"note" the same way Diagnoses does — a caller
+// seeing healthy:true while a zombie_process alert fired would be worse off
+// than seeing no Diagnoses at all.
+func TestHandleAnalyzeSurfacesAlerts(t *testing.T) {
+	alerts := []collector.Alert{{
+		Severity: "warning", Rule: "zombie_process", PID: 300,
+		Detail: "orphan (pid 300) is a zombie awaiting parent 1",
+	}}
+	s := newTestServer(t, &Service{
+		Analyze: func(_ context.Context, w int, _ int32) (AnalyzeResult, error) {
+			return AnalyzeResult{Samples: w, Alerts: alerts}, nil
+		},
+	})
+	_, payload, err := s.handleAnalyze(context.Background(), nil, &analyzeInput{})
+	if err != nil {
+		t.Fatalf("handleAnalyze: %v", err)
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", payload)
+	}
+	gotAlerts, ok := m["alerts"].([]any)
+	if !ok {
+		t.Fatalf("alerts should be a JSON array (never null); got %T", m["alerts"])
+	}
+	if len(gotAlerts) != 1 {
+		t.Fatalf("len(alerts) = %d, want 1", len(gotAlerts))
+	}
+	a0, _ := gotAlerts[0].(map[string]any)
+	if a0["rule"] != "zombie_process" {
+		t.Errorf("alerts[0].rule = %v, want zombie_process", a0["rule"])
+	}
+	if healthy, _ := m["healthy"].(bool); healthy {
+		t.Error("healthy = true with a live alert present, want false")
+	}
+	if m["note"] != nil {
+		t.Errorf("note should be omitted once an alert is present; got %v", m["note"])
+	}
+}
+
+// TestHandleAnalyzeAlertsDefaultToEmptyArray covers the nil-vs-empty JSON
+// contract for Alerts, matching Diagnoses' existing guarantee — an agent
+// parsing monitor_analyze must never see `"alerts": null`.
+func TestHandleAnalyzeAlertsDefaultToEmptyArray(t *testing.T) {
+	s := newTestServer(t, &Service{
+		Analyze: func(_ context.Context, w int, _ int32) (AnalyzeResult, error) {
+			return AnalyzeResult{Samples: w}, nil
+		},
+	})
+	_, payload, err := s.handleAnalyze(context.Background(), nil, &analyzeInput{})
+	if err != nil {
+		t.Fatalf("handleAnalyze: %v", err)
+	}
+	m, ok := payload.(map[string]any)
+	if !ok {
+		t.Fatalf("payload type = %T, want map[string]any", payload)
+	}
+	alerts, ok := m["alerts"].([]any)
+	if !ok || len(alerts) != 0 {
+		t.Fatalf("alerts = %v (%T), want an empty JSON array", m["alerts"], m["alerts"])
+	}
+}
+
 func TestHandleIssuesIsBoundedAndReadOnly(t *testing.T) {
 	items := make([]issues.Issue, 250)
 	for i := range items {
 		items[i] = issues.Issue{ID: fmt.Sprintf("ISS-%03d", i), Status: issues.StatusOpen}
 	}
-	var got issues.ListOptions
-	s := newTestServer(t, &Service{IssuesList: func(_ context.Context, opts issues.ListOptions) ([]issues.Issue, error) {
-		got = opts
-		return items, nil
+	var got IssuesListFilter
+	s := newTestServer(t, &Service{IssuesList: func(_ context.Context, filter IssuesListFilter) (IssuesListResult, error) {
+		got = filter
+		return IssuesListResult{Items: items, Scrubbed: 3}, nil
 	}})
 	_, payload, err := s.handleIssues(context.Background(), nil, &issuesInput{
 		Statuses: []string{"OPEN"}, Project: "monitor", Service: "api", Limit: 999,
+		Since: "24h", RunID: "run-1", Release: "v1.2.3", Kind: "exception",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1049,26 +1297,78 @@ func TestHandleIssuesIsBoundedAndReadOnly(t *testing.T) {
 	if len(m["issues"].([]any)) != 200 || m["total"].(float64) != 250 || !m["truncated"].(bool) {
 		t.Fatalf("bounded payload = %v", m)
 	}
+	// SEC-5: every monitor_issues payload carries the privacy marker, so
+	// an agent never mistakes list text (titles, culprits) for trusted
+	// instructions -- and the Service's redaction count flows through.
+	priv, ok := m["privacy"].(map[string]any)
+	if !ok || priv["text_is_untrusted"] != true {
+		t.Fatalf("privacy marker = %v, want {text_is_untrusted:true ...}", m["privacy"])
+	}
+	if priv["scrubbed"] != float64(3) {
+		t.Fatalf("scrubbed = %v, want the Service mock's 3", priv["scrubbed"])
+	}
 	if len(got.Statuses) != 1 || got.Statuses[0] != issues.StatusOpen || got.Project != "monitor" || got.Service != "api" {
 		t.Fatalf("filters = %+v", got)
+	}
+	// Since/RunID/Release/Kind (E2.6) must reach Service.IssuesList exactly
+	// as the MCP caller supplied them -- handleIssues is a pure field copy;
+	// interpreting Since/Until (issues.ParseWindowBound) is the Service
+	// implementation's job (internal/cli/mcp.go's listIssuesForMCP), not
+	// this handler's -- see IssuesListFilter's doc comment and
+	// TestListIssuesForMCPForwardsWindowFiltersToStore in internal/cli.
+	if got.Since != "24h" {
+		t.Fatalf("Since = %q, want the raw \"24h\" passed straight through", got.Since)
+	}
+	if got.RunID != "run-1" || got.Release != "v1.2.3" || got.Kind != "exception" {
+		t.Fatalf("RunID/Release/Kind = %q/%q/%q", got.RunID, got.Release, got.Kind)
 	}
 	if _, _, err := s.handleIssues(context.Background(), nil, &issuesInput{Statuses: []string{"bogus"}}); err != nil {
 		t.Fatalf("invalid status should be structured, got hard error: %v", err)
 	}
 }
 
+// TestHandleIssuesSurfacesServiceErrorAsStructuredPayload verifies a Service
+// error (e.g. from the Service's own issues.ParseWindowBound call, once
+// since/until leave this handler unparsed) becomes the same structured
+// {error: ...} payload as any other IssuesList failure, not a hard Go error
+// or a silently-ignored filter -- handleIssues itself does no since/until
+// parsing (or validation) of its own; see IssuesListFilter's doc comment.
+func TestHandleIssuesSurfacesServiceErrorAsStructuredPayload(t *testing.T) {
+	s := newTestServer(t, &Service{IssuesList: func(_ context.Context, filter IssuesListFilter) (IssuesListResult, error) {
+		if filter.Since == "not-a-time" {
+			return IssuesListResult{}, fmt.Errorf("invalid time %q", filter.Since)
+		}
+		return IssuesListResult{}, nil
+	}})
+	_, payload, err := s.handleIssues(context.Background(), nil, &issuesInput{Since: "not-a-time"})
+	if err != nil {
+		t.Fatalf("a Service error should be structured, got hard error: %v", err)
+	}
+	m := payload.(map[string]any)
+	if errMsg, _ := m["error"].(string); errMsg == "" {
+		t.Fatalf("payload = %v, want a non-empty error", payload)
+	}
+	if issuesVal, ok := m["issues"].([]any); !ok || len(issuesVal) != 0 {
+		t.Fatalf("payload issues = %v, want an empty array", m["issues"])
+	}
+}
+
 func TestHandleIssueReturnsOccurrencesAndStructuredNotFound(t *testing.T) {
 	issue := issues.Issue{ID: "ISS-1", OccurrenceCount: 3}
-	s := newTestServer(t, &Service{IssueGet: func(_ context.Context, id string, limit int) (issues.Issue, []issues.Occurrence, error) {
+	s := newTestServer(t, &Service{IssueContext: func(_ context.Context, id string, _ IssueContextFilter, limit int) (*IssueContextResult, error) {
 		if id == "missing" {
-			return issues.Issue{}, nil, fmt.Errorf("%w: %s", issues.ErrIssueNotFound, id)
+			return nil, fmt.Errorf("%w: %s", issues.ErrIssueNotFound, id)
 		}
 		if limit != 20 {
-			t.Fatalf("default occurrence limit = %d, want 20", limit)
+			t.Fatalf("occurrence limit = %d, want the caller's explicit 20", limit)
 		}
-		return issue, []issues.Occurrence{{ID: "OCC-1"}, {ID: "OCC-2"}}, nil
+		return &IssueContextResult{
+			IncludeLegacy: true,
+			Issue:         issue, Occurrences: []issues.Occurrence{{ID: "OCC-1"}, {ID: "OCC-2"}},
+			OccurrencesTruncated: true,
+		}, nil
 	}})
-	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "ISS-1"})
+	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "ISS-1", OccurrenceLimit: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1086,15 +1386,101 @@ func TestHandleIssueReturnsOccurrencesAndStructuredNotFound(t *testing.T) {
 	}
 }
 
+// TestHandleIssueDefaultOmitsLegacyIssueAndOccurrences is AC-6's own size
+// budget, at the handler level: with no occurrence_limit (IncludeLegacy
+// false), the response carries Context's OWN small issue summary and no
+// occurrences/occurrences_truncated keys at all -- not an empty array, an
+// ABSENT key, since a caller checking for the legacy shape's presence
+// (as internal/cli/mcp_test.go's wire test does) must be able to tell
+// "opted out" from "opted in but empty".
+func TestHandleIssueDefaultOmitsLegacyIssueAndOccurrences(t *testing.T) {
+	var gotLimit int
+	s := newTestServer(t, &Service{IssueContext: func(_ context.Context, _ string, _ IssueContextFilter, limit int) (*IssueContextResult, error) {
+		gotLimit = limit
+		return &IssueContextResult{Context: &explain.Context{
+			Schema: explain.Schema, Budget: "brief",
+			Issue: explain.IssueSummary{ID: "ISS-1", ShortID: "0001"},
+		}}, nil
+	}})
+	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "ISS-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLimit != 0 {
+		t.Fatalf("occurrence limit = %d, want 0 (no default substitution)", gotLimit)
+	}
+	m := payload.(map[string]any)
+	if _, ok := m["occurrences"]; ok {
+		t.Fatalf("payload = %v, occurrences must be ABSENT by default, not an empty array", m)
+	}
+	if _, ok := m["occurrences_truncated"]; ok {
+		t.Fatalf("payload = %v, occurrences_truncated must be absent by default", m)
+	}
+	issueField, ok := m["issue"].(map[string]any)
+	if !ok || issueField["short_id"] != "0001" {
+		t.Fatalf("issue = %v, want Context's own small summary (short_id 0001)", m["issue"])
+	}
+}
+
+// TestHandleIssueStructuredNotFoundFromResult covers the (real production)
+// path: IssueContextResult.NotFound/Recovery, not the legacy (nil, nil)
+// sentinel -- see issueContextForMCP.
+func TestHandleIssueStructuredNotFoundFromResult(t *testing.T) {
+	s := newTestServer(t, &Service{IssueContext: func(_ context.Context, _ string, _ IssueContextFilter, _ int) (*IssueContextResult, error) {
+		return &IssueContextResult{NotFound: true, Recovery: "try widening the filter"}, nil
+	}})
+	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "latest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := payload.(map[string]any)
+	if found, _ := m["not_found"].(bool); !found {
+		t.Fatalf("not_found = %v, want true", m["not_found"])
+	}
+	if m["recovery"] != "try widening the filter" {
+		t.Fatalf("recovery = %v, want the Service-provided hint verbatim", m["recovery"])
+	}
+	if _, hasError := m["error"]; hasError {
+		t.Fatalf("payload = %v, structured not_found must not populate error", m)
+	}
+}
+
+// TestHandleIssueNoMatchIsRecoveryHintNotError covers E2.7's "latest
+// matches nothing is not an error" rule: a (nil, nil) Service result must
+// produce not_found:true with a recovery string, never populate "error".
+func TestHandleIssueNoMatchIsRecoveryHintNotError(t *testing.T) {
+	s := newTestServer(t, &Service{IssueContext: func(_ context.Context, id string, filter IssueContextFilter, _ int) (*IssueContextResult, error) {
+		return nil, nil
+	}})
+	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "latest", Project: "polyglot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := payload.(map[string]any)
+	if found, _ := m["not_found"].(bool); !found {
+		t.Fatalf("not_found = %v, want true", m["not_found"])
+	}
+	if recovery, _ := m["recovery"].(string); recovery == "" {
+		t.Fatalf("payload = %v, want a non-empty recovery hint", m)
+	}
+	if _, hasError := m["error"]; hasError {
+		t.Fatalf("payload = %v, a no-match \"latest\" must not be reported as an error", m)
+	}
+}
+
 func TestHandleIssueClampsOccurrenceLimitAndKeepsTypedEvidence(t *testing.T) {
 	var gotLimit int
 	wantRun := &issues.RunContext{ID: "run-1", Environment: "preview", StepID: "test"}
 	wantEvidence := []issues.EvidenceRef{{Kind: "monitor.incident", URI: "fcheap://stash/stash-1"}}
-	s := newTestServer(t, &Service{IssueGet: func(_ context.Context, id string, limit int) (issues.Issue, []issues.Occurrence, error) {
+	s := newTestServer(t, &Service{IssueContext: func(_ context.Context, id string, _ IssueContextFilter, limit int) (*IssueContextResult, error) {
 		gotLimit = limit
-		return issues.Issue{ID: id, OccurrenceCount: 1}, []issues.Occurrence{{
-			ID: "OCC-1", IssueID: id, Run: wantRun, Evidence: wantEvidence,
-		}}, nil
+		return &IssueContextResult{
+			IncludeLegacy: true,
+			Issue:         issues.Issue{ID: id, OccurrenceCount: 1},
+			Occurrences: []issues.Occurrence{{
+				ID: "OCC-1", IssueID: id, Run: wantRun, Evidence: wantEvidence,
+			}},
+		}, nil
 	}})
 	_, payload, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "ISS-1", OccurrenceLimit: 999})
 	if err != nil {
@@ -1116,6 +1502,25 @@ func TestHandleIssueClampsOccurrenceLimitAndKeepsTypedEvidence(t *testing.T) {
 	}
 }
 
+// TestHandleIssuePassesFilterThrough pins IssueContextFilter's field
+// mapping from issueInput -- the one place handleIssue turns the typed
+// input's project/service/kind into the Service call, matching
+// IssueContextFilter's doc comment ("this handler stays a pure field
+// copy").
+func TestHandleIssuePassesFilterThrough(t *testing.T) {
+	var got IssueContextFilter
+	s := newTestServer(t, &Service{IssueContext: func(_ context.Context, id string, filter IssueContextFilter, _ int) (*IssueContextResult, error) {
+		got = filter
+		return &IssueContextResult{Issue: issues.Issue{ID: "ISS-1"}}, nil
+	}})
+	if _, _, err := s.handleIssue(context.Background(), nil, &issueInput{ID: "latest", Project: "polyglot", Service: "workload", Kind: "any"}); err != nil {
+		t.Fatal(err)
+	}
+	if got.Project != "polyglot" || got.Service != "workload" || got.Kind != "any" {
+		t.Fatalf("filter = %+v", got)
+	}
+}
+
 func TestHandleIssuesNormalizesNilServices(t *testing.T) {
 	s := newTestServer(t, &Service{})
 	_, payload, err := s.handleIssues(context.Background(), nil, &issuesInput{})
@@ -1126,4 +1531,244 @@ func TestHandleIssuesNormalizesNilServices(t *testing.T) {
 	if _, ok := m["issues"].([]any); !ok {
 		t.Fatalf("issues must be an array: %T", m["issues"])
 	}
+}
+
+// connectInMemory wires an in-memory client/server pair for a real wire-level
+// CallTool round trip (E1.7: "Add in-memory MCP CallTool tests"), instead of
+// calling the handler methods directly the way the rest of this file's tests
+// do. It returns the connected ClientSession and a cleanup func.
+func connectInMemory(t *testing.T, s *Server) (*mcp.ClientSession, func()) {
+	t.Helper()
+	ctx := context.Background()
+	clientTr, serverTr := mcp.NewInMemoryTransports()
+	ss, err := s.srv.Connect(ctx, serverTr, nil)
+	if err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.0.0"}, nil)
+	cs, err := client.Connect(ctx, clientTr, nil)
+	if err != nil {
+		ss.Close()
+		t.Fatalf("client connect: %v", err)
+	}
+	return cs, func() {
+		_ = cs.Close()
+		_ = ss.Close()
+	}
+}
+
+// callToolStructured runs one CallTool over the wire and returns its
+// StructuredContent as a map, failing the test on a transport error or an
+// unexpected content type (the server's own `result` helper always produces
+// a JSON object).
+func callToolStructured(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any) map[string]any {
+	t.Helper()
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		t.Fatalf("CallTool(%s): %v", name, err)
+	}
+	m, ok := res.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("CallTool(%s): StructuredContent type = %T, want map[string]any (content=%+v)", name, res.StructuredContent, res.Content)
+	}
+	return m
+}
+
+// TestCallToolMutatingToolsRefuseWithoutConfirmOnWire is a real, in-memory
+// MCP wire round trip (not a direct handler call) verifying all four
+// mutating tools refuse a call that doesn't carry `confirm: true` — the
+// MCP-side safety gate documented in this package's own doc comment. Two
+// distinct paths both need covering (see AGENTS.md's mutating-MCP-tools
+// checklist): the SDK's own typed-schema validation rejects a request that
+// OMITS `confirm` outright (a required property) before the handler ever
+// runs, and the handler's own requireConfirm re-check refuses a
+// hand-built/schema-bypassing request that sends `confirm: false`
+// explicitly — both must end in a refusal an agent can act on, never a
+// silent mutation.
+func TestCallToolMutatingToolsRefuseWithoutConfirmOnWire(t *testing.T) {
+	s := NewServer(&Service{
+		Kill: func(int32, bool) (kill.Result, error) {
+			t.Fatal("Kill must not be called without confirm")
+			return kill.Result{}, nil
+		},
+		Profile: func(context.Context, int32, profiler.ProfileType, string, bool, bool) (ProfileCaptureResult, error) {
+			t.Fatal("Profile must not be called without confirm")
+			return ProfileCaptureResult{}, nil
+		},
+		Investigate: func(context.Context, int32, InvestigateOptions) map[string]any {
+			t.Fatal("Investigate must not be called without confirm")
+			return nil
+		},
+		Record: func(context.Context, int32, int) (string, error) {
+			t.Fatal("Record must not be called without confirm")
+			return "", nil
+		},
+	}, "test")
+	cs, cleanup := connectInMemory(t, s)
+	defer cleanup()
+
+	tools := []string{"monitor_kill", "monitor_profile_capture", "monitor_investigate", "monitor_record"}
+
+	for _, tool := range tools {
+		t.Run(tool+"/omitted", func(t *testing.T) {
+			// The MCP SDK itself rejects this before the handler runs:
+			// `confirm` has no `omitempty` in every *Input struct, so it is
+			// a required property in the generated JSON schema.
+			res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tool, Arguments: map[string]any{"pid": 999999}})
+			if err != nil {
+				t.Fatalf("CallTool(%s): transport error %v", tool, err)
+			}
+			if !res.IsError {
+				t.Fatalf("%s: IsError = false for a request missing confirm; content=%+v", tool, res.Content)
+			}
+			var text string
+			if len(res.Content) > 0 {
+				if tc, ok := res.Content[0].(*mcp.TextContent); ok {
+					text = tc.Text
+				}
+			}
+			if !strings.Contains(text, "confirm") {
+				t.Errorf("%s: rejection text = %q, want it to mention the missing confirm field", tool, text)
+			}
+		})
+		t.Run(tool+"/explicitFalse", func(t *testing.T) {
+			// A schema-valid call (confirm present, just false) reaches the
+			// handler, which must refuse it with its own structured
+			// {refused:true, reason} payload — not a protocol-level error —
+			// so a hand-built request that bypasses SDK-side validation
+			// still gets a refusal an agent can inspect programmatically.
+			m := callToolStructured(t, cs, tool, map[string]any{"pid": 999999, "confirm": false})
+			if refused, _ := m["refused"].(bool); !refused {
+				t.Fatalf("%s: refused=%v (want true) with confirm:false; payload=%v", tool, m["refused"], m)
+			}
+			if reason, _ := m["reason"].(string); reason == "" {
+				t.Errorf("%s: reason is empty; payload=%v", tool, m)
+			}
+		})
+	}
+}
+
+// TestCallToolProfileCaptureLiveNodeInspectorReturnsCPULines is a real,
+// in-memory MCP wire round trip against a REAL node --inspect process (not
+// a stub): monitor_profile_capture with type:cpu must come back with
+// method inspector_cpu and symbols carrying file:line (AC-6 / E1.7 — "CDP
+// line-level profiles of Node/Deno processes started with --inspect").
+func TestCallToolProfileCaptureLiveNodeInspectorReturnsCPULines(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH")
+	}
+	workload, err := filepath.Abs(filepath.Join("..", "..", "examples", "polyglot", "js", "workload.js"))
+	if err != nil || !fileExists(workload) {
+		t.Skipf("workload fixture not found at %s", workload)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a free port: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	// --jitless (interpreter only, no JIT inlining) matches
+	// specs/profile_node_lines.yml's own documented workaround for stable
+	// per-line attribution against this exact fixture.
+	cmd := exec.Command(nodeBin, "--jitless", "--inspect="+addr, workload)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start node: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+	pid := int32(cmd.Process.Pid)
+
+	deadline := time.Now().Add(10 * time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		if conn, dialErr := net.DialTimeout("tcp", addr, 200*time.Millisecond); dialErr == nil {
+			_ = conn.Close()
+			ready = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatalf("node inspector never came up on %s; stderr so far:\n%s", addr, stderr.String())
+	}
+	// Let the workload's setInterval hot loop accumulate real samples
+	// before the profiler window starts.
+	time.Sleep(300 * time.Millisecond)
+
+	svc := &Service{
+		// NOTE: this stub deliberately mirrors ONLY the CDP capture
+		// mechanics (VerifyInspectorOwnership + ProfileInspector), not the
+		// production runtime-aware dispatch (procbind.Inspect +
+		// captureRuntimeAwareProfile's Bun/pprof/sample fallback logic),
+		// which lives in the cli package and would be an import cycle to
+		// call from here. cli/mcp_test.go's
+		// TestProfileServiceLiveNodeInspectorViaRealDispatch exercises that
+		// real dispatch (via the same buildProfileService the production
+		// `monitor mcp serve` wires in) over its own in-memory transport;
+		// this test's job is narrower — the MCP wire/schema round trip
+		// (tool registration, typed input, structuredContent shape) against
+		// a REAL node --inspect process, not a synthetic Profile.
+		Profile: func(ctx context.Context, pid int32, ptype profiler.ProfileType, pprofAddr string, keep, _ bool) (ProfileCaptureResult, error) {
+			if ptype != profiler.ProfileCPU {
+				return ProfileCaptureResult{}, fmt.Errorf("unexpected profile type %q", ptype)
+			}
+			if own, detail := profiler.VerifyInspectorOwnership(ctx, pid, addr); own != profiler.OwnershipOwned {
+				return ProfileCaptureResult{}, fmt.Errorf("inspector %s not proven to belong to pid %d: %s", addr, pid, detail)
+			}
+			prof, err := profiler.ProfileInspector(ctx, pid, addr, 2*time.Second)
+			if err != nil {
+				return ProfileCaptureResult{}, err
+			}
+			receipt := prof.VerifyArtifact()
+			if !keep {
+				_ = prof.DiscardRawArtifact()
+			}
+			return ProfileCaptureResult{Profile: prof, Receipt: receipt}, nil
+		},
+	}
+	s := NewServer(svc, "test")
+	cs, cleanup := connectInMemory(t, s)
+	defer cleanup()
+
+	m := callToolStructured(t, cs, "monitor_profile_capture", map[string]any{
+		"pid": pid, "type": "cpu", "confirm": true,
+	})
+	if captured, _ := m["captured"].(bool); !captured {
+		t.Fatalf("captured = %v, want true; payload=%v", m["captured"], m)
+	}
+	profileMap, ok := m["profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("profile field missing or wrong type (%T); payload=%v", m["profile"], m)
+	}
+	if profileMap["method"] != "inspector_cpu" {
+		t.Fatalf("profile.method = %v, want inspector_cpu; payload=%v", profileMap["method"], m)
+	}
+	symbols, ok := profileMap["symbols"].([]any)
+	if !ok || len(symbols) == 0 {
+		t.Fatalf("profile.symbols = %v, want at least one CDP symbol", profileMap["symbols"])
+	}
+	first, ok := symbols[0].(map[string]any)
+	if !ok {
+		t.Fatalf("symbols[0] type = %T, want map[string]any", symbols[0])
+	}
+	if _, ok := first["line"]; !ok {
+		t.Errorf("symbols[0] missing a 'line' field (must carry file:line, not just a function name): %+v", first)
+	}
+	if _, ok := first["func"]; !ok {
+		t.Errorf("symbols[0] missing a 'func' field: %+v", first)
+	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

@@ -1,0 +1,133 @@
+version: 1
+name: monitor_profile_go_pprof
+
+intent: |
+  `monitor profile <pid> --type cpu --pprof-addr <addr> --json` parses a real
+  Go net/http/pprof CPU profile in-process (github.com/google/pprof/profile),
+  with no dependency on the `go` toolchain being on PATH at capture time.
+  Builds and runs examples/polyglot/go-pprof (a workload whose hot path is
+  main.heavyStringify calling json.Marshal in a tight loop — see
+  ~/notes/projects/monitor/2026-09-22-local-sentry-findings.md, "Go:
+  main.heavyStringify NEVER appears" under the old goToolPprofTop/
+  parsePprofTop path), captures a CPU profile of it, and asserts
+  main.heavyStringify actually appears in the parsed symbols AND that its
+  hottest line is exactly 19 (the json.Marshal call) — AC-1's "the real
+  hot line, not just the function" bar, not merely "the name is present
+  somewhere in the JSON".
+
+target:
+  # preconditions already built the workload binary at
+  # /tmp/monitor-spec-go-pprof/go-pprof; this just runs+profiles+kills it.
+  cmd:
+    [
+      "sh",
+      "-c",
+      "/tmp/monitor-spec-go-pprof/go-pprof >/tmp/monitor-spec-go-pprof/stderr.log 2>&1 & P=$!; sleep 1; ./bin/monitor profile \"$P\" --type cpu --pprof-addr 127.0.0.1:6069 --duration 2s --json; R=$?; kill \"$P\" 2>/dev/null; exit $R",
+    ]
+  cwd: "."
+
+terminal:
+  cols: 120
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v go"
+      timeoutMs: 5000
+    - run: "mkdir -p /tmp/monitor-spec-go-pprof && (cd examples/polyglot/go-pprof && go build -o /tmp/monitor-spec-go-pprof/go-pprof .)"
+      timeoutMs: 60000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 20000
+
+outcomes:
+  - id: type_cpu
+    description: stdout marks the profile type as cpu
+    verify:
+      command:
+        run: >-
+          /tmp/monitor-spec-go-pprof/go-pprof >/tmp/monitor-spec-go-pprof/stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor profile "$P" --type cpu --pprof-addr 127.0.0.1:6069 --duration 2s --json 2>&1 > /tmp/monitor-spec-go-pprof/profile.json;
+          kill "$P" 2>/dev/null;
+          grep -q '"type":[[:space:]]*"cpu"' /tmp/monitor-spec-go-pprof/profile.json
+  - id: path_saved
+    description: |
+      with --keep, the raw pprof proto is saved to a .pb.gz Path (go tool
+      pprof can still open it independently). --keep is required here since
+      E1.7: the default (no --keep, no --output) now deletes that on-disk
+      temp file once its receipt is verified, so repeated `monitor profile`
+      captures don't accumulate /tmp/monitor-cpu-* files — see
+      specs/mcp_profile_capture.yml's analogous no-leftover-file outcomes
+      for the MCP side of that same contract. text/symbols (what glyphrun
+      procmon actually parses) are unaffected either way.
+    verify:
+      command:
+        run: >-
+          /tmp/monitor-spec-go-pprof/go-pprof >/tmp/monitor-spec-go-pprof/stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor profile "$P" --type cpu --pprof-addr 127.0.0.1:6069 --duration 2s --keep --json 2>&1 > /tmp/monitor-spec-go-pprof/profile.json;
+          kill "$P" 2>/dev/null;
+          grep -q '"path":[[:space:]]*".*\.pb\.gz"' /tmp/monitor-spec-go-pprof/profile.json
+  - id: path_absent_by_default
+    description: |
+      without --keep or --output, the on-disk .pb.gz temp file is removed
+      once verified and "path" is absent from --json — text/symbols stay
+      exactly as before (glyphrun procmon's contract is unaffected).
+    verify:
+      command:
+        run: >-
+          /tmp/monitor-spec-go-pprof/go-pprof >/tmp/monitor-spec-go-pprof/stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor profile "$P" --type cpu --pprof-addr 127.0.0.1:6069 --duration 2s --json 2>&1 > /tmp/monitor-spec-go-pprof/profile2.json;
+          kill "$P" 2>/dev/null;
+          ! grep -q '"path":' /tmp/monitor-spec-go-pprof/profile2.json &&
+          grep -q '"symbols":' /tmp/monitor-spec-go-pprof/profile2.json
+  - id: heavy_stringify_present
+    description: |
+      main.heavyStringify (the planted hot path) appears among the parsed
+      symbols, and its hottest line is exactly 19 — the json.Marshal call
+      in examples/polyglot/go-pprof/main.go:heavyStringify — not just its
+      name anywhere in the JSON. Symbols are cum-then-weight sorted
+      (symbolsFromPprof), and Symbol's JSON field order is
+      func,file,line,weight,cum, so the first "line" following the first
+      "main.heavyStringify" match is its highest-ranked occurrence; no JSON
+      parser needed.
+    verify:
+      command:
+        run: >-
+          /tmp/monitor-spec-go-pprof/go-pprof >/tmp/monitor-spec-go-pprof/stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor profile "$P" --type cpu --pprof-addr 127.0.0.1:6069 --duration 2s --json 2>&1 > /tmp/monitor-spec-go-pprof/profile.json;
+          kill "$P" 2>/dev/null;
+          awk '/"func":[[:space:]]*"main.heavyStringify"/{f=1} f && /"line":/{print; exit}' /tmp/monitor-spec-go-pprof/profile.json | grep -q '"line":[[:space:]]*19'
+  - id: no_unknown_symbols
+    description: |
+      no symbol is mislabeled "unknown" (the removed HasSuffix(fn,"s") bug
+      this replaces) or its in-process replacement's own honest-degradation
+      fallback label "(unknown)" (a Location with no resolved Function,
+      which a well-formed net/http/pprof CPU profile should never emit).
+    verify:
+      command:
+        run: >-
+          /tmp/monitor-spec-go-pprof/go-pprof >/tmp/monitor-spec-go-pprof/stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor profile "$P" --type cpu --pprof-addr 127.0.0.1:6069 --duration 2s --json 2>&1 > /tmp/monitor-spec-go-pprof/profile.json;
+          kill "$P" 2>/dev/null;
+          ! grep -q '"func":[[:space:]]*"unknown"' /tmp/monitor-spec-go-pprof/profile.json &&
+          ! grep -q '"func":[[:space:]]*"(unknown)"' /tmp/monitor-spec-go-pprof/profile.json
+  - id: clean_exit
+    description: the binary exits cleanly
+    verify:
+      command:
+        run: >-
+          /tmp/monitor-spec-go-pprof/go-pprof >/tmp/monitor-spec-go-pprof/stderr.log 2>&1 &
+          P=$!; sleep 1;
+          ./bin/monitor profile "$P" --type cpu --pprof-addr 127.0.0.1:6069 --duration 2s --json >/dev/null 2>&1;
+          R=$?; kill "$P" 2>/dev/null; [ $R -eq 0 ]

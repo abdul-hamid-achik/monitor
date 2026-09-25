@@ -1,0 +1,97 @@
+[0m[33mWarning[0m `allow-hrtime` and `deny-hrtime` have been removed in Deno 2, as high resolution time is now always allowed
+Debugger listening on ws://127.0.0.1:9241/859f9e37-4f33-45c8-83b2-c3f7c2c2da0d
+Visit chrome://inspect to connect to the debugger.
+[deno] pid=16547 workload starting
+[deno] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (file:///repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (file:///repo/examples/polyglot/js/workload.js:40:7)
+    at invokeCallback (ext:deno_node/internal/timers.mjs:196:16)
+    at Object.cb [as _onTimeout] (ext:deno_node/internal/timers.mjs:241:16)
+    at listOnTimeout (ext:core/02_timers.js:307:17)
+    at Object.processTimers (ext:core/02_timers.js:250:7)
+    at __processTimers (ext:core/01_core.js:448:21)
+[deno] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (file:///repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (file:///repo/examples/polyglot/js/workload.js:40:7)
+    at invokeCallback (ext:deno_node/internal/timers.mjs:196:16)
+    at Object.cb [as _onTimeout] (ext:deno_node/internal/timers.mjs:241:16)
+    at listOnTimeout (ext:core/02_timers.js:307:17)
+    at Object.processTimers (ext:core/02_timers.js:250:7)
+    at __processTimers (ext:core/01_core.js:448:21)
+[deno] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (file:///repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (file:///repo/examples/polyglot/js/workload.js:40:7)
+    at invokeCallback (ext:deno_node/internal/timers.mjs:196:16)
+    at Object.cb [as _onTimeout] (ext:deno_node/internal/timers.mjs:241:16)
+    at listOnTimeout (ext:core/02_timers.js:307:17)
+    at Object.processTimers (ext:core/02_timers.js:250:7)
+    at __processTimers (ext:core/01_core.js:448:21)
+[deno] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (file:///repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (file:///repo/examples/polyglot/js/workload.js:40:7)
+    at invokeCallback (ext:deno_node/internal/timers.mjs:196:16)
+    at Object.cb [as _onTimeout] (ext:deno_node/internal/timers.mjs:241:16)
+    at listOnTimeout (ext:core/02_timers.js:307:17)
+    at Object.processTimers (ext:core/02_timers.js:250:7)
+    at __processTimers (ext:core/01_core.js:448:21)
+[deno] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (file:///repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (file:///repo/examples/polyglot/js/workload.js:40:7)
+    at invokeCallback (ext:deno_node/internal/timers.mjs:196:16)
+    at Object.cb [as _onTimeout] (ext:deno_node/internal/timers.mjs:241:16)
+    at listOnTimeout (ext:core/02_timers.js:307:17)
+    at Object.processTimers (ext:core/02_timers.js:250:7)
+    at __processTimers (ext:core/01_core.js:448:21)
+[deno] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (file:///repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (file:///repo/examples/polyglot/js/workload.js:40:7)
+    at invokeCallback (ext:deno_node/internal/timers.mjs:196:16)
+    at Object.cb [as _onTimeout] (ext:deno_node/internal/timers.mjs:241:16)
+    at listOnTimeout (ext:core/02_timers.js:307:17)
+    at Object.processTimers (ext:core/02_timers.js:250:7)
+    at __processTimers (ext:core/01_core.js:448:21)
+[deno] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (file:///repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (file:///repo/examples/polyglot/js/workload.js:40:7)
+    at invokeCallback (ext:deno_node/internal/timers.mjs:196:16)
+    at Object.cb [as _onTimeout] (ext:deno_node/internal/timers.mjs:241:16)
+    at listOnTimeout (ext:core/02_timers.js:307:17)
+    at Object.processTimers (ext:core/02_timers.js:250:7)
+    at __processTimers (ext:core/01_core.js:448:21)
+[deno] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (file:///repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (file:///repo/examples/polyglot/js/workload.js:40:7)
+    at invokeCallback (ext:deno_node/internal/timers.mjs:196:16)
+    at Object.cb [as _onTimeout] (ext:deno_node/internal/timers.mjs:241:16)
+    at listOnTimeout (ext:core/02_timers.js:307:17)
+    at Object.processTimers (ext:core/02_timers.js:250:7)
+    at __processTimers (ext:core/01_core.js:448:21)
+Debugger session started.
+[deno] caught in tickErrors: flakyParse: malformed payload near token "bad-payl"
+Error: flakyParse: malformed payload near token "bad-payl"
+    at flakyParse (file:///repo/examples/polyglot/js/workload.js:31:11)
+    at Timeout.tickErrors [as _onTimeout] (file:///repo/examples/polyglot/js/workload.js:40:7)
+    at invokeCallback (ext:deno_node/internal/timers.mjs:196:16)
+    at Object.cb [as _onTimeout] (ext:deno_node/internal/timers.mjs:241:16)
+    at listOnTimeout (ext:core/02_timers.js:307:17)
+    at Object.processTimers (ext:core/02_timers.js:250:7)
+    at __processTimers (ext:core/01_core.js:448:21)
+Debugger session ended
+[0m[1m[31merror[0m: Uncaught Error: deno workload: intentional uncaught failure at t=40042ms
+  throw new Error(`${RUNTIME} workload: intentional uncaught failure at t=${Date.now() - START}ms`);
+[0m[31m        ^[0m
+    at [0m[1m[3mdetonate[0m ([0m[2m[38;5;245mfile:///repo/examples/polyglot/js/[0m[0m[36mworkload.js[0m:[0m[33m49[0m:[0m[33m9[0m)
+    at [0m[1m[3mTimeout._onTimeout[0m ([0m[2m[38;5;245mfile:///repo/examples/polyglot/js/[0m[0m[36mworkload.js[0m:[0m[33m64[0m:[0m[33m3[0m)
+    [0m[2m[38;5;245mat [0m[0m[2m[38;5;245minvokeCallback[0m[0m[2m[38;5;245m ([0m[0m[2m[38;5;245mext:deno_node/internal/timers.mjs[0m[0m[2m[38;5;245m:[0m[0m[2m[38;5;245m196[0m[0m[2m[38;5;245m:[0m[0m[2m[38;5;245m16[0m[0m[2m[38;5;245m)[0m
+    [0m[2m[38;5;245mat [0m[0m[2m[38;5;245mObject.cb [as _onTimeout][0m[0m[2m[38;5;245m ([0m[0m[2m[38;5;245mext:deno_node/internal/timers.mjs[0m[0m[2m[38;5;245m:[0m[0m[2m[38;5;245m241[0m[0m[2m[38;5;245m:[0m[0m[2m[38;5;245m16[0m[0m[2m[38;5;245m)[0m
+    [0m[2m[38;5;245mat [0m[0m[2m[38;5;245mlistOnTimeout[0m[0m[2m[38;5;245m ([0m[0m[2m[38;5;245mext:core/02_timers.js[0m[0m[2m[38;5;245m:[0m[0m[2m[38;5;245m307[0m[0m[2m[38;5;245m:[0m[0m[2m[38;5;245m17[0m[0m[2m[38;5;245m)[0m
+    [0m[2m[38;5;245mat [0m[0m[2m[38;5;245mObject.processTimers[0m[0m[2m[38;5;245m ([0m[0m[2m[38;5;245mext:core/02_timers.js[0m[0m[2m[38;5;245m:[0m[0m[2m[38;5;245m250[0m[0m[2m[38;5;245m:[0m[0m[2m[38;5;245m7[0m[0m[2m[38;5;245m)[0m
+    [0m[2m[38;5;245mat [0m[0m[2m[38;5;245m__processTimers[0m[0m[2m[38;5;245m ([0m[0m[2m[38;5;245mext:core/01_core.js[0m[0m[2m[38;5;245m:[0m[0m[2m[38;5;245m448[0m[0m[2m[38;5;245m:[0m[0m[2m[38;5;245m21[0m[0m[2m[38;5;245m)[0m

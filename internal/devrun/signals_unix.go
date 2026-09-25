@@ -1,0 +1,160 @@
+//go:build unix
+
+package devrun
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/abdul-hamid-achik/monitor/internal/procbind"
+	"github.com/charmbracelet/x/term"
+)
+
+// StdinIsTTY reports whether monitor's own stdin is a terminal -- the
+// signal `monitor run --` uses to decide its process-group strategy
+// (the naming ADR's E2.4 "process group" rule).
+func StdinIsTTY() bool {
+	return term.IsTerminal(os.Stdin.Fd())
+}
+
+// configureProcessGroup sets cmd's SysProcAttr per the TTY rule: when
+// monitor's stdin is a terminal, the child stays in monitor's own process
+// group (SysProcAttr left nil, exec's default) so the kernel delivers a
+// terminal-generated SIGINT (Ctrl-C) to both processes directly -- no
+// forwarding from monitor required, and monitor must NOT forward it a
+// second time (see forwardSignals). Otherwise the child is given its own
+// process group (Setpgid), since a signal sent to only monitor's PID would
+// otherwise never reach it automatically; forwardSignals then relays SIGINT
+// explicitly in that case.
+func configureProcessGroup(cmd *exec.Cmd, ttyShared bool) {
+	if ttyShared {
+		return
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
+
+// forwardSignals relays signals received by monitor itself to the child
+// process for as long as done is open (naming ADR's E2.4 "process group" rule):
+//
+//   - SIGTERM and SIGHUP are ALWAYS forwarded, regardless of ttyShared:
+//     `kill <monitor-pid>` targets only monitor's own PID, never the child,
+//     so without this the child would be orphaned instead of shut down
+//     alongside monitor.
+//   - SIGINT is forwarded only when ttyShared is false. When stdin is a
+//     terminal and the child shares monitor's process group, the kernel
+//     already delivers a Ctrl-C-generated SIGINT to BOTH processes
+//     directly; forwarding it again here would be redundant at best.
+//
+// This function still calls signal.Notify for SIGINT in the ttyShared case
+// too, so monitor itself does not fall to Go's default fatal-terminate-on-
+// SIGINT disposition before it has had a chance to wait for the child and
+// print the exit summary -- it just does nothing with that particular
+// signal beyond staying alive.
+//
+// Returns once done is closed.
+func forwardSignals(cmd *exec.Cmd, ttyShared bool, done <-chan struct{}) {
+	sigCh := make(chan os.Signal, 4)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigCh)
+	for {
+		select {
+		case <-done:
+			return
+		case sig := <-sigCh:
+			if sig == syscall.SIGINT && ttyShared {
+				continue
+			}
+			deliverSignal(cmd, ttyShared, sig)
+		}
+	}
+}
+
+// deliverSignal relays sig to cmd's child. When the child has its own
+// process group (configureProcessGroup's Setpgid case, i.e. ttyShared is
+// false), the signal is sent to the WHOLE group -- syscall.Kill(-pid,
+// sig) -- not just cmd.Process's own pid: a wrapper child (`go run .`,
+// `yarn start`, `sh -c '...'`) commonly execs or forks a real leaf process
+// that inherits that same new group, and `kill -TERM <monitor-pid>` (which
+// can only ever target monitor's own pid, never a separate group it does
+// not belong to) or a piped Ctrl-C (a non-TTY stdin, so --scan turned it
+// into an ordinary SIGINT delivered only to monitor) must still reach that
+// leaf, or it is silently orphaned while monitor waits on it (see
+// devrun.go's WaitDelay-bounded reap for the rest of that fix -- this half
+// is what makes the signal arrive at all instead of merely bounding the
+// hang if it doesn't).
+//
+// In the ttyShared case the child stays in monitor's OWN process group
+// (configureProcessGroup leaves SysProcAttr nil), so a group kill is not an
+// option: Kill(0, sig) would also signal monitor itself and every pipeline
+// sibling in that group (`monitor run -- x | tee`) and, under a
+// non-job-control shell, the parent shell too. Instead the signal goes to
+// cmd.Process AND to every descendant of cmd.Process.Pid taken from one
+// process-tree snapshot, deepest first (CC-9): a wrapper child that dies
+// without passing the signal on must not leave the real leaf server
+// orphaned, still holding its port. When the snapshot cannot be built
+// (enumeration error or timeout), the signal still reaches the direct
+// child -- the pre-CC-9 ttyShared behavior -- rather than nothing.
+func deliverSignal(cmd *exec.Cmd, ttyShared bool, sig os.Signal) {
+	if cmd.Process == nil {
+		return
+	}
+	if !ttyShared {
+		if sysSig, ok := sig.(syscall.Signal); ok {
+			_ = syscall.Kill(-cmd.Process.Pid, sysSig)
+			return
+		}
+	}
+	signalDescendants(cmd.Process.Pid, sig)
+	_ = cmd.Process.Signal(sig)
+}
+
+// descendantSignalTimeout bounds the process-table enumeration behind
+// ttyShared signal delivery: shutdown must never hang on a stalled /proc
+// or sysctl read, only degrade to signaling the direct child.
+const descendantSignalTimeout = 2 * time.Second
+
+// signalDescendants sends sig to every descendant of rootPid, deepest
+// first, from ONE process-table snapshot (procbind.BuildTree, the same
+// single-enumeration walk `monitor resolve` uses). Deepest-first means a
+// leaf gets the signal before the wrapper parent above it can exit or
+// otherwise interfere; pids in the snapshot stay valid regardless, since
+// reparenting on a parent's death does not change them. Errors degrade
+// silently to "no descendants signaled", which leaves the direct-child
+// signal in deliverSignal as the fallback.
+func signalDescendants(rootPid int, sig os.Signal) {
+	sysSig, ok := sig.(syscall.Signal)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), descendantSignalTimeout)
+	defer cancel()
+	tree, err := procbind.BuildTree(ctx, nil)
+	if err != nil {
+		return
+	}
+	descendants := tree.Descendants(int32(rootPid)) // breadth-first, nearest first
+	for i := len(descendants) - 1; i >= 0; i-- {    // ...so reversed walks leaves first
+		_ = syscall.Kill(int(descendants[i].PID), sysSig)
+	}
+}
+
+// exitCodeFor derives the process exit code from state, matching a shell's
+// 128+signal convention for a process terminated by a signal
+// (ProcessState.ExitCode() reports -1 in that case on Unix, since there is
+// no ordinary exit status to report).
+func exitCodeFor(state *os.ProcessState) int {
+	if state == nil {
+		return -1
+	}
+	if code := state.ExitCode(); code >= 0 {
+		return code
+	}
+	if ws, ok := state.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return 128 + int(ws.Signal())
+	}
+	return -1
+}

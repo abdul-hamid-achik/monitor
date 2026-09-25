@@ -1,0 +1,185 @@
+version: 1
+name: monitor_run_profile
+
+intent: |
+  E3.3b `monitor run --profile`, entirely out of process against a real
+  node process (glyph launches ./bin/monitor as a real subprocess, not a
+  shell fixture): `monitor run --name w --profile -- sh -c 'node --jitless
+  examples/polyglot/js/workload.js'` appends
+  "--cpu-prof --cpu-prof-dir=<private dir> --require <exit shim>" to
+  NODE_OPTIONS. Verified live (see internal/devrun/profile.go's own doc
+  comment) that WITHOUT the exit shim, a bare Ctrl-C (SIGINT) kills node
+  immediately with NO profile written at all -- V8's --cpu-prof only
+  flushes on a graceful exit hook, which the default SIGINT disposition
+  never reaches. This spec sends SIGINT mid-run (the realistic "developer
+  hits Ctrl-C" case, not a natural exit) and requires:
+
+  - monitor's own exit code (and therefore the child's) to be 130 (128 +
+    SIGINT's signal number 2) -- the shim's own process.exit(128 + signum)
+    call, proving it actually intercepted SIGINT and reached --cpu-prof's
+    exit hook, rather than the process simply hanging forever the way an
+    app using the very common `signal-exit` package does WITHOUT this
+    fix (verified live against the real signal-exit@4.1.0 from npm: it
+    and this shim otherwise each wait for the OTHER to be the one to
+    actually terminate the process, and neither ever does);
+  - a real .cpuprofile to exist afterward, under monitor's own private
+    per-launch profile directory;
+  - monitor's own exit-time summary line to name the planted hot function
+    (heavyStringify) and workload.js, with a "next: monitor hot --file
+    <path>" hint that itself actually works when followed -- proving the
+    whole "hottest: <func> <file:line> (<pct>)" line is not merely
+    plausible-looking text but is really backed by a loadable, correctly
+    attributed profile.
+
+  --jitless matches specs/hot_pid.yml/specs/run_inspect.yml's own
+  documented rationale (a stable, deterministic line attribution for this
+  fixture). WORKLOAD_SECONDS shortens the fixture's own 40s default run.
+
+target:
+  cmd:
+    [
+      "sh",
+      "-c",
+      "d=/tmp/monitor-spec-run-profile/target; rm -rf \"$d\"; mkdir -p \"$d/state\" \"$d/data\"; export XDG_STATE_HOME=\"$d/state\" MONITOR_ISSUES_STORE=\"$d/data/issues.veclite\" WORKLOAD_SECONDS=10; ./bin/monitor run --name w --profile -- sh -c 'node --jitless examples/polyglot/js/workload.js' >\"$d/run.out\" 2>&1 & P=$!; sleep 1.5; kill -INT $P; wait $P; R=$?; cat \"$d/run.out\" >&2; exit $R",
+    ]
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v node"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "test -f examples/polyglot/js/workload.js"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-run-profile && mkdir -p /tmp/monitor-spec-run-profile"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 130
+      timeoutMs: 20000
+
+outcomes:
+  - id: ctrl_c_is_intercepted_and_exits_130_with_a_profile
+    description: |
+      the shim intercepts SIGINT and calls process.exit(128 + SIGINT's
+      signal number = 130) itself -- rather than the process simply
+      hanging forever the way it does WITHOUT the shim (verified live:
+      without it, a signal-exit-using app ignores both SIGINT and SIGTERM
+      entirely and only SIGKILL ever terminates it; a plain app with no
+      handler at all is not killed by the OS's own default SIGINT
+      disposition either, since --require already changed it the moment
+      ANY listener was registered). 130 (not a bare 0) is deliberate: a
+      run terminated by Ctrl-C is not a clean exit, and monitor's own exit
+      summary must not claim it was one -- see the companion
+      cpuprofile_file_exists_after_ctrl_c outcome for the actual proof
+      the shim's graceful path (not a kernel-level kill) is what produced
+      this exit, since only a real process.exit() call reaches
+      --cpu-prof's flush-on-exit hook at all.
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-run-profile/o1; rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+          export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite" WORKLOAD_SECONDS=10
+          ./bin/monitor run --name w --profile -- sh -c 'node --jitless examples/polyglot/js/workload.js' >"$d/run.out" 2>&1 &
+          P=$!; sleep 1.5
+          kill -INT $P
+          wait $P
+          R=$?
+          [ "$R" -eq 130 ]
+        timeoutMs: 15000
+
+  - id: cpuprofile_file_exists_after_ctrl_c
+    description: a real .cpuprofile file exists under monitor's private per-launch profile directory after Ctrl-C
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-run-profile/o2; rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+          export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite" WORKLOAD_SECONDS=10
+          ./bin/monitor run --name w --profile -- sh -c 'node --jitless examples/polyglot/js/workload.js' >"$d/run.out" 2>&1 &
+          P=$!; sleep 1.5
+          kill -INT $P; wait $P
+          prof=$(find "$d/state/monitor/profiles" -name '*.cpuprofile' | head -1)
+          test -n "$prof"
+          test -s "$prof"
+          python3 -c "import json; json.load(open('$prof'))"
+        timeoutMs: 15000
+
+  - id: exit_summary_names_hot_function_and_next_hint_works
+    description: |
+      the printed "monitor > cpu profile: <path> · hottest: <func>
+      <file:line> (<pct>)" line itself (not merely the whole run.out,
+      which trivially contains "workload.js" already from the UNRELATED
+      start banner two lines above -- a prior version of this assertion
+      grepped the whole file and would have passed even if the summary
+      line named the wrong file entirely) names heavyStringify (or its
+      caller processBatch, if V8 inlined it) and workload.js, and the
+      "next: monitor hot --file <path>" hint it prints is a REAL, working
+      command, not just plausible-looking text: following it independently
+      renders a heatmap that also names the fixture.
+
+      --jitless (matching hot_pid.yml/run_inspect.yml's own documented
+      rationale) is a deliberate deviation from the brief's literal
+      example command: it is the only mode verified to give a stable,
+      deterministic line/function attribution for this fixture --
+      V8 inlines heavyStringify into processBatch under its default JIT
+      tiers depending on warmup, which this assertion already tolerates
+      (it accepts either name) but --jitless keeps deterministic across
+      machines and CPU speeds.
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-run-profile/o3; rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+          export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite" WORKLOAD_SECONDS=10
+          ./bin/monitor run --name w --profile -- sh -c 'node --jitless examples/polyglot/js/workload.js' >"$d/run.out" 2>&1 &
+          P=$!; sleep 1.5
+          kill -INT $P; wait $P
+          summary=$(grep '^monitor > cpu profile:' "$d/run.out")
+          test -n "$summary"
+          echo "$summary" | grep -q 'hottest:'
+          echo "$summary" | grep -qE 'workload\.js'
+          echo "$summary" | grep -qE 'heavyStringify|processBatch'
+          grep -q 'next  monitor hot --file' "$d/run.out"
+          hint=$(grep 'next  monitor hot --file' "$d/run.out" | sed -E 's/^next  monitor hot --file //')
+          test -n "$hint"
+          ./bin/monitor hot --file "$hint" --json > "$d/hot.json" 2>"$d/hot.err"
+          python3 -c "
+          import json
+          d = json.load(open('$d/hot.json'))
+          assert d['schema'] == 'monitor.line_heatmap.v1', d.get('schema')
+          names = [f['name'] for f in d['functions']]
+          assert 'heavyStringify' in names or 'processBatch' in names, names
+          "
+        timeoutMs: 15000
+
+  - id: registry_entry_removed_after_exit
+    description: the launch registry entry is removed once `monitor run` itself exits, even though it was terminated by Ctrl-C rather than a natural exit
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-run-profile/o4; rm -rf "$d"; mkdir -p "$d/state" "$d/data"
+          export XDG_STATE_HOME="$d/state" MONITOR_ISSUES_STORE="$d/data/issues.veclite" WORKLOAD_SECONDS=10
+          ./bin/monitor run --name w --profile -- sh -c 'node --jitless examples/polyglot/js/workload.js' >"$d/run.out" 2>&1 &
+          P=$!; sleep 1.5
+          kill -INT $P; wait $P
+          test -z "$(find "$d/state/monitor/services" -type f 2>/dev/null)"
+        timeoutMs: 15000
+
+  - id: clean_exit
+    description: the target script's own exit code (it propagates `wait $P`'s own $? via `exit $R`) is 130 -- the shim's own process.exit(128 + SIGINT's signal number), not V8's default SIGINT-kill's 130-by-a-different-mechanism, and not a hang requiring SIGKILL
+    verify:
+      process:
+        exitCode: 130

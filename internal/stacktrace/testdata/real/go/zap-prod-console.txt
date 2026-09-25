@@ -1,0 +1,6 @@
+1.790137826326457e+09	info	app/main.go:90	server started	{"port": 8080}
+1.790137826326494e+09	error	app/main.go:91	request failed	{"error": "load failed: db timeout", "errorVerbose": "db timeout\nexample.com/app/internal/svc.fetch\n\t/repo/app/internal/svc/svc.go:24\nexample.com/app/internal/svc.(*Store).Load\n\t/repo/app/internal/svc/svc.go:20\nmain.zapErr\n\t/repo/app/main.go:57\nmain.main\n\t/repo/app/main.go:91\nruntime.main\n\t/usr/local/go/src/runtime/proc.go:290\nruntime.goexit\n\t/usr/local/go/src/runtime/asm_arm64.s:1447\nload failed\nexample.com/app/internal/svc.(*Store).Load\n\t/repo/app/internal/svc/svc.go:20\nmain.zapErr\n\t/repo/app/main.go:57\nmain.main\n\t/repo/app/main.go:91\nruntime.main\n\t/usr/local/go/src/runtime/proc.go:290\nruntime.goexit\n\t/usr/local/go/src/runtime/asm_arm64.s:1447", "request_id": "abc123"}
+main.main
+	/repo/app/main.go:91
+runtime.main
+	/usr/local/go/src/runtime/proc.go:290

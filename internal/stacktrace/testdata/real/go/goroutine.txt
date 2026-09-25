@@ -1,0 +1,9 @@
+panic: runtime error: index out of range [3] with length 0
+
+goroutine 20 [running]:
+main.worker(...)
+	/repo/app/main.go:52
+main.goroutine.func1()
+	/repo/app/main.go:45 +0x48
+created by main.goroutine in goroutine 1
+	/repo/app/main.go:43 +0x70

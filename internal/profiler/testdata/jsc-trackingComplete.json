@@ -1,0 +1,1355 @@
+{
+ "scriptParsed": [
+  {
+   "method": "Debugger.scriptParsed",
+   "params": {
+    "scriptId": "3",
+    "url": "/repo/internal/profiler/testdata/src/loop.js",
+    "startLine": 0,
+    "startColumn": 0,
+    "endLine": 19,
+    "endColumn": 0,
+    "executionContextId": 1,
+    "scriptType": "module",
+    "isContentScript": false,
+    "sourceURL": "/repo/internal/profiler/testdata/src/loop.js",
+    "sourceMapURL": "data:application/json;base64,ewogICJ2ZXJzaW9uIjozLAogICJzb3VyY2VzIjogWyIvbG9vcC5qcyJdLAogICJzb3VyY2VzQ29udGVudCI6IFsiZnVuY3Rpb24gaGVhdnlTdHJpbmdpZnkobikge1xuICBsZXQgcyA9IFwiXCI7XG4gIGZvciAobGV0IGkgPSAwOyBpIDwgbjsgaSsrKSB7XG4gICAgY29uc3QgbyA9IHsgYTogaSwgYjogXCJ4XCIucmVwZWF0KDEwKSB9O1xuICAgIHMgKz0gSlNPTi5zdHJpbmdpZnkobyk7ICAgICAgICAgICAvLyBsaW5lIDUgaG90XG4gICAgaWYgKHMubGVuZ3RoID4gMTAwMDAwKSBzID0gXCJcIjtcbiAgfVxuICByZXR1cm4gcy5sZW5ndGg7XG59XG5mdW5jdGlvbiB0aWNrKCkgeyBoZWF2eVN0cmluZ2lmeSgzMDAwKTsgc2V0VGltZW91dCh0aWNrLCAxKTsgfVxudGljaygpO1xuc2V0VGltZW91dCgoKSA9PiBwcm9jZXNzLmV4aXQoMCksIDYwMDAwKTtcbiJdLAogICJtYXBwaW5ncyI6ICJBQUFBLFNBQVMsY0FBYyxDQUFDLEdBQUc7QUFBQSxFQUN6QixJQUFJLElBQUk7QUFBQSxFQUNSLFNBQVMsSUFBSSxFQUFHLElBQUksR0FBRyxLQUFLO0FBQUEsSUFDMUIsTUFBTSxJQUFJLEVBQUUsR0FBRyxHQUFHLEdBQUcsSUFBSSxPQUFPLEVBQUUsRUFBRTtBQUFBLElBQ3BDLEtBQUssS0FBSyxVQUFVLENBQUM7QUFBQSxJQUNyQixJQUFJLEVBQUUsU0FBUztBQUFBLE1BQVEsSUFBSTtBQUFBLEVBQzdCO0FBQUEsRUFDQSxPQUFPLEVBQUU7QUFBQTtBQUVYLFNBQVMsSUFBSSxHQUFHO0FBQUEsRUFBRSxlQUFlLElBQUk7QUFBQSxFQUFHLFdBQVcsTUFBTSxDQUFDO0FBQUE7QUFDMUQsS0FBSztBQUNMLFdBQVcsTUFBTSxRQUFRLEtBQUssQ0FBQyxHQUFHLEtBQUsiLCAibmFtZXMiOiBbXQp9"
+   }
+  }
+ ],
+ "trackingComplete": {
+  "method": "ScriptProfiler.trackingComplete",
+  "params": {
+   "timestamp": 2.361058375099674,
+   "samples": {
+    "stackTraces": [
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "repeat",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "repeat",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 3,
+         "column": 18
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "repeat",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "repeat",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "repeat",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "repeat",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "repeat",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "repeat",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "repeat",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "repeat",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "repeat",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "repeat",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "repeat",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "repeat",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 4,
+         "column": 36
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     },
+     {
+      "timestamp": 0,
+      "stackFrames": [
+       {
+        "sourceID": "4294967295",
+        "name": "stringify",
+        "line": -1,
+        "column": -1,
+        "url": ""
+       },
+       {
+        "sourceID": "3",
+        "name": "heavyStringify",
+        "line": 1,
+        "column": 24,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 5,
+         "column": 24
+        }
+       },
+       {
+        "sourceID": "3",
+        "name": "tick",
+        "line": 11,
+        "column": 14,
+        "url": "/repo/internal/profiler/testdata/src/loop.js",
+        "expressionLocation": {
+         "line": 12,
+         "column": 17
+        }
+       }
+      ]
+     }
+    ]
+   }
+  }
+ }
+}

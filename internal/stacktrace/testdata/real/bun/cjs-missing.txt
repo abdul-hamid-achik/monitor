@@ -1,0 +1,3 @@
+error: Cannot find module './no-such-module' from '/repo/app/src/cjs.js'
+
+Bun v1.4.2 (macOS arm64)

@@ -5,6 +5,8 @@ package analyzer
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
@@ -320,18 +322,62 @@ func matchCPU(set []cpuClass, v cpuClass) bool {
 }
 
 func buildMemoryLeak(s signalState) collector.Diagnosis {
+	next := []string{
+		fmt.Sprintf("monitor_profile_capture pid:%d type:heap confirm:true", s.pid),
+		fmt.Sprintf("monitor_investigate pid:%d confirm:true", s.pid),
+	}
+	// E3.5: point at the LINE-level heap view, not just the function-level
+	// capture above — but only the ONE form that can actually work for this
+	// process: `monitor hot --type heap` only ever names a real line for a
+	// Go target (heat.Build's pprof heap path is the only heap format it
+	// can parse into per-line detail — see internal/profiler/heat.go), and
+	// for a live Node/Deno target it would instead pause the isolate for a
+	// CDP heap snapshot `hot` can't even render (see internal/cli/hot.go's
+	// own JS-runtime heap/goroutine guard). signalState carries no
+	// procbind runtime classification, only the process's own name — a
+	// heuristic, not a proof, but enough to stop recommending a Go-only
+	// command to a process we can plainly see isn't Go, and the reverse to
+	// one that plausibly is.
+	if looksLikeNonGoProcessName(s.name) {
+		next = append(next, fmt.Sprintf("monitor profile %d -t heap", s.pid))
+	} else {
+		next = append(next, fmt.Sprintf("monitor hot %d --type heap", s.pid))
+	}
 	return collector.Diagnosis{
 		Summary: fmt.Sprintf(
 			"%s: RSS grew %+.0f%% over %s while CPU stayed flat — consistent with a memory leak (slope %s/min, R²=%.2f)",
 			s.subject(), s.growthPct, s.elapsed.Truncate(time.Second),
 			formatSignedBytes(s.rssSlopePerMin()), s.rssR2),
-		Evidence:   s.evidence(),
-		Confidence: confidenceFromFit(s.rssR2, s.n),
-		NextActions: []string{
-			fmt.Sprintf("monitor_profile_capture pid:%d type:heap confirm:true", s.pid),
-			fmt.Sprintf("monitor_investigate pid:%d confirm:true", s.pid),
-		},
+		Evidence:    s.evidence(),
+		Confidence:  confidenceFromFit(s.rssR2, s.n),
+		NextActions: next,
 	}
+}
+
+// nonGoInterpreterPrefixes are known non-Go language runtime process
+// names. A Go binary's own process name is whatever its author named the
+// compiled executable — there is no reliable positive signal for "this IS
+// Go" from a bare name alone — so looksLikeNonGoProcessName only ever
+// answers the negative case it can actually be sure of.
+var nonGoInterpreterPrefixes = []string{"node", "bun", "deno", "python", "ruby", "java", "dotnet"}
+
+// looksLikeNonGoProcessName reports whether name plainly belongs to a
+// known non-Go language runtime (see nonGoInterpreterPrefixes) rather than
+// a compiled Go binary. Case-insensitive and matched on the basename only,
+// so "/usr/local/bin/python3.11" and "PYTHON.EXE" both match; "" (no
+// process name known) is never treated as non-Go, since that would be a
+// guess in the other direction with just as little evidence.
+func looksLikeNonGoProcessName(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(filepath.Base(name)))
+	if n == "" {
+		return false
+	}
+	for _, p := range nonGoInterpreterPrefixes {
+		if strings.HasPrefix(n, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func buildCPUSpin(s signalState) collector.Diagnosis {

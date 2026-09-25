@@ -1,0 +1,267 @@
+package sourcemap
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// copyFixtureTree copies every regular file under testdata/<srcDir> into
+// dstDir, preserving its relative path, and returns the destination path
+// for each requested relative name. It does not preserve mtimes - callers
+// that care about staleness set those explicitly afterwards - which is the
+// whole point: resolving straight against the checked-out testdata files
+// would make Stale depend on git checkout's write order (whichever of a
+// pair happens to land on disk last), not on anything this package should
+// actually be judged by.
+func copyFixtureTree(t *testing.T, srcDir, dstDir string, names ...string) map[string]string {
+	t.Helper()
+	paths := make(map[string]string, len(names))
+	for _, name := range names {
+		data, err := os.ReadFile(filepath.Join(srcDir, name))
+		if err != nil {
+			t.Fatalf("reading fixture %s: %v", name, err)
+		}
+		dst := filepath.Join(dstDir, name)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			t.Fatalf("mkdir for %s: %v", name, err)
+		}
+		if err := os.WriteFile(dst, data, 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+		paths[name] = dst
+	}
+	return paths
+}
+
+// TestFixtureBunExternalLineMapsExact is the E3.3a golden case: a real
+// TypeScript -> JavaScript build (bun build greeter.ts --sourcemap=external)
+// resolves a known generated position back to the exact .ts line and column
+// it came from. testdata/bun-external is committed with relative paths
+// only; see testdata/README.md for how it was produced.
+//
+// The fixture pair is copied into a scratch directory with explicit,
+// controlled mtimes (the map a hair older than the generated file, exactly
+// how tsc and bun themselves write them) rather than resolved straight
+// against the checked-out testdata files: resolving those directly would
+// make the "not stale" assertion depend on git checkout's write order for
+// the pair, which is incidental and not something this package should be
+// judged by.
+func TestFixtureBunExternalLineMapsExact(t *testing.T) {
+	dir := t.TempDir()
+	paths := copyFixtureTree(t, "testdata", dir, "greeter.ts", "bun-external/greeter.js", "bun-external/greeter.js.map")
+
+	now := time.Now()
+	if err := os.Chtimes(paths["bun-external/greeter.js.map"], now, now); err != nil {
+		t.Fatalf("chtimes map: %v", err)
+	}
+	if err := os.Chtimes(paths["bun-external/greeter.js"], now.Add(2*time.Millisecond), now.Add(2*time.Millisecond)); err != nil {
+		t.Fatalf("chtimes generated: %v", err)
+	}
+
+	// Generated line 9, col 10 is "function main() {" -> the "main"
+	// identifier; it maps to greeter.ts line 14, col 10 -> "main" in
+	// "function main(): void {".
+	r := NewResolver()
+	pos, err := r.Resolve(paths["bun-external/greeter.js"], 9, 10)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if pos.Mapping != MappingExact {
+		t.Errorf("Mapping = %q, want exact", pos.Mapping)
+	}
+	if filepath.Base(pos.Source) != "greeter.ts" {
+		t.Errorf("Source = %q, want it to end in greeter.ts", pos.Source)
+	}
+	if pos.Line != 14 || pos.Col != 10 {
+		t.Errorf("got %d:%d, want 14:10", pos.Line, pos.Col)
+	}
+	if pos.Stale {
+		t.Error("Stale = true, want false: a 2ms write-order gap is exactly what a real fresh build looks like")
+	}
+
+	// The resolved source path must actually exist on disk and contain the
+	// "main" identifier at the claimed line, so this test would fail if the
+	// fixture and the hard-coded expectation ever drifted apart.
+	content, err := os.ReadFile(pos.Source)
+	if err != nil {
+		t.Fatalf("reading resolved source %s: %v", pos.Source, err)
+	}
+	sourceLines := strings.Split(string(content), "\n")
+	if pos.Line-1 >= len(sourceLines) {
+		t.Fatalf("resolved line %d is past the end of %s (%d lines)", pos.Line, pos.Source, len(sourceLines))
+	}
+	got := sourceLines[pos.Line-1]
+	if !strings.Contains(got, "function main") {
+		t.Errorf("greeter.ts:%d = %q, want it to contain \"function main\"", pos.Line, got)
+	}
+}
+
+// TestFixtureTSCLineMapsExact is the roadmap's other named case ("Un
+// fixture de tsc muestra la línea .ts con mapping exact"): a real tsc
+// build (tsc --sourceMap, TypeScript 5.9.3), not just bun's own compiler,
+// resolves a known generated position back to the exact .ts line and
+// column. testdata/tsc exercises the relative
+// "//# sourceMappingURL=greeter.js.map" comment tsc emits, which bun's
+// --sourcemap=external mode does not (it emits no comment at all, relying
+// on the sibling-file fallback instead - see testdata/README.md).
+func TestFixtureTSCLineMapsExact(t *testing.T) {
+	genPath := "testdata/tsc/dist/greeter.js"
+
+	// Generated line 11, col 10 is "function main() {" -> the "main"
+	// identifier; it maps to greeter.ts line 14, col 10, same as the bun
+	// fixture above (both compile the same source file).
+	r := NewResolver()
+	pos, err := r.Resolve(genPath, 11, 10)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if pos.Mapping != MappingExact {
+		t.Errorf("Mapping = %q, want exact", pos.Mapping)
+	}
+	if filepath.Base(pos.Source) != "greeter.ts" {
+		t.Errorf("Source = %q, want it to end in greeter.ts", pos.Source)
+	}
+	if pos.Line != 14 || pos.Col != 10 {
+		t.Errorf("got %d:%d, want 14:10", pos.Line, pos.Col)
+	}
+
+	content, err := os.ReadFile(pos.Source)
+	if err != nil {
+		t.Fatalf("reading resolved source %s: %v", pos.Source, err)
+	}
+	sourceLines := strings.Split(string(content), "\n")
+	if pos.Line-1 >= len(sourceLines) {
+		t.Fatalf("resolved line %d is past the end of %s (%d lines)", pos.Line, pos.Source, len(sourceLines))
+	}
+	if got := sourceLines[pos.Line-1]; !strings.Contains(got, "function main") {
+		t.Errorf("greeter.ts:%d = %q, want it to contain \"function main\"", pos.Line, got)
+	}
+}
+
+// TestFixtureInlineDataURLOverEightKBWorks proves discovery finds an inline
+// "data:" sourceMappingURL comment even when that one line - the whole
+// comment is the map, base64-encoded - runs well past the fixed 8 KB tail
+// window this package used to search. testdata/bun-inline-big/big.ts is a
+// synthetic file with 80 small functions (bun build big.ts
+// --sourcemap=inline --outdir out); the resulting comment line alone is
+// about 24 KB, three times the old window.
+func TestFixtureInlineDataURLOverEightKBWorks(t *testing.T) {
+	genPath := "testdata/bun-inline-big/out/big.js"
+	data, err := os.ReadFile(genPath)
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	commentLine := lines[len(lines)-1]
+	if !strings.Contains(commentLine, "sourceMappingURL=data:") {
+		t.Fatalf("fixture %s's last line does not contain an inline sourceMappingURL comment; did the fixture change?", genPath)
+	}
+	if len(commentLine) <= 8192 {
+		t.Fatalf("fixture %s's comment line is only %d bytes; want > 8192 to actually exercise the old window's failure mode", genPath, len(commentLine))
+	}
+
+	// Line 322, col 10 is "function main() {" -> the "main" identifier; it
+	// maps to big.ts line 405, col 10 -> "main" in "function main(): void {".
+	r := NewResolver()
+	pos, err := r.Resolve(genPath, 322, 10)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if pos.Mapping != MappingExact {
+		t.Errorf("Mapping = %q, want exact", pos.Mapping)
+	}
+	if filepath.Base(pos.Source) != "big.ts" {
+		t.Errorf("Source = %q, want it to end in big.ts", pos.Source)
+	}
+	if pos.Line != 405 || pos.Col != 10 {
+		t.Errorf("got %d:%d, want 405:10", pos.Line, pos.Col)
+	}
+}
+
+// TestFixtureInlineDataURLMapWorks proves discovery order step 1 (a
+// sourceMappingURL comment) with a real inline base64 data: URL, produced by
+// `bun build greeter.ts --sourcemap=inline`.
+func TestFixtureInlineDataURLMapWorks(t *testing.T) {
+	genPath := "testdata/bun-inline/greeter.js"
+	data, err := os.ReadFile(genPath)
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	if !strings.Contains(string(data), "sourceMappingURL=data:") {
+		t.Fatalf("fixture %s does not contain an inline sourceMappingURL comment; did the fixture change?", genPath)
+	}
+
+	r := NewResolver()
+	pos, err := r.Resolve(genPath, 9, 10)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if pos.Mapping != MappingExact {
+		t.Errorf("Mapping = %q, want exact", pos.Mapping)
+	}
+	if pos.Line != 14 || pos.Col != 10 {
+		t.Errorf("got %d:%d, want 14:10", pos.Line, pos.Col)
+	}
+	if !strings.HasSuffix(pos.Source, filepath.FromSlash("testdata/greeter.ts")) {
+		t.Errorf("Source = %q, want it to end in testdata/greeter.ts", pos.Source)
+	}
+}
+
+// TestFixtureStaleMapIsFlagged copies the committed external fixture into a
+// scratch directory and back-dates the .map file, proving Stale detection
+// against a real bun-produced map rather than a hand-built one.
+func TestFixtureStaleMapIsFlagged(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"greeter.js", "greeter.js.map"} {
+		data, err := os.ReadFile(filepath.Join("testdata/bun-external", name))
+		if err != nil {
+			t.Fatalf("reading fixture %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+	}
+
+	now := time.Now()
+	if err := os.Chtimes(filepath.Join(dir, "greeter.js.map"), now.Add(-time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatalf("chtimes map: %v", err)
+	}
+	if err := os.Chtimes(filepath.Join(dir, "greeter.js"), now, now); err != nil {
+		t.Fatalf("chtimes generated: %v", err)
+	}
+
+	r := NewResolver()
+	pos, err := r.Resolve(filepath.Join(dir, "greeter.js"), 9, 10)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if !pos.Stale {
+		t.Error("Stale = false, want true: the map is an hour older than the generated file")
+	}
+}
+
+// TestFixtureMissingMapReturnsErrNoSourceMap proves the honest-degradation
+// path: a generated file with neither a sourceMappingURL comment nor a
+// sibling .map returns the typed ErrNoSourceMap, never a guess.
+func TestFixtureMissingMapReturnsErrNoSourceMap(t *testing.T) {
+	dir := t.TempDir()
+	data, err := os.ReadFile("testdata/bun-external/greeter.js")
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	// Deliberately do not copy greeter.js.map alongside it.
+	genPath := filepath.Join(dir, "greeter.js")
+	if err := os.WriteFile(genPath, data, 0o644); err != nil {
+		t.Fatalf("writing generated file: %v", err)
+	}
+
+	r := NewResolver()
+	_, err = r.Resolve(genPath, 9, 10)
+	if !errors.Is(err, ErrNoSourceMap) {
+		t.Fatalf("got error %v, want ErrNoSourceMap", err)
+	}
+}
