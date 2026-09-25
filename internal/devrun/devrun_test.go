@@ -569,9 +569,17 @@ func TestRunBurstNeverSlowsTheChildEvenWithStoreLocked(t *testing.T) {
 	}
 	devrunElapsed := time.Since(devrunStart)
 
-	if diff := devrunElapsed - rawElapsed; diff > 2*time.Second {
-		t.Errorf("devrun took %v vs baseline %v (no monitor) -- %v slower, want within 2s even with the store locked",
-			devrunElapsed, rawElapsed, diff)
+	// The race detector instruments the copy path, so the budget scales
+	// under -race (a marginal 2.08s-over-2s was observed there). The
+	// tripwire still catches the real failure mode -- a devrun that
+	// blocks the child would be minutes slower, not seconds.
+	budget := 2 * time.Second
+	if raceEnabled {
+		budget = 8 * time.Second
+	}
+	if diff := devrunElapsed - rawElapsed; diff > budget {
+		t.Errorf("devrun took %v vs baseline %v (no monitor) -- %v slower, want within %v even with the store locked",
+			devrunElapsed, rawElapsed, diff, budget)
 	}
 	if result.Dropped == 0 {
 		t.Error("Dropped = 0, want > 0: a burst this size must overflow the bounded channel")

@@ -44,6 +44,53 @@ func readFile(t *testing.T, f *os.File) string {
 	return string(data)
 }
 
+// waitForPIDFile polls path until it contains a positive pid, so tests
+// synchronize on the shell having spawned its background sleep (and,
+// in the trap scripts below, installed its signal handlers) instead of
+// sleeping a fixed "let the child get ready" window that a loaded CI
+// runner can overrun.
+func waitForPIDFile(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(path); err == nil {
+			if s := strings.TrimSpace(string(bytes.TrimSpace(data))); s != "" {
+				if pid, perr := strconv.Atoi(s); perr == nil && pid > 0 {
+					return pid
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("pidfile %s never contained a pid", path)
+	return 0
+}
+
+// trapScript builds the shell script the forwarding tests use: a shell
+// that backgrounds a sleep and waits on it, with a TERM trap that reports
+// and exits 7 -- proving the forwarded signal reached the shell itself,
+// not just its descendants. The sleep runs with SIGTERM IGNORED (an
+// ignored disposition survives across fork+exec, so emptying the trap
+// before spawning it suffices): deliverSignal's ttyShared walk signals
+// deepest-first, and a TERM-receptive sleep would die first and let the
+// shell's bare `wait` return 0 and exit cleanly before its own pending
+// TERM trap ever fires -- dash's argument-less `wait` reports 0 even
+// when the reaped job was signal-killed, which is exactly the "exit
+// code = 0, want 7" flake this guards against. The trap kills the sleep
+// with SIGKILL (unkillable sleep, no orphan) before exiting 7. The
+// pidfile write comes AFTER the handler installs, so a test that has
+// observed the pidfile knows the shell is fully armed. Pass withINT to
+// prepend the SIGINT trap the skip test asserts never fires.
+func trapScript(pidFile string, withINT bool) string {
+	prefix := ""
+	if withINT {
+		prefix = "trap 'echo caught-int; exit 8' INT; "
+	}
+	return prefix + "trap '' TERM; sleep 30 & SP=$!; " +
+		"trap 'kill -KILL $SP 2>/dev/null; echo caught-term; exit 7' TERM; " +
+		"echo $SP > " + pidFile + "; wait"
+}
+
 func TestConfigureProcessGroupSharedWhenTTY(t *testing.T) {
 	cmd := exec.Command("true")
 	configureProcessGroup(cmd, true)
@@ -113,8 +160,8 @@ func TestExitCodeForNilState(t *testing.T) {
 func TestForwardSignalsAlwaysRelaysSigterm(t *testing.T) {
 	for _, ttyShared := range []bool{true, false} {
 		t.Run(boolLabel("ttyShared", ttyShared), func(t *testing.T) {
-			cmd := exec.CommandContext(context.Background(), "sh", "-c",
-				`trap 'kill %1 2>/dev/null; echo caught-term; exit 7' TERM; sleep 10 & wait`)
+			pidFile := filepath.Join(t.TempDir(), "sleep.pid")
+			cmd := exec.CommandContext(context.Background(), "sh", "-c", trapScript(pidFile, false))
 			out := tempFileStdout(t)
 			cmd.Stdout = out
 			configureProcessGroup(cmd, ttyShared)
@@ -125,7 +172,7 @@ func TestForwardSignalsAlwaysRelaysSigterm(t *testing.T) {
 			done := make(chan struct{})
 			go forwardSignals(cmd, ttyShared, done)
 
-			time.Sleep(300 * time.Millisecond) // let the child install its trap
+			waitForPIDFile(t, pidFile) // the shell is armed once the pidfile lands
 			if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
 				t.Fatalf("Kill(self, SIGTERM): %v", err)
 			}
@@ -159,8 +206,8 @@ func TestForwardSignalsAlwaysRelaysSigterm(t *testing.T) {
 // alive afterward. A later SIGTERM (always forwarded) is used to end the
 // child cleanly and confirm forwardSignals itself is still working.
 func TestForwardSignalsSkipsSigintWhenTTYShared(t *testing.T) {
-	cmd := exec.CommandContext(context.Background(), "sh", "-c",
-		`trap 'echo caught-int; exit 8' INT; trap 'kill %1 2>/dev/null; echo caught-term; exit 7' TERM; sleep 10 & wait`)
+	pidFile := filepath.Join(t.TempDir(), "sleep.pid")
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", trapScript(pidFile, true))
 	out := tempFileStdout(t)
 	cmd.Stdout = out
 	configureProcessGroup(cmd, true) // ttyShared
@@ -172,10 +219,13 @@ func TestForwardSignalsSkipsSigintWhenTTYShared(t *testing.T) {
 	go forwardSignals(cmd, true, done)
 	defer close(done)
 
-	time.Sleep(300 * time.Millisecond)
+	waitForPIDFile(t, pidFile) // the shell is armed once the pidfile lands
 	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
 		t.Fatalf("Kill(self, SIGINT): %v", err)
 	}
+	// Negative-observation window, not readiness: a (broken) forwarded
+	// SIGINT needs time to arrive and kill the child, so absence can
+	// only be asserted after waiting.
 	time.Sleep(300 * time.Millisecond)
 
 	if cmd.Process.Signal(syscall.Signal(0)) != nil {
@@ -220,23 +270,7 @@ func TestForwardSignalsReachesWholeProcessGroupWhenNotTTYShared(t *testing.T) {
 	done := make(chan struct{})
 	go forwardSignals(cmd, false, done)
 
-	var grandchildPID int
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if data, err := os.ReadFile(pidFile); err == nil {
-			if s := strings.TrimSpace(string(bytes.TrimSpace(data))); s != "" {
-				if pid, perr := strconv.Atoi(s); perr == nil && pid > 0 {
-					grandchildPID = pid
-					break
-				}
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if grandchildPID == 0 {
-		close(done)
-		t.Fatal("grandchild pid was never written to the pidfile")
-	}
+	grandchildPID := waitForPIDFile(t, pidFile)
 
 	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
 		t.Fatalf("Kill(self, SIGTERM): %v", err)
@@ -256,7 +290,7 @@ func TestForwardSignalsReachesWholeProcessGroupWhenNotTTYShared(t *testing.T) {
 	// The grandchild shares the new process group; only a group-wide kill
 	// (not a direct-pid signal to the shell) reaches it. Poll briefly for
 	// the kernel to finish reaping it.
-	deadline = time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(grandchildPID, 0); err != nil {
 			return // ESRCH: gone. Success.
@@ -302,23 +336,7 @@ func TestForwardSignalsTtySharedReachesDescendants(t *testing.T) {
 			done := make(chan struct{})
 			go forwardSignals(cmd, true, done)
 
-			var grandchildPID int
-			deadline := time.Now().Add(3 * time.Second)
-			for time.Now().Before(deadline) {
-				if data, err := os.ReadFile(pidFile); err == nil {
-					if s := strings.TrimSpace(string(bytes.TrimSpace(data))); s != "" {
-						if pid, perr := strconv.Atoi(s); perr == nil && pid > 0 {
-							grandchildPID = pid
-							break
-						}
-					}
-				}
-				time.Sleep(20 * time.Millisecond)
-			}
-			if grandchildPID == 0 {
-				close(done)
-				t.Fatal("grandchild pid was never written to the pidfile")
-			}
+			grandchildPID := waitForPIDFile(t, pidFile)
 
 			// Exactly what a user's `kill <monitor-pid>` does: only
 			// monitor's own pid, never the shared group.
@@ -340,7 +358,7 @@ func TestForwardSignalsTtySharedReachesDescendants(t *testing.T) {
 			// The grandchild shares monitor's process group, so only the
 			// descendant walk (not the self-pid kill above) can have
 			// reached it. Poll for the kernel to finish reaping it.
-			deadline = time.Now().Add(5 * time.Second)
+			deadline := time.Now().Add(5 * time.Second)
 			for time.Now().Before(deadline) {
 				if err := syscall.Kill(grandchildPID, 0); err != nil {
 					return // ESRCH: gone. Success.

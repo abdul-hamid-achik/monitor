@@ -1450,7 +1450,25 @@ func TestRunHotPIDLiveNodeInspectorNamesHotLine(t *testing.T) {
 	if !ready {
 		t.Fatalf("node inspector never came up on %s", addr)
 	}
-	time.Sleep(300 * time.Millisecond)
+	// Settle on the CDP HTTP endpoint itself, not just the open TCP
+	// port: --inspect binds the socket before the debugger endpoint
+	// answers, and a fixed sleep flakes on loaded runners.
+	cdpClient := &http.Client{Timeout: 2 * time.Second}
+	cdpDeadline := time.Now().Add(10 * time.Second)
+	cdpReady := false
+	for time.Now().Before(cdpDeadline) {
+		if resp, err := cdpClient.Get("http://" + addr + "/json/version"); err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				cdpReady = true
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !cdpReady {
+		t.Fatalf("node inspector CDP endpoint never answered on %s", addr)
+	}
 
 	hotCmd := newHotCmd()
 	var out bytes.Buffer
@@ -1708,13 +1726,38 @@ func testPython3Bin(t *testing.T) string {
 // isSupportedLeafRuntime), so this uses a real `python3` process rather
 // than an arbitrary unrecognized binary, which ResolveLeaf would refuse
 // before `hot` ever got a chance to fall back.
-func TestRunHotPIDDarwinSampleFallbackForNonJSTarget(t *testing.T) {
+// requireWorkingSample skips the caller unless the macOS `sample` tool can
+// actually sample a live process on THIS host right now. Presence on PATH
+// is not enough: runners have been observed where `sample` exists but
+// instantly fails (per-machine privacy/tooling state), which used to
+// surface as a confusing pprof-ownership error from the fallback under
+// test instead of the honest skip it deserves.
+func requireWorkingSample(t *testing.T) {
+	t.Helper()
 	if runtime.GOOS != "darwin" {
-		t.Skip("darwin sample fallback only applies on macOS")
+		t.Skip("sample only available on macOS")
 	}
 	if _, err := exec.LookPath("sample"); err != nil {
 		t.Skip("sample not on PATH")
 	}
+	probe := exec.Command("sleep", "30")
+	if err := probe.Start(); err != nil {
+		t.Skipf("cannot spawn sample preflight sleeper: %v", err)
+	}
+	defer func() {
+		_ = probe.Process.Kill()
+		_ = probe.Wait()
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "sample", fmt.Sprintf("%d", probe.Process.Pid), "1", "-mayDie").CombinedOutput()
+	if err != nil {
+		t.Skipf("sample cannot sample on this host: %v (%.300s)", err, out)
+	}
+}
+
+func TestRunHotPIDDarwinSampleFallbackForNonJSTarget(t *testing.T) {
+	requireWorkingSample(t)
 	pythonBin := testPython3Bin(t)
 	// A tight busy loop, not time.sleep: `sample` only ever captures ACTIVE
 	// (non-idle) frames from whatever the target is doing DURING its
@@ -1733,6 +1776,9 @@ func TestRunHotPIDDarwinSampleFallbackForNonJSTarget(t *testing.T) {
 		_ = cmd.Wait()
 	}()
 	pid := cmd.Process.Pid
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("python target pid %d died before hot ran: %v", pid, err)
+	}
 
 	hotCmd := newHotCmd()
 	hotCmd.SetErr(&bytes.Buffer{})
