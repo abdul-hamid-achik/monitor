@@ -310,8 +310,24 @@ func (r *bigLineReader) Read(p []byte) (int, error) {
 // pass). The emitted giant line is exactly maxPartialLineBytes long, the
 // byte stream still reaches the terminal in full, and the line after the
 // giant one is still delivered.
+//
+// The timing half is calibrated per runner, not a flat wall-clock ceiling:
+// the linear pass alone measured >2 s for 128 MiB on a loaded CI runner,
+// which a flat ceiling cannot tell apart from the 4 s quadratic pass on
+// idle hardware. Scaling is the discriminator -- 32x the bytes costs ~32x
+// the time linearly and ~1024x quadratically -- so the ceiling is a ratio
+// against a same-run 4 MiB baseline, placed between the two regimes with
+// ~5x margin on either side.
 func TestCopyStreamBoundedAndFastOnHugeNewlineFreeWrite(t *testing.T) {
 	const size = 128 << 20 // 128 MiB
+	const calibSize = 4 << 20
+	// The min of two baseline runs shrugs off a one-off scheduler stall in
+	// either one (a stalled baseline would loosen the ceiling).
+	calib := min(
+		copyHugeNewlineFreeWrite(t, calibSize),
+		copyHugeNewlineFreeWrite(t, calibSize),
+	)
+
 	in := &bigLineReader{remaining: size}
 	out := &countWriter{}
 	lines := make(chan streamLine, 8)
@@ -339,7 +355,26 @@ func TestCopyStreamBoundedAndFastOnHugeNewlineFreeWrite(t *testing.T) {
 	if dropped != 0 {
 		t.Errorf("dropped = %d, want 0 (size-capping is not a channel drop)", dropped)
 	}
-	if elapsed > 2*time.Second {
-		t.Errorf("copyStream took %v for a %d MiB newline-free write; the chunk scan must stay linear (CC-10)", elapsed, size>>20)
+	if ceiling := time.Duration(6*(size/calibSize))*calib + 500*time.Millisecond; elapsed > ceiling {
+		t.Errorf("copyStream took %v for a %d MiB newline-free write vs %v for %d MiB; the chunk scan must stay linear (CC-10)",
+			elapsed, size>>20, calib, calibSize>>20)
 	}
+}
+
+// copyHugeNewlineFreeWrite drives copyStream over a newline-free write of
+// size bytes (the same discarding path TestCopyStreamBounded uses) and
+// returns how long it took, for use as a timing baseline.
+func copyHugeNewlineFreeWrite(t *testing.T, size int) time.Duration {
+	t.Helper()
+	in := &bigLineReader{remaining: size}
+	out := &countWriter{}
+	lines := make(chan streamLine, 8)
+	var dropped int64
+	start := time.Now()
+	if err := copyStream(out, in, streamStderr, lines, &dropped); err != nil {
+		t.Fatalf("copyStream: %v", err)
+	}
+	close(lines)
+	drainFrom(lines)
+	return time.Since(start)
 }
