@@ -19,6 +19,14 @@ type Sparkline struct {
 	Color      string
 	ShowAxis   bool
 	ShowLabels bool
+	// AlignRight pins the newest sample to the right edge and pads on the
+	// left, so a short history grows in from the right like a live chart.
+	AlignRight bool
+	// Capacity is how many samples a full chart holds (a ring buffer's
+	// size). When it is smaller than Width each sample is stretched across
+	// Width/Capacity columns, so a full buffer spans the whole chart instead
+	// of leaving the rest of a wide panel empty.
+	Capacity int
 }
 
 // Pre-defined styles to avoid allocations in hot loops
@@ -26,7 +34,18 @@ var (
 	sparklineStyleCache = make(map[string]lipgloss.Style)
 	sparklineGlyphCache = make(map[string][]string)
 	barFilledStyleCache = make(map[string]lipgloss.Style)
-	barEmptyStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#3A4356"))
+	barEmptyStyleCache  = make(map[string]lipgloss.Style)
+)
+
+// DefaultGaugeTrack is the unfilled part of a gauge: Studio's dark frame
+// border, so a bar reads as a continuous track like the site's CSS bars.
+const DefaultGaugeTrack = "#3A414B"
+
+// GaugeFill and GaugeTrack are the bar glyphs: one heavy rule, coloured
+// for the filled share and dimmed for the rest.
+const (
+	GaugeFill  = "━"
+	GaugeTrack = "━"
 )
 
 func getSparklineStyle(color string) lipgloss.Style {
@@ -44,6 +63,18 @@ func getBarFilledStyle(color string) lipgloss.Style {
 	}
 	style := lipgloss.NewStyle().Foreground(lipgloss.Color(color))
 	barFilledStyleCache[color] = style
+	return style
+}
+
+func getBarEmptyStyle(color string) lipgloss.Style {
+	if color == "" {
+		color = DefaultGaugeTrack
+	}
+	if style, ok := barEmptyStyleCache[color]; ok {
+		return style
+	}
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color(color))
+	barEmptyStyleCache[color] = style
 	return style
 }
 
@@ -100,7 +131,7 @@ func (s *Sparkline) Render() string {
 	}
 
 	// Sample data to fit width
-	sampled := sampleData(s.Data, s.Width)
+	sampled := sampleData(stretchData(s.Data, s.Capacity, s.Width), s.Width)
 	if len(sampled) == 0 {
 		return ""
 	}
@@ -148,10 +179,14 @@ func (s *Sparkline) Render() string {
 	lines := make([]string, s.Height)
 	padWidth := s.Width - minInt(len(sampled), s.Width)
 	for i := range builders {
-		if padWidth > 0 {
-			builders[i].WriteString(strings.Repeat(" ", padWidth))
-		}
 		lines[i] = builders[i].String()
+		if padWidth > 0 {
+			if s.AlignRight {
+				lines[i] = strings.Repeat(" ", padWidth) + lines[i]
+			} else {
+				lines[i] += strings.Repeat(" ", padWidth)
+			}
+		}
 	}
 
 	// Add axis labels if enabled
@@ -174,6 +209,25 @@ func (s *Sparkline) Render() string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// stretchData widens data so that capacity samples would span width columns,
+// repeating each sample (nearest neighbour). It leaves data unchanged when
+// there is no capacity, or when the buffer is already at least as wide as
+// the chart.
+func stretchData(data []float64, capacity, width int) []float64 {
+	if capacity <= 0 || capacity >= width || len(data) == 0 || len(data) > capacity {
+		return data
+	}
+	cols := width * len(data) / capacity
+	if cols <= len(data) {
+		return data
+	}
+	out := make([]float64, cols)
+	for i := range out {
+		out[i] = data[i*len(data)/cols]
+	}
+	return out
 }
 
 // sampleData reduces data points to fit the specified width
@@ -234,6 +288,11 @@ type MultiSparkline struct {
 	Colors []string
 	Max    float64
 	Min    float64
+	// AlignRight and Capacity are passed to each row's Sparkline.
+	AlignRight bool
+	Capacity   int
+	// LabelColor paints the row labels; empty leaves them unstyled.
+	LabelColor string
 }
 
 // NewMultiSparkline creates a new multi-sparkline widget
@@ -281,13 +340,15 @@ func (m *MultiSparkline) Render() string {
 
 	for i, data := range m.Data {
 		spark := &Sparkline{
-			Data:      data,
-			Width:     m.Width,
-			Height:    1,
-			Min:       min,
-			Max:       max,
-			AutoScale: false,
-			ShowAxis:  false,
+			Data:       data,
+			Width:      m.Width,
+			Height:     1,
+			Min:        min,
+			Max:        max,
+			AutoScale:  false,
+			ShowAxis:   false,
+			AlignRight: m.AlignRight,
+			Capacity:   m.Capacity,
 		}
 
 		if i < len(m.Colors) {
@@ -300,7 +361,11 @@ func (m *MultiSparkline) Render() string {
 
 		// Add label if available
 		if i < len(m.Labels) && m.Labels[i] != "" {
-			label := lipgloss.NewStyle().Width(12).Align(lipgloss.Right).Render(m.Labels[i] + ":")
+			labelStyle := lipgloss.NewStyle().Width(12).Align(lipgloss.Right)
+			if m.LabelColor != "" {
+				labelStyle = labelStyle.Foreground(lipgloss.Color(m.LabelColor))
+			}
+			label := labelStyle.Render(m.Labels[i] + ":")
 			line = label + " " + line
 		}
 
@@ -318,6 +383,8 @@ type BarGauge struct {
 	ShowValue   bool
 	ShowPercent bool
 	ColorFunc   func(float64) string
+	// TrackColor paints the unfilled share; empty means DefaultGaugeTrack.
+	TrackColor string
 }
 
 // NewBarGauge creates a new bar gauge widget
@@ -362,7 +429,7 @@ func (b *BarGauge) Render() string {
 		color = b.ColorFunc(value)
 	}
 
-	result := renderGaugeSegments(color, filled, b.Width-filled)
+	result := renderGaugeSegments(color, b.TrackColor, filled, b.Width-filled)
 
 	if b.ShowPercent {
 		result += fmt.Sprintf(" %5.1f%%", percent)
@@ -381,6 +448,8 @@ type MiniGauge struct {
 	Unit      string
 	Color     string
 	ShowValue bool
+	// TrackColor paints the unfilled share; empty means DefaultGaugeTrack.
+	TrackColor string
 }
 
 // NewMiniGauge creates a new mini gauge
@@ -421,7 +490,7 @@ func (m *MiniGauge) Render() string {
 		filled = m.Width
 	}
 
-	bar := renderGaugeSegments(m.Color, filled, m.Width-filled)
+	bar := renderGaugeSegments(m.Color, m.TrackColor, filled, m.Width-filled)
 
 	if m.ShowValue {
 		unit := m.Unit
@@ -434,7 +503,7 @@ func (m *MiniGauge) Render() string {
 	return bar
 }
 
-func renderGaugeSegments(color string, filledCount, emptyCount int) string {
+func renderGaugeSegments(color, track string, filledCount, emptyCount int) string {
 	if filledCount < 0 {
 		filledCount = 0
 	}
@@ -443,10 +512,10 @@ func renderGaugeSegments(color string, filledCount, emptyCount int) string {
 	}
 	var builder strings.Builder
 	if filledCount > 0 {
-		builder.WriteString(getBarFilledStyle(color).Render(strings.Repeat("▓", filledCount)))
+		builder.WriteString(getBarFilledStyle(color).Render(strings.Repeat(GaugeFill, filledCount)))
 	}
 	if emptyCount > 0 {
-		builder.WriteString(barEmptyStyle.Render(strings.Repeat("░", emptyCount)))
+		builder.WriteString(getBarEmptyStyle(track).Render(strings.Repeat(GaugeTrack, emptyCount)))
 	}
 	return builder.String()
 }

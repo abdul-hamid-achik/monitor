@@ -23,18 +23,18 @@ func formatNumberShort(n uint64) string {
 	return fmt.Sprintf("%d", n)
 }
 
-func directionalMetricLines(label, down, up string, narrow bool) []string {
+func (m Model) directionalMetricLines(label, down, up string, narrow bool) []string {
 	if narrow {
-		return []string{"  " + label + " ↓ " + down, "  " + label + " ↑ " + up}
+		return []string{m.kv(label, 8, "↓ "+down), m.kv("", 8, "↑ "+up)}
 	}
-	return []string{fmt.Sprintf("  %s: ↓ %s    ↑ %s", label, down, up)}
+	return []string{m.kv(label, 8, fmt.Sprintf("↓ %-12s ↑ %s", down, up))}
 }
 
-func networkRateLines(download, upload string, narrow bool) []string {
+func (m Model) networkRateLines(download, upload string, narrow bool) []string {
 	if narrow {
-		return []string{"  Download " + download, "  Upload   " + upload}
+		return []string{m.kv("Download", 8, download), m.kv("Upload", 8, upload)}
 	}
-	return []string{fmt.Sprintf("  Download: %s    Upload: %s", download, upload)}
+	return []string{m.statLine(false, [2]string{"Download", m.bigValue(download)}, [2]string{"Upload", m.bigValue(upload)})}
 }
 
 func (m Model) renderNetwork() string {
@@ -49,7 +49,7 @@ func (m Model) renderNetwork() string {
 
 	panelWidth := metricPanelWidth(m.width)
 	narrow := m.width < 64
-	lines := []string{m.titleStyle.Render(" Network "), ""}
+	lines := []string{m.titleStyle.Render(" Network ")}
 	rateIssue := metricIssue(net.MetricStates, "rate")
 	if rateIssue != "" {
 		state := "Rates unavailable"
@@ -68,7 +68,7 @@ func (m Model) renderNetwork() string {
 			lines = append(lines, "  Press r to retry; monitor doctor checks collector health.")
 		}
 	} else {
-		lines = append(lines, networkRateLines(
+		lines = append(lines, m.networkRateLines(
 			collector.FormatBytes(net.BytesRecvPerSec)+"/s",
 			collector.FormatBytes(net.BytesSentPerSec)+"/s", narrow)...)
 		if len(net.DownloadHistory) == 0 && len(net.UploadHistory) == 0 {
@@ -78,18 +78,21 @@ func (m Model) renderNetwork() string {
 			history.Data = [][]float64{net.DownloadHistory, net.UploadHistory}
 			history.Labels = []string{"download", "upload"}
 			history.Colors = []string{m.theme.hex(m.theme.Accent), m.theme.hex(m.theme.Good)}
+			history.AlignRight = true
+			history.Capacity = studioHistorySize
+			history.LabelColor = m.theme.hex(m.theme.Muted)
 			history.Width = panelWidth - 18
 			if history.Width < 8 {
 				history.Width = 8
 			}
-			lines = append(lines, "", "  Recent rates · shared scale", history.Render())
+			lines = append(lines, "", "  "+m.muted("recent rates · shared scale"), history.Render())
 		}
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, directionalMetricLines("Total",
+	lines = append(lines, m.directionalMetricLines("Total",
 		collector.FormatBytes(net.BytesRecv), collector.FormatBytes(net.BytesSent), narrow)...)
-	lines = append(lines, directionalMetricLines("Packets",
+	lines = append(lines, m.directionalMetricLines("Packets",
 		formatNumberShort(net.PacketsRecv), formatNumberShort(net.PacketsSent), narrow)...)
-	return m.panelStyle.Width(panelWidth).Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+	return m.panel(panelWidth, lipgloss.JoinVertical(lipgloss.Left, lines...))
 }

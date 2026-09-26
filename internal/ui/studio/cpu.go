@@ -12,8 +12,8 @@ import (
 
 func (m Model) renderCPU() string {
 	if m.last.LastUpdate.IsZero() {
-		return m.panelStyle.Width(maxInt(20, m.width-4)).Render(
-			m.titleStyle.Render(" CPU ") + "\n\n  Waiting for the first CPU sample…",
+		return m.panel(maxInt(20, m.width),
+			m.titleStyle.Render(" CPU ")+"\n\n  Waiting for the first CPU sample…",
 		)
 	}
 
@@ -26,15 +26,17 @@ func (m Model) renderCPU() string {
 		sparkHeight = 2
 	}
 	historyBody := m.renderCPUHistory(cpu, sparkHeight)
-	sparkline := m.panelStyle.Width(maxInt(20, m.width-4)).Render(
-		lipgloss.JoinVertical(lipgloss.Left, m.titleStyle.Render(" CPU Usage History "), "", historyBody),
+	sparkline := m.panel(maxInt(20, m.width),
+		lipgloss.JoinVertical(lipgloss.Left, m.titleStyle.Render(" CPU Usage History "), historyBody),
 	)
 
 	wide := m.width >= 92
-	statsWidth := 31
-	coresWidth := m.width - 4
+	statsWidth := 36
+	coresWidth := m.width
 	if wide {
-		coresWidth = m.width - statsWidth - 7
+		coresWidth = m.width - statsWidth - 1
+	} else {
+		statsWidth = m.width
 	}
 	if coresWidth < 28 {
 		coresWidth = 28
@@ -55,31 +57,44 @@ func (m Model) renderCPU() string {
 	}
 
 	coreBody := m.renderCoreGrid(cpu, coresWidth, maxCoreRows)
-	coreParts := []string{m.titleStyle.Render(" Per-Core Usage "), "", coreBody}
+	coreParts := []string{m.titleStyle.Render(" Per-Core Usage "), coreBody}
 	if shortStack {
-		summary := fmt.Sprintf("  %.1f%% total · %.2f GHz · %d cores / %d threads",
-			cpu.UsagePercent, cpu.FrequencyMHz/1000, cpu.CoreCount, cpu.ThreadCount)
+		clock := ""
+		if cpu.FrequencyMHz >= 100 {
+			clock = fmt.Sprintf(" · %.2f GHz", cpu.FrequencyMHz/1000)
+		}
+		summary := fmt.Sprintf("  %.1f%% total%s · %d cores / %d threads",
+			cpu.UsagePercent, clock, cpu.CoreCount, cpu.ThreadCount)
 		if issue := metricIssue(cpu.MetricStates, "info"); issue != "" {
 			coreParts = append(coreParts, "  CPU info unavailable · "+issue)
 			summary = fmt.Sprintf("  %.1f%% total · CPU info unavailable", cpu.UsagePercent)
 		}
 		if issue := metricIssue(cpu.MetricStates, "load_average"); issue != "" {
-			coreParts = append(coreParts, "  Load unavailable · "+issue)
+			coreParts = append(coreParts, fitText("  Load unavailable · "+issue, maxInt(1, coresWidth-m.panelStyle.GetHorizontalFrameSize())))
 		}
 		coreParts = append(coreParts, "", fitText(summary, maxInt(1, coresWidth-m.panelStyle.GetHorizontalFrameSize())))
 	}
-	coresPanel := m.panelStyle.Width(coresWidth).Render(
+	coresPanel := m.panel(coresWidth,
 		lipgloss.JoinVertical(lipgloss.Left, coreParts...),
 	)
-	statsPanel := m.panelStyle.Width(statsWidth).Render(
-		lipgloss.JoinVertical(lipgloss.Left, m.titleStyle.Render(" Statistics "), "", m.renderCPUStats(cpu)),
+	statsPanel := m.panel(statsWidth,
+		lipgloss.JoinVertical(lipgloss.Left, m.titleStyle.Render(" Statistics "), m.renderCPUStats(cpu, statsWidth)),
 	)
 
 	bottom := lipgloss.JoinVertical(lipgloss.Left, coresPanel, statsPanel)
 	if wide {
-		bottom = lipgloss.JoinHorizontal(lipgloss.Top, coresPanel, statsPanel)
+		bottom = lipgloss.JoinHorizontal(lipgloss.Top, coresPanel, " ", statsPanel)
 	} else if shortStack {
 		return lipgloss.JoinVertical(lipgloss.Left, sparkline, "", coresPanel)
+	}
+	// Give the history chart whatever height the panels below leave free
+	// (capped, so a tall terminal does not turn it into a wall of blocks).
+	budget := m.height - 4 // header (3 rows) + footer
+	if spare := budget - lipgloss.Height(sparkline) - 1 - lipgloss.Height(bottom); spare > 0 {
+		grown := sparkHeight + minInt(spare, 24)
+		sparkline = m.panel(maxInt(20, m.width),
+			lipgloss.JoinVertical(lipgloss.Left, m.titleStyle.Render(" CPU Usage History "), m.renderCPUHistory(cpu, grown)),
+		)
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, sparkline, "", bottom)
 }
@@ -93,12 +108,14 @@ func (m Model) renderCPUHistory(cpu collector.CPUInfo, height int) string {
 	}
 	spark := widgets.NewSparkline()
 	spark.Data = cpu.History
-	spark.Width = maxInt(8, m.width-20)
+	spark.Width = maxInt(8, m.width-4)
 	spark.Height = height
 	spark.Min = 0
 	spark.Max = 100
 	spark.AutoScale = false
 	spark.Color = m.theme.hex(m.theme.Accent)
+	spark.AlignRight = true
+	spark.Capacity = studioHistorySize
 	return spark.Render()
 }
 
@@ -152,7 +169,8 @@ func (m Model) renderCoreGrid(cpu collector.CPUInfo, width, maxRows int) string 
 			bar.Width = barWidth
 			bar.ShowPercent = true
 			bar.ColorFunc = func(v float64) string { return m.theme.gaugeHex(v, 50, 80) }
-			cell := fmt.Sprintf("  Core %-2d %s", i, bar.Render())
+			bar.TrackColor = m.theme.hex(m.theme.Border)
+			cell := "  " + m.muted(fmt.Sprintf("Core %-2d", i)) + " " + bar.Render()
 			cells = append(cells, lipgloss.NewStyle().Width(cellWidth).Render(cell))
 		}
 		lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, cells...))
@@ -167,12 +185,18 @@ func (m Model) renderCoreGrid(cpu collector.CPUInfo, width, maxRows int) string 
 	return strings.Join(lines, "\n")
 }
 
-func (m Model) renderCPUStats(cpu collector.CPUInfo) string {
-	usage := fmt.Sprintf("%.1f%%", cpu.UsagePercent)
+func (m Model) renderCPUStats(cpu collector.CPUInfo, width int) string {
+	usage := m.bigValue(fmt.Sprintf("%.1f%%", cpu.UsagePercent))
 	if issue := metricIssue(cpu.MetricStates, "usage"); issue != "" {
 		usage = "unavailable · " + issue
 	}
+	// Some hosts report 0 or a tiny placeholder (4 MHz) through gopsutil;
+	// like the Overview KPI, treat anything implausible as unavailable
+	// rather than presenting it as a real clock.
 	frequency := fmt.Sprintf("%.2f GHz", cpu.FrequencyMHz/1000)
+	if cpu.FrequencyMHz < 100 {
+		frequency = m.muted("unavailable")
+	}
 	threads := fmt.Sprintf("%d", cpu.ThreadCount)
 	if issue := metricIssue(cpu.MetricStates, "info"); issue != "" {
 		frequency = "unavailable · " + issue
@@ -182,17 +206,24 @@ func (m Model) renderCPUStats(cpu collector.CPUInfo) string {
 	if issue := metricIssue(cpu.MetricStates, "per_core"); issue != "" {
 		cores = "unavailable · " + issue
 	}
-	load := fmt.Sprintf("%.2f / %.2f / %.2f", cpu.LoadAvg1, cpu.LoadAvg5, cpu.LoadAvg15)
-	if issue := metricIssue(cpu.MetricStates, "load_average"); issue != "" {
-		load = "unavailable · " + issue
+	lines := []string{
+		m.kv("usage", 9, usage),
+		m.kv("clock", 9, frequency),
+		m.kv("cores", 9, cores),
+		m.kv("threads", 9, threads),
 	}
-	return strings.Join([]string{
-		"  Usage: " + usage,
-		"  Frequency: " + frequency,
-		"  Cores: " + cores,
-		"  Threads: " + threads,
-		"  Load (1/5/15): " + load,
-	}, "\n")
+	if issue := metricIssue(cpu.MetricStates, "load_average"); issue != "" {
+		// A long platform reason wraps under the value column instead of
+		// running off the panel edge.
+		wrapped := wrapDetailValue(issue, maxInt(12, width-16))
+		lines = append(lines, m.kv("load", 9, m.muted("unavailable")))
+		for _, line := range wrapped {
+			lines = append(lines, "            "+m.muted(line))
+		}
+	} else {
+		lines = append(lines, m.kv("load", 9, fmt.Sprintf("%.2f  %.2f  %.2f", cpu.LoadAvg1, cpu.LoadAvg5, cpu.LoadAvg15)))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func metricIssue(statuses map[string]collector.MetricStatus, key string) string {
@@ -209,6 +240,13 @@ func metricIssue(statuses map[string]collector.MetricStatus, key string) string 
 
 func maxInt(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b

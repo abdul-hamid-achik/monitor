@@ -4,6 +4,9 @@ import (
 	"math"
 	"strings"
 	"testing"
+
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestSparklineRender(t *testing.T) {
@@ -161,5 +164,57 @@ func TestGaugesContainInvalidGeometryAndValues(t *testing.T) {
 	}
 	if !math.IsInf(bar.Max, 1) {
 		t.Fatal("Render must not mutate caller-owned Max")
+	}
+}
+
+func TestSparklineAlignRightPadsOnTheLeft(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		alignRight bool
+		wantPrefix string
+	}{
+		{"default pads right", false, "█"},
+		{"align right pads left", true, "   "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewSparkline()
+			s.Data = []float64{100, 100}
+			s.Width, s.Height = 5, 1
+			s.Min, s.Max, s.AutoScale = 0, 100, false
+			s.AlignRight = tc.alignRight
+			got := ansi.Strip(s.Render())
+			if lipgloss.Width(got) != 5 || !strings.HasPrefix(got, tc.wantPrefix) {
+				t.Fatalf("render = %q, want width 5 with prefix %q", got, tc.wantPrefix)
+			}
+		})
+	}
+}
+
+func TestSparklineCapacityStretchesAcrossWidth(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		data     int
+		capacity int
+		width    int
+		filled   int
+	}{
+		{"full buffer spans the chart", 4, 4, 12, 12},
+		{"half buffer spans half", 2, 4, 12, 6},
+		{"no capacity keeps one column per sample", 4, 0, 12, 4},
+		{"capacity wider than chart is ignored", 4, 20, 12, 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewSparkline()
+			s.Data = make([]float64, tc.data)
+			for i := range s.Data {
+				s.Data[i] = 100
+			}
+			s.Width, s.Height, s.Capacity = tc.width, 1, tc.capacity
+			s.Min, s.Max, s.AutoScale = 0, 100, false
+			got := ansi.Strip(s.Render())
+			if n := strings.Count(got, "█"); n != tc.filled {
+				t.Fatalf("filled columns = %d, want %d (%q)", n, tc.filled, got)
+			}
+		})
 	}
 }

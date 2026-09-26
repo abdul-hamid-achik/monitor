@@ -1,9 +1,9 @@
 # The TUI
 
 `monitor studio` launches the interactive TUI — a Bubble Tea v2 application
-with the docs site's own palette (brand red on warm dark/light backgrounds,
-auto-detected from the terminal), nine tabs, and full keyboard and mouse
-navigation. (Running
+drawn in the same visual language as this site: the same palette (brand red on
+warm dark/light backgrounds, auto-detected from the terminal), the same
+`╭─ title ─╮` frames, nine tabs, and full keyboard and mouse navigation. (Running
 bare `monitor` prints help instead.)
 
 ```bash
@@ -20,20 +20,23 @@ always appear in this order:
 
 | # | Tab | What it shows |
 |---|-----|---------------|
-| 1 | **Overview** | CPU and memory gauges side by side, plus a network panel (per-second and total throughput) |
+| 1 | **Overview** | CPU, memory, thermal and disk at a glance, 60 s CPU/memory activity, the top CPU processes, and a status/attention line |
 | 2 | **CPU** | CPU history, a responsive per-core grid, frequency, load averages, and core/thread counts |
 | 3 | **Memory** | Memory usage and swap |
-| 4 | **Temperature** | CPU package, CPU cores, GPU, ANE, and battery sensor readings, plus fan telemetry when available |
+| 4 | **Thermal** | CPU package, CPU cores, GPU, ANE, and battery sensor readings, plus fan telemetry when available |
 | 5 | **Disk** | Disk usage and I/O |
 | 6 | **Network** | Network throughput |
 | 7 | **Processes** | A sortable, searchable, selectable process table |
 | 8 | **Settings** | The current configuration (editable in the TUI) |
 | 9 | **Trends** | Sparklines and summary stats over the persistent history captured by `monitor history record` |
 
-The header adapts from full tab names to abbreviations and finally the active
-tab on narrow terminals. The active tab uses both color and a `▸` marker. The
-status bar remains pinned to the bottom and reports `LIVE`, `PAUSED`, `WAITING`,
-or `STALE` alongside CPU, memory, sample time, and context-aware shortcuts.
+The header is three rows: the `◆ monitor` wordmark with the host name and the
+collection state (`● LIVE`, `PAUSED`, `WAITING`, or `STALE`, plus the sample
+time), the tab row, and a rule. The tab row adapts from full names
+(`1 overview`) to abbreviations (`1 ovr`) and finally the active tab alone on
+narrow terminals; the active tab uses both color and a `▸` marker. Every panel
+carries its title in its top border. The bottom line lists context-aware
+shortcuts as keycaps: the key in the accent color, its action muted.
 
 ### CPU core grid and metric availability
 

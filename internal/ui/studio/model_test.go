@@ -481,12 +481,12 @@ func TestUpdateIntervalApplied(t *testing.T) {
 func TestResponsiveHeaderLayoutsAndHitTargets(t *testing.T) {
 	m := NewModel()
 	m.width = 140
-	if got := m.headerLayout(); len(got.labels) != int(viewCount) || got.labels[3] != "4:Temperature" {
+	if got := m.headerLayout(); len(got.labels) != int(viewCount) || got.labels[3] != "4 thermal" {
 		t.Fatalf("wide header should use all full labels; got %#v", got.labels)
 	}
 
 	m.width = 80
-	if got := m.headerLayout(); len(got.labels) != int(viewCount) || got.labels[3] != "4:Tmp" {
+	if got := m.headerLayout(); len(got.labels) != int(viewCount) || got.labels[3] != "4 tmp" {
 		t.Fatalf("80-column header should use all compact labels; got %#v", got.labels)
 	}
 	if got := lipgloss.Width(m.renderHeader()); got > m.width {
@@ -655,4 +655,40 @@ func TestNewModelWithDisabledTemperatureSource(t *testing.T) {
 		t.Fatal("disabled temperature source should still create the system collector")
 	}
 	m.cancel()
+}
+
+// Entering the Processes tab must show the current snapshot straight away,
+// not the rows cached the last time the tab was visible (or none at all)
+// until the next collector tick.
+func TestSwitchingToProcessesRefreshesTableImmediately(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  tea.Key
+	}{
+		{"number key", tea.Key{Text: "7", Code: '7'}},
+		{"tab key", tea.Key{Code: tea.KeyTab}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewModel()
+			t.Cleanup(m.cancel)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+			fm := updated.(Model)
+			fm.paused = true // no ticks: only the switch itself may refresh
+			if tc.key.Code == tea.KeyTab {
+				fm.view = viewNetwork
+			}
+			fm.last.LastUpdate = time.Now()
+			fm.last.Processes = []collector.ProcessInfo{
+				{PID: 4242, Name: "fresh-worker", CPUPercent: 12, User: "user"},
+			}
+			updated, _ = fm.Update(tea.KeyPressMsg(tc.key))
+			fm = updated.(Model)
+			if fm.view != viewProcesses {
+				t.Fatalf("view = %v, want Processes", fm.view)
+			}
+			if body := fm.View().Content; !strings.Contains(body, "fresh-worker") {
+				t.Fatalf("Processes tab did not show the current snapshot on entry:\n%s", body)
+			}
+		})
+	}
 }

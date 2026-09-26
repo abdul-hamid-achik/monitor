@@ -24,13 +24,13 @@ func tabHitTest(x, titleWidth int, tabWidths []int) (viewID, bool) {
 }
 
 var fullTabLabels = []string{
-	"1:Overview", "2:CPU", "3:Memory", "4:Temperature", "5:Disk",
-	"6:Network", "7:Processes", "8:Settings", "9:Trends",
+	"1 overview", "2 cpu", "3 memory", "4 thermal", "5 disk",
+	"6 network", "7 processes", "8 settings", "9 trends",
 }
 
 var compactTabLabels = []string{
-	"1:Ovr", "2:CPU", "3:Mem", "4:Tmp", "5:Dsk",
-	"6:Net", "7:Proc", "8:Cfg", "9:Trend",
+	"1 ovr", "2 cpu", "3 mem", "4 tmp", "5 dsk",
+	"6 net", "7 proc", "8 cfg", "9 trend",
 }
 
 type headerTabs struct {
