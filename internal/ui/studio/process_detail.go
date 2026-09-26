@@ -124,8 +124,8 @@ func (m Model) centerProcessDetail(panel string) string {
 }
 
 func (m Model) processDetailContentBudget() int {
-	// Studio's frame reserves two header rows and one footer row.
-	return m.height - 3
+	// Studio's frame reserves three header rows and one footer row.
+	return m.height - 4
 }
 
 func (m Model) renderCompactProcessDetail(p collector.ProcessInfo, width int) string {

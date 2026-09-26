@@ -51,8 +51,12 @@ func (m Model) diskPartitionLine(partition collector.DiskPartitionInfo, panelWid
 	if barWidth > 32 {
 		barWidth = 32
 	}
+	// If the bar won't fit, fall back to the narrow layout so rows never
+	// overflow mid-width terminals with long mount paths.
 	if barWidth < 6 {
-		barWidth = 6
+		stats := pct + " " + m.muted(collector.FormatBytes(partition.TotalBytes))
+		width := maxInt(5, innerWidth-lipgloss.Width(stats)-3)
+		return "  " + padRight(fitMetricText(partition.MountPoint, width), width) + " " + stats
 	}
 	return "  " + padRight(fitMetricText(partition.MountPoint, mountWidth), mountWidth) + "  " +
 		m.gauge(partition.UsagePercent, barWidth, 70, 90) + " " + pct + "  " + sizes
