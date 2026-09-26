@@ -6,8 +6,21 @@ const base = process.env.DOCS_BASE ?? '/'
 export default defineConfig({
   title: 'Monitor',
   description:
-    'Local-first observability for macOS and Linux with grouped issues, incident evidence, a terminal Studio, JSON CLI, and safe MCP server.',
+    'Local error tracking that points at the line, with no SDK — plus a live terminal Studio, JSON CLI and a safe MCP server for macOS and Linux.',
   lastUpdated: true,
+  // Studio is dark-first; the site opens the same way (the toggle still
+  // offers the light palette, which mirrors Studio's light variant).
+  appearance: 'dark',
+
+  markdown: {
+    container: {
+      tipLabel: 'tip',
+      infoLabel: 'info',
+      warningLabel: 'warning',
+      dangerLabel: 'danger',
+      detailsLabel: 'details',
+    },
+  },
   cleanUrls: true,
 
   // Root deploy (the monitorcli.dev custom domain on Vercel). Set
@@ -29,15 +42,15 @@ export default defineConfig({
 
     // Open Graph
     ['meta', { property: 'og:type', content: 'website' }],
-    ['meta', { property: 'og:title', content: 'Monitor — Local-first observability from your terminal' }],
-    ['meta', { property: 'og:description', content: 'A live terminal Studio, automation-ready JSON, and safe MCP tools in one local-first binary.' }],
+    ['meta', { property: 'og:title', content: 'Monitor — crashes that point at the line' }],
+    ['meta', { property: 'og:description', content: 'Crashes from Node, Deno, Bun, Python, Ruby and Go become grouped local issues with a culprit file:line. No SDK, no account.' }],
     ['meta', { property: 'og:url', content: 'https://monitorcli.dev' }],
     ['meta', { property: 'og:site_name', content: 'Monitor' }],
 
     // Twitter Card
     ['meta', { name: 'twitter:card', content: 'summary' }],
-    ['meta', { name: 'twitter:title', content: 'Monitor — Local-first observability from your terminal' }],
-    ['meta', { name: 'twitter:description', content: 'A live terminal Studio, automation-ready JSON, and safe MCP tools in one local-first binary.' }],
+    ['meta', { name: 'twitter:title', content: 'Monitor — crashes that point at the line' }],
+    ['meta', { name: 'twitter:description', content: 'Crashes from Node, Deno, Bun, Python, Ruby and Go become grouped local issues with a culprit file:line. No SDK, no account.' }],
     ['meta', { name: 'twitter:creator', content: '@abdulachik' }],
 
     // JSON-LD structured data
@@ -60,16 +73,15 @@ export default defineConfig({
 
   sitemap: { hostname: 'https://monitorcli.dev' },
   themeConfig: {
-    // VitePress applies `base` to theme assets automatically.
-    logo: { src: '/favicon.svg', alt: '' },
-    siteTitle: 'Monitor',
+    // No image logo: the nav draws the Studio's "◆ monitor" wordmark in CSS.
+    siteTitle: 'monitor',
 
     notFound: {
       code: '404',
-      title: 'PAGE NOT FOUND',
+      title: 'no such route',
       quote:
-        'No signal on this route — it is not in the process tree. Head back and keep watching what matters.',
-      linkText: 'Take me home',
+        'Nothing is listening on this path — it is not in the process tree. Head back and keep watching what matters.',
+      linkText: '← back to monitor',
     },
     nav: [
       { text: 'Install', link: '/guide/installation' },

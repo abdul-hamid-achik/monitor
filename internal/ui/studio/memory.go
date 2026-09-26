@@ -11,7 +11,6 @@ import (
 )
 
 func metricPanelWidth(width int) int {
-	width -= 4
 	if width < 20 {
 		return 20
 	}
@@ -60,7 +59,7 @@ func (m Model) renderMetricStatePanel(title, state, reason string, retry bool) s
 			lines = append(lines, "  Press r to retry; monitor doctor checks collector health.")
 		}
 	}
-	return m.panelStyle.Width(panelWidth).Render(strings.Join(lines, "\n"))
+	return m.panel(panelWidth, strings.Join(lines, "\n"))
 }
 
 func (m Model) renderMemory() string {
@@ -74,39 +73,49 @@ func (m Model) renderMemory() string {
 	if issue := metricIssue(mem.MetricStates, "virtual"); issue != "" {
 		panels = append(panels, m.renderMetricStatePanel("Physical Memory", "Unavailable", issue, true))
 	} else {
-		memBar := widgets.NewBarGauge()
-		memBar.Value = mem.UsagePercent
-		memBar.Width = metricBarWidth(m.width)
-		memBar.ShowPercent = true
-		memBar.ColorFunc = func(v float64) string { return m.theme.gaugeHex(v, 70, 90) }
-		stats := fmt.Sprintf("  Total: %s    Used: %s    Available: %s",
-			collector.FormatBytes(mem.TotalBytes), collector.FormatBytes(mem.UsedBytes), collector.FormatBytes(mem.AvailableBytes))
-		if m.width < 64 {
-			stats = fmt.Sprintf("  Total %s · Used %s\n  Available %s",
-				collector.FormatBytes(mem.TotalBytes), collector.FormatBytes(mem.UsedBytes), collector.FormatBytes(mem.AvailableBytes))
+		barWidth := maxInt(8, panelWidth-4)
+		lines := []string{
+			m.titleStyle.Render(" Physical Memory "),
+			"  " + m.bigValue(fmt.Sprintf("%.1f%%", mem.UsagePercent)) + "  " +
+				m.muted(fmt.Sprintf("%s of %s", collector.FormatBytes(mem.UsedBytes), collector.FormatBytes(mem.TotalBytes))),
+			"  " + m.gauge(mem.UsagePercent, barWidth-2, 70, 90),
+			m.statLine(m.width < 64,
+				[2]string{"total", collector.FormatBytes(mem.TotalBytes)},
+				[2]string{"used", collector.FormatBytes(mem.UsedBytes)},
+				[2]string{"available", collector.FormatBytes(mem.AvailableBytes)}),
 		}
-		panels = append(panels, m.panelStyle.Width(panelWidth).Render(
-			lipgloss.JoinVertical(lipgloss.Left, m.titleStyle.Render(" Physical Memory "), "", memBar.Render(), stats)))
+		if len(mem.History) > 1 && m.height >= 28 {
+			spark := widgets.NewSparkline()
+			spark.Data = mem.History
+			spark.Width = barWidth - 2
+			spark.Height = 3
+			spark.Min, spark.Max, spark.AutoScale = 0, 100, false
+			spark.Color = m.theme.hex(m.theme.Accent)
+			spark.AlignRight = true
+			spark.Capacity = studioHistorySize
+			lines = append(lines, "", "  "+m.muted("recent"), indentLines(spark.Render(), "  "))
+		}
+		panels = append(panels, m.panel(panelWidth, strings.Join(lines, "\n")))
 	}
 
 	if issue := metricIssue(mem.MetricStates, "swap"); issue != "" {
 		panels = append(panels, m.renderMetricStatePanel("Swap", "Unavailable", issue, true))
 	} else if mem.SwapTotal == 0 {
-		panels = append(panels, m.panelStyle.Width(panelWidth).Render(
-			lipgloss.JoinVertical(lipgloss.Left, m.titleStyle.Render(" Swap "), "", "  No swap configured · observed total 0 B")))
+		panels = append(panels, m.panel(panelWidth,
+			lipgloss.JoinVertical(lipgloss.Left, m.titleStyle.Render(" Swap "), "  "+m.muted("No swap configured · observed total 0 B"))))
 	} else {
-		swapBar := widgets.NewBarGauge()
-		swapBar.Value = float64(mem.SwapUsed) / float64(mem.SwapTotal) * 100
-		swapBar.Width = metricBarWidth(m.width)
-		swapBar.ShowPercent = true
-		stats := fmt.Sprintf("  Total: %s    Used: %s    Free: %s",
-			collector.FormatBytes(mem.SwapTotal), collector.FormatBytes(mem.SwapUsed), collector.FormatBytes(mem.SwapFree))
-		if m.width < 64 {
-			stats = fmt.Sprintf("  Total %s · Used %s\n  Free %s",
-				collector.FormatBytes(mem.SwapTotal), collector.FormatBytes(mem.SwapUsed), collector.FormatBytes(mem.SwapFree))
+		swapPercent := float64(mem.SwapUsed) / float64(mem.SwapTotal) * 100
+		lines := []string{
+			m.titleStyle.Render(" Swap "),
+			"  " + m.bigValue(fmt.Sprintf("%.1f%%", swapPercent)) + "  " +
+				m.muted(fmt.Sprintf("%s of %s", collector.FormatBytes(mem.SwapUsed), collector.FormatBytes(mem.SwapTotal))),
+			"  " + m.gauge(swapPercent, maxInt(8, panelWidth-6), 50, 80),
+			m.statLine(m.width < 64,
+				[2]string{"total", collector.FormatBytes(mem.SwapTotal)},
+				[2]string{"used", collector.FormatBytes(mem.SwapUsed)},
+				[2]string{"free", collector.FormatBytes(mem.SwapFree)}),
 		}
-		panels = append(panels, m.panelStyle.Width(panelWidth).Render(
-			lipgloss.JoinVertical(lipgloss.Left, m.titleStyle.Render(" Swap "), "", swapBar.Render(), stats)))
+		panels = append(panels, m.panel(panelWidth, strings.Join(lines, "\n")))
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, intersperseMetricPanels(panels)...)
 }

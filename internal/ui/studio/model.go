@@ -34,6 +34,11 @@ const (
 	viewCount = iota // number of tabs
 )
 
+// studioHistorySize is how many samples the live sparklines keep: one minute
+// at the default 1s interval. Charts stretch this many samples across their
+// width (Sparkline.Capacity) so a full buffer fills the panel.
+const studioHistorySize = 60
+
 type Model struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -128,7 +133,7 @@ func NewModelWithOptions(opts Options) Model {
 	if interval <= 0 {
 		interval = time.Second
 	}
-	c := collector.New(collector.Options{Interval: interval, HistorySize: 60})
+	c := collector.New(collector.Options{Interval: interval, HistorySize: studioHistorySize})
 	// NewDefaultEngine is the single rule-set source shared with `monitor
 	// watch` and the MCP/CLI analyze window (bug 17: Studio's engine used to
 	// have no ThresholdRule, so the config.json alert thresholds had no
@@ -309,37 +314,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshNow()
 			return m, nil
 		case "tab", "right", "l":
-			m.view = (m.view + 1) % viewCount
+			m.setView((m.view + 1) % viewCount)
 			return m, nil
 		case "shift+tab", "left", "h":
-			m.view = (m.view + viewCount - 1) % viewCount
+			m.setView((m.view + viewCount - 1) % viewCount)
 			return m, nil
 		case "1":
-			m.view = viewOverview
+			m.setView(viewOverview)
 			return m, nil
 		case "2":
-			m.view = viewCPU
+			m.setView(viewCPU)
 			return m, nil
 		case "3":
-			m.view = viewMemory
+			m.setView(viewMemory)
 			return m, nil
 		case "4":
-			m.view = viewTemperature
+			m.setView(viewTemperature)
 			return m, nil
 		case "5":
-			m.view = viewDisk
+			m.setView(viewDisk)
 			return m, nil
 		case "6":
-			m.view = viewNetwork
+			m.setView(viewNetwork)
 			return m, nil
 		case "7":
-			m.view = viewProcesses
+			m.setView(viewProcesses)
 			return m, nil
 		case "8":
-			m.view = viewSettings
+			m.setView(viewSettings)
 			return m, nil
 		case "9":
-			m.view = viewTrends
+			m.setView(viewTrends)
 			return m, nil
 		}
 		if m.view == viewSettings {
@@ -360,7 +365,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The identity bar occupies row 0; navigation lives on row 1.
 		if msg.Mouse().Y == 1 {
 			if v, ok := m.headerTabAt(msg.Mouse().X); ok {
-				m.view = v
+				m.setView(v)
 				return m, nil
 			}
 		}
@@ -507,23 +512,32 @@ func (m Model) statusText() string {
 }
 
 func (m Model) footerText() string {
-	left := " Tab/←→ switch · p pause · r refresh · ? help · q quit "
+	hints := [][2]string{{"tab", "switch"}, {"p", "pause"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}}
 	switch m.view {
 	case viewProcesses:
-		left = " ↑/↓ move · Enter inspect · / filter · K terminate · ? help "
+		hints = [][2]string{{"↑↓", "move"}, {"enter", "inspect"}, {"/", "filter"}, {"K", "terminate"}, {"?", "help"}}
 	case viewSettings:
-		left = " ↑/↓ select · Enter change · s save · ? help "
+		hints = [][2]string{{"↑↓", "select"}, {"enter", "change"}, {"s", "save"}, {"?", "help"}}
 	case viewTrends:
-		left = " r reload history · Tab switch · ? help · q quit "
+		hints = [][2]string{{"r", "reload history"}, {"tab", "switch"}, {"?", "help"}, {"q", "quit"}}
 	}
+	// Keycaps: the key in the accent, its action muted -- the same pairing
+	// the docs site uses for its <kbd> hints.
+	key := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Accent)
+	action := lipgloss.NewStyle().Foreground(m.theme.Muted)
+	parts := make([]string, 0, len(hints))
+	for _, h := range hints {
+		parts = append(parts, key.Render(h[0])+" "+action.Render(h[1]))
+	}
+	left := " " + strings.Join(parts, "   ") + " "
 	right := ""
 	if m.settings != nil && m.settings.UpdateInterval > 0 {
-		right = fmt.Sprintf("every %s ", m.settings.UpdateInterval)
+		right = action.Render(fmt.Sprintf("every %s ", m.settings.UpdateInterval))
 	}
 	if m.width >= 80 {
 		return joinEnds(m.width, left, right)
 	}
-	return fitText(left, m.width)
+	return operationalFit(left, m.width)
 }
 
 // thresholdMarks returns a "!" for CPU / memory when the live value meets or
@@ -548,9 +562,12 @@ func (m Model) renderHeader() string {
 	if host == "" {
 		host = "local"
 	}
-	identity := " MONITOR"
+	// Brand row: the same "◆ monitor" wordmark and "● live" pulse the docs
+	// site draws on its terminal frames.
+	left := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Accent).Render(" ◆ ") +
+		lipgloss.NewStyle().Bold(true).Foreground(m.theme.Text).Render("monitor")
 	if m.width >= 58 {
-		identity += " · " + fitText(host, 24)
+		left += lipgloss.NewStyle().Foreground(m.theme.Muted).Render("  " + fitText(host, 24))
 	}
 	stateSummary := "● " + state
 	if m.width >= 46 {
@@ -562,12 +579,10 @@ func (m Model) renderHeader() string {
 	} else if state == "WAITING" {
 		stateColor = m.theme.Muted
 	}
-	left := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Accent).Render(identity)
-	right := lipgloss.NewStyle().Bold(true).Foreground(stateColor).Render(stateSummary + " ")
+	right := lipgloss.NewStyle().Foreground(stateColor).Render(stateSummary + " ")
 	identityRow := lipgloss.NewStyle().
 		Width(maxInt(1, m.width)).
 		Foreground(m.theme.Text).
-		Background(m.theme.SurfaceAlt).
 		Render(joinEnds(m.width, left, right))
 
 	layout := m.headerLayout()
@@ -585,9 +600,9 @@ func (m Model) renderHeader() string {
 	navigation = lipgloss.NewStyle().
 		Width(maxInt(1, m.width)).
 		Foreground(m.theme.Text).
-		Background(m.theme.Surface).
 		Render(navigation)
-	return lipgloss.JoinVertical(lipgloss.Left, identityRow, navigation)
+	rule := lipgloss.NewStyle().Foreground(m.theme.Border).Render(strings.Repeat("─", maxInt(1, m.width)))
+	return lipgloss.JoinVertical(lipgloss.Left, identityRow, navigation, rule)
 }
 
 func (m Model) renderTinyFrame() string {
@@ -662,7 +677,7 @@ func (m Model) renderOverview() string {
 
 func (m Model) renderSettings() string {
 	if m.settings == nil {
-		return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Settings ") + "\n\nNo settings loaded.")
+		return m.panel(m.width, m.titleStyle.Render(" Settings ")+"\n\nNo settings loaded.")
 	}
 	s := m.settings
 	showSys := "OFF"
@@ -677,33 +692,39 @@ func (m Model) renderSettings() string {
 	if s.MemoryAlertThreshold > 0 {
 		memAlert = fmt.Sprintf("%.0f%%", s.MemoryAlertThreshold)
 	}
-	rows := []string{
-		fmt.Sprintf("  Update Interval:      %s", s.UpdateInterval),
-		fmt.Sprintf("  Temperature Unit:     °%s", s.TemperatureUnit),
-		fmt.Sprintf("  Show System Procs:    %s", showSys),
-		fmt.Sprintf("  Max Processes:        %d", s.MaxProcesses),
-		fmt.Sprintf("  Mouse Enabled:        %t", s.MouseEnabled),
-		fmt.Sprintf("  CPU Alert Threshold:  %s", cpuAlert),
-		fmt.Sprintf("  Memory Alert Threshold: %s", memAlert),
+	settings := [][2]string{
+		{"Update interval", s.UpdateInterval.String()},
+		{"Temperature unit", "°" + s.TemperatureUnit},
+		{"System processes", showSys},
+		{"Max processes", fmt.Sprintf("%d", s.MaxProcesses)},
+		{"Mouse", fmt.Sprintf("%t", s.MouseEnabled)},
+		{"CPU alert", cpuAlert},
+		{"Memory alert", memAlert},
 	}
-	// Mark the selected row.
+	// The selected row gets Studio's "▸" pointer and the accent; the rest
+	// pair a muted label with a bright value, as every other panel does.
 	sel := lipgloss.NewStyle().Foreground(m.theme.Accent).Bold(true)
-	for i := range rows {
+	rows := make([]string, len(settings))
+	for i, kv := range settings {
 		if i == m.settingsCursor {
-			rows[i] = sel.Render("▸" + rows[i][1:])
+			rows[i] = sel.Render(fmt.Sprintf("▸ %-18s %s", kv[0], kv[1]))
+			continue
 		}
+		rows[i] = m.kv(kv[0], 18, kv[1])
 	}
 	body := strings.Join(rows, "\n")
-	hint := "  ↑/↓ select  ·  enter/space change  ·  - back  ·  s save"
+	key := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Accent)
+	hint := "  " + key.Render("↑↓") + m.muted(" select   ") + key.Render("enter") + m.muted(" change   ") +
+		key.Render("-") + m.muted(" back   ") + key.Render("s") + m.muted(" save")
 	if m.settingsSaved {
-		hint += "   ✓ saved"
+		hint += lipgloss.NewStyle().Foreground(m.theme.Good).Render("   ✓ saved")
 	} else if m.settingsErr != "" {
-		hint += "   ⚠ " + m.settingsErr
+		hint += lipgloss.NewStyle().Foreground(m.theme.Critical).Render("   ⚠ " + m.settingsErr)
 	} else if m.settingsDirty {
-		hint += "   ● unsaved"
+		hint += lipgloss.NewStyle().Foreground(m.theme.Warning).Render("   ● unsaved")
 	}
-	footer := "\n" + lipgloss.NewStyle().Foreground(m.theme.Muted).Render(hint)
-	return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Settings ") + "\n\n" + body + footer)
+	footer := "\n" + hint
+	return m.panel(m.width, m.titleStyle.Render(" Settings ")+"\n"+body+"\n"+footer)
 }
 
 // formatTemp renders a Celsius reading honoring the configured TemperatureUnit
@@ -729,17 +750,50 @@ func (m Model) renderTemperature() string {
 	}
 
 	badge := m.tempBadge(temp.Source)
-	rows := []string{m.titleStyle.Render(" Sensor Readings "), "", "  Source:" + badge,
-		fmt.Sprintf("  CPU Package  %s · %s", m.formatTemp(temp.CPUPackage), gaugeLabel(temp.CPUPackage)),
-		fmt.Sprintf("  CPU Cores    %s · %s", m.formatTemp(temp.CPUCores), gaugeLabel(temp.CPUCores)),
-		fmt.Sprintf("  GPU          %s · %s", m.formatTemp(temp.GPU), gaugeLabel(temp.GPU)),
-		fmt.Sprintf("  ANE          %s · %s", m.formatTemp(temp.ANE), gaugeLabel(temp.ANE)),
-		fmt.Sprintf("  Battery      %s · %s", m.formatTemp(temp.Battery), gaugeLabel(temp.Battery)),
+	contentWidth := metricPanelWidth(m.width) - m.panelStyle.GetHorizontalFrameSize()
+	barWidth := minInt(40, contentWidth-36)
+	sensor := func(label string, c float64) string {
+		state := lipgloss.NewStyle().Foreground(m.theme.Good)
+		switch {
+		case c >= 85:
+			state = lipgloss.NewStyle().Foreground(m.theme.Critical)
+		case c >= 70:
+			state = lipgloss.NewStyle().Foreground(m.theme.Warning)
+		}
+		if barWidth < 6 {
+			return operationalFit(m.kv(label, 12, m.formatTemp(c))+" "+state.Render(gaugeLabel(c)), contentWidth)
+		}
+		// The bar spans 0-100 °C whatever the display unit.
+		return m.kv(label, 12, m.formatTemp(c)) + "  " + m.gauge(c, barWidth, 70, 85) + "  " + state.Render(gaugeLabel(c))
 	}
-	fan := "  Fan unavailable · restricted SMC keys"
+	rows := []string{m.titleStyle.Render(" Sensor Readings "), m.kv("source", 12, strings.TrimSpace(badge)),
+		"",
+		sensor("CPU Package", temp.CPUPackage),
+		sensor("CPU Cores", temp.CPUCores),
+		sensor("GPU", temp.GPU),
+		sensor("ANE", temp.ANE),
+		sensor("Battery", temp.Battery),
+	}
+	fan := m.kv("Fan", 12, m.muted("unavailable · restricted SMC keys"))
 	if temp.FanRPM > 0 || temp.FanMode != "" {
-		fan = fmt.Sprintf("  Fan          %d RPM · %s", temp.FanRPM, temp.FanMode)
+		fan = m.kv("Fan", 12, fmt.Sprintf("%d RPM · %s", temp.FanRPM, temp.FanMode))
 	}
-	rows = append(rows, "", fan)
-	return m.panelStyle.Width(metricPanelWidth(m.width)).Render(strings.Join(rows, "\n"))
+	rows = append(rows, "", operationalFit(fan, contentWidth))
+	return m.panel(metricPanelWidth(m.width), strings.Join(rows, "\n"))
+}
+
+// setView switches tabs and brings the new tab's cached state up to date
+// with the latest snapshot. The process table and the Trends cache are
+// otherwise only refreshed on the next tick while their tab is visible, so
+// entering them would show stale (or no) rows for up to an interval.
+func (m *Model) setView(v viewID) {
+	m.view = v
+	switch v {
+	case viewProcesses:
+		m.updateProcessTable()
+	case viewTrends:
+		if m.trendsAt.IsZero() || time.Since(m.trendsAt) > 5*time.Second {
+			m.refreshTrends()
+		}
+	}
 }

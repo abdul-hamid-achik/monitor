@@ -78,7 +78,7 @@ func TestOperationalOverviewResponsiveCockpit(t *testing.T) {
 			got := m.renderOperationalOverview()
 			plain := ansi.Strip(got)
 			for _, want := range []string{
-				"CPU", "MEMORY", "THERMAL", "DISK", "ACTIVITY", "TOP CPU PROCESSES", "node", "real",
+				"CPU", "Memory", "Thermal", "Disk", "Activity", "Top CPU", "node", "real",
 			} {
 				if !strings.Contains(plain, want) {
 					t.Errorf("overview missing %q:\n%s", want, plain)
@@ -147,7 +147,7 @@ func TestOperationalOverviewAttentionRail(t *testing.T) {
 	m := operationalOverviewFixture(t, 120, 40)
 	m.last.CPU.UsagePercent = 85
 	plain := ansi.Strip(m.renderOperationalOverview())
-	if !strings.Contains(plain, "ATTENTION | CPU 85.0% >= 80% threshold") {
+	if !strings.Contains(plain, "─ Attention ─") || !strings.Contains(plain, "● CPU 85.0% >= 80% threshold") {
 		t.Fatalf("threshold attention is missing:\n%s", plain)
 	}
 
@@ -157,7 +157,7 @@ func TestOperationalOverviewAttentionRail(t *testing.T) {
 		"usage": {State: collector.MetricUnavailable, Reason: "sampler failed"},
 	}
 	plain = ansi.Strip(m.renderOperationalOverview())
-	if !strings.Contains(plain, "ATTENTION | CPU unavailable | sampler failed") {
+	if !strings.Contains(plain, "─ Attention ─") || !strings.Contains(plain, "● CPU unavailable | sampler failed") {
 		t.Fatalf("metric-state degradation is missing:\n%s", plain)
 	}
 }
@@ -169,7 +169,7 @@ func TestOperationalOverviewSurfacesAnalyzerAlert(t *testing.T) {
 		Detail: "node (pid 8421) at 82.3% vs 24.1% baseline",
 	}}
 	plain := ansi.Strip(m.renderOperationalOverview())
-	if !strings.Contains(plain, "ATTENTION | CPU SPIKE | node (pid 8421)") {
+	if !strings.Contains(plain, "─ Attention ─") || !strings.Contains(plain, "● CPU SPIKE | node (pid 8421)") {
 		t.Fatalf("analyzer finding is missing from the attention rail:\n%s", plain)
 	}
 }
@@ -194,7 +194,7 @@ func TestOperationalOverviewPrefersStartupDiskOverPseudoMount(t *testing.T) {
 	}
 
 	value, note := m.operationalDiskSummary()
-	if value != "96.0%" || !strings.Contains(note, "/ |") {
+	if value != "96.0%" || !strings.Contains(note, "/ ·") {
 		t.Fatalf("disk summary = %q, %q; want startup volume rather than devfs", value, note)
 	}
 }

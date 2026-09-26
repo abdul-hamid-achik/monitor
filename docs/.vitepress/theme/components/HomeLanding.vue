@@ -1,270 +1,262 @@
 <script setup lang="ts">
 import { withBase } from 'vitepress'
 import CommandCopy from './CommandCopy.vue'
-import InstallPanel from './InstallPanel.vue'
-import SignalFlow from './SignalFlow.vue'
-import TerminalMockup from './TerminalMockup.vue'
 
 const installCommand = 'brew install --cask abdul-hamid-achik/tap/monitor'
+
+// Read-only tools answer freely; mutating ones refuse without confirm:true.
+const tools = [
+  ['monitor_issue', 'read'],
+  ['monitor_issues', 'read'],
+  ['monitor_analyze', 'read'],
+  ['monitor_snapshot', 'read'],
+  ['monitor_processes', 'read'],
+  ['monitor_doctor', 'read'],
+  ['monitor_profile_capture', 'confirm'],
+  ['monitor_investigate', 'confirm'],
+  ['monitor_record', 'confirm'],
+  ['monitor_kill', 'confirm'],
+]
+
+// The Studio replica draws the same data shapes the TUI does: KPI gauges
+// coloured by threshold, 60 one-second samples per activity chart, and a
+// PID/NAME/CPU process list.
+const kpis = [
+  { label: 'CPU', value: '32.3%', note: '10 cores', fill: 32, tone: 'good' },
+  { label: 'Memory', value: '78.9%', note: '12.6 GB / 16.0 GB', fill: 79, tone: 'warn' },
+  { label: 'Thermal', value: '52.0 C', note: 'real sensor', fill: 52, tone: 'good' },
+  { label: 'Disk', value: '73.0%', note: '/ · 365.0 GB used', fill: 73, tone: 'warn' },
+]
+const cpuSeries = [
+  24, 31, 30, 32, 29, 28, 30, 35, 41, 38, 33, 30, 31, 29, 34, 45, 52, 47, 36, 31,
+  30, 29, 31, 35, 37, 33, 30, 28, 31, 30, 34, 38, 36, 31, 30, 29, 33, 36, 34, 31,
+  30, 58, 66, 44, 34, 31, 30, 33, 36, 34, 31, 30, 29, 31, 33, 35, 40, 37, 34, 32,
+]
+const memSeries = cpuSeries.map((_, i) => 77 + ((i * 7) % 5) * 0.4 + (i > 40 ? 1.2 : 0))
+// Mirrors docs/guide/runtimes.md: every runtime gets crash parsing; hot
+// lines depend on what the runtime's profiler exposes.
+const runtimes = [
+  { name: 'node', hot: 'live', ok: true },
+  { name: 'deno', hot: 'live', ok: true },
+  { name: 'bun', hot: 'at exit', ok: true },
+  { name: 'go', hot: 'pprof', ok: true },
+  { name: 'python', hot: 'errors only', ok: false },
+  { name: 'ruby', hot: 'errors only', ok: false },
+]
+const topCPU = [
+  ['8421', 'node', '82.3%'],
+  ['9102', 'chrome', '12.7%'],
+  ['7788', 'go', '8.3%'],
+  ['1324', 'WebKit.GPU', '5.4%'],
+  ['4410', 'ghostty', '2.9%'],
+  ['3155', 'postgres', '1.6%'],
+  ['662', 'Finder', '0.4%'],
+]
 </script>
 
 <template>
-  <div class="monitor-home">
-    <section class="home-hero">
-      <div class="hero-grid home-shell">
-        <div class="hero-copy">
-          <a
-            class="release-pill"
-            href="https://github.com/abdul-hamid-achik/monitor/releases/tag/v1.15.1"
-          >
-            <span aria-hidden="true" />
-            v1.15.1 is live
-            <i aria-hidden="true">↗</i>
-          </a>
-
-          <p class="hero-kicker">Local observability for developers and agents</p>
-          <h1>
-            Catch the process
-            <span>before the evidence disappears.</span>
-          </h1>
-          <p class="hero-lede">
-            Monitor turns volatile machine state into grouped local issues,
-            bounded diagnoses, and durable evidence—without an account, a
-            daemon, or a cloud dependency.
-          </p>
-
-          <div class="hero-actions">
-            <a class="home-button primary" :href="withBase('/guide/getting-started')">
-              Start investigating
-              <span aria-hidden="true">→</span>
-            </a>
-            <a class="home-button secondary" :href="withBase('/guide/mcp')">
-              Connect an agent
-            </a>
-          </div>
-
-          <CommandCopy class="hero-command" :command="installCommand" />
-
-          <div class="hero-proof" aria-label="Supported interfaces and platforms">
-            <span><i aria-hidden="true" /> Local-first</span>
-            <span>Studio + JSON + MCP</span>
-            <span>macOS + Linux</span>
-          </div>
-        </div>
-
-        <div class="hero-visual">
-          <div class="visual-label">
-            <span>Live machine state</span>
-            <span><i aria-hidden="true" /> collecting · 1s</span>
-          </div>
-          <TerminalMockup />
-
-          <aside class="issue-receipt" aria-label="Detected issue summary">
-            <div>
-              <span>Issue · ISS-5F8E3A1C9D42B760</span>
-              <strong>CPU spike recurring</strong>
-            </div>
-            <dl>
-              <div><dt>process</dt><dd>node · 8421</dd></div>
-              <div><dt>events</dt><dd>7 grouped</dd></div>
-              <div><dt>evidence</dt><dd>verified</dd></div>
-            </dl>
-          </aside>
-        </div>
-      </div>
-    </section>
-
-    <dl class="signal-rail home-shell">
-      <div>
-        <dt>01</dt>
-        <dd><strong>One collector</strong><span>Every interface sees the same facts</span></dd>
-      </div>
-      <div>
-        <dt>02</dt>
-        <dd><strong>Local issue model</strong><span>Events grouped into durable threads</span></dd>
-      </div>
-      <div>
-        <dt>03</dt>
-        <dd><strong>Bounded by default</strong><span>Stable JSON and intentional limits</span></dd>
-      </div>
-      <div>
-        <dt>04</dt>
-        <dd><strong>Agent-safe actions</strong><span>Typed input plus confirmation gates</span></dd>
-      </div>
-    </dl>
-
-    <section class="home-section investigation-section">
-      <div class="home-shell">
-        <header class="section-heading investigation-heading">
-          <div>
-            <span class="section-kicker">A complete local investigation</span>
-            <h2>From a transient spike to evidence you can keep.</h2>
-          </div>
-          <p>
-            Monitor follows one coherent path from live signal to issue,
-            diagnosis, and incident bundle. Select a stage to see the contract
-            exposed to both humans and agents.
-          </p>
-        </header>
-
-        <SignalFlow />
-      </div>
-    </section>
-
-    <section class="home-section surfaces-section">
-      <div class="home-shell">
-        <header class="section-heading">
-          <div>
-            <span class="section-kicker">One model, three surfaces</span>
-            <h2>Stay visual. Go scriptable. Hand off safely.</h2>
-          </div>
-          <p>
-            Use the interface that matches the moment without changing the
-            underlying process model, safety rules, or evidence format.
-          </p>
-        </header>
-
-        <div class="surface-grid">
-          <article class="surface-card studio-card">
-            <div class="card-topline"><span>01 / Studio</span><i>human</i></div>
-            <div class="studio-card-copy">
-              <h3>The machine, composed for focus.</h3>
-              <p>
-                Nine keyboard-driven views keep live metrics, trends,
-                processes, settings, and actions close without becoming a wall of
-                dashboards.
-              </p>
-              <a :href="withBase('/guide/tui')">Explore Studio <span aria-hidden="true">→</span></a>
-            </div>
-            <div class="studio-mini" aria-hidden="true">
-              <div><span>CPU</span><strong>82.3%</strong><i>high</i></div>
-              <svg viewBox="0 0 420 96" preserveAspectRatio="none">
-                <path d="M0 76 L34 70 L68 73 L102 50 L136 59 L170 43 L204 47 L238 22 L272 35 L306 14 L340 27 L374 9 L420 18" />
-              </svg>
-            </div>
-          </article>
-
-          <article class="surface-card cli-card">
-            <div class="card-topline"><span>02 / CLI</span><i>automation</i></div>
-            <h3>Signal that pipes cleanly.</h3>
-            <p>
-              One-shot JSON, streaming NDJSON, stable exit codes, and bounded
-              outputs fit scripts and CI without a translation layer.
-            </p>
-            <pre><code><span>$</span> monitor snapshot --compact | jq '.cpu.usage_percent'
-18.4</code></pre>
-            <a :href="withBase('/guide/cli')">Read the CLI guide <span aria-hidden="true">→</span></a>
-          </article>
-
-          <article class="surface-card mcp-card">
-            <div class="card-topline"><span>03 / MCP</span><i>agents</i></div>
-            <h3>Context with sharp edges.</h3>
-            <p>
-              Ten typed tools advertise read-only, destructive, and idempotent
-              behavior. Mutations require confirmation and still honor process
-              protection.
-            </p>
-            <div class="tool-stack">
-              <div><code>monitor_analyze</code><span>read-only</span></div>
-              <div><code>monitor_issues</code><span>read-only</span></div>
-              <div><code>monitor_kill</code><span>confirm</span></div>
-            </div>
-            <a :href="withBase('/guide/mcp')">Configure MCP <span aria-hidden="true">→</span></a>
-          </article>
-        </div>
-      </div>
-    </section>
-
-    <section class="ecosystem-section">
-      <div class="home-shell ecosystem-grid">
-        <div class="ecosystem-copy">
-          <span class="section-kicker">Local developer stack</span>
-          <h2>Built to outlive an ephemeral environment.</h2>
-          <p>
-            Monitor observes the run. Chalupa provides the environment.
-            file.cheap retains its artifacts. codemap and vecgrep add code and
-            semantic context when an investigation needs to go deeper.
-          </p>
-          <a :href="withBase('/guide/ecosystem')">
-            See integration contracts <span aria-hidden="true">→</span>
-          </a>
-        </div>
-
-        <div
-          class="ecosystem-map"
-          role="group"
-          aria-label="Monitor ecosystem integration map"
-        >
-          <div class="ecosystem-core">
-            <img :src="withBase('/favicon.svg')" alt="" />
-            <span>observe + group</span>
-            <strong>Monitor</strong>
-          </div>
-          <div class="ecosystem-node chalupa"><span>environment</span><strong>chalupa.run</strong></div>
-          <div class="ecosystem-node fcheap"><span>artifacts</span><strong>file.cheap</strong></div>
-          <div class="ecosystem-node codemap"><span>code context</span><strong>codemap</strong></div>
-          <div class="ecosystem-node vecgrep"><span>semantic search</span><strong>vecgrep</strong></div>
-          <svg viewBox="0 0 600 360" preserveAspectRatio="none" aria-hidden="true">
-            <path d="M300 180 C218 180 208 76 128 76" />
-            <path d="M300 180 C382 180 392 76 472 76" />
-            <path d="M300 180 C218 180 208 284 128 284" />
-            <path d="M300 180 C382 180 392 284 472 284" />
-          </svg>
-        </div>
-      </div>
-    </section>
-
-    <section class="safety-section home-shell">
-      <div class="safety-copy">
-        <span class="section-kicker">Agent-safe by construction</span>
-        <h2>Read freely.<br />Mutate deliberately.</h2>
-        <p>
-          Read-only tools return bounded structured context. Actions such as
-          killing or profiling require <code>confirm: true</code>, then pass the
-          same protected-process checks used by Studio and the CLI.
+  <div class="home">
+    <!-- ── Hero ───────────────────────────────────────────────────────── -->
+    <section class="shell hero">
+      <div class="hero-copy">
+        <p class="eyebrow">
+          <span class="live-dot">●</span> v2.0.0 · local-first · macOS + Linux
         </p>
-        <a :href="withBase('/guide/safety')">Review the safety model <span aria-hidden="true">→</span></a>
+        <h1>Crashes that point<br />at the line.</h1>
+        <p class="lede">
+          Wrap any command in <code>monitor run</code>. Crashes from Node, Deno,
+          Bun, Python, Ruby and Go become grouped issues with a culprit
+          <code>file:line</code>, the source around it and the commit that last
+          touched it. No SDK. No account. Nothing leaves your machine.
+        </p>
+        <div class="actions">
+          <a class="btn primary" :href="withBase('/guide/first-issue')">Your first issue →</a>
+          <a class="btn" href="https://github.com/abdul-hamid-achik/monitor">GitHub</a>
+        </div>
+        <CommandCopy class="install" :command="installCommand" />
       </div>
 
-      <figure class="safety-code">
-        <figcaption><span>MCP request</span><i>destructiveHint: true</i></figcaption>
-        <strong>monitor_kill</strong>
-        <pre><code>{
-  "pid": <span>8421</span>,
-  "force": <span>false</span>,
-  "confirm": <span>true</span>
-}</code></pre>
-        <p><i aria-hidden="true" /> typed input accepted · protection checks pending</p>
-      </figure>
+      <aside class="tf runtimes" aria-label="Supported runtimes">
+        <span class="tf-title">runtimes</span>
+        <table>
+          <thead><tr><th /><th>crashes</th><th>hot lines</th></tr></thead>
+          <tbody>
+            <tr v-for="rt in runtimes" :key="rt.name">
+              <td>{{ rt.name }}</td>
+              <td><span class="good">●</span></td>
+              <td :class="rt.ok ? '' : 'dim'"><span :class="rt.ok ? 'good' : 'dim'">{{ rt.ok ? '●' : '○' }}</span> {{ rt.hot }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <a :href="withBase('/guide/runtimes')">runtimes matrix →</a>
+      </aside>
     </section>
 
-    <section class="home-section install-section">
-      <div class="home-shell">
-        <header class="section-heading install-heading">
-          <div>
-            <span class="section-kicker">Install Monitor</span>
-            <h2>One binary. Your machine stays yours.</h2>
+    <!-- The hero visual is a terminal drawn with Studio's own chrome. -->
+    <section class="shell">
+      <div class="term" aria-label="Example terminal session">
+        <div class="term-bar">
+          <span><b class="accent">◆</b> <b>monitor</b> <i>~/shop</i></span>
+          <span class="live-dot">● live</span>
+        </div>
+        <pre class="term-body"><span class="dim">$</span> monitor run -- node src/server.js
+<span class="accent">monitor &gt;</span> <span class="dim">node src/server.js · pid 99880 · shop/node · scanning stderr</span>
+<span class="crit">TypeError: Cannot read properties of undefined (reading 'amount')</span>
+<span class="dim">    at applyDiscount (src/cart.js:3:31)
+    at checkout (src/cart.js:7:17)
+    at handle (src/server.js:4:10)</span>
+<span class="accent">monitor &gt;</span> <b class="warn">NEW BA42</b> fatal TypeError … <b>src/cart.js:3</b> applyDiscount()
+
+<span class="dim">$</span> monitor issue latest
+<b>BA42</b>  TypeError: Cannot read properties of undefined (reading 'amount')  <span class="dim">new · fatal</span>
+<span class="dim">shop / node · first seen just now · 1 event</span>
+
+<b class="accent">CULPRIT</b>  src/cart.js:3 in applyDiscount()
+<span class="dim">     2 |   const rule = cart.discounts[code];</span>
+<span class="hl">&gt;    3 |   return cart.subtotal - rule.amount;</span>
+<span class="dim">     4 | }</span>
+<b class="accent">TOUCHED</b>  f2dc0d0 "feat: spring discount"  <span class="dim">just now · local git blame</span>
+<b class="accent">NEXT</b>     monitor issue ba42 --md   <span class="dim">paste-ready fix context for your agent</span>
+
+<span class="dim">$</span> <span class="cursor" aria-hidden="true"></span></pre>
+        <div class="keys term-foot">
+          <span><b>run</b>catch</span>
+          <span><b>issue</b>explain</span>
+          <span><b>hot</b>profile</span>
+          <span><b>studio</b>watch</span>
+          <span><b>mcp</b>hand off</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Three commands ────────────────────────────────────────────── -->
+    <section class="shell block">
+      <header class="head">
+        <h2>Three commands, one loop.</h2>
+        <p>Catch it, explain it, find the hot line. Every step also speaks <code>--json</code>.</p>
+      </header>
+      <div class="steps">
+        <article class="tf">
+          <span class="tf-title">1 run</span>
+          <p>Launch through monitor. Output still streams to your terminal first; crashes are parsed, scrubbed and grouped.</p>
+          <pre><span class="dim">$</span> monitor run -- python app.py
+<span class="accent">monitor &gt;</span> <b class="warn">NEW 7C1E</b> KeyError app.py:42</pre>
+        </article>
+        <article class="tf">
+          <span class="tf-title">2 issue</span>
+          <p>One command explains an issue: snippet, chained causes, blast radius, last commit. <code>--md</code> hands it to an agent.</p>
+          <pre><span class="dim">$</span> monitor issues
+<span class="dim">ID    EVENTS  WHERE</span>
+BA42  12      src/cart.js:3</pre>
+        </article>
+        <article class="tf">
+          <span class="tf-title">3 hot</span>
+          <p>Which line inside a function burns CPU. Node, Deno, Bun and Go profiles, resolved through source maps.</p>
+          <pre><span class="dim">heavyStringify · hot.js:3-6 · 95.8% self</span>
+   4 | 32.7% <span class="bar" style="--w: 8ch" />
+<span class="hl">&gt;  5 | 66.1% <span class="bar" style="--w: 17ch" /></span></pre>
+        </article>
+      </div>
+    </section>
+
+    <!-- ── Studio ───────────────────────────────────────────────────── -->
+    <section class="shell block">
+      <header class="head">
+        <h2>And when you want to watch it live.</h2>
+        <p><code>monitor studio</code> is the same frames, the same colors, driven by the keyboard. What you see on this page is what you get in the terminal.</p>
+      </header>
+
+      <div class="studio" aria-label="monitor studio overview">
+        <div class="term-bar">
+          <span><b class="accent">◆</b> <b>monitor</b> <i>macbook-pro</i></span>
+          <span class="live-dot">● LIVE · sampled 22:48:26</span>
+        </div>
+        <div class="studio-tabs">
+          <span class="on">▸1 overview</span><span>2 cpu</span><span>3 memory</span><span>4 thermal</span><span>5 disk</span><span>6 network</span><span>7 processes</span><span>8 settings</span><span>9 trends</span>
+        </div>
+        <div class="studio-grid">
+          <div v-for="kpi in kpis" :key="kpi.label" class="tf kpi">
+            <span class="tf-title">{{ kpi.label }}</span>
+            <b>{{ kpi.value }}</b>
+            <span class="gauge" :class="kpi.tone"><i :style="{ width: kpi.fill + '%' }" /></span>
+            <em>{{ kpi.note }}</em>
           </div>
-          <p>
-            Start with the maintained Homebrew tap, download a release archive,
-            or build from source. No account or background service required.
-          </p>
-        </header>
-        <InstallPanel />
+          <div class="tf wide">
+            <span class="tf-title">Activity · 60s</span>
+            <div class="series"><span>CPU</span><b>32.3%</b></div>
+            <div class="chart accent-bars" aria-hidden="true">
+              <i v-for="(v, i) in cpuSeries" :key="i" :style="{ height: v + '%' }" />
+            </div>
+            <div class="series"><span>MEM</span><b>78.9%</b></div>
+            <div class="chart good-bars" aria-hidden="true">
+              <i v-for="(v, i) in memSeries" :key="i" :style="{ height: v + '%' }" />
+            </div>
+          </div>
+          <div class="tf side">
+            <span class="tf-title">Top CPU</span>
+            <table class="procs">
+              <thead><tr><th>PID</th><th>NAME</th><th>CPU</th></tr></thead>
+              <tbody>
+                <tr v-for="[pid, name, cpu] in topCPU" :key="pid"><td>{{ pid }}</td><td>{{ name }}</td><td>{{ cpu }}</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="tf full">
+            <span class="tf-title">Attention</span>
+            <pre><span class="warn">●</span> CPU SPIKE | node (pid 8421) at 82.3% vs 24.1% baseline</pre>
+          </div>
+        </div>
+        <div class="keys term-foot">
+          <span><b>tab</b>switch</span><span><b>p</b>pause</span><span><b>r</b>refresh</span><span><b>?</b>help</span><span><b>q</b>quit</span>
+        </div>
       </div>
+      <p class="more"><a :href="withBase('/guide/tui')">Studio guide →</a></p>
     </section>
 
-    <section class="home-cta">
-      <div class="home-shell cta-inner">
+    <!-- ── Agents ───────────────────────────────────────────────────── -->
+    <section class="shell block">
+      <header class="head">
+        <h2>Built for agents, safe by default.</h2>
+        <p>Ten MCP tools share one service with the CLI. Reads return bounded, scrubbed context; anything that acts refuses without <code>confirm: true</code>.</p>
+      </header>
+      <div class="agents">
+        <div class="tf">
+          <span class="tf-title">mcp.json</span>
+          <pre>{
+  "mcpServers": {
+    "monitor": {
+      "command": "<span class="accent">monitor</span>",
+      "args": ["mcp", "serve"]
+    }
+  }
+}</pre>
+        </div>
+        <div class="tf">
+          <span class="tf-title">tools</span>
+          <ul class="tools">
+            <li v-for="[name, kind] in tools" :key="name">
+              <code>{{ name }}</code>
+              <span :class="kind === 'confirm' ? 'warn' : 'good'">{{ kind === 'confirm' ? 'confirm' : 'read-only' }}</span>
+            </li>
+          </ul>
+        </div>
+      </div>
+      <p class="more"><a :href="withBase('/guide/mcp')">MCP guide →</a> <a :href="withBase('/guide/safety')">Safety model →</a></p>
+    </section>
+
+    <!-- ── Install ──────────────────────────────────────────────────── -->
+    <section class="shell block last">
+      <div class="tf cta">
+        <span class="tf-title">install</span>
         <div>
-          <span class="section-kicker">The next incident starts locally</span>
-          <h2>Keep the signal.<br />Lose the guesswork.</h2>
+          <h2>One binary. Your machine stays yours.</h2>
+          <p>No daemon, no account, no cloud. Homebrew, a release archive, or <code>go build</code>.</p>
         </div>
         <div class="cta-side">
-          <p>Install Monitor, open Studio, and turn the next unexplained spike into evidence.</p>
-          <div class="cta-actions">
-            <a class="home-button primary" :href="withBase('/guide/getting-started')">Open the guide <span aria-hidden="true">→</span></a>
-            <a class="home-button secondary" href="https://github.com/abdul-hamid-achik/monitor">View source</a>
+          <CommandCopy :command="installCommand" />
+          <div class="actions">
+            <a class="btn primary" :href="withBase('/guide/installation')">Install guide →</a>
+            <a class="btn" :href="withBase('/guide/getting-started')">Getting started</a>
           </div>
         </div>
       </div>
@@ -273,545 +265,456 @@ const installCommand = 'brew install --cask abdul-hamid-achik/tap/monitor'
 </template>
 
 <style scoped>
-.monitor-home {
-  --home-line: var(--vp-c-divider);
-  overflow: hidden;
+.home {
+  --mono: var(--vp-font-family-mono);
   color: var(--vp-c-text-1);
 }
 
-.home-shell {
-  width: min(1240px, calc(100% - 56px));
+.shell {
+  width: min(1120px, calc(100% - 48px));
   margin: 0 auto;
 }
 
-.home-hero {
-  position: relative;
-  padding: clamp(86px, 9vw, 132px) 0 112px;
-  background: linear-gradient(180deg, var(--vp-c-bg) 0%, var(--vp-c-bg) 74%, var(--vp-c-bg-alt) 100%);
-}
-
-.home-hero::before {
-  position: absolute;
-  inset: 0;
-  background-image: linear-gradient(var(--home-line) 1px, transparent 1px),
-    linear-gradient(90deg, var(--home-line) 1px, transparent 1px);
-  background-size: 72px 72px;
-  content: '';
-  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.22), transparent 68%);
-  opacity: 0.55;
-  pointer-events: none;
-}
-
-.hero-grid {
-  position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 0.78fr) minmax(590px, 1.22fr);
-  gap: clamp(54px, 7vw, 104px);
-  align-items: center;
-}
-
-.hero-copy {
-  position: relative;
-  z-index: 2;
-}
-
-.release-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  margin-bottom: 32px;
+code {
+  white-space: nowrap;
   border: 1px solid var(--vp-c-divider);
-  border-radius: 999px;
-  padding: 7px 11px;
-  background: color-mix(in srgb, var(--vp-c-bg-elv) 76%, transparent);
-  color: var(--vp-c-text-2);
-  font-family: var(--vp-font-family-mono);
-  font-size: 10px;
-  font-weight: 620;
-  letter-spacing: 0.04em;
-  text-decoration: none;
-  transition: border-color 160ms ease, color 160ms ease, transform 160ms ease;
+  border-radius: 4px;
+  padding: 1px 5px;
+  background: var(--vp-c-bg-soft);
+  font-family: var(--mono);
+  font-size: 0.86em;
 }
 
-.release-pill:hover {
-  border-color: color-mix(in srgb, var(--vp-c-brand-1) 48%, var(--vp-c-divider));
-  color: var(--vp-c-text-1);
-  transform: translateY(-1px);
-}
-
-.release-pill > span {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #55a87d;
-  box-shadow: 0 0 0 4px rgba(85, 168, 125, 0.12);
-}
-
-.release-pill i {
-  color: var(--vp-c-brand-1);
-  font-style: normal;
-}
-
-.hero-kicker,
-.section-kicker {
+pre {
   margin: 0;
-  color: var(--vp-c-brand-1);
-  font-family: var(--vp-font-family-mono);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.13em;
-  text-transform: uppercase;
-}
-
-.hero-copy h1 {
-  max-width: 10.8ch;
-  margin: 18px 0 24px;
+  overflow-x: auto;
   color: var(--vp-c-text-1);
-  font-size: clamp(52px, 6.2vw, 78px);
-  font-weight: 685;
-  letter-spacing: -0.064em;
-  line-height: 0.96;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.65;
 }
 
-.hero-copy h1 span {
-  display: block;
+.accent { color: var(--vp-c-brand-1); }
+.good { color: var(--m-good); }
+.warn { color: var(--m-warn); }
+.crit { color: var(--m-crit); }
+.dim { color: var(--vp-c-text-3); }
+
+/* The culprit line: Studio's selected-row treatment. */
+.hl {
+  display: inline-block;
+  min-width: 100%;
+  background: var(--vp-c-brand-1);
+  color: var(--m-select-fg);
+  font-weight: 600;
+}
+
+/* Profile bars: CSS blocks, since box-drawing █ leaves gaps in Geist Mono. */
+.bar {
+  display: inline-block;
+  width: var(--w);
+  height: 0.9em;
+  vertical-align: -0.1em;
+  background: currentColor;
+}
+
+pre > .bar { color: var(--vp-c-brand-1); }
+
+/* Hero */
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 48px;
+  align-items: end;
+  padding: clamp(56px, 8vw, 96px) 0 48px;
+}
+
+.runtimes {
+  padding: 22px 18px 16px;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.runtimes table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.runtimes th {
+  padding: 0 0 8px;
   color: var(--vp-c-text-3);
+  font-weight: 400;
+  text-align: left;
 }
 
-.hero-lede {
-  max-width: 55ch;
+.runtimes td {
+  padding: 3px 0;
+}
+
+.runtimes td:first-child {
+  color: var(--vp-c-text-1);
+  font-weight: 600;
+}
+
+.runtimes a {
+  display: inline-block;
+  margin-top: 12px;
+  color: var(--vp-c-brand-1);
+  text-decoration: none;
+}
+
+.runtimes a:hover { text-decoration: underline; }
+
+.eyebrow {
+  margin: 0 0 22px;
+  color: var(--vp-c-text-3);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+h1 {
   margin: 0;
-  color: var(--vp-c-text-2);
-  font-size: clamp(16px, 1.55vw, 18px);
-  line-height: 1.68;
+  font-family: var(--mono);
+  font-size: clamp(40px, 6.4vw, 76px);
+  font-weight: 650;
+  letter-spacing: -0.045em;
+  line-height: 1.02;
 }
 
-.hero-actions,
-.cta-actions {
+.lede {
+  max-width: 62ch;
+  margin: 26px 0 0;
+  color: var(--vp-c-text-2);
+  font-size: clamp(16px, 1.5vw, 18px);
+  line-height: 1.65;
+}
+
+.actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  margin-top: 32px;
+  margin-top: 30px;
 }
 
-.home-button {
+.btn {
   display: inline-flex;
-  min-height: 45px;
   align-items: center;
-  justify-content: center;
-  gap: 12px;
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 10px;
-  padding: 0 18px;
-  font-size: 13px;
-  font-weight: 680;
+  min-height: 40px;
+  border: 1px solid var(--m-frame);
+  border-radius: 6px;
+  padding: 0 16px;
+  color: var(--vp-c-text-1);
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
   text-decoration: none;
-  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
+  transition: border-color 140ms ease, background-color 140ms ease;
 }
 
-.home-button:hover {
-  transform: translateY(-2px);
-}
+.btn:hover { border-color: var(--vp-c-text-3); }
 
-.home-button.primary {
+.btn.primary {
   border-color: var(--vp-c-brand-1);
   background: var(--vp-c-brand-1);
-  color: var(--vp-button-brand-text);
-  box-shadow: 0 13px 28px color-mix(in srgb, var(--vp-c-brand-1) 20%, transparent);
+  color: var(--m-select-fg);
 }
 
-.home-button.primary:hover {
-  border-color: var(--vp-c-brand-2);
-  background: var(--vp-c-brand-2);
-}
+.btn.primary:hover { background: var(--vp-c-brand-2); }
 
-.home-button.secondary {
-  background: color-mix(in srgb, var(--vp-c-bg-elv) 82%, transparent);
-  color: var(--vp-c-text-1);
-}
-
-.home-button.secondary:hover {
-  border-color: color-mix(in srgb, var(--vp-c-text-1) 28%, var(--vp-c-divider));
-  background: var(--vp-c-bg-elv);
-}
-
-.hero-command {
-  max-width: 500px;
+.install {
+  max-width: 540px;
   margin-top: 16px;
 }
 
-.hero-proof {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 18px;
-  margin-top: 22px;
-  color: var(--vp-c-text-3);
-  font-size: 10px;
-  font-weight: 570;
+/* Terminal chrome shared by the hero session and the Studio replica. */
+.term,
+.studio {
+  border: 1px solid var(--m-frame);
+  border-radius: 10px;
+  background: var(--vp-c-bg);
+  font-family: var(--mono);
 }
 
-.hero-proof span {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.hero-proof i {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #55a87d;
-}
-
-.hero-visual {
-  position: relative;
-  z-index: 1;
-  min-width: 0;
-  padding-bottom: 72px;
-}
-
-.hero-visual::before {
-  position: absolute;
-  top: -40px;
-  right: -38px;
-  width: 78%;
-  height: 76%;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--vp-c-brand-1) 10%, transparent);
-  content: '';
-  filter: blur(58px);
-  pointer-events: none;
-}
-
-.visual-label {
-  position: relative;
+.term-bar {
   display: flex;
   justify-content: space-between;
-  margin: 0 2px 12px;
+  gap: 16px;
+  padding: 12px 18px;
+  font-size: 13px;
+}
+
+.term-bar i {
+  margin-left: 8px;
   color: var(--vp-c-text-3);
-  font-family: var(--vp-font-family-mono);
-  font-size: 9px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-style: normal;
 }
 
-.visual-label span:last-child {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
+.term-body {
+  padding: 16px 18px 18px;
+  border-block: 1px solid var(--vp-c-divider);
 }
 
-.visual-label i {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #55a87d;
+.term-foot {
+  padding: 10px 18px 12px;
 }
 
-.hero-visual :deep(.terminal-mockup) {
-  position: relative;
-  z-index: 1;
-  transform: perspective(1600px) rotateY(-2deg) rotateX(0.7deg);
-  transform-origin: center left;
+/* Sections */
+.block {
+  padding-top: clamp(80px, 10vw, 128px);
 }
 
-.issue-receipt {
-  position: absolute;
-  z-index: 2;
-  right: -24px;
-  bottom: 0;
-  width: min(420px, 72%);
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--vp-c-brand-1) 34%, var(--vp-c-divider));
-  border-radius: 15px;
-  background: color-mix(in srgb, var(--vp-c-bg-elv) 94%, transparent);
-  box-shadow: var(--monitor-shadow-lg);
-  backdrop-filter: blur(18px);
+.block.last {
+  padding-bottom: clamp(80px, 10vw, 128px);
 }
 
-.issue-receipt > div:first-child {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 16px 18px 14px;
-  border-bottom: 1px solid var(--vp-c-divider);
+.head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px 48px;
+  align-items: end;
+  margin-bottom: 40px;
 }
 
-.issue-receipt span,
-.issue-receipt dt {
-  color: var(--vp-c-text-3);
-  font-family: var(--vp-font-family-mono);
-  font-size: 8px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+h2 {
+  margin: 0;
+  border: 0;
+  font-family: var(--mono);
+  font-size: clamp(26px, 3.4vw, 38px);
+  font-weight: 650;
+  letter-spacing: -0.035em;
+  line-height: 1.12;
 }
 
-.issue-receipt strong {
-  font-size: 14px;
-  font-weight: 680;
+.head p,
+.cta p {
+  margin: 0;
+  color: var(--vp-c-text-2);
+  font-size: 16px;
+  line-height: 1.65;
 }
 
-.issue-receipt dl {
+.steps {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin: 0;
+  gap: 20px;
 }
 
-.issue-receipt dl div {
-  min-width: 0;
-  padding: 11px 14px 13px;
-  border-right: 1px solid var(--vp-c-divider);
-}
-
-.issue-receipt dl div:last-child { border-right: 0; }
-.issue-receipt dd { overflow: hidden; margin: 4px 0 0; font-size: 10px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
-
-.signal-rail {
-  position: relative;
-  z-index: 3;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin-top: -40px;
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 18px;
-  background: var(--vp-c-bg-elv);
-  box-shadow: var(--monitor-shadow-md);
-}
-
-.signal-rail > div {
+.steps .tf {
   display: flex;
-  min-width: 0;
-  gap: 14px;
-  padding: 22px 24px;
-  border-right: 1px solid var(--vp-c-divider);
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px 20px 20px;
 }
 
-.signal-rail > div:last-child { border-right: 0; }
-.signal-rail dt { color: var(--vp-c-brand-1); font-family: var(--vp-font-family-mono); font-size: 9px; font-weight: 700; }
-.signal-rail dd { display: flex; min-width: 0; flex-direction: column; gap: 4px; margin: 0; }
-.signal-rail strong { font-size: 12px; font-weight: 680; }
-.signal-rail dd span { overflow: hidden; color: var(--vp-c-text-3); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-
-.home-section { padding: clamp(100px, 12vw, 154px) 0; }
-.investigation-section { background: var(--vp-c-bg-alt); }
-.surfaces-section { background: var(--vp-c-bg); }
-
-.section-heading {
-  display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(300px, 0.75fr);
-  gap: 56px;
-  align-items: end;
-  margin-bottom: 54px;
-}
-
-.section-heading h2,
-.ecosystem-copy h2,
-.safety-copy h2,
-.home-cta h2 {
-  max-width: 13ch;
-  margin: 14px 0 0;
-  color: var(--vp-c-text-1);
-  font-size: clamp(40px, 5.5vw, 64px);
-  font-weight: 670;
-  letter-spacing: -0.058em;
-  line-height: 0.99;
-}
-
-.section-heading > p {
-  max-width: 48ch;
-  margin: 0 0 3px;
+.steps p {
+  margin: 0;
   color: var(--vp-c-text-2);
   font-size: 15px;
-  line-height: 1.72;
+  line-height: 1.6;
 }
 
-.surface-grid {
-  display: grid;
-  grid-template-columns: 1.16fr 0.84fr;
-  gap: 18px;
+.steps pre {
+  margin-top: auto;
+  border-top: 1px dashed var(--vp-c-divider);
+  padding-top: 14px;
+  font-size: 12.5px;
 }
 
-.surface-card {
-  position: relative;
-  overflow: hidden;
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 22px;
-  padding: clamp(26px, 4vw, 42px);
-  background: var(--vp-c-bg-elv);
-  box-shadow: var(--monitor-shadow-sm);
-}
-
-.studio-card {
-  grid-row: span 2;
+/* Studio replica */
+.studio-tabs {
   display: flex;
-  min-height: 610px;
-  flex-direction: column;
+  flex-wrap: wrap;
+  gap: 0 4px;
+  padding: 0 18px 10px;
+  border-bottom: 1px solid var(--vp-c-divider);
+  color: var(--vp-c-text-2);
+  font-size: 13px;
 }
 
-.card-topline {
+.studio-tabs span { padding: 0 8px; }
+
+.studio-tabs .on {
+  background: var(--vp-c-brand-1);
+  color: var(--m-select-fg);
+  font-weight: 700;
+}
+
+.studio-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 24px 12px;
+  padding: 26px 18px 18px;
+}
+
+.studio-grid .tf { padding: 16px 14px 12px; }
+.kpi { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.kpi b { font-size: 15px; }
+.kpi em { color: var(--vp-c-text-2); font-style: normal; }
+
+/* Studio's heavy-rule gauge: a coloured share on a frame-coloured track. */
+.gauge {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--m-frame);
+}
+
+.gauge i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+}
+
+.gauge.good i { background: var(--m-good); }
+.gauge.warn i { background: var(--m-warn); }
+.gauge.crit i { background: var(--m-crit); }
+
+.series {
   display: flex;
   justify-content: space-between;
-  color: var(--vp-c-text-3);
-  font-family: var(--vp-font-family-mono);
-  font-size: 9px;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
+  font-size: 13px;
 }
 
-.card-topline i { color: var(--vp-c-brand-1); font-style: normal; }
-.studio-card-copy { max-width: 500px; margin-top: auto; padding-top: 62px; }
-.surface-card h3 { max-width: 12ch; margin: 0 0 18px; color: var(--vp-c-text-1); font-size: clamp(30px, 4.2vw, 48px); font-weight: 670; letter-spacing: -0.05em; line-height: 1.02; }
-.studio-card h3 { max-width: 10ch; }
-.surface-card p { max-width: 52ch; margin: 0; color: var(--vp-c-text-2); font-size: 14px; line-height: 1.7; }
-.surface-card > h3 { margin-top: 72px; }
-.surface-card a,
-.ecosystem-copy a,
-.safety-copy a { display: inline-flex; gap: 10px; margin-top: 24px; color: var(--vp-c-text-1); font-size: 12px; font-weight: 680; text-decoration: none; }
-.surface-card a:hover,
-.ecosystem-copy a:hover,
-.safety-copy a:hover { color: var(--vp-c-brand-1); }
+.series span { color: var(--vp-c-text-2); }
 
-.studio-mini {
-  position: relative;
-  min-height: 175px;
-  margin-top: 42px;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 14px;
-  background: #141b25;
+/* Block-glyph bar charts, one bar per one-second sample. */
+.chart {
+  display: flex;
+  align-items: flex-end;
+  height: 64px;
+  margin: 4px 0 10px;
 }
 
-.studio-mini > div { display: flex; align-items: baseline; gap: 10px; padding: 22px 24px 0; color: #8e9bad; font-family: var(--vp-font-family-mono); font-size: 9px; text-transform: uppercase; }
-.studio-mini strong { color: #eef2f7; font-size: 25px; letter-spacing: -0.06em; }
-.studio-mini i { margin-left: auto; color: #ff8a80; font-style: normal; }
-.studio-mini svg { position: absolute; right: 0; bottom: 0; left: 0; width: 100%; height: 102px; }
-.studio-mini path { fill: none; stroke: #ff8a80; stroke-linecap: round; stroke-width: 2; vector-effect: non-scaling-stroke; }
-
-.cli-card,
-.mcp-card { min-height: 296px; }
-.cli-card > h3,
-.mcp-card > h3 { max-width: 14ch; margin-top: 52px; font-size: clamp(28px, 3.4vw, 38px); }
-.cli-card pre { overflow: hidden; margin: 26px 0 0; border: 1px solid rgba(255,255,255,0.1); border-radius: 11px; padding: 15px; background: #141b25; color: #cbd4df; font-family: var(--vp-font-family-mono); font-size: 9px; line-height: 1.7; }
-.cli-card pre span { color: #ff8a80; }
-
-.tool-stack { margin-top: 24px; border-top: 1px solid var(--vp-c-divider); }
-.tool-stack div { display: flex; align-items: center; justify-content: space-between; padding: 11px 0; border-bottom: 1px solid var(--vp-c-divider); }
-.tool-stack code { color: var(--vp-c-text-1); font-size: 10px; }
-.tool-stack span { color: var(--vp-c-text-3); font-family: var(--vp-font-family-mono); font-size: 8px; text-transform: uppercase; }
-
-.ecosystem-section { padding: clamp(100px, 12vw, 150px) 0; border-block: 1px solid var(--vp-c-divider); background: var(--vp-c-bg-alt); }
-.ecosystem-grid { display: grid; grid-template-columns: minmax(0, 0.72fr) minmax(520px, 1.28fr); gap: clamp(60px, 9vw, 130px); align-items: center; }
-.ecosystem-copy h2 { max-width: 10ch; }
-.ecosystem-copy p { max-width: 50ch; margin: 24px 0 0; color: var(--vp-c-text-2); font-size: 15px; line-height: 1.72; }
-.ecosystem-map { position: relative; min-height: 460px; }
-.ecosystem-map > svg { position: absolute; inset: 50px 0; width: 100%; height: calc(100% - 100px); }
-.ecosystem-map > svg path { fill: none; stroke: var(--vp-c-divider); stroke-dasharray: 4 7; stroke-width: 1; vector-effect: non-scaling-stroke; }
-.ecosystem-core,
-.ecosystem-node { position: absolute; z-index: 1; display: flex; flex-direction: column; border: 1px solid var(--vp-c-divider); background: var(--vp-c-bg-elv); box-shadow: var(--monitor-shadow-sm); }
-.ecosystem-core { top: 50%; left: 50%; width: 156px; align-items: center; border-radius: 22px; padding: 26px 20px; transform: translate(-50%, -50%); }
-.ecosystem-core img { width: 34px; height: 34px; margin-bottom: 17px; }
-.ecosystem-core span,
-.ecosystem-node span { color: var(--vp-c-text-3); font-family: var(--vp-font-family-mono); font-size: 8px; letter-spacing: 0.07em; text-transform: uppercase; }
-.ecosystem-core strong { margin-top: 4px; font-size: 18px; font-weight: 690; }
-.ecosystem-node { width: 150px; border-radius: 13px; padding: 15px 17px; }
-.ecosystem-node strong { margin-top: 4px; font-size: 12px; font-weight: 660; }
-.ecosystem-node.chalupa { top: 28px; left: 20px; }
-.ecosystem-node.fcheap { top: 28px; right: 20px; }
-.ecosystem-node.codemap { bottom: 28px; left: 20px; }
-.ecosystem-node.vecgrep { right: 20px; bottom: 28px; }
-
-.safety-section { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(460px, 1.1fr); gap: clamp(64px, 10vw, 150px); align-items: center; padding-top: clamp(100px, 12vw, 160px); padding-bottom: clamp(100px, 12vw, 160px); }
-.safety-copy h2 { max-width: 11ch; }
-.safety-copy p { max-width: 54ch; margin: 24px 0 0; color: var(--vp-c-text-2); font-size: 15px; line-height: 1.72; }
-.safety-copy code { color: var(--vp-c-brand-1); }
-.safety-code { overflow: hidden; margin: 0; border: 1px solid rgba(255,255,255,0.11); border-radius: 18px; background: #131923; color: #d9e0ea; box-shadow: 0 34px 80px rgba(16,20,28,0.22); font-family: var(--vp-font-family-mono); }
-.safety-code figcaption { display: flex; justify-content: space-between; padding: 13px 17px; border-bottom: 1px solid rgba(255,255,255,0.08); background: #19212d; color: #8491a3; font-size: 9px; }
-.safety-code figcaption i { color: #ff8a80; font-style: normal; }
-.safety-code > strong { display: block; padding: 24px 26px 0; color: #f2f5f8; font-size: 12px; }
-.safety-code pre { margin: 0; padding: 18px 26px 28px; color: #aeb9c8; font-size: 12px; line-height: 1.75; }
-.safety-code pre span { color: #ff8a80; }
-.safety-code > p { display: flex; align-items: center; gap: 8px; margin: 0; padding: 13px 17px; border-top: 1px solid rgba(255,255,255,0.08); color: #8491a3; font-size: 9px; }
-.safety-code > p i { width: 6px; height: 6px; border-radius: 50%; background: #73c49b; }
-
-.install-section { background: var(--vp-c-bg-alt); }
-.install-heading h2 { max-width: 12ch; }
-.home-cta { padding: clamp(90px, 11vw, 132px) 0; background: var(--vp-c-bg-elv); }
-.cta-inner { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 70px; align-items: end; }
-.home-cta h2 { max-width: 11ch; }
-.cta-side { justify-self: end; max-width: 470px; }
-.cta-side > p { margin: 0; color: var(--vp-c-text-2); font-size: 15px; line-height: 1.7; }
-
-@media (max-width: 1100px) {
-  .hero-grid { grid-template-columns: minmax(0, 0.8fr) minmax(500px, 1.2fr); gap: 52px; }
-  .hero-copy h1 { font-size: clamp(50px, 6vw, 68px); }
-  .ecosystem-grid { grid-template-columns: 0.8fr 1.2fr; gap: 60px; }
+.chart i {
+  flex: 1;
+  min-width: 0;
 }
 
-@media (max-width: 900px) {
-  .home-shell { width: min(100% - 40px, 760px); }
-  .home-hero { padding-top: 78px; }
-  .hero-grid,
-  .ecosystem-grid,
-  .safety-section { grid-template-columns: 1fr; }
-  .hero-copy { max-width: 660px; }
-  .hero-copy h1 { max-width: 11ch; font-size: clamp(54px, 9vw, 74px); }
-  .hero-visual { margin-top: 18px; }
-  .signal-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .signal-rail > div:nth-child(2) { border-right: 0; }
-  .signal-rail > div:nth-child(-n+2) { border-bottom: 1px solid var(--vp-c-divider); }
-  .section-heading { grid-template-columns: 1fr; gap: 24px; }
-  .surface-grid { grid-template-columns: 1fr; }
-  .studio-card { grid-row: auto; min-height: 540px; }
-  .ecosystem-copy { max-width: 600px; }
-  .ecosystem-map { width: min(100%, 620px); margin: 0 auto; }
-  .safety-code { width: min(100%, 640px); }
-  .cta-inner { grid-template-columns: 1fr; gap: 34px; }
-  .cta-side { justify-self: start; }
+.accent-bars i { background: var(--vp-c-brand-1); }
+.good-bars i { background: var(--m-good); }
+
+.procs {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  line-height: 1.55;
 }
 
-@media (max-width: 620px) {
-  .home-shell { width: min(100% - 28px, 520px); }
-  .home-hero { padding: 62px 0 86px; }
-  .release-pill { margin-bottom: 25px; }
-  .hero-copy h1 { margin-top: 14px; font-size: clamp(46px, 14.7vw, 66px); }
-  .hero-lede { font-size: 16px; }
-  .hero-actions { align-items: stretch; flex-direction: column; }
-  .home-button { width: 100%; }
-  .hero-proof { gap: 8px 14px; }
-  .visual-label { font-size: 8px; }
-  .hero-visual { padding-bottom: 126px; }
-  .hero-visual :deep(.terminal-mockup) { min-width: 640px; transform: scale(0.78); transform-origin: top left; }
-  .hero-visual :deep(.terminal-mockup) { margin-bottom: -104px; }
-  .issue-receipt { right: -2px; width: 92%; }
-  .signal-rail { grid-template-columns: 1fr; margin-top: -28px; }
-  .signal-rail > div { border-right: 0; border-bottom: 1px solid var(--vp-c-divider); padding: 18px; }
-  .signal-rail > div:last-child { border-bottom: 0; }
-  .home-section { padding: 94px 0; }
-  .section-heading { margin-bottom: 36px; }
-  .section-heading h2,
-  .ecosystem-copy h2,
-  .safety-copy h2,
-  .home-cta h2 { font-size: clamp(38px, 12vw, 52px); }
-  .surface-card { border-radius: 18px; padding: 25px 22px; }
-  .studio-card { min-height: 500px; }
-  .surface-card > h3 { margin-top: 48px; }
-  .ecosystem-map { min-height: 510px; }
-  .ecosystem-core { top: 50%; }
-  .ecosystem-node { width: 132px; padding: 13px; }
-  .ecosystem-node.chalupa,
-  .ecosystem-node.codemap { left: 0; }
-  .ecosystem-node.fcheap,
-  .ecosystem-node.vecgrep { right: 0; }
-  .ecosystem-map > svg { display: none; }
-  .safety-section { width: min(100% - 28px, 520px); gap: 48px; }
-  .safety-code pre { font-size: 10px; }
-  .cta-actions { flex-direction: column; }
+.procs th {
+  padding: 0;
+  color: var(--vp-c-text-2);
+  font-weight: 400;
+  text-align: left;
+}
+
+.procs td { padding: 0; }
+.procs :is(th, td):first-child { width: 6ch; padding-right: 1.5ch; text-align: right; }
+.procs :is(th, td):last-child { text-align: right; }
+
+/* A block cursor at the end of the hero session. */
+.cursor {
+  display: inline-block;
+  width: 0.6em;
+  height: 1.1em;
+  vertical-align: -0.2em;
+  background: var(--vp-c-brand-1);
+  animation: blink 1.1s steps(1) infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .release-pill,
-  .home-button { transition: none; }
-  .release-pill:hover,
-  .home-button:hover { transform: none; }
+  .cursor { animation: none; }
+}
+.studio-grid .wide { grid-column: span 3; }
+.studio-grid .side { grid-column: span 1; }
+.studio-grid .full { grid-column: 1 / -1; }
+.studio-grid pre { font-size: 13px; }
+
+.more {
+  display: flex;
+  gap: 24px;
+  margin: 18px 0 0;
+  font-family: var(--mono);
+  font-size: 14px;
+}
+
+.more a {
+  color: var(--vp-c-brand-1);
+  text-decoration: none;
+}
+
+.more a:hover { text-decoration: underline; }
+
+/* Agents */
+.agents {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 20px;
+}
+
+.agents .tf { padding: 24px 20px 18px; }
+
+.tools {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 24px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tools li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--vp-c-divider);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.tools code {
+  border: 0;
+  padding: 0;
+  background: none;
+  font-size: 12.5px;
+}
+
+/* Install CTA */
+.cta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 32px 48px;
+  align-items: center;
+  padding: 44px 36px 36px;
+}
+
+.cta h2 { margin-bottom: 14px; }
+.cta .actions { margin-top: 14px; }
+
+@media (max-width: 900px) {
+  .hero { grid-template-columns: 1fr; }
+  .runtimes { max-width: 420px; }
+  .head,
+  .agents,
+  .cta { grid-template-columns: 1fr; }
+  .steps { grid-template-columns: 1fr; }
+  .studio-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .studio-grid .wide,
+  .studio-grid .side { grid-column: 1 / -1; }
+}
+
+@media (max-width: 560px) {
+  .shell { width: calc(100% - 32px); }
+  pre,
+  .studio-grid pre { font-size: 11.5px; }
+  .term-bar { padding: 10px 14px; font-size: 12px; }
+  .term-body { padding: 14px; }
+  .tools { grid-template-columns: 1fr; }
+  .cta { padding: 36px 20px 24px; }
+  .btn { flex: 1 1 auto; justify-content: center; }
 }
 </style>

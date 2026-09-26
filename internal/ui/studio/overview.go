@@ -3,6 +3,7 @@ package studio
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -24,7 +25,7 @@ func (m Model) renderOperationalOverview() string {
 	}
 	if m.last.LastUpdate.IsZero() {
 		return operationalPanel(m, width,
-			m.titleStyle.Render(" OVERVIEW "),
+			m.titleStyle.Render(" Overview "),
 			"Collecting the first system sample...",
 		)
 	}
@@ -41,10 +42,14 @@ func (m Model) renderOperationalOverview() string {
 	}
 	kpiRow := lipgloss.JoinHorizontal(lipgloss.Top, interleaveOperational(kpiPanels, " ")...)
 
+	// The activity/process row takes the height the KPI row and the status
+	// rail leave free, so a tall terminal gets taller charts, not dead space.
+	rows := m.height - 4 - lipgloss.Height(kpiRow) - 2 - 3 - 2
+	rows = maxInt(2, minInt(rows, 24))
 	leftWidth := (width - 1) * 3 / 5
 	rightWidth := width - 1 - leftWidth
-	activity := m.renderOperationalActivity(leftWidth)
-	processes := m.renderOperationalProcesses(rightWidth, 3)
+	activity := m.renderOperationalActivityRows(leftWidth, rows)
+	processes := m.renderOperationalProcesses(rightWidth, maxInt(3, rows))
 	workspace := lipgloss.JoinHorizontal(lipgloss.Top, activity, " ", processes)
 	rail := m.renderOperationalRail(width, false)
 
@@ -56,9 +61,9 @@ func (m Model) renderCompactOperationalOverview(width int) string {
 	frame := m.panelStyle.GetHorizontalFrameSize()
 	contentWidth := maxInt(1, width-frame)
 	summary := []string{
-		m.titleStyle.Render(" SYSTEM SNAPSHOT "),
-		operationalFit(fmt.Sprintf("CPU %s | MEMORY %s", kpis[0].value, kpis[1].value), contentWidth),
-		operationalFit(fmt.Sprintf("THERMAL %s %s | DISK %s", kpis[2].value, kpis[2].compactNote, kpis[3].value), contentWidth),
+		m.titleStyle.Render(" System "),
+		operationalFit(fmt.Sprintf("CPU %s · Memory %s", kpis[0].value, kpis[1].value), contentWidth),
+		operationalFit(fmt.Sprintf("Thermal %s %s · Disk %s", kpis[2].value, kpis[2].compactNote, kpis[3].value), contentWidth),
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
@@ -74,6 +79,9 @@ type operationalKPI struct {
 	value       string
 	note        string
 	compactNote string
+	// gauge is the 0-100 fill for the KPI's bar; negative means no bar.
+	gauge          float64
+	warnAt, critAt float64
 }
 
 func (m Model) operationalKPIs() []operationalKPI {
@@ -83,7 +91,7 @@ func (m Model) operationalKPIs() []operationalKPI {
 	// 4 MHz) through gopsutil. Omit values that cannot plausibly describe a
 	// modern CPU instead of presenting false precision as 0.00 GHz.
 	if m.last.CPU.FrequencyMHz >= 100 {
-		cpuNote += fmt.Sprintf(" | %.2f GHz", m.last.CPU.FrequencyMHz/1000)
+		cpuNote += fmt.Sprintf(" · %.2f GHz", m.last.CPU.FrequencyMHz/1000)
 	}
 	if issue := metricIssue(m.last.CPU.MetricStates, "usage"); issue != "" {
 		cpuValue, cpuNote = "unavailable", issue
@@ -95,7 +103,7 @@ func (m Model) operationalKPIs() []operationalKPI {
 	memSuffix := ""
 	if m.last.Cgroup.Limited && m.last.Cgroup.MemLimitBytes > 0 {
 		memUsed, memTotal = m.last.Cgroup.MemUsageBytes, m.last.Cgroup.MemLimitBytes
-		memSuffix = " | cgroup"
+		memSuffix = " · cgroup"
 	}
 	memNote := fmt.Sprintf("%s / %s%s", collector.FormatBytes(memUsed), collector.FormatBytes(memTotal), memSuffix)
 	if issue := metricIssue(mem.MetricStates, "virtual"); issue != "" {
@@ -105,12 +113,22 @@ func (m Model) operationalKPIs() []operationalKPI {
 	tempValue, tempNote, tempCompact := m.operationalTemperatureSummary()
 	diskValue, diskNote := m.operationalDiskSummary()
 
-	return []operationalKPI{
-		{label: "CPU", value: cpuValue, note: cpuNote},
-		{label: "MEMORY", value: memValue, note: memNote},
-		{label: "THERMAL", value: tempValue, note: tempNote, compactNote: tempCompact},
-		{label: "DISK", value: diskValue, note: diskNote},
+	kpis := []operationalKPI{
+		{label: "CPU", value: cpuValue, note: cpuNote, gauge: m.last.CPU.UsagePercent, warnAt: 70, critAt: 90},
+		{label: "Memory", value: memValue, note: memNote, gauge: mem.UsagePercent, warnAt: 70, critAt: 90},
+		{label: "Thermal", value: tempValue, note: tempNote, compactNote: tempCompact, gauge: m.last.Temperature.CPUPackage, warnAt: 70, critAt: 85},
+		{label: "Disk", value: diskValue, note: diskNote, gauge: -1, warnAt: 70, critAt: 90},
 	}
+	if v, err := strconv.ParseFloat(strings.TrimSuffix(diskValue, "%"), 64); err == nil {
+		kpis[3].gauge = v
+	}
+	// An unavailable reading gets no bar: an empty track would read as 0%.
+	for i := range kpis {
+		if kpis[i].value == "unavailable" {
+			kpis[i].gauge = -1
+		}
+	}
+	return kpis
 }
 
 func (m Model) operationalTemperatureSummary() (value, note, compact string) {
@@ -161,7 +179,7 @@ func (m Model) operationalDiskSummary() (string, string) {
 	if strings.TrimSpace(mount) == "" {
 		mount = partition.Device
 	}
-	return fmt.Sprintf("%.1f%%", partition.UsagePercent), fmt.Sprintf("%s | %s used", mount, collector.FormatBytes(partition.UsedBytes))
+	return fmt.Sprintf("%.1f%%", partition.UsagePercent), fmt.Sprintf("%s · %s used", mount, collector.FormatBytes(partition.UsedBytes))
 }
 
 func isOperationalDisk(partition collector.DiskPartitionInfo) bool {
@@ -178,21 +196,65 @@ func isOperationalDisk(partition collector.DiskPartitionInfo) bool {
 
 func operationalKPIPanel(m Model, width int, kpi operationalKPI) string {
 	contentWidth := maxInt(1, width-m.panelStyle.GetHorizontalFrameSize())
-	valueStyle := lipgloss.NewStyle().Bold(true)
+	bar := ""
+	if kpi.gauge >= 0 {
+		bar = m.gauge(kpi.gauge, contentWidth, kpi.warnAt, kpi.critAt)
+	}
 	return operationalPanel(m, width,
 		operationalFit(m.titleStyle.Render(" "+kpi.label+" "), contentWidth),
-		operationalFit(valueStyle.Render(kpi.value), contentWidth),
-		operationalFit(kpi.note, contentWidth),
+		operationalFit(m.bigValue(kpi.value), contentWidth),
+		bar,
+		operationalFit(m.muted(kpi.note), contentWidth),
 	)
 }
 
 func (m Model) renderOperationalActivity(width int) string {
 	contentWidth := maxInt(1, width-m.panelStyle.GetHorizontalFrameSize())
 	return operationalPanel(m, width,
-		operationalFit(m.titleStyle.Render(" ACTIVITY | 60s "), contentWidth),
+		operationalFit(m.titleStyle.Render(" Activity · 60s "), contentWidth),
 		m.operationalHistoryLine("CPU", m.last.CPU.History, m.last.CPU.UsagePercent, metricIssue(m.last.CPU.MetricStates, "usage"), contentWidth),
 		m.operationalHistoryLine("MEM", m.last.Memory.History, m.last.Memory.UsagePercent, metricIssue(m.last.Memory.MetricStates, "virtual"), contentWidth),
 	)
+}
+
+// renderOperationalActivityRows fills rows body lines. With room for it each
+// series gets a caption ("CPU 28.9%") over a multi-row sparkline; otherwise
+// it falls back to the one-line-per-series layout.
+func (m Model) renderOperationalActivityRows(width, rows int) string {
+	perSeries := rows/2 - 1
+	if perSeries < 2 {
+		return m.renderOperationalActivity(width)
+	}
+	perSeries = minInt(perSeries, 10)
+	contentWidth := maxInt(1, width-m.panelStyle.GetHorizontalFrameSize())
+	series := func(label string, data []float64, current float64, issue string, color string) []string {
+		caption := joinEnds(contentWidth, m.muted(label), m.bigValue(fmt.Sprintf("%.1f%%", current)))
+		if issue != "" {
+			return []string{operationalFit(m.muted(label)+" unavailable · "+issue, contentWidth)}
+		}
+		if len(data) == 0 {
+			return []string{operationalFit(label+" no samples yet", contentWidth)}
+		}
+		spark := widgets.NewSparkline()
+		spark.Data = data
+		spark.Width = contentWidth
+		spark.Height = perSeries
+		spark.Min, spark.Max, spark.AutoScale = 0, 100, false
+		spark.ShowAxis = false
+		spark.Color = color
+		spark.AlignRight = true
+		spark.Capacity = studioHistorySize
+		return append([]string{caption}, strings.Split(spark.Render(), "\n")...)
+	}
+	lines := []string{operationalFit(m.titleStyle.Render(" Activity · 60s "), contentWidth)}
+	lines = append(lines, series("CPU", m.last.CPU.History, m.last.CPU.UsagePercent,
+		metricIssue(m.last.CPU.MetricStates, "usage"), m.theme.hex(m.theme.Accent))...)
+	lines = append(lines, series("MEM", m.last.Memory.History, m.last.Memory.UsagePercent,
+		metricIssue(m.last.Memory.MetricStates, "virtual"), m.theme.hex(m.theme.Good))...)
+	for len(lines) < rows+1 {
+		lines = append(lines, "")
+	}
+	return operationalPanel(m, width, lines...)
 }
 
 func (m Model) operationalHistoryLine(label string, data []float64, current float64, issue string, width int) string {
@@ -221,11 +283,14 @@ func (m Model) operationalHistoryLine(label string, data []float64, current floa
 }
 
 func (m Model) renderOperationalProcesses(width, count int) string {
+	// The panel keeps count+1 body lines (title included) however many
+	// processes exist, so it lines up with the activity panel beside it.
+	want := count + 1
 	contentWidth := maxInt(1, width-m.panelStyle.GetHorizontalFrameSize())
-	lines := []string{operationalFit(m.titleStyle.Render(" TOP CPU PROCESSES "), contentWidth)}
+	lines := []string{operationalFit(m.titleStyle.Render(" Top CPU "), contentWidth)}
 	if issue := operationalStatusIssue(m.last.ProcessesState); issue != "" {
 		lines = append(lines, operationalFit("Unavailable | "+issue, contentWidth))
-		for len(lines) < count+1 {
+		for len(lines) < want {
 			lines = append(lines, "")
 		}
 		return operationalPanel(m, width, lines...)
@@ -248,13 +313,17 @@ func (m Model) renderOperationalProcesses(width, count int) string {
 		if nameWidth < 4 {
 			nameWidth = 4
 		}
+		if count >= 4 {
+			lines = append(lines, operationalFit(m.muted(fmt.Sprintf("%5s  %-*s %6s", "PID", nameWidth, "NAME", "CPU")), contentWidth))
+			count--
+		}
 		for _, process := range processes[:count] {
 			name := truncateStr(process.Name, nameWidth)
 			line := fmt.Sprintf("%5d  %-*s %5.1f%%", process.PID, nameWidth, name, process.CPUPercent)
 			lines = append(lines, operationalFit(line, contentWidth))
 		}
 	}
-	for len(lines) < count+1 {
+	for len(lines) < want {
 		lines = append(lines, "")
 	}
 	return operationalPanel(m, width, lines...)
@@ -269,12 +338,18 @@ func (m Model) renderOperationalRail(width int, compact bool) string {
 			message += fmt.Sprintf(" | +%d more", len(issues)-1)
 		}
 	}
-	line := prefix + " | " + message
 	if compact {
-		return operationalFit(line, width)
+		return operationalFit(prefix+" | "+message, width)
 	}
-	contentWidth := maxInt(1, width-m.panelStyle.GetHorizontalFrameSize())
-	return operationalPanel(m, width, operationalFit(line, contentWidth))
+	// The state word stays in the frame title so it survives without color;
+	// the dot repeats it in the semantic color.
+	dot := lipgloss.NewStyle().Foreground(m.theme.Good).Render("●")
+	title := " Status "
+	if len(issues) > 0 {
+		dot = lipgloss.NewStyle().Foreground(m.theme.Warning).Render("●")
+		title = " Attention "
+	}
+	return operationalPanel(m, width, m.titleStyle.Render(title), dot+" "+message)
 }
 
 func (m Model) operationalAttentionIssues() []string {
@@ -339,7 +414,7 @@ func operationalPanel(m Model, totalWidth int, lines ...string) string {
 	// Lipgloss v2 treats Width as the final rendered width, including the
 	// style's border and padding. Lines are fitted to the remaining content
 	// width above, while the panel itself receives the requested total width.
-	return m.panelStyle.Width(totalWidth).Render(strings.Join(lines, "\n"))
+	return m.panel(totalWidth, strings.Join(lines, "\n"))
 }
 
 func operationalColumns(total, count, gap int) []int {

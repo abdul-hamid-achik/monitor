@@ -38,7 +38,7 @@ func (m Model) renderProcessDetail() string {
 			"",
 			m.processDetailFooter(contentWidth),
 		)
-		return m.centerProcessDetail(m.panelStyle.Width(panelWidth).Render(body))
+		return m.centerProcessDetail(m.panel(panelWidth, body))
 	}
 
 	// A short narrow terminal gets a prioritized, single-line metric list.
@@ -46,7 +46,7 @@ func (m Model) renderProcessDetail() string {
 	// introducing modal scrolling state.
 	if short && m.width < 78 {
 		body := m.renderCompactProcessDetail(p, contentWidth)
-		return m.centerProcessDetail(m.panelStyle.Width(panelWidth).Render(body))
+		return m.centerProcessDetail(m.panel(panelWidth, body))
 	}
 
 	safety, safetyNote := m.processSafety(p)
@@ -101,12 +101,12 @@ func (m Model) renderProcessDetail() string {
 		"",
 		m.processDetailFooter(contentWidth),
 	)
-	panel := m.panelStyle.Width(panelWidth).Render(body)
+	panel := m.panel(panelWidth, body)
 	if lipgloss.Height(panel) > contentBudget {
 		// Defensive fallback for unusually verbose platform reasons. The
 		// compact body is intentionally complete enough to diagnose and safe
 		// enough to act, while remaining bounded.
-		panel = m.panelStyle.Width(panelWidth).Render(m.renderCompactProcessDetail(p, contentWidth))
+		panel = m.panel(panelWidth, m.renderCompactProcessDetail(p, contentWidth))
 	}
 	return m.centerProcessDetail(panel)
 }
@@ -124,8 +124,8 @@ func (m Model) centerProcessDetail(panel string) string {
 }
 
 func (m Model) processDetailContentBudget() int {
-	// Studio's frame reserves two header rows and one footer row.
-	return m.height - 3
+	// Studio's frame reserves three header rows and one footer row.
+	return m.height - 4
 }
 
 func (m Model) renderCompactProcessDetail(p collector.ProcessInfo, width int) string {

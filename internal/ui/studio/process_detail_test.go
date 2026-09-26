@@ -135,8 +135,8 @@ func TestProcessDetailHandlesExitedPIDAndNarrowTerminal(t *testing.T) {
 	if width := lipgloss.Width(content); width > m.width {
 		t.Fatalf("narrow detail width=%d exceeds terminal width=%d", width, m.width)
 	}
-	if height := lipgloss.Height(content); height != m.height-3 {
-		t.Fatalf("detail height=%d, want content height=%d", height, m.height-3)
+	if height := lipgloss.Height(content); height != m.height-4 {
+		t.Fatalf("detail height=%d, want content height=%d", height, m.height-4)
 	}
 }
 
@@ -167,7 +167,7 @@ func TestProcessDetailBoundedAtShortTerminalSizes(t *testing.T) {
 
 			content := m.renderProcessDetail()
 			plain := ansi.Strip(content)
-			budget := size.height - 3
+			budget := size.height - 4
 			if got := lipgloss.Width(content); got > size.width {
 				t.Fatalf("detail width=%d exceeds terminal width=%d:\n%s", got, size.width, plain)
 			}

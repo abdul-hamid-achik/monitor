@@ -63,12 +63,12 @@ func (m *Model) refreshTrends() {
 func (m Model) renderTrends() string {
 	switch {
 	case m.trendsErr == "norec":
-		return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Trends ") + "\n\n" +
-			"No recorded history yet.\nRun `monitor history record` to capture metrics over time.")
+		return m.panel(m.width, m.titleStyle.Render(" Trends ")+"\n"+
+			"  No recorded history yet.\n  "+m.muted("Run ")+"monitor history record"+m.muted(" to capture metrics over time."))
 	case m.trendsErr != "":
-		return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Trends ") + "\n\n" + m.trendsErr)
+		return m.panel(m.width, m.titleStyle.Render(" Trends ")+"\n\n"+m.trendsErr)
 	case m.trends == nil:
-		return m.panelStyle.Width(m.width - 4).Render(m.titleStyle.Render(" Trends ") + "\n\nLoading…")
+		return m.panel(m.width, m.titleStyle.Render(" Trends ")+"\n  "+m.muted("Loading…"))
 	}
 	var panels []string
 	for _, s := range m.trends {
@@ -78,9 +78,10 @@ func (m Model) renderTrends() string {
 }
 
 func (m Model) trendPanel(metric string, pts []history.Point) string {
-	width := m.width - 4
+	width := m.width
 	if len(pts) == 0 {
-		return m.panelStyle.Width(width).Render(m.titleStyle.Render(" "+metric+" (last 1h) ") + "\n\n(no samples in the last hour)")
+		return m.panel(width, m.titleStyle.Render(" "+metric+" · last 1h ")+"\n  "+
+			m.muted("No samples in the last hour · run ")+"monitor history record"+m.muted(" to collect them."))
 	}
 	vals := make([]float64, len(pts))
 	for i, p := range pts {
@@ -89,12 +90,18 @@ func (m Model) trendPanel(metric string, pts []history.Point) string {
 	s := history.Summarize(pts)
 	spark := widgets.NewSparkline()
 	spark.Data = vals
-	if w := m.width - 10; w > 0 {
+	if w := m.width - 6; w > 0 {
 		spark.Width = w
 	}
 	spark.Height = 5
-	body := spark.Render() + fmt.Sprintf(
-		"\n  %d samples  │  min %.1f  avg %.1f  p95 %.1f  max %.1f  │  trend %+.1f",
-		s.Count, s.Min, s.Avg, s.P95, s.Max, s.Trend)
-	return m.panelStyle.Width(width).Render(m.titleStyle.Render(" "+metric+" (last 1h) ") + "\n\n" + body)
+	spark.Color = m.theme.hex(m.theme.Accent)
+	spark.AlignRight = true
+	body := indentLines(spark.Render(), " ") + "\n" + m.statLine(false,
+		[2]string{"samples", fmt.Sprintf("%d", s.Count)},
+		[2]string{"min", fmt.Sprintf("%.1f", s.Min)},
+		[2]string{"avg", fmt.Sprintf("%.1f", s.Avg)},
+		[2]string{"p95", fmt.Sprintf("%.1f", s.P95)},
+		[2]string{"max", fmt.Sprintf("%.1f", s.Max)},
+		[2]string{"trend", fmt.Sprintf("%+.1f", s.Trend)})
+	return m.panel(width, m.titleStyle.Render(" "+metric+" · last 1h ")+"\n"+body)
 }

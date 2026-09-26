@@ -140,10 +140,15 @@ func processSpecsForWidth(width int) []processColumnSpec {
 		if nameWidth < 10 {
 			nameWidth = 10
 		}
-		if nameWidth > 32 {
-			nameWidth = 32
+		if nameWidth > 44 {
+			nameWidth = 44
 		}
 		specs[nameIdx].width = nameWidth
+		// On wide terminals the table spans the full-width panel: the room
+		// the name column cannot use goes to the trailing column.
+		if spare := available - fixed - nameWidth; spare > 0 {
+			specs[len(specs)-1].width += minInt(spare, 16)
+		}
 	}
 	return specs
 }
@@ -566,8 +571,8 @@ func (m Model) renderProcesses() string {
 		return m.renderProcessDetail()
 	}
 	if m.last.LastUpdate.IsZero() {
-		return m.panelStyle.Width(m.width - 4).Render(
-			m.titleStyle.Render(" Processes ") +
+		return m.panel(m.width,
+			m.titleStyle.Render(" Processes ")+
 				"\n\n  Waiting for process data…\n  The first snapshot normally arrives within one update interval.")
 	}
 	var content []string
@@ -591,7 +596,7 @@ func (m Model) renderProcesses() string {
 	} else if m.searchQuery != "" {
 		content = append(content, fmt.Sprintf(" Filter: %q · %d match(es) · / edit", m.searchQuery, matched))
 	} else {
-		content = append(content, " ↑/↓ or j/k navigate  ·  enter details  ·  space select  ·  / filter  ·  c/m sort  ·  K/X terminate")
+		content = append(content, lipgloss.NewStyle().Foreground(m.theme.Muted).Render(" ↑/↓ or j/k navigate  ·  enter details  ·  space select  ·  / filter  ·  c/m sort  ·  K/X terminate"))
 	}
 	content = append(content, "")
 	if m.processTable != nil && len(m.processTable.Rows()) > 0 {
@@ -616,7 +621,7 @@ func (m Model) renderProcesses() string {
 			"  Press r to refresh, or enable system processes in Settings.",
 		)
 	}
-	panel := m.panelStyle.Width(m.width - 4).Render(lipgloss.JoinVertical(lipgloss.Left, content...))
+	panel := m.panel(m.width, lipgloss.JoinVertical(lipgloss.Left, content...))
 	body := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, panel)
 	if m.showKillConfirm {
 		dialog := m.renderKillConfirmation()

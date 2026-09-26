@@ -1,9 +1,9 @@
 ---
 layout: home
 markdownStyles: false
-title: Monitor — Local-first observability from your terminal
+title: Monitor — crashes that point at the line
 titleTemplate: false
-description: Monitor combines grouped local issues and evidence with a live terminal Studio, automation-ready JSON CLI, and a safe MCP server for macOS and Linux.
+description: Wrap any command in monitor run. Crashes from Node, Deno, Bun, Python, Ruby and Go become grouped local issues with a culprit file:line, source and last commit. No SDK, no account.
 ---
 
 <HomeLanding />

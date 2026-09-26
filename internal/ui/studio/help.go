@@ -12,7 +12,7 @@ import (
 // and destructive process actions cannot be triggered through the dialog.
 func (m Model) renderHelp() string {
 	keyHelp := func(binding, description string) string {
-		keyStyle := lipgloss.NewStyle().Foreground(m.theme.Warning).Bold(true)
+		keyStyle := lipgloss.NewStyle().Foreground(m.theme.Accent).Bold(true)
 		return fmt.Sprintf("  %-22s %s", keyStyle.Render(binding), description)
 	}
 	lines := []string{
@@ -60,7 +60,7 @@ func (m Model) renderHelp() string {
 		lines = append(lines, "", keyHelp("r", "reload recorded history now"))
 	}
 
-	lines = append(lines, "", lipgloss.NewStyle().Foreground(m.theme.Good).Render(" Press ? or Esc to close "))
+	lines = append(lines, "", lipgloss.NewStyle().Foreground(m.theme.Muted).Render(" Press ? or Esc to close "))
 	width := m.width - 8
 	if width > 72 {
 		width = 72
@@ -69,7 +69,7 @@ func (m Model) renderHelp() string {
 		width = 30
 	}
 	dialog := lipgloss.NewStyle().
-		Border(lipgloss.DoubleBorder()).
+		Border(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.Accent).
 		Padding(1, 2).
 		Width(width).

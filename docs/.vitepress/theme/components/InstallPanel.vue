@@ -36,14 +36,14 @@ const sourceCommand =
   <div class="install-panel">
     <div class="install-tabs" role="group" aria-label="Installation methods">
       <button
-        v-for="method in methods"
+        v-for="(method, index) in methods"
         :key="method.id"
         type="button"
         :class="{ active: activeMethod === method.id }"
         :aria-pressed="activeMethod === method.id"
         @click="activeMethod = method.id"
       >
-        <span>{{ method.label }}</span>
+        <span>{{ activeMethod === method.id ? '▸' : ' ' }}{{ index + 1 }} {{ method.label.toLowerCase() }}</span>
         <small>{{ method.note }}</small>
       </button>
     </div>
@@ -136,179 +136,149 @@ const sourceCommand =
 </template>
 
 <style scoped>
+/* A Studio frame: numbered tabs across the top (the active one filled with
+   the accent, like `monitor studio`'s tab row), content underneath. */
 .install-panel {
-  container-name: install-panel;
-  container-type: inline-size;
   overflow: hidden;
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 22px;
+  border: 1px solid var(--m-frame);
+  border-radius: 8px;
   background: var(--vp-c-bg);
-  box-shadow: 0 24px 70px rgba(20, 24, 32, 0.08);
 }
 
 .install-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1px;
-  padding: 8px;
-  background: var(--vp-c-bg-soft);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--vp-c-divider);
 }
 
 .install-tabs button {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  border: 1px solid transparent;
-  border-radius: 14px;
-  padding: 13px 16px;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 10px;
+  border: 0;
+  padding: 3px 10px;
   background: transparent;
   color: var(--vp-c-text-2);
   cursor: pointer;
-  text-align: left;
-  transition: background-color 180ms ease, border-color 180ms ease,
-    color 180ms ease, transform 180ms ease;
+  font-family: var(--vp-font-family-mono);
+  font-size: 13.5px;
+  white-space: pre;
 }
 
 .install-tabs button:hover {
   color: var(--vp-c-text-1);
-  background: color-mix(in srgb, var(--vp-c-bg) 68%, transparent);
-}
-
-.install-tabs button:active {
-  transform: scale(0.98);
-}
-
-.install-tabs button:focus-visible {
-  outline: 2px solid var(--vp-c-brand-1);
-  outline-offset: 2px;
 }
 
 .install-tabs button.active {
-  border-color: var(--vp-c-divider);
-  background: var(--vp-c-bg);
-  color: var(--vp-c-text-1);
-  box-shadow: 0 8px 24px rgba(20, 24, 32, 0.06);
-}
-
-.install-tabs span {
-  font-size: 14px;
-  font-weight: 720;
+  background: var(--vp-c-brand-1);
+  color: var(--m-select-fg);
+  font-weight: 700;
 }
 
 .install-tabs small {
   color: var(--vp-c-text-3);
-  font-size: 11px;
+  font-size: 11.5px;
+  font-weight: 400;
 }
 
 .install-tabs button.active small {
-  color: var(--vp-c-brand-1);
+  color: inherit;
+  opacity: 0.75;
 }
 
 .install-content {
-  padding: clamp(24px, 4vw, 48px);
+  padding: clamp(20px, 3.5vw, 32px);
 }
 
 .method-panel {
-  display: grid;
-  grid-template-columns: minmax(0, 0.8fr) minmax(420px, 1.2fr);
-  gap: 26px 48px;
-  align-items: end;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
 }
 
 .method-copy :is(h2, h3) {
-  margin: 6px 0 10px;
+  margin: 4px 0 8px;
   border: 0;
   padding: 0;
   color: var(--vp-c-text-1);
-  font-size: clamp(22px, 3vw, 30px);
-  letter-spacing: -0.035em;
-  line-height: 1.12;
+  font-family: var(--vp-font-family-mono);
+  font-size: clamp(19px, 2.4vw, 23px);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
 }
 
 .method-copy p {
-  max-width: 52ch;
+  max-width: 62ch;
   margin: 0;
   color: var(--vp-c-text-2);
-  font-size: 14px;
-  line-height: 1.65;
+  font-size: 15px;
+  line-height: 1.6;
 }
 
 .method-kicker {
-  color: var(--vp-c-brand-1);
+  color: var(--vp-c-text-3);
   font-family: var(--vp-font-family-mono);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
+  font-size: 12.5px;
+  text-transform: lowercase;
 }
 
 .install-steps {
-  display: grid;
-  grid-column: 1 / -1;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0;
-  margin: 8px 0 0;
-  padding: 22px 0 0;
-  border-top: 1px solid var(--vp-c-divider);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 28px;
+  margin: 4px 0 0;
+  padding: 16px 0 0;
+  border-top: 1px dashed var(--vp-c-divider);
   list-style: none;
 }
 
 .install-steps li {
   display: flex;
-  gap: 12px;
-  align-items: flex-start;
-  min-width: 0;
-  padding: 0 20px;
-  border-right: 1px solid var(--vp-c-divider);
-}
-
-.install-steps li:first-child {
-  padding-left: 0;
-}
-
-.install-steps li:last-child {
-  padding-right: 0;
-  border-right: 0;
+  gap: 10px;
+  align-items: baseline;
+  margin: 0;
 }
 
 .install-steps li > span {
   color: var(--vp-c-brand-1);
   font-family: var(--vp-font-family-mono);
-  font-size: 11px;
+  font-size: 12.5px;
   font-weight: 700;
-  line-height: 1.7;
 }
 
 .install-steps div {
   display: flex;
-  min-width: 0;
   flex-direction: column;
-  gap: 5px;
+  gap: 2px;
 }
 
 .install-steps strong {
   color: var(--vp-c-text-1);
-  font-size: 13px;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .install-steps code,
 .method-footnote code,
 .method-copy code {
+  border: 0;
+  padding: 0;
+  background: none;
   color: var(--vp-c-text-2);
   font-family: var(--vp-font-family-mono);
-  font-size: 11px;
+  font-size: 12.5px;
   overflow-wrap: anywhere;
 }
 
 .release-link {
-  grid-column: 2;
   width: fit-content;
   color: var(--vp-c-brand-1);
-  font-size: 13px;
-  font-weight: 700;
+  font-family: var(--vp-font-family-mono);
+  font-size: 14px;
+  font-weight: 600;
   text-decoration: none;
 }
 
@@ -317,123 +287,10 @@ const sourceCommand =
   text-underline-offset: 4px;
 }
 
-.release-link:focus-visible {
-  border-radius: 4px;
-  outline: 2px solid var(--vp-c-brand-1);
-  outline-offset: 4px;
-}
-
 .method-footnote {
-  grid-column: 2;
   margin: 0;
   color: var(--vp-c-text-3);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.6;
-}
-
-@media (max-width: 820px) {
-  .method-panel {
-    grid-template-columns: 1fr;
-  }
-
-  .release-link,
-  .method-footnote {
-    grid-column: 1;
-  }
-
-  .install-steps {
-    grid-template-columns: 1fr;
-    gap: 14px;
-  }
-
-  .install-steps li,
-  .install-steps li:first-child,
-  .install-steps li:last-child {
-    padding: 0 0 14px;
-    border-right: 0;
-    border-bottom: 1px solid var(--vp-c-divider);
-  }
-
-  .install-steps li:last-child {
-    padding-bottom: 0;
-    border-bottom: 0;
-  }
-}
-
-@container install-panel (max-width: 780px) {
-  .method-panel {
-    grid-template-columns: 1fr;
-  }
-
-  .release-link,
-  .method-footnote {
-    grid-column: 1;
-  }
-
-  .install-steps {
-    grid-template-columns: 1fr;
-    gap: 14px;
-  }
-
-  .install-steps li,
-  .install-steps li:first-child,
-  .install-steps li:last-child {
-    padding: 0 0 14px;
-    border-right: 0;
-    border-bottom: 1px solid var(--vp-c-divider);
-  }
-
-  .install-steps li:last-child {
-    padding-bottom: 0;
-    border-bottom: 0;
-  }
-}
-
-@media (max-width: 620px) {
-  .install-panel {
-    border-radius: 16px;
-  }
-
-  .install-tabs {
-    grid-template-columns: 1fr;
-  }
-
-  .install-tabs button {
-    flex-direction: row;
-    align-items: baseline;
-    justify-content: space-between;
-    padding: 10px 12px;
-  }
-
-  .install-content {
-    padding: 22px 16px 24px;
-  }
-}
-
-@container install-panel (max-width: 520px) {
-  .install-panel {
-    border-radius: 16px;
-  }
-
-  .install-tabs {
-    grid-template-columns: 1fr;
-  }
-
-  .install-tabs button {
-    flex-direction: row;
-    align-items: baseline;
-    justify-content: space-between;
-    padding: 10px 12px;
-  }
-
-  .install-content {
-    padding: 22px 16px 24px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .install-tabs button {
-    transition: none;
-  }
 }
 </style>
