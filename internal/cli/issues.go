@@ -1055,7 +1055,7 @@ func runDeprecatedIssueAlias(cmd *cobra.Command, args []string, sub string) erro
 // past `--store X`-style pairs without mistaking X for the first
 // positional token.
 var issueAliasValueFlags = map[string]bool{
-	"store": true, "project": true, "service": true, "kind": true, "root": true,
+	"store": true, "project": true, "service": true, "kind": true, "root": true, "budget": true,
 }
 
 // firstNonFlagArg returns the first token in args that is a positional
@@ -1095,6 +1095,7 @@ func firstNonFlagArg(args []string) (string, bool) {
 func newIssueCmd() *cobra.Command {
 	var (
 		storePath, projectFlag, service, kind, root string
+		budget                                      string
 		md                                          bool
 	)
 	cmd := &cobra.Command{
@@ -1111,7 +1112,9 @@ by --project/--service/--kind -- to mean "the most recently active
 issue". An ambiguous prefix exits 2 and lists every match.
 
 --json emits the full monitor.issue_context.v1 contract at the
-"standard" budget. --md emits a paste-ready markdown page for an
+"standard" budget (--budget brief caps it at 4 KB and omits the commit
+author's email -- the shape to hand to another system; --budget full
+drops the size cap). --md emits a paste-ready markdown page for an
 agent.
 
 'monitor issue list|show|resolve|reopen|ignore ...' (the pre-E2.5
@@ -1162,7 +1165,15 @@ args>'.`,
 			}
 			defer store.Close()
 
-			opts := explain.Options{Budget: explain.BudgetStandard, Root: resolveExplainRoot(root), Redact: true}
+			chosen := explain.BudgetStandard
+			switch explain.Budget(budget) {
+			case "", explain.BudgetStandard:
+			case explain.BudgetBrief, explain.BudgetFull:
+				chosen = explain.Budget(budget)
+			default:
+				return &issueCommandError{action: "issue", err: fmt.Errorf("--budget must be brief, standard or full, got %q", budget)}
+			}
+			opts := explain.Options{Budget: chosen, Root: resolveExplainRoot(root), Redact: true}
 			targetID := rawID
 			if strings.EqualFold(rawID, "latest") {
 				latest, resolved, ok, latestErr := explain.ResolveLatest(store, explain.LatestFilter{
@@ -1206,6 +1217,7 @@ args>'.`,
 	cmd.Flags().StringVar(&root, "root", "", "git/codebase root for culprit/impact/blame lookups (default: discovered from the working directory)")
 	cmd.Flags().Bool("json", false, "emit the full monitor.issue_context.v1 JSON contract")
 	cmd.Flags().BoolVar(&md, "md", false, "emit a paste-ready markdown page for an agent")
+	cmd.Flags().StringVar(&budget, "budget", "", "issue_context size budget: brief (<=4 KB, no author email), standard (default, <=16 KB) or full")
 	return silenceOwnErrors(cmd)
 }
 

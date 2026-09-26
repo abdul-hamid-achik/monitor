@@ -747,7 +747,9 @@ commit that touched the culprit line, and proposed next steps — the
 `monitor.issue_context.v1` page. `<id>` may be a full id, an unambiguous
 short id or prefix, or the literal `latest` (narrowed by
 `--project`/`--service`/`--kind`). `--json` emits the full contract at the
-"standard" budget; `--md` emits a paste-ready markdown page for an agent.
+"standard" budget; `--budget brief` caps it at 4 KB and omits the commit
+author's email (the shape to hand to another system), `--budget full` drops
+the size cap. `--md` emits a paste-ready markdown page for an agent.
 
 ```bash
 monitor issue latest
@@ -769,8 +771,16 @@ exception is recorded into the issues store through the same pipeline
 keys; `--from-start` replays the whole file). Recorded occurrences take
 their timestamp from the log line or the file's mtime, never "now".
 
+For container logs, `--line-timestamps` strips the RFC 3339 timestamp
+`docker compose logs --timestamps --no-log-prefix` puts on every line
+(otherwise it hides the trace) and uses it as the event time, and
+`--path-map /app=/srv/checkout` (repeatable) rewrites the container's path
+prefix so frames resolve as in-app against the host's git root.
+
 ```bash
 monitor stacktrace parse --record --file app.log
+docker compose logs --timestamps --no-log-prefix api > api.log
+monitor stacktrace parse --record --file api.log --line-timestamps --path-map /app="$PWD"
 ```
 
 ### `logs`
