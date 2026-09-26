@@ -86,72 +86,71 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* A one-line terminal: Studio frame border, accent prompt, keycap-style copy. */
 .command-copy {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: stretch;
   overflow: hidden;
-  border: 1px solid var(--monitor-command-border, rgba(255, 255, 255, 0.12));
-  border-radius: 12px;
-  background: var(--monitor-command-bg, #11151c);
-  color: var(--monitor-command-text, #f8fafc);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  transition: border-color 180ms ease, transform 180ms ease;
+  border: 1px solid var(--m-frame);
+  border-radius: 6px;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  transition: border-color 140ms ease;
 }
 
-.command-copy:focus-within {
-  border-color: var(--vp-c-brand-1);
+.command-copy:focus-within,
+.command-copy:hover {
+  border-color: var(--vp-c-text-3);
 }
 
 .command-text {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 12px;
-  padding: 14px 16px;
+  gap: 10px;
+  padding: 11px 14px;
   overflow-x: auto;
 }
 
 .command-prompt {
   flex: 0 0 auto;
-  color: var(--monitor-command-accent, #ff8a80);
+  color: var(--vp-c-brand-1);
   font-family: var(--vp-font-family-mono);
   font-weight: 700;
 }
 
 code {
+  border: 0;
+  padding: 0;
+  background: none;
   color: inherit;
   font-family: var(--vp-font-family-mono);
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.5;
   white-space: pre;
 }
 
 button {
-  min-width: 84px;
+  min-width: 72px;
   border: 0;
-  border-left: 1px solid var(--monitor-command-border, rgba(255, 255, 255, 0.12));
-  background: rgba(255, 255, 255, 0.045);
-  color: #d8dee9;
+  border-left: 1px solid var(--m-frame);
+  background: transparent;
+  color: var(--vp-c-text-2);
   cursor: pointer;
-  font-family: var(--vp-font-family-base);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  transition: background-color 160ms ease, color 160ms ease, transform 160ms ease;
+  font-family: var(--vp-font-family-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  transition: color 140ms ease, background-color 140ms ease;
 }
 
 button:hover {
-  background: rgba(255, 255, 255, 0.09);
-  color: #ffffff;
-}
-
-button:active {
-  transform: scale(0.98);
+  background: var(--vp-c-bg-soft);
+  color: var(--vp-c-brand-1);
 }
 
 button:focus-visible {
-  outline: 2px solid #ffffff;
+  outline: 2px solid var(--vp-c-brand-1);
   outline-offset: -4px;
 }
 
@@ -161,36 +160,32 @@ button:disabled {
 }
 
 .is-copied {
-  border-color: rgba(74, 222, 128, 0.55);
+  border-color: var(--m-good);
 }
 
 .is-copied button {
-  color: #86efac;
+  color: var(--m-good);
 }
 
 .is-error {
-  border-color: rgba(251, 191, 36, 0.65);
+  border-color: var(--m-warn);
 }
 
 .is-error button {
-  color: #fde68a;
+  color: var(--m-warn);
 }
 
 @media (max-width: 520px) {
   .command-text {
     align-items: flex-start;
     overflow-x: visible;
-    padding: 12px 13px;
+    padding: 10px 12px;
   }
 
   code {
     overflow-wrap: anywhere;
-    font-size: 10px;
+    font-size: 11.5px;
     white-space: pre-wrap;
-  }
-
-  button {
-    min-width: 72px;
   }
 }
 

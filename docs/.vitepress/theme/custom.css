@@ -1,3 +1,13 @@
+/*
+ * Monitor — one visual language for the site, the docs and `monitor studio`.
+ *
+ * The tokens below are the Studio palette (internal/ui/studio/theme.go):
+ * the same backgrounds, text, frame border, brand accent and semantic
+ * greens/ambers. The recurring motif is the Studio's titled frame --
+ * `╭─ title ────╮` -- drawn here as `.tf` / `.tf-title`, and reused by
+ * code blocks, callouts and the landing page's terminal panels.
+ */
+
 :root {
   --vp-c-brand-1: #b63838;
   --vp-c-brand-2: #982e2e;
@@ -5,20 +15,31 @@
   --vp-c-brand-soft: rgba(182, 56, 56, 0.1);
 
   --vp-c-bg: #fbfaf8;
-  --vp-c-bg-alt: #f3f1ed;
+  --vp-c-bg-alt: #fbfaf8;
   --vp-c-bg-elv: #ffffff;
-  --vp-c-bg-soft: #f6f4f1;
+  --vp-c-bg-soft: #f4f2ee;
 
   --vp-c-text-1: #20252d;
-  --vp-c-text-2: #5d6570;
-  --vp-c-text-3: #666e78;
-  --vp-c-divider: rgba(32, 37, 45, 0.12);
-  --vp-c-gutter: rgba(32, 37, 45, 0.09);
+  --vp-c-text-2: #4a525d;
+  --vp-c-text-3: #6b737e;
+  --vp-c-divider: #e4e1dc;
+  --vp-c-gutter: #e4e1dc;
+
+  /* Studio roles */
+  --m-frame: #d9d6d1;
+  --m-good: #3c7658;
+  --m-warn: #8a6116;
+  --m-crit: #c02828;
+  --m-select-fg: #ffffff;
 
   --vp-font-family-base: 'Geist Variable', 'Geist', -apple-system,
     BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --vp-font-family-mono: 'Geist Mono Variable', 'Geist Mono', ui-monospace,
     'SFMono-Regular', Menlo, Monaco, Consolas, monospace;
+
+  --vp-code-block-bg: var(--vp-c-bg);
+  --vp-code-copy-code-bg: var(--vp-c-bg-soft);
+  --vp-code-copy-code-hover-bg: var(--vp-c-bg-soft);
 
   --vp-button-brand-border: transparent;
   --vp-button-brand-text: #ffffff;
@@ -30,34 +51,35 @@
   --vp-button-brand-active-text: #ffffff;
   --vp-button-brand-active-bg: var(--vp-c-brand-3);
 
-  --monitor-shadow-sm: 0 10px 30px rgba(28, 33, 41, 0.055);
-  --monitor-shadow-md: 0 20px 54px rgba(28, 33, 41, 0.075);
-  --monitor-shadow-lg: 0 32px 86px rgba(28, 33, 41, 0.11);
+  --vp-layout-max-width: 1320px;
 }
 
 .dark {
   --vp-c-brand-1: #ff8a80;
-  --vp-c-brand-2: #ffaaa3;
-  --vp-c-brand-3: #ffc3be;
+  --vp-c-brand-2: #ffa39b;
+  --vp-c-brand-3: #ffbdb7;
   --vp-c-brand-soft: rgba(255, 138, 128, 0.12);
 
   --vp-c-bg: #11161d;
-  --vp-c-bg-alt: #0d1218;
-  --vp-c-bg-elv: #191f28;
+  --vp-c-bg-alt: #11161d;
+  --vp-c-bg-elv: #151b23;
   --vp-c-bg-soft: #171d25;
 
   --vp-c-text-1: #f1f3f6;
   --vp-c-text-2: #a6aeba;
-  --vp-c-text-3: #8f99a8;
-  --vp-c-divider: rgba(255, 255, 255, 0.115);
-  --vp-c-gutter: rgba(255, 255, 255, 0.075);
+  --vp-c-text-3: #7d8693;
+  --vp-c-divider: #262c35;
+  --vp-c-gutter: #262c35;
+
+  --m-frame: #3a414b;
+  --m-good: #62b891;
+  --m-warn: #d6a94f;
+  --m-crit: #ff756d;
+  --m-select-fg: #20252d;
+
   --vp-button-brand-text: #20252d;
   --vp-button-brand-hover-text: #20252d;
   --vp-button-brand-active-text: #20252d;
-
-  --monitor-shadow-sm: 0 12px 32px rgba(3, 6, 10, 0.18);
-  --monitor-shadow-md: 0 24px 58px rgba(3, 6, 10, 0.24);
-  --monitor-shadow-lg: 0 36px 92px rgba(3, 6, 10, 0.32);
 }
 
 html {
@@ -65,76 +87,126 @@ html {
 }
 
 body {
-  font-variation-settings: 'wght' 440;
+  background: var(--vp-c-bg);
   text-rendering: optimizeLegibility;
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--vp-c-brand-1) 22%, transparent);
+  background: color-mix(in srgb, var(--vp-c-brand-1) 26%, transparent);
   color: var(--vp-c-text-1);
-}
-
-a,
-button {
-  -webkit-tap-highlight-color: transparent;
 }
 
 a:focus-visible,
 button:focus-visible,
 input:focus-visible {
   outline: 2px solid var(--vp-c-brand-1);
-  outline-offset: 3px;
+  outline-offset: 2px;
 }
 
-/* Navigation */
+/* ── Shared terminal vocabulary ─────────────────────────────────────────── */
+
+/* A titled frame: the Studio's `╭─ title ───╮` panel. */
+.tf {
+  --tf-bg: var(--vp-c-bg);
+  position: relative;
+  border: 1px solid var(--m-frame);
+  border-radius: 8px;
+  padding: 18px 18px 14px;
+  background: var(--tf-bg);
+}
+
+.tf-title {
+  position: absolute;
+  top: 0;
+  left: 12px;
+  padding: 0 6px;
+  background: var(--tf-bg);
+  color: var(--vp-c-brand-1);
+  font-family: var(--vp-font-family-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1;
+  transform: translateY(-50%);
+  white-space: nowrap;
+}
+
+/* Keycap hints: key in the accent, action muted (Studio footer). */
+.keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  color: var(--vp-c-text-3);
+  font-family: var(--vp-font-family-mono);
+  font-size: 12.5px;
+}
+
+.keys b {
+  margin-right: 6px;
+  color: var(--vp-c-brand-1);
+  font-weight: 700;
+}
+
+.live-dot {
+  color: var(--m-good);
+  font-family: var(--vp-font-family-mono);
+}
+
+/* ── Navigation ─────────────────────────────────────────────────────────── */
+
 .VPNav {
   border-bottom: 0;
 }
 
 .VPNavBar {
-  border-bottom: 1px solid color-mix(in srgb, var(--vp-c-divider) 78%, transparent);
-  background: color-mix(in srgb, var(--vp-c-bg) 86%, transparent) !important;
-  backdrop-filter: blur(20px) saturate(145%);
+  background: var(--vp-c-bg) !important;
 }
 
+/* The inner layers stay transparent so they never paint over the bar's
+   bottom rule (VitePress fills them for its blurred, gradient variant). */
 .VPNavBar.has-sidebar .content,
-.VPNavBar.has-sidebar .title {
+.VPNavBar.has-sidebar .title,
+.VPNavBar .content-body {
   background: transparent !important;
 }
 
-.VPNavBarTitle .title {
-  gap: 10px;
-  border-bottom: 0;
-  color: var(--vp-c-text-1);
-  font-size: 14px;
-  font-variation-settings: 'wght' 720;
-  letter-spacing: -0.03em;
+.VPNavBar {
+  border-bottom: 1px solid var(--vp-c-divider);
 }
 
+.VPNavBar .divider {
+  display: none;
+}
+
+.VPNavBarTitle .title {
+  gap: 8px;
+  border-bottom: 0 !important;
+  color: var(--vp-c-text-1);
+  font-family: var(--vp-font-family-mono);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* The Studio's "◆ monitor" wordmark replaces the image logo. */
 .VPNavBarTitle .logo {
-  width: 28px;
-  height: 28px;
-  margin-right: 0;
+  display: none;
+}
+
+.VPNavBarTitle .title::before {
+  color: var(--vp-c-brand-1);
+  content: '◆';
+}
+
+.VPNavBarTitle .title span {
+  text-transform: lowercase;
 }
 
 .VPNavBarMenuLink,
 .VPNavBarMenuGroup .text {
-  position: relative;
-  font-size: 12px;
-  font-variation-settings: 'wght' 620;
-}
-
-.VPNavBarMenuLink::after {
-  position: absolute;
-  right: 12px;
-  bottom: 11px;
-  left: 12px;
-  height: 1px;
-  background: var(--vp-c-brand-1);
-  content: '';
-  opacity: 0;
-  transform: scaleX(0.4);
-  transition: opacity 160ms ease, transform 160ms ease;
+  font-family: var(--vp-font-family-mono);
+  font-size: 13px;
+  font-weight: 500;
+  text-transform: lowercase;
 }
 
 .VPNavBarMenuLink:hover,
@@ -143,31 +215,39 @@ input:focus-visible {
   color: var(--vp-c-brand-1);
 }
 
-.VPNavBarMenuLink:hover::after,
-.VPNavBarMenuLink.active::after {
-  opacity: 1;
-  transform: scaleX(1);
-}
-
 .VPNavBarSearch .DocSearch-Button {
-  border-color: var(--vp-c-divider);
-  border-radius: 9px;
-  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--m-frame);
+  border-radius: 6px;
+  background: transparent;
+  font-family: var(--vp-font-family-mono);
 }
 
-.VPNavBarAppearance .VPSwitchAppearance {
+/* On phones the search button is a bare icon, like the menu toggle beside it. */
+@media (max-width: 767px) {
+  .VPNavBarSearch .DocSearch-Button {
+    border: 0;
+  }
+}
+
+.DocSearch-Button .DocSearch-Button-Key {
   border-color: var(--vp-c-divider);
+  background: transparent;
 }
 
 .VPMenu {
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--vp-c-bg-elv) 96%, transparent);
-  box-shadow: var(--monitor-shadow-md);
-  backdrop-filter: blur(18px);
+  border: 1px solid var(--m-frame);
+  border-radius: 8px;
+  background: var(--vp-c-bg);
+  box-shadow: none;
 }
 
-/* Home shell */
+.VPMenu .VPMenuLink .link {
+  font-family: var(--vp-font-family-mono);
+  font-size: 13px;
+}
+
+/* ── Home shell ─────────────────────────────────────────────────────────── */
+
 .VPHome {
   margin-bottom: 0 !important;
   padding-bottom: 0 !important;
@@ -178,93 +258,171 @@ input:focus-visible {
 }
 
 .VPFooter {
-  border-top-color: var(--vp-c-divider);
-  background: var(--vp-c-bg-alt);
+  border-top: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg);
 }
 
 .VPFooter .message,
 .VPFooter .copyright {
   color: var(--vp-c-text-3);
-  font-size: 10px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
 }
 
-/* Documentation layout */
+/* Local search: a Studio frame over the page, the selected hit in accent. */
+:root {
+  --vp-local-search-bg: var(--vp-c-bg);
+  --vp-local-search-result-bg: var(--vp-c-bg);
+  --vp-local-search-result-border: var(--vp-c-divider);
+  --vp-local-search-result-selected-bg: var(--vp-c-brand-soft);
+  --vp-local-search-result-selected-border: var(--vp-c-brand-1);
+  --vp-local-search-highlight-bg: var(--vp-c-brand-1);
+  --vp-local-search-highlight-text: var(--m-select-fg);
+}
+
+.VPLocalSearchBox .shell {
+  border: 1px solid var(--m-frame);
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.VPLocalSearchBox .search-bar {
+  border-color: var(--m-frame);
+  border-radius: 6px;
+}
+
+.VPLocalSearchBox .search-bar:focus-within {
+  border-color: var(--vp-c-brand-1);
+}
+
+.VPLocalSearchBox .search-input {
+  font-family: var(--vp-font-family-mono);
+}
+
+/* The bar's own border shows focus; skip the global outline here. */
+.VPLocalSearchBox .search-input:focus-visible {
+  outline: none;
+}
+
+.VPLocalSearchBox .result {
+  border-radius: 6px;
+}
+
+.VPLocalSearchBox .search-keyboard-shortcuts kbd {
+  border-color: var(--m-frame);
+  background: transparent;
+  box-shadow: none;
+}
+
+/* 404: an exit code, not a poster. */
+.NotFound .code {
+  color: var(--vp-c-brand-1);
+  font-family: var(--vp-font-family-mono);
+  font-size: 56px;
+  font-weight: 650;
+}
+
+.NotFound .title {
+  font-family: var(--vp-font-family-mono);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.NotFound .divider {
+  border-color: var(--m-frame);
+}
+
+.NotFound .quote {
+  color: var(--vp-c-text-2);
+}
+
+.NotFound .link {
+  border: 1px solid var(--m-frame);
+  border-radius: 6px;
+  color: var(--vp-c-brand-1);
+  font-family: var(--vp-font-family-mono);
+}
+
+.NotFound .link:hover {
+  border-color: var(--vp-c-brand-1);
+}
+
+/* ── Docs layout ────────────────────────────────────────────────────────── */
+
 .VPSidebar {
   border-right: 1px solid var(--vp-c-divider);
-  background: var(--vp-c-bg-alt);
+  background: var(--vp-c-bg) !important;
 }
 
 .VPSidebarItem.level-0 {
-  padding-bottom: 18px;
+  padding-bottom: 14px;
 }
 
 .VPSidebarItem.level-0 > .item > .text {
   color: var(--vp-c-text-3);
   font-family: var(--vp-font-family-mono);
-  font-size: 9px;
-  font-variation-settings: 'wght' 700;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: lowercase;
+}
+
+.VPSidebarItem.level-0 > .item > .text::before {
+  color: var(--m-frame);
+  content: '── ';
 }
 
 .VPSidebarItem.level-1 .item {
   position: relative;
-  margin: 2px 0;
-  border-radius: 7px;
-  padding: 6px 10px;
-  transition: background-color 150ms ease, color 150ms ease;
-}
-
-.VPSidebarItem.level-1 .item:hover {
-  background: color-mix(in srgb, var(--vp-c-bg-elv) 64%, transparent);
+  padding-left: 16px;
 }
 
 .VPSidebarItem.level-1 .text {
   color: var(--vp-c-text-2);
-  font-size: 12px;
-  font-variation-settings: 'wght' 530;
+  font-size: 14px;
+  font-weight: 450;
 }
 
-.VPSidebarItem.level-1.is-active > .item {
-  background: var(--vp-c-brand-soft);
+.VPSidebarItem.level-1 .item:hover .text {
+  color: var(--vp-c-text-1);
 }
 
+/* The Studio's "▸" active-tab pointer. */
 .VPSidebarItem.level-1.is-active > .item::before {
   position: absolute;
-  top: 8px;
-  bottom: 8px;
+  top: 50%;
   left: 0;
-  width: 2px;
-  border-radius: 2px;
-  background: var(--vp-c-brand-1);
-  content: '';
-}
-
-.VPSidebarItem.level-1.is-active .text {
   color: var(--vp-c-brand-1);
-  font-variation-settings: 'wght' 650;
+  content: '▸';
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
+  transform: translateY(-50%);
 }
 
-.VPDoc .container {
-  max-width: 1220px;
+.VPSidebarItem.level-1.is-active > .item .text {
+  color: var(--vp-c-brand-1);
+  font-weight: 600;
 }
 
 .VPDoc.has-aside .content-container {
-  max-width: 800px;
+  max-width: 780px;
 }
 
 .VPDocAsideOutline .outline-title {
   color: var(--vp-c-text-3);
   font-family: var(--vp-font-family-mono);
-  font-size: 9px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: lowercase;
+}
+
+.VPDocAsideOutline .outline-marker {
+  background-color: var(--vp-c-brand-1);
 }
 
 .VPDocAsideOutline .outline-link {
   color: var(--vp-c-text-3);
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: 13px;
 }
 
 .VPDocAsideOutline .outline-link:hover,
@@ -272,50 +430,42 @@ input:focus-visible {
   color: var(--vp-c-brand-1);
 }
 
-.VPDocFooter {
-  margin-top: 64px;
-  padding-top: 24px;
-  border-top: 1px solid var(--vp-c-divider);
-}
-
 .VPDocFooter .edit-link-button,
 .VPDocFooter .last-updated {
   color: var(--vp-c-text-3);
-  font-size: 10px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
 }
 
 .pager-link {
-  border-color: var(--vp-c-divider) !important;
-  border-radius: 13px !important;
-  padding: 18px !important;
-  background: var(--vp-c-bg-elv);
-  box-shadow: var(--monitor-shadow-sm);
-  transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+  border: 1px solid var(--m-frame) !important;
+  border-radius: 8px !important;
+  background: var(--vp-c-bg);
+  transition: border-color 140ms ease;
 }
 
 .pager-link:hover {
-  border-color: color-mix(in srgb, var(--vp-c-brand-1) 44%, var(--vp-c-divider)) !important;
-  box-shadow: var(--monitor-shadow-md);
-  transform: translateY(-2px);
+  border-color: var(--vp-c-brand-1) !important;
 }
 
 .pager-link .desc {
   color: var(--vp-c-text-3);
   font-family: var(--vp-font-family-mono);
-  font-size: 9px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-size: 12px;
+  text-transform: lowercase;
 }
 
 .pager-link .title {
-  font-size: 13px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 14px;
 }
 
-/* Documentation typography */
+/* ── Docs typography ────────────────────────────────────────────────────── */
+
 .vp-doc {
   color: var(--vp-c-text-2);
   font-size: 16px;
-  line-height: 1.75;
+  line-height: 1.72;
 }
 
 .vp-doc h1,
@@ -323,41 +473,38 @@ input:focus-visible {
 .vp-doc h3,
 .vp-doc h4 {
   color: var(--vp-c-text-1);
-  font-variation-settings: 'wght' 670;
-  letter-spacing: -0.042em;
+  font-family: var(--vp-font-family-mono);
+  font-weight: 600;
+  letter-spacing: -0.03em;
 }
 
 .vp-doc h1 {
-  max-width: 15ch;
-  margin-bottom: 26px;
-  font-size: clamp(42px, 5vw, 58px);
-  line-height: 1.02;
+  margin-bottom: 20px;
+  font-size: clamp(30px, 4vw, 40px);
+  line-height: 1.12;
 }
 
 .vp-doc h1 + p {
-  margin-top: 0;
   color: var(--vp-c-text-2);
   font-size: 18px;
-  line-height: 1.7;
+  line-height: 1.65;
 }
 
 .vp-doc h2 {
-  margin-top: 64px;
+  margin-top: 56px;
   border-top: 1px solid var(--vp-c-divider);
-  padding-top: 30px;
-  font-size: 29px;
-  line-height: 1.18;
-}
-
-.vp-doc h3 {
-  margin-top: 38px;
-  font-size: 21px;
+  padding-top: 28px;
+  font-size: 23px;
   line-height: 1.25;
 }
 
+.vp-doc h3 {
+  margin-top: 36px;
+  font-size: 18px;
+}
+
 .vp-doc h4 {
-  margin-top: 30px;
-  font-size: 16px;
+  font-size: 15px;
 }
 
 .vp-doc p,
@@ -367,12 +514,14 @@ input:focus-visible {
 
 .vp-doc strong {
   color: var(--vp-c-text-1);
-  font-variation-settings: 'wght' 650;
+  font-weight: 600;
 }
 
 .vp-doc a {
-  font-variation-settings: 'wght' 560;
-  text-decoration-color: color-mix(in srgb, var(--vp-c-brand-1) 38%, transparent);
+  color: var(--vp-c-brand-1);
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--vp-c-brand-1) 35%, transparent);
   text-decoration-thickness: 1px;
   text-underline-offset: 4px;
 }
@@ -381,151 +530,225 @@ input:focus-visible {
   text-decoration-color: var(--vp-c-brand-1);
 }
 
-.vp-doc ul,
-.vp-doc ol {
-  padding-left: 1.35rem;
-}
-
 .vp-doc li::marker {
-  color: var(--vp-c-brand-1);
-  font-family: var(--vp-font-family-mono);
-  font-size: 0.82em;
+  color: var(--vp-c-text-3);
 }
 
 .vp-doc :not(pre) > code {
-  border: 1px solid color-mix(in srgb, var(--vp-c-brand-1) 20%, var(--vp-c-divider));
-  border-radius: 5px;
-  padding: 2px 5px;
-  background: var(--vp-c-brand-soft);
-  color: var(--vp-c-brand-1);
-  font-size: 0.84em;
-}
-
-.vp-doc div[class*='language-'] {
-  margin: 26px 0;
   border: 1px solid var(--vp-c-divider);
-  border-radius: 13px;
-  background: #131923;
-  box-shadow: var(--monitor-shadow-sm);
+  border-radius: 4px;
+  padding: 1px 5px;
+  background: var(--vp-c-bg-soft);
+  color: var(--vp-c-text-1);
+  font-size: 0.86em;
 }
 
-.vp-doc div[class*='language-']::before {
-  color: #8b97a9;
+.vp-doc a > code {
+  color: var(--vp-c-brand-1) !important;
+}
+
+/* Code blocks are titled frames: the language label sits on the border. */
+.vp-doc div[class*='language-'] {
+  margin: 28px 0;
+  overflow: visible;
+  border: 1px solid var(--m-frame);
+  border-radius: 8px;
+  background: var(--vp-c-bg);
+}
+
+.vp-doc div[class*='language-'] > span.lang {
+  top: 0;
+  right: auto;
+  left: 12px;
+  padding: 0 6px;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-brand-1);
   font-family: var(--vp-font-family-mono);
-  font-size: 9px;
-  letter-spacing: 0.08em;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  transform: translateY(-50%);
+  opacity: 1 !important;
+}
+
+.vp-doc div[class*='language-'] pre {
+  padding: 18px 0 16px;
 }
 
 .vp-doc div[class*='language-'] code {
-  font-size: 12px;
-  line-height: 1.72;
+  font-size: 13px;
+  line-height: 1.7;
 }
 
-.vp-doc .line-numbers-wrapper {
-  color: #7e8b9d;
+.vp-doc div[class*='language-'] > button.copy {
+  top: 10px;
+  border-color: var(--vp-c-divider);
+  border-radius: 6px;
+}
+
+@media (max-width: 639px) {
+  .vp-doc div[class*='language-'] {
+    margin: 24px -8px;
+  }
+}
+
+.vp-doc .vp-code-group {
+  margin: 28px 0;
+}
+
+.vp-doc .vp-code-group .tabs {
+  border: 1px solid var(--m-frame);
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  background: var(--vp-c-bg);
+}
+
+.vp-doc .vp-code-group .tabs label {
+  font-family: var(--vp-font-family-mono);
+  font-size: 13px;
+}
+
+.vp-doc .vp-code-group div[class*='language-'] {
+  margin: 0;
+  border-radius: 0 0 8px 8px;
 }
 
 .vp-doc blockquote {
-  margin: 26px 0;
-  border-left: 2px solid var(--vp-c-brand-1);
-  border-radius: 0 10px 10px 0;
-  padding: 15px 20px;
-  background: var(--vp-c-brand-soft);
+  margin: 24px 0;
+  border-left: 2px solid var(--m-frame);
+  padding: 2px 18px;
 }
 
-.vp-doc blockquote p {
-  margin: 0;
-  color: var(--vp-c-text-2);
-  font-size: 14px;
-}
-
+/* Callouts: titled frames coloured by their semantic role. */
 .vp-doc .custom-block {
-  margin: 28px 0;
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 12px;
-  padding: 20px 22px;
-  background: var(--vp-c-bg-soft);
+  --tf-bg: var(--vp-c-bg);
+  position: relative;
+  margin: 30px 0;
+  border: 1px solid var(--m-frame);
+  border-radius: 8px;
+  padding: 18px 20px 14px;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-2);
 }
 
-.vp-doc .custom-block-title {
+.vp-doc .custom-block p,
+.vp-doc .custom-block li {
+  color: var(--vp-c-text-2);
+}
+
+.vp-doc .custom-block .custom-block-title {
+  position: absolute;
+  top: 0;
+  left: 12px;
+  margin: 0;
+  padding: 0 6px;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-2);
+  font-family: var(--vp-font-family-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1;
+  transform: translateY(-50%);
+}
+
+.vp-doc .custom-block.tip .custom-block-title {
+  color: var(--m-good);
+}
+
+.vp-doc .custom-block.warning {
+  border-color: color-mix(in srgb, var(--m-warn) 55%, var(--m-frame));
+}
+
+.vp-doc .custom-block.warning .custom-block-title {
+  color: var(--m-warn);
+}
+
+.vp-doc .custom-block.danger {
+  border-color: color-mix(in srgb, var(--m-crit) 55%, var(--m-frame));
+}
+
+.vp-doc .custom-block.danger .custom-block-title {
+  color: var(--m-crit);
+}
+
+.vp-doc .custom-block div[class*='language-'] {
+  margin: 20px 0 8px;
+}
+
+.vp-doc .custom-block div[class*='language-'] > span.lang {
+  background: var(--vp-c-bg);
+}
+
+.vp-doc .custom-block :not(pre) > code {
+  background: var(--vp-c-bg-soft);
+  color: var(--vp-c-text-1);
+}
+
+/* Components that draw their own terminal text opt out of inline-code chips. */
+.vp-doc .command-copy code,
+.vp-doc .install-panel code {
+  border: 0;
+  padding: 0;
+  background: none;
+}
+
+.vp-doc .custom-block.details {
+  padding-top: 14px;
+}
+
+.vp-doc .custom-block.details summary {
   color: var(--vp-c-text-1);
   font-family: var(--vp-font-family-mono);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-size: 13px;
 }
 
-.vp-doc .custom-block.tip {
-  border-color: color-mix(in srgb, #55a87d 32%, var(--vp-c-divider));
-}
-
-.vp-doc .custom-block.warning,
-.vp-doc .custom-block.danger {
-  border-color: color-mix(in srgb, var(--vp-c-brand-1) 34%, var(--vp-c-divider));
-}
-
+/* Tables read like the Studio's process table: accent headers, thin rules. */
 .vp-doc table {
   display: table;
   width: 100%;
   margin: 28px 0;
-  overflow: hidden;
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 10px;
+  border-collapse: collapse;
 }
 
-.vp-doc tr {
-  border-top-color: var(--vp-c-divider);
+.vp-doc tr,
+.vp-doc tr:nth-child(2n) {
+  border-top: 1px solid var(--vp-c-divider);
+  background: transparent;
 }
 
 .vp-doc th {
-  background: var(--vp-c-bg-soft);
-  color: var(--vp-c-text-1);
+  border: 0;
+  border-bottom: 1px solid var(--m-frame);
+  background: transparent;
+  color: var(--vp-c-brand-1);
   font-family: var(--vp-font-family-mono);
-  font-size: 10px;
-  font-variation-settings: 'wght' 670;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: left;
 }
 
 .vp-doc td {
+  border: 0;
+  vertical-align: top;
   color: var(--vp-c-text-2);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .vp-doc th,
 .vp-doc td {
-  border-color: var(--vp-c-divider);
-  padding: 12px 14px;
+  padding: 10px 14px 10px 0;
 }
 
 .vp-doc hr {
-  margin: 50px 0;
-  border-top-color: var(--vp-c-divider);
+  margin: 48px 0;
+  border-top: 1px solid var(--vp-c-divider);
 }
 
 .vp-doc > .install-panel {
-  margin: 34px 0 48px;
-}
-
-/* Shared interaction */
-.VPButton,
-.VPSwitch,
-.DocSearch-Button {
-  transition: background-color 160ms ease, border-color 160ms ease,
-    color 160ms ease, transform 160ms ease;
-}
-
-.VPButton:active,
-.VPSwitch:active,
-.DocSearch-Button:active {
-  transform: scale(0.98);
+  margin: 36px 0 48px;
 }
 
 @media (min-width: 960px) {
-  .VPNavBar .container {
-    max-width: 1280px;
-  }
-
   .VPSidebar {
     padding-left: max(32px, calc((100vw - 1440px) / 2));
   }
@@ -534,11 +757,6 @@ input:focus-visible {
 @media (max-width: 768px) {
   .vp-doc {
     font-size: 15px;
-    line-height: 1.72;
-  }
-
-  .vp-doc h1 {
-    font-size: clamp(38px, 11vw, 48px);
   }
 
   .vp-doc h1 + p {
@@ -546,25 +764,13 @@ input:focus-visible {
   }
 
   .vp-doc h2 {
-    margin-top: 52px;
-    font-size: 26px;
+    margin-top: 48px;
+    font-size: 21px;
   }
 
   .vp-doc table {
     display: block;
     overflow-x: auto;
-    border-radius: 8px;
-    -webkit-overflow-scrolling: touch;
-  }
-}
-
-@media (max-width: 640px) {
-  .VPNavBarTitle .title {
-    font-size: 13px;
-  }
-
-  .VPDocFooter {
-    margin-top: 48px;
   }
 }
 
@@ -576,7 +782,6 @@ input:focus-visible {
   *,
   *::before,
   *::after {
-    scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
