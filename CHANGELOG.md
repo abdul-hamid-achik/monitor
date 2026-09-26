@@ -6,6 +6,31 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-26
+
+### Added
+
+- **Container log replay: `stacktrace parse --line-timestamps` and
+  `--path-map FROM=TO`.** A `docker compose logs --timestamps
+  --no-log-prefix` capture can be replayed as-is: the leading RFC 3339
+  timestamp is stripped before detection and becomes the event's own
+  time, and container path prefixes (`--path-map /app=/srv/checkout`,
+  repeatable, first match wins) are rewritten before in-app and
+  root-relative resolution, so replayed frames get a real culprit.
+- **`monitor issue --budget brief|full`.** The brief (≤4 KB, no commit
+  author email) is now an explicit CLI choice for callers that hand the
+  page to another system; `full` drops the size cap. `standard` stays the
+  default.
+
+### Fixed
+
+- **CC-10's pump timing assertion no longer flakes on loaded CI
+  runners.** The flat 2 s ceiling could not separate a linear 128 MiB
+  pass on a busy runner from the quadratic pass on idle hardware; the
+  assertion is now a ratio against a same-run 4 MiB baseline (min of two
+  runs), placed between the linear (~32×) and quadratic (~1024×)
+  regimes with ~5× margin either way.
+
 ## [2.0.0] - 2026-09-24
 
 ### Breaking
