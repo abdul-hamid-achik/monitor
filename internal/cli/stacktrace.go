@@ -125,13 +125,13 @@ last_seen to "now".`,
 					return err
 				}
 				return runStacktraceRecord(cmd.Context(), cmd.OutOrStdout(), stacktraceRecordOptions{
-					file:      file,
-					project:   projectFlag,
-					service:   service,
-					gitRoot:   gitRoot,
-					fromStart: fromStart,
-					storePath: storePath,
-					redactEnv: redactEnv,
+					file:       file,
+					project:    projectFlag,
+					service:    service,
+					gitRoot:    gitRoot,
+					fromStart:  fromStart,
+					storePath:  storePath,
+					redactEnv:  redactEnv,
 					lineStamps: lineStamps,
 					pathMaps:   pathMaps,
 				})
@@ -149,8 +149,8 @@ last_seen to "now".`,
 				live = false
 			}
 			return runStacktraceParse(r, cmd.OutOrStdout(), stacktraceParseOptions{
-				project: projectFlag,
-				service: service,
+				project:    projectFlag,
+				service:    service,
 				gitRoot:    gitRoot,
 				live:       live,
 				tick:       stacktraceTickInterval,
