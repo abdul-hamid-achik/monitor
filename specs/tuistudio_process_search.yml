@@ -1,0 +1,108 @@
+version: 1
+name: monitor_tuistudio_process_search
+intent: |
+    The Processes tab of the experimental Tuimark studio (--tuimark
+    --fixture): "/" opens the filter row, typed text narrows the table by
+    name/pid/user (internal/ui/tuistudio/processes.go's filteredProcesses,
+    the same substring rule the Bubble Tea studio uses), and esc restores
+    the full list and closes the filter row. c sorts by CPU and toggles the
+    header arrow.
+target:
+    cmd: ["./bin/monitor", "studio", "--tuimark", "--fixture"]
+    cwd: "."
+terminal:
+    cols: 120
+    rows: 30
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "test -x ./bin/monitor"
+          timeoutMs: 5000
+steps:
+    - press: "7"
+    - wait:
+        screen:
+            contains: "PID NAME"
+        timeoutMs: 5000
+    - snapshot: start
+    - press: c
+    - wait:
+        screen:
+            contains: "CPU%▼"
+        timeoutMs: 2000
+    - press: c
+    - wait:
+        screen:
+            contains: "CPU%▲"
+        timeoutMs: 2000
+    - snapshot: sorted_asc
+    - press: c
+    - wait:
+        screen:
+            contains: "CPU%▼"
+        timeoutMs: 2000
+    - press: /
+    - wait:
+        screen:
+            contains: "/ filter"
+        timeoutMs: 2000
+    - type: "agent"
+    - wait:
+        screen:
+            notContains: "WindowServer"
+        timeoutMs: 2000
+    - snapshot: filtered
+    - press: esc
+    - wait:
+        screen:
+            contains: "WindowServer"
+        timeoutMs: 2000
+    - snapshot: restored
+    - press: q
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+outcomes:
+    - id: filter_narrows_by_name
+      description: typing "agent" into the filter leaves only monitor-agent visible
+      verify:
+        script:
+            runtime: shell
+            run: |
+                f="$GLYPHRUN_RUN_DIR/snapshots/filtered.txt"
+                if grep -q "monitor-agent" "$f" && ! grep -q "WindowServer" "$f"; then
+                  echo '{"ok": true, "evidence": "only monitor-agent matches the filter"}'
+                else
+                  echo '{"ok": false, "evidence": "the filter did not narrow the table correctly"}'
+                fi
+    - id: esc_restores_the_full_list
+      description: esc restores every process and closes the filter row
+      verify:
+        script:
+            runtime: shell
+            run: |
+                f="$GLYPHRUN_RUN_DIR/snapshots/restored.txt"
+                if grep -q "WindowServer" "$f" && ! grep -q "/ agent" "$f"; then
+                  echo '{"ok": true, "evidence": "the full list is back and the filter row is closed"}'
+                else
+                  echo '{"ok": false, "evidence": "esc did not restore the list or close the filter row"}'
+                fi
+    - id: c_sorts_by_cpu_and_toggles_the_arrow
+      description: c sorts by CPU descending; c again reverses it and flips the header arrow
+      verify:
+        script:
+            runtime: shell
+            run: |
+                d="$GLYPHRUN_RUN_DIR/snapshots"
+                if grep -q "CPU%▲" "$d/sorted_asc.txt" && ! grep -q "CPU%▲" "$d/start.txt"; then
+                  echo '{"ok": true, "evidence": "the header arrow flipped after pressing c twice"}'
+                else
+                  echo '{"ok": false, "evidence": "c did not sort/reverse the table"}'
+                fi
+    - id: clean_exit
+      description: q quits the app and it exits 0
+      verify:
+        process:
+            exitCode: 0
+contractHash: sha256:435df0382bc411c89c8b4837eb37607d9b1fae71560032e058ce9e9a21cc4695

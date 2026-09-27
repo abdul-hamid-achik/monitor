@@ -1,0 +1,154 @@
+version: 1
+name: monitor_tuistudio_kill_cancel
+intent: |
+    The kill confirmation of the experimental Tuimark studio (--tuimark
+    --fixture): K asks about the cursor row, X asks for a forced kill and
+    shows "SIGKILL cannot be caught"; a protected process (WindowServer, by
+    name, per internal/collector.ProtectedProcessNames) is always listed as
+    [BLOCKED ], never [ELIGIBLE], matching internal/kill.CheckSafety's
+    protected/system classification, even when every visible row is marked
+    for a mass kill (ctrl+a); n and esc both cancel without terminating
+    anything, and cancelling drops the marks (like the Bubble Tea studio),
+    so the next K asks about the cursor row alone. This spec never confirms
+    a kill (y) — it only opens and cancels
+    — so nothing is ever terminated, on top of --fixture already making
+    that impossible (fixtureKiller never sends a real signal).
+target:
+    cmd: ["./bin/monitor", "studio", "--tuimark", "--fixture"]
+    cwd: "."
+terminal:
+    cols: 120
+    rows: 30
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "test -x ./bin/monitor"
+          timeoutMs: 5000
+steps:
+    - press: "7"
+    - wait:
+        screen:
+            contains: "PID NAME"
+        timeoutMs: 5000
+    - press: K
+    - wait:
+        screen:
+            contains: "kill processes"
+        timeoutMs: 2000
+    - snapshot: ask
+    - press: n
+    - wait:
+        screen:
+            notContains: "kill processes"
+        timeoutMs: 2000
+    - snapshot: cancelled_n
+    - press: j
+    - press: X
+    - wait:
+        screen:
+            contains: "SIGKILL cannot be caught"
+        timeoutMs: 2000
+    - snapshot: force
+    - press: esc
+    - wait:
+        screen:
+            notContains: "kill processes"
+        timeoutMs: 2000
+    - snapshot: cancelled_esc
+    - press: ctrl+a
+    - press: K
+    - wait:
+        screen:
+            contains: "kill processes"
+        timeoutMs: 2000
+    - snapshot: all_marked
+    - press: n
+    - wait:
+        screen:
+            notContains: "kill processes"
+        timeoutMs: 2000
+    - press: K
+    - wait:
+        screen:
+            contains: "kill processes"
+        timeoutMs: 2000
+    - snapshot: after_cancel
+    - press: n
+    - wait:
+        screen:
+            notContains: "kill processes"
+        timeoutMs: 2000
+    - press: q
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+outcomes:
+    - id: k_asks_about_the_cursor_row_and_blocks_the_protected_one
+      description: K opens the confirmation for the cursor row (WindowServer, the default top-CPU row, protected by name) and lists it as [BLOCKED ]
+      verify:
+        script:
+            runtime: shell
+            run: |
+                f="$GLYPHRUN_RUN_DIR/snapshots/ask.txt"
+                if grep -q "WindowServer" "$f" && grep -q "\[BLOCKED \]" "$f" && ! grep -q "SIGKILL" "$f"; then
+                  echo '{"ok": true, "evidence": "the confirmation lists WindowServer as blocked with no force warning"}'
+                else
+                  echo '{"ok": false, "evidence": "K did not open the expected confirmation"}'
+                fi
+    - id: n_and_esc_cancel_without_changing_anything
+      description: n and esc both close the confirmation and the process table is unchanged
+      verify:
+        script:
+            runtime: shell
+            run: |
+                d="$GLYPHRUN_RUN_DIR/snapshots"
+                if ! grep -q "kill processes" "$d/cancelled_n.txt" && grep -q "WindowServer" "$d/cancelled_n.txt" \
+                  && ! grep -q "kill processes" "$d/cancelled_esc.txt" && grep -q "WindowServer" "$d/cancelled_esc.txt"; then
+                  echo '{"ok": true, "evidence": "both cancelled snapshots show the table intact with no modal"}'
+                else
+                  echo '{"ok": false, "evidence": "n or esc left the modal open or changed the table"}'
+                fi
+    - id: x_shows_the_sigkill_warning_for_an_eligible_row
+      description: after moving the cursor to an eligible row (monitor-agent), X (force kill) shows the SIGKILL warning and lists it as eligible
+      verify:
+        script:
+            runtime: shell
+            run: |
+                f="$GLYPHRUN_RUN_DIR/snapshots/force.txt"
+                if grep -q "SIGKILL cannot be caught" "$f" && grep -q "\[ELIGIBLE\]" "$f" && grep -q "monitor-agent" "$f"; then
+                  echo '{"ok": true, "evidence": "the force snapshot shows the SIGKILL warning and the eligible row"}'
+                else
+                  echo '{"ok": false, "evidence": "X did not show the expected warning/row"}'
+                fi
+    - id: protected_process_is_blocked_even_in_a_mass_kill
+      description: with every default-visible row marked (ctrl+a), the protected WindowServer is still [BLOCKED ] while at least one other row is [ELIGIBLE]
+      verify:
+        script:
+            runtime: shell
+            run: |
+                f="$GLYPHRUN_RUN_DIR/snapshots/all_marked.txt"
+                if grep -q "\[BLOCKED \]" "$f" && grep -q "WindowServer" "$f" && grep -q "\[ELIGIBLE\]" "$f"; then
+                  echo '{"ok": true, "evidence": "WindowServer stays blocked and other rows stay eligible in the mass-kill confirmation"}'
+                else
+                  echo '{"ok": false, "evidence": "the mass-kill confirmation did not show the expected mix"}'
+                fi
+    - id: cancel_clears_the_selection
+      description: after the mass-kill confirmation is cancelled, K asks about the cursor row alone (one listed process), because cancelling dropped the marks
+      verify:
+        script:
+            runtime: shell
+            run: |
+                f="$GLYPHRUN_RUN_DIR/snapshots/after_cancel.txt"
+                n=$(grep -c -E "\[(BLOCKED |ELIGIBLE)\]" "$f")
+                if [ "$n" -eq 1 ]; then
+                  echo '{"ok": true, "evidence": "the confirmation after cancel lists exactly one process"}'
+                else
+                  echo "{\"ok\": false, \"evidence\": \"the confirmation after cancel lists $n processes, want 1\"}"
+                fi
+    - id: clean_exit
+      description: q quits the app and it exits 0; nothing was ever confirmed (y was never pressed)
+      verify:
+        process:
+            exitCode: 0
+contractHash: sha256:2b76c079d4e18599d2b65137f2ee1a810cfae87139303725e289512c089b0e42

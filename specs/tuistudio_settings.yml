@@ -1,0 +1,119 @@
+version: 1
+name: monitor_tuistudio_settings
+intent: |
+    The Settings tab of the experimental Tuimark studio (--tuimark
+    --fixture) edits internal/config.Settings in place: enter/space cycles
+    the cursor row's value forward, "-" cycles it back, and s saves — with
+    --fixture, "saving" only writes to an in-memory fixtureSettingsStore
+    (internal/ui/tuistudio/fixture.go), never to a real
+    ~/.config/monitor/config.json. Switching the mouse setting off also
+    flips the document's own mouse attribute (<tui mouse="mouse_enabled">),
+    so a later click on a tab label does nothing.
+target:
+    cmd: ["./bin/monitor", "studio", "--tuimark", "--fixture"]
+    cwd: "."
+terminal:
+    cols: 120
+    rows: 30
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "test -x ./bin/monitor"
+          timeoutMs: 5000
+steps:
+    - press: "8"
+    - wait:
+        screen:
+            contains: "▸8 settings"
+        timeoutMs: 5000
+    - wait:
+        screen:
+            contains: "enter change"
+        timeoutMs: 2000
+    - snapshot: settings
+    - press: enter
+    - wait:
+        screen:
+            matches: "update interval\\s+2s"
+        timeoutMs: 2000
+    - press: "-"
+    - wait:
+        screen:
+            matches: "update interval\\s+1s"
+        timeoutMs: 2000
+    - snapshot: changed
+    - press: s
+    - wait:
+        screen:
+            contains: "saved: 1 changed"
+        timeoutMs: 2000
+    - snapshot: saved
+    - press: j
+    - press: j
+    - press: j
+    - press: j
+    - press: enter
+    - wait:
+        screen:
+            matches: "mouse\\s+off"
+        timeoutMs: 2000
+    - snapshot: mouse_off
+    - mouse:
+        x: 4
+        y: 1
+        button: left
+        action: click
+    - press: j
+    - press: enter
+    - wait:
+        screen:
+            matches: "cpu alert\\s+50%"
+        timeoutMs: 2000
+    - snapshot: after_click
+    - press: q
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+outcomes:
+    - id: enter_and_minus_cycle_the_value
+      description: enter moves update interval to its next value (1s -> 2s), "-" moves it back
+      verify:
+        script:
+            runtime: shell
+            run: |
+                if grep -qE "update interval\s+1s" "$GLYPHRUN_RUN_DIR/snapshots/changed.txt"; then
+                  echo '{"ok": true, "evidence": "1s -> 2s -> 1s, the wait steps saw each value"}'
+                else
+                  echo '{"ok": false, "evidence": "the setting did not cycle as expected"}'
+                fi
+    - id: s_saves_with_a_status_line
+      description: s saves and the status line reports how many settings changed
+      verify:
+        script:
+            runtime: shell
+            run: |
+                if grep -q "saved: 1 changed" "$GLYPHRUN_RUN_DIR/snapshots/saved.txt"; then
+                  echo '{"ok": true, "evidence": "the saved snapshot shows the status line"}'
+                else
+                  echo '{"ok": false, "evidence": "no save status"}'
+                fi
+    - id: mouse_off_ignores_a_later_click
+      description: after the mouse setting is switched off, a click on the "1 overview" tab label does nothing; settings stays active and the keys typed after it (j, enter) still act on the settings list
+      verify:
+        script:
+            runtime: shell
+            run: |
+                d="$GLYPHRUN_RUN_DIR/snapshots"
+                if grep -qE "mouse\s+off" "$d/mouse_off.txt" \
+                  && grep -q "▸8 settings" "$d/after_click.txt" && ! grep -q "▸1 overview" "$d/after_click.txt"; then
+                  echo '{"ok": true, "evidence": "the click after mouse off left settings active"}'
+                else
+                  echo '{"ok": false, "evidence": "a click acted with the mouse setting off"}'
+                fi
+    - id: clean_exit
+      description: q quits the app and it exits 0
+      verify:
+        process:
+            exitCode: 0
+contractHash: sha256:9282513273e3c928c6672f640eb201c3404e53233d3a4b376fce14c66d7d38fb

@@ -140,6 +140,10 @@ internal/
   contextids/     MONITOR_* / CHALUPA_CI_* run correlation
   notify/ reload/ config/ kill/ cgroup/ temperature/ capability/
   ui/studio/      the TUI (Bubble Tea v2, charm.land/*)
+  ui/tuistudio/   EXPERIMENTAL: the same Studio, rendered by Tuimark instead
+                  (`monitor studio --tuimark`; `--fixture` for deterministic
+                  offline data, `--dump COLSxROWS` for one JSON frame). Reuses
+                  collector/kill/config/history/temperature read-only.
   widgets/        sparklines, gauges, CodeFrame (line-heatmap renderer)
 
 examples/polyglot/  js (node/bun/deno), python, ruby, go-pprof, go-plain,
