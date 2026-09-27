@@ -155,6 +155,27 @@ func TestKillEligibleProcessAndSparesProtected(t *testing.T) {
 	}
 }
 
+// TestKillConfirmationFocusesTheModal: when the confirmation opens, focus
+// rests on the modal, not on a button. A focused "yes (y)" button would
+// confirm the kill on enter or space; the Bubble Tea studio acts only on
+// y, n and esc.
+func TestKillConfirmationFocusesTheModal(t *testing.T) {
+	s := newFixtureStudio(t)
+	must(t, s.ui.Set("view", "processes"))
+	must(t, s.publishProcs())
+	fire(t, s, "cursor_moved", tuimark.Event{Keys: map[string]any{"p": 2201.0}}) // monitor-agent, eligible
+	fire(t, s, "kill_ask", tuimark.Event{})
+	d, err := s.ui.Dump(100, 24)
+	must(t, err)
+	if d.Focus == nil || *d.Focus != "kill" {
+		focus := "<none>"
+		if d.Focus != nil {
+			focus = *d.Focus
+		}
+		t.Fatalf("focus is %s with the kill confirmation open, want the modal (kill)", focus)
+	}
+}
+
 // TestKillCancelClearsSelection matches the Bubble Tea studio: cancelling
 // the confirmation terminates nothing and drops the marks, so the next
 // kill_ask falls back to the cursor row.

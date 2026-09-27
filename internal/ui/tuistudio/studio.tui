@@ -249,9 +249,12 @@
         </row>
       </col>
       <text class="warn" if="kill_force">SIGKILL cannot be caught</text>
+      <!-- The buttons take clicks but not focus, so focus rests on the
+           modal and only y, n and esc act, as in the Bubble Tea studio:
+           a focused "yes" would confirm the kill on enter or space. -->
       <row id="kill-actions">
-        <button id="kill-yes" label="yes (y)" on:click="kill_confirm"/>
-        <button id="kill-no" label="no (n)" on:click="kill_cancel"/>
+        <button id="kill-yes" label="yes (y)" focusable="false" on:click="kill_confirm"/>
+        <button id="kill-no" label="no (n)" focusable="false" on:click="kill_cancel"/>
       </row>
     </modal>
     <modal id="detail" open="detail_open" title="{detail.title}" on:escape="detail_close">
