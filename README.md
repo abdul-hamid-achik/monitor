@@ -156,6 +156,12 @@ monitor --version
 monitor studio
 ```
 
+EXPERIMENTAL: `monitor studio --tuimark` renders the same 9 tabs through
+[Tuimark](https://github.com/abdul-hamid-achik/tuimark) instead of Bubble Tea,
+over the same data. `--fixture` swaps in deterministic offline data (no real
+process, config file, or history store touched); `--dump COLSxROWS` prints one
+frame as JSON and exits.
+
 ### Prerequisites (build from source only)
 
 - Go 1.25 or higher
