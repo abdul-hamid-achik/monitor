@@ -256,12 +256,15 @@ func (s *studio) killAsk(ev tuimark.Event, force bool) error {
 // non-system) process in the frozen confirmation, verifying each one
 // (which can block up to ~2s per pid: internal/kill.KillVerified polls),
 // so it runs off the handler goroutine. A protected or system process in
-// the confirmation is never signaled, matching the CLI/MCP gate.
+// the confirmation is never signaled, matching the CLI/MCP gate. The
+// selection is cleared unconditionally on confirm (spared or not),
+// matching the Bubble Tea studio's handleKillConfirmKeys.
 func (s *studio) killConfirm() error {
 	s.mu.Lock()
 	conf := s.killConf
 	force := s.forceKill
 	s.showKill = false
+	s.marked = map[int32]bool{}
 	s.mu.Unlock()
 
 	var attempted []int32
@@ -272,24 +275,16 @@ func (s *studio) killConfirm() error {
 		attempted = append(attempted, p.PID)
 	}
 
-	if err := s.ui.Set("kill_open", false); err != nil {
-		return err
+	errs := []error{s.ui.Set("kill_open", false), s.publishProcs()}
+	if len(attempted) > 0 {
+		go func() {
+			for _, pid := range attempted {
+				_, _ = s.kill.Verify(pid, force)
+			}
+			_ = s.refreshNow()
+		}()
 	}
-	if len(attempted) == 0 {
-		return nil
-	}
-	go func() {
-		for _, pid := range attempted {
-			_, _ = s.kill.Verify(pid, force)
-		}
-		s.mu.Lock()
-		for _, pid := range attempted {
-			delete(s.marked, pid)
-		}
-		s.mu.Unlock()
-		_ = s.refreshNow()
-	}()
-	return nil
+	return joinErrs(errs)
 }
 
 // publishDetail writes the read-only, PID-pinned diagnostic panel; once
