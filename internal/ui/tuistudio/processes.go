@@ -65,11 +65,15 @@ func (s *studio) processHandlers() map[string]tuimark.Handler {
 	on("kill_ask", func(ev tuimark.Event) error { return s.killAsk(ev, false) })
 	on("kill_force_ask", func(ev tuimark.Event) error { return s.killAsk(ev, true) })
 	on("kill_confirm", func(tuimark.Event) error { return s.killConfirm() })
+	// Cancelling clears the selection too, matching the Bubble Tea
+	// studio's handleKillConfirmKeys (esc/n).
 	on("kill_cancel", func(tuimark.Event) error {
 		s.mu.Lock()
 		s.showKill = false
+		s.forceKill = false
+		s.marked = map[int32]bool{}
 		s.mu.Unlock()
-		return s.ui.Set("kill_open", false)
+		return joinErrs([]error{s.ui.Set("kill_open", false), s.publishProcs()})
 	})
 
 	on("diagnose", func(ev tuimark.Event) error {

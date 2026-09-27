@@ -155,6 +155,47 @@ func TestKillEligibleProcessAndSparesProtected(t *testing.T) {
 	}
 }
 
+// TestKillCancelClearsSelection matches the Bubble Tea studio: cancelling
+// the confirmation terminates nothing and drops the marks, so the next
+// kill_ask falls back to the cursor row.
+func TestKillCancelClearsSelection(t *testing.T) {
+	s := newFixtureStudio(t)
+	must(t, s.ui.Set("view", "processes"))
+	must(t, s.publishProcs())
+	fire(t, s, "marks_changed", tuimark.Event{Value: []any{7744.0}})
+	must(t, s.publishProcs())
+	if !hasCheckedRow(t, s) {
+		t.Fatal("setup: the marked row is not shown as checked")
+	}
+	fire(t, s, "kill_ask", tuimark.Event{})
+	fire(t, s, "kill_cancel", tuimark.Event{})
+
+	s.mu.Lock()
+	marks, showKill := len(s.marked), s.showKill
+	s.mu.Unlock()
+	if marks != 0 || showKill {
+		t.Fatalf("after cancel: %d marks, confirmation open=%v; want 0, false", marks, showKill)
+	}
+	if _, ok := s.findProcess(7744); !ok {
+		t.Fatal("cancel terminated the marked process")
+	}
+	if hasCheckedRow(t, s) {
+		t.Fatal("the table still shows a checked row after cancel")
+	}
+}
+
+func hasCheckedRow(t *testing.T, s *studio) bool {
+	t.Helper()
+	d, err := s.ui.Dump(120, 24)
+	must(t, err)
+	for _, n := range d.Nodes {
+		if n.Checked {
+			return true
+		}
+	}
+	return false
+}
+
 // TestDiagnoseTracksPinnedPIDUntilItVanishes matches examples/monitor's
 // contract: the detail stays pinned to its pid; once that pid leaves the
 // snapshot (here, the fixture's ephemeral "demo-worker" after 3 ticks) the

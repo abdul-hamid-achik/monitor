@@ -7,8 +7,10 @@ intent: |
     name, per internal/collector.ProtectedProcessNames) is always listed as
     [BLOCKED ], never [ELIGIBLE], matching internal/kill.CheckSafety's
     protected/system classification, even when every visible row is marked
-    for a mass kill (ctrl+a); n and esc both cancel without changing the
-    table. This spec never confirms a kill (y) — it only opens and cancels
+    for a mass kill (ctrl+a); n and esc both cancel without terminating
+    anything, and cancelling drops the marks (like the Bubble Tea studio),
+    so the next K asks about the cursor row alone. This spec never confirms
+    a kill (y) — it only opens and cancels
     — so nothing is ever terminated, on top of --fixture already making
     that impossible (fixtureKiller never sends a real signal).
 target:
@@ -60,6 +62,17 @@ steps:
             contains: "kill processes"
         timeoutMs: 2000
     - snapshot: all_marked
+    - press: n
+    - wait:
+        screen:
+            notContains: "kill processes"
+        timeoutMs: 2000
+    - press: K
+    - wait:
+        screen:
+            contains: "kill processes"
+        timeoutMs: 2000
+    - snapshot: after_cancel
     - press: n
     - wait:
         screen:
@@ -120,9 +133,22 @@ outcomes:
                 else
                   echo '{"ok": false, "evidence": "the mass-kill confirmation did not show the expected mix"}'
                 fi
+    - id: cancel_clears_the_selection
+      description: after the mass-kill confirmation is cancelled, K asks about the cursor row alone (one listed process), because cancelling dropped the marks
+      verify:
+        script:
+            runtime: shell
+            run: |
+                f="$GLYPHRUN_RUN_DIR/snapshots/after_cancel.txt"
+                n=$(grep -c -E "\[(BLOCKED |ELIGIBLE)\]" "$f")
+                if [ "$n" -eq 1 ]; then
+                  echo '{"ok": true, "evidence": "the confirmation after cancel lists exactly one process"}'
+                else
+                  echo "{\"ok\": false, \"evidence\": \"the confirmation after cancel lists $n processes, want 1\"}"
+                fi
     - id: clean_exit
       description: q quits the app and it exits 0; nothing was ever confirmed (y was never pressed)
       verify:
         process:
             exitCode: 0
-contractHash: sha256:2b7f3fc200ca54de900e1f8511a77a725a564dbdfc1d09d04b4c4f0a00eab5c9
+contractHash: sha256:2b76c079d4e18599d2b65137f2ee1a810cfae87139303725e289512c089b0e42

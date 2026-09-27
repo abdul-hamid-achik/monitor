@@ -2,6 +2,8 @@ package tuistudio
 
 import (
 	"context"
+	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -53,6 +55,34 @@ func TestSmokeEveryTabAtEveryWidth(t *testing.T) {
 				t.Errorf("dump %s@%d errors=%v ok=%v", view, cols, d.Errors, d.OK)
 			}
 		}
+	}
+}
+
+// TestRunWithoutTerminalReportsOnStderr: with no terminal on stdin, Run
+// fails, and like the Bubble Tea studio the failure is printed, since the
+// command itself exits 0.
+func TestRunWithoutTerminalReportsOnStderr(t *testing.T) {
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devnull.Close()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldIn, oldErr := os.Stdin, os.Stderr
+	os.Stdin, os.Stderr = devnull, w
+	runErr := RunWithOptions(Options{Fixture: true})
+	os.Stdin, os.Stderr = oldIn, oldErr
+	w.Close()
+	out, _ := io.ReadAll(r)
+
+	if runErr == nil {
+		t.Fatal("RunWithOptions succeeded without a terminal")
+	}
+	if !strings.Contains(string(out), "Error running monitor studio --tuimark:") {
+		t.Fatalf("stderr = %q, want the failure reported", out)
 	}
 }
 

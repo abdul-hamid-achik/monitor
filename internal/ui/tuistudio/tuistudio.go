@@ -93,8 +93,18 @@ func Run() error { return RunWithOptions(Options{}) }
 
 // RunWithOptions launches the experimental studio, honoring the same
 // --no-temperature-source policy and --reload-server bridge as the
-// default studio.
+// default studio. A failure (no terminal on stdin, a view that does not
+// load) is reported on stderr, as internal/ui/studio.RunWithOptions does:
+// `monitor studio` itself exits 0 either way.
 func RunWithOptions(opts Options) error {
+	if err := run(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "Error running monitor studio --tuimark: %v\n", err)
+		return err
+	}
+	return nil
+}
+
+func run(opts Options) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
