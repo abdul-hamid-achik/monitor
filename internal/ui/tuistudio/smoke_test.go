@@ -1,0 +1,106 @@
+package tuistudio
+
+import (
+	"context"
+	"strings"
+	"testing"
+)
+
+func newFixtureStudio(t *testing.T) *studio {
+	t.Helper()
+	s, err := newStudio(context.Background(), Options{Fixture: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestSmokeValidateAndDump(t *testing.T) {
+	s := newFixtureStudio(t)
+	for _, d := range s.ui.Validate() {
+		t.Errorf("diagnostic: %+v", d)
+	}
+	for _, cols := range []int{80, 120} {
+		d, err := s.ui.Dump(cols, 30)
+		if err != nil {
+			t.Fatalf("dump %d: %v", cols, err)
+		}
+		if len(d.Errors) > 0 || !d.OK {
+			t.Errorf("dump %d errors=%v ok=%v", cols, d.Errors, d.OK)
+		}
+	}
+}
+
+// TestSmokeEveryTabAtEveryWidth walks every tab at 40/80/120 columns and
+// fails on any layout/bind error or warning: since Tuimark only lays out
+// the active tab, Validate() alone does not exercise the inactive ones.
+func TestSmokeEveryTabAtEveryWidth(t *testing.T) {
+	s := newFixtureStudio(t)
+	views := []string{"overview", "cpu", "memory", "thermal", "disk", "network", "processes", "settings", "trends"}
+	if err := s.publishProcs(); err != nil {
+		t.Fatal(err)
+	}
+	for _, view := range views {
+		if err := s.ui.Set("view", view); err != nil {
+			t.Fatalf("set view %s: %v", view, err)
+		}
+		for _, cols := range []int{40, 80, 120} {
+			d, err := s.ui.Dump(cols, 30)
+			if err != nil {
+				t.Fatalf("dump %s@%d: %v", view, cols, err)
+			}
+			if len(d.Errors) > 0 || !d.OK {
+				t.Errorf("dump %s@%d errors=%v ok=%v", view, cols, d.Errors, d.OK)
+			}
+		}
+	}
+}
+
+func TestSmokeEveryActionHasAHandler(t *testing.T) {
+	s := newFixtureStudio(t)
+	for _, a := range s.ui.Catalog() {
+		if a.Builtin {
+			continue
+		}
+		if _, ok := s.handlers()[a.Name]; !ok {
+			t.Errorf("no handler for action %q (%v)", a.Name, a.Sources)
+		}
+	}
+}
+
+func TestSmokeProcessesVisible(t *testing.T) {
+	s := newFixtureStudio(t)
+	if err := s.ui.Set("view", "processes"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.publishProcs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := s.ui.Dump(120, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	screen := strings.Join(d.Grid, "\n")
+	if !strings.Contains(screen, "WindowServer") || !strings.Contains(screen, "monitor-agent") {
+		t.Errorf("expected fixture processes in the table:\n%s", screen)
+	}
+	// launchd is root-owned (system), hidden by default...
+	if strings.Contains(screen, "launchd") {
+		t.Errorf("launchd (a system process) should be hidden by default:\n%s", screen)
+	}
+	// ...until show_system_processes is toggled on.
+	if err := s.cycleSetting("show_system_processes", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.publishProcs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err = s.ui.Dump(120, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	screen = strings.Join(d.Grid, "\n")
+	if !strings.Contains(screen, "launchd") {
+		t.Errorf("launchd should be visible once show_system_processes is on:\n%s", screen)
+	}
+}

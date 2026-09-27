@@ -1,0 +1,271 @@
+<tui version="2" theme="auto" mouse="mouse_enabled">
+  <style src="studio.tcss"/>
+  <keymap>
+    <bind keys="q" action="quit" when="#app" label="quit"/>
+    <bind keys="ctrl+c" action="quit"/>
+    <bind keys="?" action="help_open" when="#app" label="help"/>
+    <bind keys="tab,shift+tab" action="filter_apply" when="#filter"/>
+    <bind keys="esc" action="filter_cancel" when="#filter" label="cancel"/>
+    <bind keys="1" action="switch-to" to="#overview" when="#app" keycap="1-9" label="tabs"/>
+    <bind keys="2" action="switch-to" to="#cpu" when="#app"/>
+    <bind keys="3" action="switch-to" to="#memory" when="#app"/>
+    <bind keys="4" action="switch-to" to="#thermal" when="#app"/>
+    <bind keys="5" action="switch-to" to="#disk" when="#app"/>
+    <bind keys="6" action="switch-to" to="#network" when="#app"/>
+    <bind keys="7" action="switch-to" to="#processes" when="#app"/>
+    <bind keys="8" action="switch-to" to="#settings" when="#app"/>
+    <bind keys="9" action="switch-to" to="#trends" when="#app"/>
+    <bind keys="tab,right,l" action="move-next" to="#nav" when="#app"/>
+    <bind keys="shift+tab,left,h" action="move-prev" to="#nav" when="#app"/>
+    <bind keys="p" action="pause" when="#app" label="pause"/>
+    <bind keys="r" action="refresh" when="#app" label="refresh"/>
+    <bind keys="j" action="move-next" when="#procs:focus"/>
+    <bind keys="k" action="move-prev" when="#procs:focus"/>
+    <bind keys="space" action="check-toggle" when="#procs:focus" label="mark"/>
+    <bind keys="ctrl+a" action="check-all" when="#procs:focus" keycap="^A" label="all"/>
+    <bind keys="ctrl+d" action="check-none" when="#procs:focus" keycap="^D" label="none"/>
+    <bind keys="c" action="sort_cpu" when="#procs:focus" label="sort cpu"/>
+    <bind keys="m" action="sort_mem" when="#procs:focus" label="sort mem"/>
+    <bind keys="/" action="filter_open" when="#procs:focus" label="filter"/>
+    <bind keys="enter" action="diagnose" when="#procs:focus" label="details"/>
+    <bind keys="K" action="kill_ask" when="#procs:focus" label="kill"/>
+    <bind keys="X" action="kill_force_ask" when="#procs:focus" label="force kill"/>
+    <bind keys="y" action="kill_confirm" when="#kill" label="confirm"/>
+    <bind keys="n" action="kill_cancel" when="#kill" label="cancel"/>
+    <bind keys="enter,q" action="detail_close" when="#detail" label="close"/>
+    <bind keys="r" action="detail_refresh" when="#detail" label="refresh"/>
+    <bind keys="j" action="move-next" when="#settings-list:focus"/>
+    <bind keys="k" action="move-prev" when="#settings-list:focus"/>
+    <bind keys="enter,space" action="setting_next" when="#settings-list:focus" label="change"/>
+    <bind keys="-" action="setting_prev" when="#settings-list:focus" label="back"/>
+    <bind keys="s" action="settings_save" when="#settings" label="save"/>
+  </keymap>
+  <screen id="studio">
+    <col id="app">
+      <row id="identity">
+        <text class="brand">◆ monitor</text>
+        <text class="muted">{host}</text>
+        <spacer/>
+        <text class="status" class:live="live" class:paused="paused" class:waiting="waiting" class:stale="stale">{status_label}</text>
+        <text class="muted">{sampled_at}</text>
+      </row>
+      <tabs id="nav" bind="view" mark="▸" focusable="true" on:select="view_changed">
+        <tab id="overview" label="1 overview" short="1 ovr">
+          <col class="pane">
+            <box id="panels">
+              <box class="panel" title="cpu">
+                <row class="meter">
+                  <text class="meter-label">{cpu.value}</text>
+                  <progress class="gauge" bind="cpu.pct"/>
+                </row>
+                <text class="muted">{cpu.note}</text>
+              </box>
+              <box class="panel" title="memory">
+                <row class="meter">
+                  <text class="meter-label">{mem.value}</text>
+                  <progress class="gauge" bind="mem.pct"/>
+                </row>
+                <text class="muted">{mem.note}</text>
+              </box>
+              <box class="panel" title="thermal">
+                <row class="meter">
+                  <text class="meter-label">{thermal.value}</text>
+                  <progress class="gauge" bind="thermal.pct"/>
+                </row>
+                <text class="muted">{thermal.note}</text>
+              </box>
+              <box class="panel" title="disk">
+                <row class="meter">
+                  <text class="meter-label">{disk.value}</text>
+                  <progress class="gauge" bind="disk.pct"/>
+                </row>
+                <text class="muted">{disk.note}</text>
+              </box>
+            </box>
+            <row id="lower" class="lower">
+              <box class="panel activity" title="activity · 60s">
+                <row class="meter"><text class="meter-label">cpu</text><sparkline class="spark" bind="cpu.hist" min="0" max="100"/></row>
+                <row class="meter"><text class="meter-label">mem</text><sparkline class="spark" bind="mem.hist" min="0" max="100"/></row>
+              </box>
+              <box class="panel top" title="top cpu">
+                <col each="top as t" key="t.pid">
+                  <row class="top-row">
+                    <text>{t.name}</text>
+                    <spacer/>
+                    <text class="num">{t.cpu}</text>
+                  </row>
+                </col>
+              </box>
+            </row>
+            <text class="warn attention" if="attention.has">{attention.message}</text>
+          </col>
+        </tab>
+        <tab id="cpu" label="2 cpu" short="2 cpu">
+          <col class="pane">
+            <box class="panel" title="cpu usage history">
+              <sparkline class="spark-big" bind="cpu.hist" min="0" max="100"/>
+              <text class="muted">{cpu.stats}</text>
+            </box>
+            <scroll id="cores-view" class="panel" title="per-core usage">
+              <box id="cores" each="cores as c" key="c.id">
+                <row class="core">
+                  <text class="core-label">{c.label}</text>
+                  <progress class="gauge" bind="c.pct"/>
+                </row>
+              </box>
+            </scroll>
+          </col>
+        </tab>
+        <tab id="memory" label="3 memory" short="3 mem">
+          <col class="pane">
+            <box class="panel" title="physical memory">
+              <row class="meter">
+                <text class="meter-label">{mem.value}</text>
+                <progress class="gauge" bind="mem.pct"/>
+              </row>
+              <text class="muted">{mem.note}</text>
+              <row class="breakdown">
+                <text class="bd-label">app</text><text class="num">{mem.app}</text>
+                <text class="bd-label">wired</text><text class="num">{mem.wired}</text>
+              </row>
+              <row class="breakdown">
+                <text class="bd-label">compressed</text><text class="num">{mem.compressed}</text>
+                <text class="bd-label">cache</text><text class="num">{mem.cache}</text>
+              </row>
+              <row class="breakdown">
+                <text class="bd-label">purgeable</text><text class="num">{mem.purgeable}</text>
+              </row>
+            </box>
+            <box class="panel" title="swap">
+              <row class="meter">
+                <text class="meter-label">{mem.swap_value}</text>
+                <progress class="gauge" bind="mem.swap_pct"/>
+              </row>
+              <text class="muted">{mem.swap_note}</text>
+            </box>
+          </col>
+        </tab>
+        <tab id="thermal" label="4 thermal" short="4 thm">
+          <col class="pane">
+            <box class="panel" title="sensor readings">
+              <text class="muted">source {thermal.source}</text>
+              <row class="meter"><text class="meter-label">cpu package</text><progress class="gauge" bind="thermal.cpu_package_pct"/><text class="num">{thermal.cpu_package}</text></row>
+              <row class="meter"><text class="meter-label">cpu cores</text><progress class="gauge" bind="thermal.cpu_cores_pct"/><text class="num">{thermal.cpu_cores}</text></row>
+              <row class="meter"><text class="meter-label">gpu</text><progress class="gauge" bind="thermal.gpu_pct"/><text class="num">{thermal.gpu}</text></row>
+              <row class="meter"><text class="meter-label">ane</text><progress class="gauge" bind="thermal.ane_pct"/><text class="num">{thermal.ane}</text></row>
+              <row class="meter"><text class="meter-label">battery</text><progress class="gauge" bind="thermal.battery_pct"/><text class="num">{thermal.battery}</text></row>
+              <text class="muted">{thermal.fan}</text>
+              <text class="warn" if="thermal.unavailable">{thermal.reason}</text>
+            </box>
+          </col>
+        </tab>
+        <tab id="disk" label="5 disk" short="5 dsk">
+          <col class="pane">
+            <box class="panel" title="volumes">
+              <col id="partitions" each="disk.partitions as v" key="v.mount">
+                <row class="meter">
+                  <text class="mount-label" wrap="truncate">{v.mount}</text>
+                  <progress class="gauge" bind="v.pct"/>
+                  <text class="num">{v.note}</text>
+                </row>
+              </col>
+              <text class="muted" if="disk.unavailable">{disk.reason}</text>
+            </box>
+            <box class="panel" title="disk i/o">
+              <text class="muted">{disk.rate_note}</text>
+              <row class="meter"><text class="meter-label">read</text><sparkline class="spark" bind="disk.read_hist" min="0" max="100"/></row>
+              <row class="meter"><text class="meter-label">write</text><sparkline class="spark" bind="disk.write_hist" min="0" max="100"/></row>
+            </box>
+          </col>
+        </tab>
+        <tab id="network" label="6 network" short="6 net">
+          <col class="pane">
+            <box class="panel" title="network">
+              <text class="muted">{network.rate_note}</text>
+              <row class="meter"><text class="meter-label">download</text><sparkline class="spark" bind="network.down_hist" min="0" max="100"/></row>
+              <row class="meter"><text class="meter-label">upload</text><sparkline class="spark" bind="network.up_hist" min="0" max="100"/></row>
+              <text class="muted">{network.total_note}</text>
+              <text class="muted">{network.packets_note}</text>
+              <text class="warn" if="network.unavailable">{network.reason}</text>
+            </box>
+          </col>
+        </tab>
+        <tab id="processes" label="7 processes" short="7 proc" focus="#procs">
+          <col class="pane">
+            <row id="filter-row" if="filter_open">
+              <text class="muted">/</text>
+              <input id="filter" bind="query" placeholder="filter" on:change="filter" on:submit="filter_apply"/>
+            </row>
+            <table id="procs" each="procs as p" key="p.pid" bind="cursor_pid"
+                   checked="marked_pids" mark="▸" placeholder="no results"
+                   on:select="cursor_moved" on:change="marks_changed">
+              <item class:blocked="p.protected"/>
+              <column id="c-pid" class="num" title="PID" width="7">{p.pid}</column>
+              <column id="c-name" title="{h.name}">{p.name}</column>
+              <column id="c-cpu" class="num" title="{h.cpu}" width="7" class:hot="p.cpu_hot" on:click="sort_cpu">{p.cpu}</column>
+              <column id="c-mem" class="num" title="{h.mem}" width="8" on:click="sort_mem">{p.mem}</column>
+              <column id="c-thr" class="num" title="THR" width="4">{p.threads}</column>
+              <column id="c-io" class="num" title="I/O" width="9">{p.io}</column>
+              <column id="c-user" title="USER" width="10">{p.user}</column>
+            </table>
+          </col>
+        </tab>
+        <tab id="settings" label="8 settings" short="8 cfg" focus="#settings-list">
+          <col class="pane">
+            <list id="settings-list" each="settings as s" key="s.key" bind="setting_cursor">
+              <item class:dirty="s.dirty" class:error="s.error">
+                <row class="setting">
+                  <text class="setting-label">{s.label}</text>
+                  <text class="setting-value">{s.value}</text>
+                </row>
+              </item>
+            </list>
+            <text id="settings-status" class:ok="settings_saved" class:error="settings_failed">{settings_status}</text>
+          </col>
+        </tab>
+        <tab id="trends" label="9 trends" short="9 trd">
+          <col class="pane">
+            <box class="panel" title="cpu usage · last 1h">
+              <sparkline class="spark-big" bind="trends.cpu.hist" min="0" max="100"/>
+              <text class="muted">{trends.cpu.stats}</text>
+            </box>
+            <box class="panel" title="memory usage · last 1h">
+              <sparkline class="spark-big" bind="trends.mem.hist" min="0" max="100"/>
+              <text class="muted">{trends.mem.stats}</text>
+            </box>
+            <text class="warn" if="trends.unavailable">{trends.message}</text>
+          </col>
+        </tab>
+      </tabs>
+      <hints id="keys"/>
+    </col>
+    <modal id="kill" open="kill_open" title="kill processes" on:escape="kill_cancel">
+      <col id="kill-rows" each="kill_rows as k" key="k.pid">
+        <row class="kill-row" class:blocked="k.blocked">
+          <text class="kill-state">{k.state}</text>
+          <text class="num kill-pid">{k.pid}</text>
+          <text>{k.name}</text>
+          <text class="muted">{k.note}</text>
+        </row>
+      </col>
+      <text class="warn" if="kill_force">SIGKILL cannot be caught</text>
+      <row id="kill-actions">
+        <button id="kill-yes" label="yes (y)" on:click="kill_confirm"/>
+        <button id="kill-no" label="no (n)" on:click="kill_cancel"/>
+      </row>
+    </modal>
+    <modal id="detail" open="detail_open" title="{detail.title}" on:escape="detail_close">
+      <text class="muted" if="!detail.present">This process is no longer present in the latest snapshot.</text>
+      <box id="detail-rows" if="detail.present" each="detail.rows as d" key="d.k">
+        <row class="detail-row">
+          <text class="detail-label">{d.label}</text>
+          <text>{d.value}</text>
+        </row>
+      </box>
+    </modal>
+    <modal id="help" open="help_open" title="keys" on:escape="help_close">
+      <hints id="help-keys" scope="all" class="help"/>
+      <button id="help-ok" label="close" on:click="help_close"/>
+    </modal>
+  </screen>
+</tui>

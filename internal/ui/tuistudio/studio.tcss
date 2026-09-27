@@ -1,0 +1,110 @@
+/* Monitor Studio's real palette (internal/ui/studio/theme.go), so the
+   experimental Tuimark front-end reads as the same product as the Bubble
+   Tea studio and the docs site. */
+:root {
+  --bg: #11161D;
+  --fg: #F1F3F6;
+  --muted: #A6AEBA;
+  --accent: #FF8A80;
+  --ok: #62B891;
+  --warn: #D6A94F;
+  --danger: #FF756D;
+  --border: #3A414B;
+  --focus: #FF8A80;
+  --panel: #171D25;
+}
+
+@media (theme: light) {
+  :root {
+    --bg: #FBFAF8;
+    --fg: #20252D;
+    --muted: #5D6570;
+    --accent: #B63838;
+    --ok: #3C7658;
+    --warn: #8A6116;
+    --danger: #C02828;
+    --border: #D9D6D1;
+    --focus: #B63838;
+    --panel: #F6F4F1;
+  }
+}
+
+screen { color: $fg; background: $bg; }
+#identity { height: 1; gap: 1; background: $panel; }
+.brand { color: $accent; bold: true; }
+.muted { color: $muted; }
+.status { bold: true; }
+.live { color: $ok; }
+.paused { color: $warn; }
+.waiting { color: $muted; }
+.stale { color: $danger; }
+.warn { color: $warn; }
+
+#nav { height: 1fr; gap: 2; }
+.tab-label { color: $muted; }
+.tab-label:selected { color: $accent; bold: true; }
+.tab-label:disabled { dim: true; }
+
+#keys { height: 1; background: $panel; }
+.hint-key { color: $accent; bold: true; }
+.hint-label { color: $muted; }
+
+.pane { gap: 1; }
+.panel { border: rounded; border-color: $border; title-color: $muted; }
+#panels { layout: grid; grid-columns: 4; grid-min-width: 26; gap: 1; height: 7; }
+.meter { height: 1; gap: 1; }
+.meter-label { width: 16; }
+.gauge { width: 1fr; bar: eighths; color: $accent; }
+.spark { height: 1; color: $accent; width: 1fr; }
+.spark-big { height: 5; color: $accent; }
+.top-row { height: 1; }
+.num { content-align: end; }
+.attention { height: 1; }
+
+#lower { height: 10; gap: 1; }
+.activity { width: 3fr; }
+.top { width: 2fr; }
+
+#cores-view { scrollbar: auto; height: 1fr; }
+#cores { layout: grid; grid-columns: 4; grid-min-width: 22; gap: 1; }
+.core { height: 1; gap: 1; }
+.core-label { width: 9; }
+
+.breakdown { height: 1; gap: 1; }
+.bd-label { width: 11; color: $muted; }
+.mount-label { width: 24; }
+
+#filter-row { height: 1; gap: 1; }
+#filter-row:focus-within > text { color: $accent; }
+#procs { border: rounded; border-color: $border; scrollbar: auto; gap: 1; height: 1fr; }
+#procs:focus { border-color: $focus; }
+#procs > column { bold: true; color: $muted; }
+#procs > item:checked { color: $accent; }
+#procs > item.blocked { color: $danger; }
+#procs > item > text.hot { color: $warn; }
+#c-name { width: 1fr; min-width: 10; max-width: 44; }
+@media (max-cols: 99) { #c-io, #c-user { display: none; } }
+@media (max-cols: 77) { #c-thr { display: none; } }
+@media (max-cols: 57) { #c-mem { display: none; } }
+
+#settings-list { border: rounded; border-color: $border; height: 1fr; }
+#settings-list:focus { border-color: $focus; }
+.setting-label { width: 24; }
+.dirty { color: $warn; }
+.error { color: $danger; }
+.ok { color: $ok; }
+#settings-status { height: 1; }
+
+#kill { width: 80%; height: 12; }
+#kill-rows { height: auto; }
+.kill-row { height: 1; gap: 1; }
+.kill-state { width: 10; }
+.kill-pid { width: 7; }
+#kill-actions { height: 1; gap: 2; }
+.blocked { color: $danger; }
+#detail { width: 86; max-width: 100%; height: 80%; }
+#detail-rows { layout: grid; grid-columns: 2; grid-min-width: 38; gap: 0; }
+.detail-row { height: 1; gap: 1; }
+.detail-label { width: 12; color: $muted; }
+#help { width: 60%; height: 80%; }
+.help { layout: column; gap: 0; }
