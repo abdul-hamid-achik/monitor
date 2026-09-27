@@ -1,0 +1,61 @@
+version: 1
+name: monitor_tuistudio_launch_quit
+intent: |
+    `monitor studio --tuimark --fixture` is the EXPERIMENTAL Tuimark front-end
+    for Studio (internal/ui/tuistudio), rendered from studio.tui/studio.tcss
+    over the same collector/kill/config/history/temperature data the default
+    Bubble Tea studio uses. --fixture swaps in the deterministic offline data
+    source (fixture.go), so this spec never depends on the host it runs on and
+    never touches a real process, the real config file, or a real history
+    store. This checks the front-end launches into a real PTY, shows the
+    brand and the tab bar, and quits cleanly on q with the terminal restored
+    (cursor visible again, alt screen exited).
+target:
+    cmd: ["./bin/monitor", "studio", "--tuimark", "--fixture"]
+    cwd: "."
+terminal:
+    cols: 120
+    rows: 30
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "test -x ./bin/monitor"
+          timeoutMs: 5000
+steps:
+    - wait:
+        screen:
+            contains: "◆ monitor"
+        timeoutMs: 5000
+    - wait:
+        screen:
+            contains: "studio-fixture"
+        timeoutMs: 5000
+    - snapshot: home
+    - press: q
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+outcomes:
+    - id: brand_and_tabs_visible
+      description: the identity row and the 9-tab bar are visible on launch
+      verify:
+        script:
+            runtime: shell
+            run: |
+                f="$GLYPHRUN_RUN_DIR/snapshots/home.txt"
+                if grep -q "◆ monitor" "$f" && grep -q "1 overview" "$f" && grep -q "9 trends" "$f"; then
+                  echo '{"ok": true, "evidence": "brand and all 9 tab labels are present"}'
+                else
+                  echo '{"ok": false, "evidence": "the identity row or the tab bar is missing"}'
+                fi
+    - id: q_quits_cleanly
+      description: |
+        q quits the app and it exits 0. tuimark.App.Run restores the terminal
+        (cooked mode, main screen, visible cursor) before returning, and only
+        returns nil on a clean quit, so this exit code is the same "terminal
+        restored" evidence the other specs' clean_exit outcomes rely on.
+      verify:
+        process:
+            exitCode: 0
+contractHash: sha256:1fb619eacebd4c0a9440c13c25f0151ee68b9eeebe44c8a6433bbf1dc43bf0a0

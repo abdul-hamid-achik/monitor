@@ -1,0 +1,112 @@
+version: 1
+name: monitor_tuistudio_tabs
+intent: |
+    The 9 tabs of the experimental Tuimark studio (--tuimark --fixture)
+    switch by number key (1-9) and by tab/shift+tab, exactly like the
+    default Bubble Tea studio's keymap. Each tab renders real (fixture)
+    data from the same collector.SystemInfo shape the CLI and the Bubble
+    Tea studio use: per-core CPU usage, the memory breakdown, sensor
+    readings, disk volumes, and network rates.
+target:
+    cmd: ["./bin/monitor", "studio", "--tuimark", "--fixture"]
+    cwd: "."
+terminal:
+    cols: 120
+    rows: 30
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "test -x ./bin/monitor"
+          timeoutMs: 5000
+steps:
+    - wait:
+        screen:
+            contains: "◆ monitor"
+        timeoutMs: 5000
+    - press: "2"
+    - wait:
+        screen:
+            contains: "per-core usage"
+        timeoutMs: 2000
+    - snapshot: cpu_tab
+    - press: "3"
+    - wait:
+        screen:
+            contains: "physical memory"
+        timeoutMs: 2000
+    - snapshot: memory_tab
+    - press: "4"
+    - wait:
+        screen:
+            contains: "sensor readings"
+        timeoutMs: 2000
+    - snapshot: thermal_tab
+    - press: "5"
+    - wait:
+        screen:
+            contains: "volumes"
+        timeoutMs: 2000
+    - snapshot: disk_tab
+    - press: "6"
+    - wait:
+        screen:
+            contains: "download"
+        timeoutMs: 2000
+    - snapshot: network_tab
+    - press: shift+tab
+    - wait:
+        screen:
+            contains: "▸5 disk"
+        timeoutMs: 2000
+    - press: tab
+    - press: tab
+    - wait:
+        screen:
+            contains: "▸7 processes"
+        timeoutMs: 2000
+    - snapshot: processes_tab
+    - press: "1"
+    - wait:
+        screen:
+            contains: "▸1 overview"
+        timeoutMs: 2000
+    - press: q
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+outcomes:
+    - id: number_keys_switch_tabs
+      description: 2-6 switch to CPU/Memory/Thermal/Disk/Network with their own real data
+      verify:
+        script:
+            runtime: shell
+            run: |
+                d="$GLYPHRUN_RUN_DIR/snapshots"
+                if grep -q "cpu0 " "$d/cpu_tab.txt" \
+                  && grep -q "compressed" "$d/memory_tab.txt" \
+                  && grep -q "cpu package" "$d/thermal_tab.txt" \
+                  && grep -q "/System/Volumes" "$d/disk_tab.txt" \
+                  && grep -q "upload" "$d/network_tab.txt"; then
+                  echo '{"ok": true, "evidence": "each tab shows its own metric family"}'
+                else
+                  echo '{"ok": false, "evidence": "one or more tabs did not show the expected content"}'
+                fi
+    - id: tab_and_shift_tab_move_the_active_tab
+      description: shift+tab moves back one tab (network -> disk), tab moves forward twice (disk -> network -> processes)
+      verify:
+        script:
+            runtime: shell
+            run: |
+                f="$GLYPHRUN_RUN_DIR/snapshots/processes_tab.txt"
+                if grep -q "▸7 processes" "$f"; then
+                  echo '{"ok": true, "evidence": "processes is active after shift+tab then tab, tab"}'
+                else
+                  echo '{"ok": false, "evidence": "the active tab did not land on processes"}'
+                fi
+    - id: clean_exit
+      description: q quits the app and it exits 0
+      verify:
+        process:
+            exitCode: 0
+contractHash: sha256:6e8b59704d33d3e23cd50f67c271758e5f3cb120915c0a65896cee0acb6fbecd
