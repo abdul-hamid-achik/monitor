@@ -66,3 +66,33 @@ func TestFixtureNeverStartsARealTemperatureSubprocess(t *testing.T) {
 		}
 	}
 }
+
+// TestRateHistoriesShareOneScale: network and disk histories are bytes per
+// second; the view draws them with min="0" max="100", so the host maps both
+// series of a pair onto their shared min..max, like the Bubble Tea studio's
+// MultiSparkline. Binding raw bytes filled every column to the top.
+func TestRateHistoriesShareOneScale(t *testing.T) {
+	got := sharedScale([]float64{200_000, 800_000}, []float64{100_000, 400_000})
+	want := [][]any{{100.0 / 7, 100.0}, {0.0, 300.0 / 7}}
+	for i := range want {
+		for j := range want[i] {
+			if d := got[i][j].(float64) - want[i][j].(float64); d > 1e-9 || d < -1e-9 {
+				t.Fatalf("sharedScale = %v, want %v", got, want)
+			}
+		}
+	}
+	if flat := sharedScale([]float64{5, 5}); flat[0][0] != 0.0 || flat[0][1] != 0.0 {
+		t.Fatalf("a flat series maps to %v, want zeros", flat)
+	}
+
+	s := newFixtureStudio(t)
+	for i := 0; i < 20; i++ {
+		must(t, s.refreshNow())
+	}
+	must(t, s.ui.Set("view", "network"))
+	for _, line := range strings.Split(screen(t, s, 100, 24), "\n") {
+		if strings.Contains(line, "upload") && strings.Count(line, "█") > 5 {
+			t.Fatalf("the upload history is saturated (upload is the smaller series):\n%s", line)
+		}
+	}
+}

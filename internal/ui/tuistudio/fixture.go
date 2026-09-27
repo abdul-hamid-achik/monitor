@@ -224,17 +224,18 @@ func (f *fixtureSource) snapshotLocked() collector.SystemInfo {
 	f.netRecv += 480_000 + uint64(f.rng.Intn(120_000))
 	f.netPktSent += 400
 	f.netPktRecv += 900
+	// Histories hold bytes per second, as internal/collector's do.
 	downRate := clamp(30+40*f.rng.Float64(), 0, 100)
 	upRate := clamp(10+15*f.rng.Float64(), 0, 100)
-	f.netDownHist = ringAppend(f.netDownHist, downRate)
-	f.netUpHist = ringAppend(f.netUpHist, upRate)
+	f.netDownHist = ringAppend(f.netDownHist, downRate*12_000)
+	f.netUpHist = ringAppend(f.netUpHist, upRate*12_000)
 
 	f.diskRead += 200_000 + uint64(f.rng.Intn(80_000))
 	f.diskWrite += 90_000 + uint64(f.rng.Intn(40_000))
 	readRate := clamp(15+20*f.rng.Float64(), 0, 100)
 	writeRate := clamp(8+12*f.rng.Float64(), 0, 100)
-	f.diskRHist = ringAppend(f.diskRHist, readRate)
-	f.diskWHist = ringAppend(f.diskWHist, writeRate)
+	f.diskRHist = ringAppend(f.diskRHist, readRate*40_000)
+	f.diskWHist = ringAppend(f.diskWHist, writeRate*40_000)
 
 	observed := collector.MetricStatus{State: collector.MetricObserved}
 	states := func(keys ...string) map[string]collector.MetricStatus {
