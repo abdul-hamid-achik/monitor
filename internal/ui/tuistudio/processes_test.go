@@ -248,3 +248,20 @@ func TestDiagnoseTracksPinnedPIDUntilItVanishes(t *testing.T) {
 		t.Fatalf("expected the detail modal closed:\n%s", sc)
 	}
 }
+
+// TestDetailRefreshTakesASample: r inside the process detail samples now,
+// even while paused, like the global refresh and the Bubble Tea studio.
+func TestDetailRefreshTakesASample(t *testing.T) {
+	s := newFixtureStudio(t)
+	must(t, s.ui.Set("view", "processes"))
+	must(t, s.publishProcs())
+	fire(t, s, "pause", tuimark.Event{})
+	fire(t, s, "cursor_moved", tuimark.Event{Keys: map[string]any{"p": 2201.0}})
+	fire(t, s, "diagnose", tuimark.Event{})
+	before := s.last.LastUpdate
+	time.Sleep(time.Millisecond)
+	fire(t, s, "detail_refresh", tuimark.Event{})
+	if !s.last.LastUpdate.After(before) {
+		t.Fatalf("detail refresh kept the sample from %v", before)
+	}
+}

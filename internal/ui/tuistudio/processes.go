@@ -84,7 +84,10 @@ func (s *studio) processHandlers() map[string]tuimark.Handler {
 		s.mu.Unlock()
 		return joinErrs([]error{s.publishDetail(), s.ui.Set("detail_open", true)})
 	})
-	on("detail_refresh", func(tuimark.Event) error { return s.publishDetail() })
+	// r inside the detail takes a sample now, like the global refresh and
+	// the Bubble Tea studio's r (it works while paused too); applySample
+	// republishes the open detail.
+	on("detail_refresh", func(tuimark.Event) error { return s.refreshNow() })
 	on("detail_close", func(tuimark.Event) error {
 		s.mu.Lock()
 		s.detailOpen = false

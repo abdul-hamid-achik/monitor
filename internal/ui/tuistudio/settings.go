@@ -143,11 +143,18 @@ func (s *studio) cycleSetting(key string, dir int) error {
 	}
 	s.settingsDirty[key] = true
 	mouseEnabled := cfg.MouseEnabled
+	unit := cfg.TemperatureUnit
+	temp := s.last.Temperature
 	s.mu.Unlock()
 
 	errs := []error{s.publishSettings(), s.ui.Set("settings_status", ""), s.ui.Set("settings_saved", false)}
 	if key == "mouse_enabled" {
 		errs = append(errs, s.ui.Set("mouse_enabled", mouseEnabled))
+	}
+	if key == "temperature_unit" {
+		// The Bubble Tea studio formats temperatures at render time, so
+		// the new unit shows at once; republish the last reading in it.
+		errs = append(errs, s.ui.Set("thermal", thermalView(temp, unit)))
 	}
 	return joinErrs(errs)
 }

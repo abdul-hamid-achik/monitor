@@ -362,6 +362,10 @@ func pct(v float64) string { return fmt.Sprintf("%.1f%%", v) }
 func (s *studio) publishMetrics(info collector.SystemInfo, alerts []collector.Alert) error {
 	var errs []error
 	set := func(path string, v any) { errs = append(errs, s.ui.Set(path, v)) }
+	// Settings change under s.mu from the Settings handlers; read a copy.
+	s.mu.Lock()
+	settings := *s.settings
+	s.mu.Unlock()
 
 	cpuNote := fmt.Sprintf("%d cores", info.CPU.CoreCount)
 	if info.CPU.FrequencyMHz >= 100 {
@@ -398,28 +402,7 @@ func (s *studio) publishMetrics(info collector.SystemInfo, alerts []collector.Al
 		"swap_note":  fmt.Sprintf("%s / %s", collector.FormatBytes(info.Memory.SwapUsed), collector.FormatBytes(info.Memory.SwapTotal)),
 	})
 
-	temp := info.Temperature
-	unavailable := temp.State.State != "" && temp.State.State != collector.MetricObserved
-	tempNote := "estimated from CPU load"
-	if temp.Source == "powermetrics" {
-		tempNote = "real sensor"
-	}
-	if unavailable {
-		tempNote = strings.TrimSpace(temp.State.Reason)
-	}
-	fan := "unavailable · restricted SMC keys"
-	if temp.FanRPM > 0 || temp.FanMode != "" {
-		fan = fmt.Sprintf("%d RPM · %s", temp.FanRPM, temp.FanMode)
-	}
-	set("thermal", map[string]any{
-		"value": fmt.Sprintf("%.1f C", temp.CPUPackage), "pct": temp.CPUPackage, "note": tempNote,
-		"source": temp.Source, "fan": fan, "unavailable": unavailable, "reason": tempNote,
-		"cpu_package_pct": temp.CPUPackage, "cpu_package": fmt.Sprintf("%.1f C", temp.CPUPackage),
-		"cpu_cores_pct": temp.CPUCores, "cpu_cores": fmt.Sprintf("%.1f C", temp.CPUCores),
-		"gpu_pct": temp.GPU, "gpu": fmt.Sprintf("%.1f C", temp.GPU),
-		"ane_pct": temp.ANE, "ane": fmt.Sprintf("%.1f C", temp.ANE),
-		"battery_pct": temp.Battery, "battery": fmt.Sprintf("%.1f C", temp.Battery),
-	})
+	set("thermal", thermalView(info.Temperature, settings.TemperatureUnit))
 
 	diskUnavailable := len(info.Disk.Partitions) == 0
 	diskValue, diskNote, diskPct := "unavailable", "no mounted volumes", 0.0
@@ -469,7 +452,7 @@ func (s *studio) publishMetrics(info collector.SystemInfo, alerts []collector.Al
 	}
 	set("top", topRows)
 
-	message := attentionMessage(alerts, s.settings, info)
+	message := attentionMessage(alerts, &settings, info)
 	set("attention", map[string]any{"has": message != "", "message": message})
 
 	return joinErrs(errs)
@@ -521,6 +504,42 @@ func attentionMessage(alerts []collector.Alert, settings *config.Settings, info 
 		}
 	}
 	return strings.Join(parts, " · ")
+}
+
+// thermalView is the "thermal" binding: readings in the configured unit
+// (°F when Settings selects it), as the Bubble Tea studio's formatTemp and
+// renderTemperature do. The *_pct gauge fills stay in Celsius.
+func thermalView(temp collector.TemperatureInfo, unit string) map[string]any {
+	unavailable := temp.State.State != "" && temp.State.State != collector.MetricObserved
+	tempNote := "estimated from CPU load"
+	if temp.Source == "powermetrics" {
+		tempNote = "real sensor"
+	}
+	if unavailable {
+		tempNote = strings.TrimSpace(temp.State.Reason)
+	}
+	fan := "unavailable · restricted SMC keys"
+	if temp.FanRPM > 0 || temp.FanMode != "" {
+		fan = fmt.Sprintf("%d RPM · %s", temp.FanRPM, temp.FanMode)
+	}
+	return map[string]any{
+		"value": formatTemp(temp.CPUPackage, unit), "pct": temp.CPUPackage, "note": tempNote,
+		"source": temp.Source, "fan": fan, "unavailable": unavailable, "reason": tempNote,
+		"cpu_package_pct": temp.CPUPackage, "cpu_package": formatTemp(temp.CPUPackage, unit),
+		"cpu_cores_pct": temp.CPUCores, "cpu_cores": formatTemp(temp.CPUCores, unit),
+		"gpu_pct": temp.GPU, "gpu": formatTemp(temp.GPU, unit),
+		"ane_pct": temp.ANE, "ane": formatTemp(temp.ANE, unit),
+		"battery_pct": temp.Battery, "battery": formatTemp(temp.Battery, unit),
+	}
+}
+
+// formatTemp renders a Celsius reading in unit ("F" converts; anything
+// else is Celsius).
+func formatTemp(c float64, unit string) string {
+	if unit == "F" {
+		return fmt.Sprintf("%.1f F", c*9/5+32)
+	}
+	return fmt.Sprintf("%.1f C", c)
 }
 
 // sharedScale maps rate histories (bytes per second) onto one 0-100 scale,

@@ -96,3 +96,23 @@ func TestRateHistoriesShareOneScale(t *testing.T) {
 		}
 	}
 }
+
+// TestTemperatureUnitFollowsSettings: the Bubble Tea studio formats every
+// reading in the configured unit; cycling it in Settings shows the new
+// unit at once, without waiting for a sample.
+func TestTemperatureUnitFollowsSettings(t *testing.T) {
+	s := newFixtureStudio(t)
+	must(t, s.ui.Set("view", "thermal"))
+	c := s.last.Temperature.CPUPackage
+	if sc := screen(t, s, 100, 30); !strings.Contains(sc, formatTemp(c, "C")) {
+		t.Fatalf("want %q on the thermal tab:\n%s", formatTemp(c, "C"), sc)
+	}
+	must(t, s.cycleSetting("temperature_unit", 1))
+	sc := screen(t, s, 100, 30)
+	if want := formatTemp(c, "F"); !strings.Contains(sc, want) || strings.Contains(sc, formatTemp(c, "C")) {
+		t.Fatalf("after switching to Fahrenheit want %q and no Celsius reading:\n%s", want, sc)
+	}
+	if got := formatTemp(100, "F"); got != "212.0 F" {
+		t.Fatalf("formatTemp(100, F) = %q", got)
+	}
+}
