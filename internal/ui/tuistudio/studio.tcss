@@ -51,7 +51,7 @@ screen { color: $fg; background: $bg; }
 
 .pane { gap: 1; }
 .panel { border: rounded; border-color: $border; title-color: $muted; }
-#panels { layout: grid; grid-columns: 4; grid-min-width: 26; gap: 1; height: 7; }
+#panels { layout: grid; grid-columns: 4; grid-min-width: 28; gap: 1; height: auto; }
 .meter { height: 1; gap: 1; }
 .meter-label { width: 16; }
 .gauge { width: 1fr; bar: eighths; color: $accent; }
@@ -61,7 +61,7 @@ screen { color: $fg; background: $bg; }
 .num { content-align: end; }
 .attention { height: 1; }
 
-#lower { height: 10; gap: 1; }
+#lower { height: 1fr; min-height: 7; gap: 1; }
 .activity { width: 3fr; }
 .top { width: 2fr; }
 

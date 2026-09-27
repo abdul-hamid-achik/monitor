@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/abdul-hamid-achik/tuimark"
 )
 
 func newFixtureStudio(t *testing.T) *studio {
@@ -83,6 +85,41 @@ func TestRunWithoutTerminalReportsOnStderr(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "Error running monitor studio --tuimark:") {
 		t.Fatalf("stderr = %q, want the failure reported", out)
+	}
+}
+
+// TestOverviewPanelsAreNotClipped: the KPI grid takes the height its rows
+// need at every width (it once had a fixed height that cut the second
+// row at 80 columns). Each panel is a border plus two lines.
+func TestOverviewPanelsAreNotClipped(t *testing.T) {
+	s := newFixtureStudio(t)
+	for _, sz := range [][2]int{{120, 30}, {100, 30}, {80, 24}, {60, 30}, {40, 30}} {
+		d, err := s.ui.Dump(sz[0], sz[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var grid *tuimark.DumpNode
+		for i := range d.Nodes {
+			if d.Nodes[i].ID == "panels" {
+				grid = &d.Nodes[i]
+			}
+		}
+		if grid == nil {
+			t.Fatalf("%dx%d: no #panels node", sz[0], sz[1])
+		}
+		n := 0
+		for _, p := range d.Nodes {
+			if p.Tag != "box" || p.Y < grid.Y || p.Y >= grid.Y+grid.H || p.ID == "panels" {
+				continue
+			}
+			n++
+			if p.H != 4 || p.Y+p.H > grid.Y+grid.H {
+				t.Errorf("%dx%d: panel at %d,%d is %dx%d inside #panels %d+%d", sz[0], sz[1], p.X, p.Y, p.W, p.H, grid.Y, grid.H)
+			}
+		}
+		if n != 4 {
+			t.Errorf("%dx%d: %d panels inside #panels, want 4", sz[0], sz[1], n)
+		}
 	}
 }
 
