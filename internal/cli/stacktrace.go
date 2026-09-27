@@ -62,6 +62,8 @@ func newStacktraceParseCmd() *cobra.Command {
 		fromStart   bool
 		record      bool
 		redactEnv   []string
+		lineStamps  bool
+		pathMapArgs []string
 	)
 	cmd := &cobra.Command{
 		Use:   "parse",
@@ -94,6 +96,14 @@ line's own timestamp when one could be read, else the file's mtime --
 never the current time, so replaying an old log never bumps an issue's
 last_seen to "now".`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			pathMaps := make([]stacktrace.PathMap, 0, len(pathMapArgs))
+			for _, spec := range pathMapArgs {
+				m, err := stacktrace.ParsePathMap(spec)
+				if err != nil {
+					return err
+				}
+				pathMaps = append(pathMaps, m)
+			}
 			rootDir := "."
 			if file != "" {
 				rootDir = filepath.Dir(file)
@@ -115,13 +125,15 @@ last_seen to "now".`,
 					return err
 				}
 				return runStacktraceRecord(cmd.Context(), cmd.OutOrStdout(), stacktraceRecordOptions{
-					file:      file,
-					project:   projectFlag,
-					service:   service,
-					gitRoot:   gitRoot,
-					fromStart: fromStart,
-					storePath: storePath,
-					redactEnv: redactEnv,
+					file:       file,
+					project:    projectFlag,
+					service:    service,
+					gitRoot:    gitRoot,
+					fromStart:  fromStart,
+					storePath:  storePath,
+					redactEnv:  redactEnv,
+					lineStamps: lineStamps,
+					pathMaps:   pathMaps,
 				})
 			}
 
@@ -137,11 +149,13 @@ last_seen to "now".`,
 				live = false
 			}
 			return runStacktraceParse(r, cmd.OutOrStdout(), stacktraceParseOptions{
-				project: projectFlag,
-				service: service,
-				gitRoot: gitRoot,
-				live:    live,
-				tick:    stacktraceTickInterval,
+				project:    projectFlag,
+				service:    service,
+				gitRoot:    gitRoot,
+				live:       live,
+				tick:       stacktraceTickInterval,
+				lineStamps: lineStamps,
+				pathMaps:   pathMaps,
 			})
 		},
 	}
@@ -155,6 +169,10 @@ last_seen to "now".`,
 		"with --record, ignore the saved checkpoint and replay the whole file from byte 0 (no effect without --record, which always reads from the start)")
 	cmd.Flags().StringSliceVar(&redactEnv, "redact-env", nil,
 		"with --record, additional environment variable NAMEs to redact from recorded exception text (name-matched secret vars are always redacted)")
+	cmd.Flags().BoolVar(&lineStamps, "line-timestamps", false,
+		"every line starts with an RFC 3339 timestamp (docker compose logs --timestamps --no-log-prefix): strip it before detection and use it as the event time")
+	cmd.Flags().StringArrayVar(&pathMapArgs, "path-map", nil,
+		"FROM=TO absolute path prefix to rewrite in frames before in_app/root-relative resolution, e.g. a container's /app=/srv/checkout (repeatable; first match wins)")
 	return cmd
 }
 
@@ -165,6 +183,11 @@ type stacktraceParseOptions struct {
 	// otherwise a synthetic clock keeps a file replay deterministic.
 	live bool
 	tick time.Duration
+	// lineStamps strips a per-line RFC 3339 prefix (container logs) before
+	// detection and turns it into each exception's ObservedAt.
+	lineStamps bool
+	// pathMaps rewrite container paths to host ones before ApplyGitRoot.
+	pathMaps []stacktrace.PathMap
 }
 
 // runStacktraceParse streams r through a Joiner and writes one NDJSON event
@@ -174,12 +197,26 @@ type stacktraceParseOptions struct {
 func runStacktraceParse(r io.Reader, w io.Writer, opts stacktraceParseOptions) error {
 	enc := json.NewEncoder(w)
 	j := stacktrace.NewJoiner()
+	var stamps *stacktrace.LineTimestamps
+	if opts.lineStamps {
+		stamps = stacktrace.NewLineTimestamps()
+	}
+	feed := func(line string, now time.Time) []stacktrace.Block {
+		if stamps != nil {
+			line = stamps.Strip(line)
+		}
+		return j.Feed(line, now)
+	}
 	emit := func(bs []stacktrace.Block) error {
 		for _, b := range bs {
 			ex := stacktrace.Parse(b)
 			if ex == nil {
 				continue
 			}
+			if stamps != nil && ex.ObservedAt.IsZero() {
+				ex.ObservedAt = stamps.At(b.LineStart)
+			}
+			stacktrace.ApplyPathMap(ex, opts.pathMaps)
 			stacktrace.ApplyGitRoot(ex, opts.gitRoot)
 			if err := enc.Encode(parsedEvent{Project: opts.project, Service: opts.service, Exception: ex}); err != nil {
 				return fmt.Errorf("write event: %w", err)
@@ -205,7 +242,7 @@ func runStacktraceParse(r io.Reader, w io.Writer, opts stacktraceParseOptions) e
 			if err != nil {
 				return finish(err)
 			}
-			if err := emit(j.Feed(line, base.Add(time.Duration(n)*time.Microsecond))); err != nil {
+			if err := emit(feed(line, base.Add(time.Duration(n)*time.Microsecond))); err != nil {
 				return err
 			}
 		}
@@ -243,7 +280,7 @@ func runStacktraceParse(r io.Reader, w io.Writer, opts stacktraceParseOptions) e
 			if res.err != nil {
 				return finish(res.err)
 			}
-			if err := emit(j.Feed(res.line, time.Now())); err != nil {
+			if err := emit(feed(res.line, time.Now())); err != nil {
 				return err
 			}
 		case now := <-ticker.C:
@@ -340,6 +377,9 @@ type stacktraceRecordOptions struct {
 	// redacted from recorded text (SEC-6's --redact-env), on top of the
 	// secret-name heuristic scrub.SecretEnvValues applies.
 	redactEnv []string
+	// lineStamps and pathMaps: see stacktraceParseOptions.
+	lineStamps bool
+	pathMaps   []stacktrace.PathMap
 }
 
 // recordSummary is --record's one-line human summary (the roadmap's Act-1
@@ -499,6 +539,10 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 	// block -- whose wall-clock cost grows with store size -- with a
 	// single acquisition, the same shape `monitor run`'s coalesced writer
 	// uses.
+	var stamps *stacktrace.LineTimestamps
+	if opts.lineStamps {
+		stamps = stacktrace.NewLineTimestamps()
+	}
 	var store *issues.Store
 	process := func(blocks []stacktrace.Block) error {
 		for _, b := range blocks {
@@ -507,6 +551,12 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 			if ex == nil {
 				continue
 			}
+			// A container log's own line time beats the file's mtime, the
+			// fallback recordParsedExceptionOnStore applies to a zero one.
+			if stamps != nil && ex.ObservedAt.IsZero() {
+				ex.ObservedAt = stamps.At(b.LineStart)
+			}
+			stacktrace.ApplyPathMap(ex, opts.pathMaps)
 			blockOffset := int64(0)
 			if b.LineStart > 0 && b.LineStart < len(lineOffsets) {
 				blockOffset = lineOffsets[b.LineStart]
@@ -581,6 +631,9 @@ func runStacktraceRecord(ctx context.Context, w io.Writer, opts stacktraceRecord
 			summary.LinesParsed++
 			lineOffsets = append(lineOffsets, offset)
 			offset += consumed
+			if stamps != nil {
+				line = stamps.Strip(line)
+			}
 			blocks := j.Feed(line, base.Add(time.Duration(n)*time.Microsecond))
 			if len(blocks) == 0 {
 				continue

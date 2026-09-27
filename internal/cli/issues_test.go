@@ -1312,3 +1312,32 @@ func TestWriteIssuesListHumanRowsFitRealisticWidth(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+func TestIssueCommandBudgetFlag(t *testing.T) {
+	noExternalToolsPATH(t)
+	root := newCLIRoot(t, "src/app.go", "package app\n\nfunc doWork() {\n\tpanic(\"boom\")\n}\n")
+	storePath := filepath.Join(t.TempDir(), "issues.veclite")
+	issue := seedCLIException(t, storePath, root, "src/app.go", 4, "doWork", time.Now().UTC())
+
+	for _, budget := range []explain.Budget{explain.BudgetBrief, explain.BudgetStandard, explain.BudgetFull} {
+		out, err := executeIssueCommand(t, storePath, root, shortIssueID(issue.ID), "--json", "--budget", string(budget))
+		if err != nil {
+			t.Fatalf("--budget %s: %v\n%s", budget, err, out)
+		}
+		var got explain.Context
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("decode: %v (%s)", err, out)
+		}
+		if got.Budget != string(budget) {
+			t.Errorf("--budget %s produced budget %q", budget, got.Budget)
+		}
+		// The brief contract omits the commit author's email at every size.
+		if budget == explain.BudgetBrief && strings.Contains(out, "author_email") {
+			t.Errorf("--budget brief carries author_email:\n%s", out)
+		}
+	}
+
+	if out, err := executeIssueCommand(t, storePath, root, shortIssueID(issue.ID), "--json", "--budget", "huge"); err == nil {
+		t.Fatalf("--budget huge accepted:\n%s", out)
+	}
+}

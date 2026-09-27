@@ -1,0 +1,79 @@
+version: 1
+name: monitor_stacktrace_container_log
+
+intent: |
+  A crash captured from a container (`docker compose logs --timestamps
+  --no-log-prefix`) must become an issue with a culprit, the way Chalupa's
+  CI replays a failed service's logs. Two things stand in the way and
+  each has a flag:
+
+  - every line starts with an RFC 3339 timestamp, which hides the trace
+    from every grammar -- `--line-timestamps` strips it and keeps it as
+    the event time (the naming ADR's "time is the event's time");
+  - frames name the container's path (/app/...), which is not under the
+    host's git root, so nothing is in-app -- `--path-map /app=<root>`
+    rewrites the prefix before in-app resolution.
+
+  The spec records the same fixture without and with the flags: without
+  them nothing is recorded; with them the issue's culprit is
+  src/cart.js:3 and first_seen is the log line's own timestamp.
+
+target:
+  cmd: ["./bin/monitor", "stacktrace", "parse", "--help"]
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-container && mkdir -p /tmp/monitor-spec-container/state /tmp/monitor-spec-container/data /tmp/monitor-spec-container/repo"
+      timeoutMs: 5000
+    - run: "printf '%s\\n' \"2026-09-26T21:03:56.839182Z TypeError: Cannot read properties of undefined (reading 'amount')\" '2026-09-26T21:03:56.839300Z     at applyDiscount (/app/src/cart.js:3:31)' '2026-09-26T21:03:56.839300Z     at checkout (/app/src/cart.js:7:17)' > /tmp/monitor-spec-container/api.log && touch -t 202609260000 /tmp/monitor-spec-container/api.log && cp -p /tmp/monitor-spec-container/api.log /tmp/monitor-spec-container/api-plain.log"
+      timeoutMs: 5000
+    - run: "cat > /tmp/monitor-spec-container/run.sh <<'SH'\n#!/bin/sh\nset -e\nexport XDG_STATE_HOME=/tmp/monitor-spec-container/state\nD=/tmp/monitor-spec-container\nMONITOR_ISSUES_STORE=$D/data/plain.veclite ./bin/monitor stacktrace parse --record --file $D/api-plain.log --project container-spec --root $D/repo > $D/plain.txt\nMONITOR_ISSUES_STORE=$D/data/mapped.veclite ./bin/monitor stacktrace parse --record --file $D/api.log --project container-spec --root $D/repo --service api --line-timestamps --path-map /app=$D/repo > $D/mapped.txt\nMONITOR_ISSUES_STORE=$D/data/mapped.veclite ./bin/monitor issues list --json --project container-spec > $D/issues.json\nSH\nchmod +x /tmp/monitor-spec-container/run.sh"
+      timeoutMs: 5000
+    - run: "/tmp/monitor-spec-container/run.sh"
+      timeoutMs: 15000
+    - run: "cat > /tmp/monitor-spec-container/check.py <<'PY'\nimport json\nd = json.load(open('/tmp/monitor-spec-container/issues.json'))\nassert len(d) == 1, d\ni = d[0]\nassert i['exception_type'] == 'TypeError', i\nassert i['culprit']['file'] == 'src/cart.js' and i['culprit']['line'] == 3, i['culprit']\nassert i['first_seen'].startswith('2026-09-26T21:03:56.839182'), i['first_seen']\nprint('ok')\nPY"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 5000
+
+outcomes:
+  - id: help_documents_the_flags
+    description: stacktrace parse --help documents --line-timestamps and --path-map
+    timeoutMs: 5000
+    verify:
+      command:
+        run: "./bin/monitor stacktrace parse --help 2>&1 | grep -q -- '--line-timestamps' && ./bin/monitor stacktrace parse --help 2>&1 | grep -q -- '--path-map'"
+        timeoutMs: 5000
+  - id: prefix_hides_the_trace_without_the_flag
+    description: without --line-timestamps the timestamped log records nothing
+    timeoutMs: 5000
+    verify:
+      command:
+        run: "grep -q '0 occurrences written' /tmp/monitor-spec-container/plain.txt"
+        timeoutMs: 5000
+  - id: culprit_and_event_time_with_the_flags
+    description: with both flags the issue's culprit is src/cart.js:3 and first_seen is the log line's time
+    timeoutMs: 5000
+    verify:
+      command:
+        run: "python3 /tmp/monitor-spec-container/check.py"
+        timeoutMs: 5000
+  - id: clean_exit
+    description: stacktrace parse --help exits cleanly
+    verify:
+      process:
+        exitCode: 0

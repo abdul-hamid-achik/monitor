@@ -324,8 +324,12 @@ func TestHandleKillSucceedsWithConfirm(t *testing.T) {
 	s := newTestServer(t, &Service{
 		Kill: func(pid int32, force bool) (kill.Result, error) {
 			called = true
-			if pid != 4321 {
-				t.Errorf("Kill received pid=%d, want 4321", pid)
+			// A high, almost-certainly-vacant PID like the error-path
+			// test's 999999: a small one can collide with a real
+			// system-owned process on a shared runner, and the safety
+			// check then refuses before the service is ever called.
+			if pid != 999321 {
+				t.Errorf("Kill received pid=%d, want 999321", pid)
 			}
 			if !force {
 				t.Errorf("Kill received force=false, want true")
@@ -333,7 +337,7 @@ func TestHandleKillSucceedsWithConfirm(t *testing.T) {
 			return kill.Result{PID: pid, Signal: "SIGKILL", Outcome: kill.OutcomeTerminated, WaitedMs: 12}, nil
 		},
 	})
-	_, payload, err := s.handleKill(context.Background(), nil, &killInput{PID: 4321, Force: true, Confirm: true})
+	_, payload, err := s.handleKill(context.Background(), nil, &killInput{PID: 999321, Force: true, Confirm: true})
 	if err != nil {
 		t.Fatalf("handleKill returned hard error: %v", err)
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
+	"github.com/abdul-hamid-achik/monitor/internal/stacktrace"
 )
 
 const cliPyTrace = "Traceback (most recent call last):\n" +
@@ -710,5 +711,86 @@ func TestStacktraceRecordDoesNotFabricateAPartialTraceCaughtMidWrite(t *testing.
 	}
 	if list[0].Culprit == nil || list[0].Culprit.File != "app/main.py" || list[0].Culprit.Line != 3 {
 		t.Errorf("culprit = %+v, want app/main.py:3", list[0].Culprit)
+	}
+}
+
+// A `docker compose logs --timestamps --no-log-prefix` capture from a
+// container whose code lives at /app: without --line-timestamps no grammar
+// sees the trace, and without --path-map no frame is in-app, so there is no
+// culprit. With both, --record yields the culprit relative to the host
+// checkout and the log's own time as first_seen.
+const containerNodeLog = "2026-09-26T21:03:56.839182Z TypeError: Cannot read properties of undefined (reading 'amount')\n" +
+	"2026-09-26T21:03:56.839300Z     at applyDiscount (/app/src/cart.js:3:31)\n" +
+	"2026-09-26T21:03:56.839300Z     at checkout (/app/src/cart.js:7:17)\n" +
+	"2026-09-26T21:03:56.839300Z     at handle (/app/src/server.js:4:10)\n"
+
+func TestStacktraceParseContainerLogNeedsLineTimestamps(t *testing.T) {
+	root := t.TempDir()
+	var plain bytes.Buffer
+	if err := runStacktraceParse(strings.NewReader(containerNodeLog), &plain, stacktraceParseOptions{gitRoot: root}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if plain.Len() != 0 {
+		t.Fatalf("a timestamp-prefixed log parsed without --line-timestamps: %s", plain.String())
+	}
+
+	var out bytes.Buffer
+	err := runStacktraceParse(strings.NewReader(containerNodeLog), &out, stacktraceParseOptions{
+		gitRoot:    root,
+		lineStamps: true,
+		pathMaps:   []stacktrace.PathMap{{From: "/app", To: root}},
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	events := decodeEvents(t, out.String())
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1:\n%s", len(events), out.String())
+	}
+	ex := events[0].Exception
+	want, _ := time.Parse(time.RFC3339Nano, "2026-09-26T21:03:56.839182Z")
+	if !ex.ObservedAt.Equal(want) {
+		t.Errorf("ObservedAt = %v, want the log line's %v", ex.ObservedAt, want)
+	}
+	crash := ex.Frames[len(ex.Frames)-1]
+	if !crash.InApp || crash.Filename != "src/cart.js" {
+		t.Errorf("crash frame = %+v, want in-app src/cart.js", crash)
+	}
+}
+
+func TestStacktraceRecordContainerLogKeepsCulpritAndEventTime(t *testing.T) {
+	store := recordEnv(t)
+	root := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "api.log")
+	writeSettledFixture(t, logPath, containerNodeLog)
+
+	runRecord(t, "--record", "--file", logPath, "--root", root, "--service", "api",
+		"--line-timestamps", "--path-map", "/app="+root)
+
+	db := openIssuesForTest(t, store)
+	list, err := db.List(issues.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("got %d issues, want 1: %+v", len(list), list)
+	}
+	got := list[0]
+	if got.Culprit == nil || got.Culprit.File != "src/cart.js" || got.Culprit.Line != 3 {
+		t.Errorf("culprit = %+v, want src/cart.js:3", got.Culprit)
+	}
+	want, _ := time.Parse(time.RFC3339Nano, "2026-09-26T21:03:56.839182Z")
+	if !got.FirstSeen.Equal(want) {
+		t.Errorf("first_seen = %v, want the log line's %v (not the replay time or the file mtime)", got.FirstSeen, want)
+	}
+}
+
+func TestStacktraceParseRejectsBadPathMap(t *testing.T) {
+	cmd := newStacktraceParseCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--file", "/dev/null", "--path-map", "app=/srv"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("err = %v, want an absolute-path error", err)
 	}
 }
