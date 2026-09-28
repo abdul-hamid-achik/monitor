@@ -119,36 +119,57 @@ func TestNoClippingInAnyTab(t *testing.T) {
 }
 
 // TestOverviewPanelsAreNotClipped: the KPI grid takes the height its rows
-// need at every width (it once had a fixed height that cut the second
-// row at 80 columns). Each panel is a border plus two lines.
+// need (it once had a fixed height that cut the second row at 80
+// columns). Where that is more than half the tab, as at 40 columns, it
+// scrolls (max-height: 50%; overflow: scroll) instead of pushing #lower
+// off the screen. At 120x30 it is exactly one row of panels, so no blank
+// band opens between it and #lower. Each panel is a border plus two
+// lines, never squashed.
 func TestOverviewPanelsAreNotClipped(t *testing.T) {
 	s := newFixtureStudio(t)
-	for _, sz := range [][2]int{{120, 30}, {100, 30}, {80, 24}, {60, 30}, {40, 30}} {
+	for _, sz := range [][2]int{{120, 30}, {100, 30}, {80, 24}, {60, 30}, {40, 30}, {40, 24}} {
 		d, err := s.ui.Dump(sz[0], sz[1])
 		if err != nil {
 			t.Fatal(err)
 		}
-		var grid *tuimark.DumpNode
+		var grid, lower *tuimark.DumpNode
 		for i := range d.Nodes {
-			if d.Nodes[i].ID == "panels" {
+			switch d.Nodes[i].ID {
+			case "panels":
 				grid = &d.Nodes[i]
+			case "lower":
+				lower = &d.Nodes[i]
 			}
 		}
-		if grid == nil {
-			t.Fatalf("%dx%d: no #panels node", sz[0], sz[1])
+		if grid == nil || lower == nil {
+			t.Fatalf("%dx%d: no #panels or #lower node", sz[0], sz[1])
+		}
+		// The panels lie in the grid's scroll extent, which is its own
+		// height when everything fits.
+		extent := grid.H
+		if grid.Scroll != nil && grid.Scroll.H != nil && *grid.Scroll.H > extent {
+			extent = *grid.Scroll.H
 		}
 		n := 0
 		for _, p := range d.Nodes {
-			if p.Tag != "box" || p.Y < grid.Y || p.Y >= grid.Y+grid.H || p.ID == "panels" {
+			// The four KPI panels are the boxes whose only class is "panel";
+			// #lower's boxes add "activity" or "top".
+			if p.Tag != "box" || len(p.Classes) != 1 || p.Classes[0] != "panel" {
 				continue
 			}
 			n++
-			if p.H != 4 || p.Y+p.H > grid.Y+grid.H {
-				t.Errorf("%dx%d: panel at %d,%d is %dx%d inside #panels %d+%d", sz[0], sz[1], p.X, p.Y, p.W, p.H, grid.Y, grid.H)
+			if p.H != 4 || p.Y < grid.Y || p.Y+p.H > grid.Y+extent {
+				t.Errorf("%dx%d: panel at %d,%d is %dx%d in #panels %d+%d", sz[0], sz[1], p.X, p.Y, p.W, p.H, grid.Y, extent)
 			}
 		}
 		if n != 4 {
-			t.Errorf("%dx%d: %d panels inside #panels, want 4", sz[0], sz[1], n)
+			t.Errorf("%dx%d: %d panels in #panels, want 4", sz[0], sz[1], n)
+		}
+		if lower.Y != grid.Y+grid.H+1 {
+			t.Errorf("%dx%d: #lower starts at row %d, want right under #panels (%d)", sz[0], sz[1], lower.Y, grid.Y+grid.H+1)
+		}
+		if sz == [2]int{120, 30} && grid.H != 4 {
+			t.Errorf("120x30: #panels is %d rows, want 4 (one row of panels, no blank band)", grid.H)
 		}
 	}
 }
