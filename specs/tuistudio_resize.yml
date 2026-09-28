@@ -1,0 +1,127 @@
+version: 1
+name: monitor_tuistudio_resize
+intent: |
+    The experimental Tuimark studio (--tuimark --fixture) follows the
+    terminal width with no host code. The Processes table hides its
+    columns by priority (tuimark 0.3b) only when they would not fit:
+    all seven (PID, NAME, CPU%, MEM, THR, I/O, USER) at 120, 99, and 80
+    columns; USER goes at 57; I/O and THR too at 40, where PID, NAME,
+    CPU%, and MEM stay. On the CPU tab at 40 columns the per-core grid is
+    one core per row with no blank row between cores, so all 8 fixture
+    cores are on screen at once.
+target:
+    cmd: ["./bin/monitor", "studio", "--tuimark", "--fixture"]
+    cwd: "."
+terminal:
+    cols: 120
+    rows: 24
+    profile: xterm-256color
+preconditions:
+    commands:
+        - run: "test -x ./bin/monitor"
+          timeoutMs: 5000
+steps:
+    - wait:
+        screen:
+            contains: "◆ monitor"
+        timeoutMs: 5000
+    - press: "7"
+    - wait:
+        screen:
+            contains: "▸7 processes"
+        timeoutMs: 3000
+    - wait:
+        screen:
+            contains: "I/O USER"
+        timeoutMs: 3000
+    - snapshot: w120
+    - resize:
+        cols: 99
+        rows: 24
+    - wait:
+        screen:
+            contains: "▸7 proc "
+        timeoutMs: 3000
+    - wait:
+        screen:
+            matches: "I/O USER +[┃│]"
+        timeoutMs: 3000
+    - snapshot: w99
+    - resize:
+        cols: 80
+        rows: 24
+    - wait:
+        screen:
+            matches: "NAME {24}CPU%▼"
+        timeoutMs: 3000
+    - snapshot: w80
+    - resize:
+        cols: 57
+        rows: 24
+    - wait:
+        screen:
+            matches: "I/O[┃│]"
+        timeoutMs: 3000
+    - snapshot: w57
+    - resize:
+        cols: 40
+        rows: 24
+    - wait:
+        screen:
+            matches: "MEM[┃│]"
+        timeoutMs: 3000
+    - snapshot: w40
+    - press: "2"
+    - wait:
+        screen:
+            contains: "‹ 2 cpu ›"
+        timeoutMs: 3000
+    - wait:
+        screen:
+            contains: "cpu7 "
+        timeoutMs: 3000
+    - snapshot: cores40
+    - press: q
+    - wait:
+        process:
+            exitCode: 0
+        timeoutMs: 5000
+outcomes:
+    - id: columns_follow_the_width
+      description: the table shows all seven columns at 120, 99, and 80, where they fit; by priority it drops USER at 57, and I/O and THR at 40, where four columns stay
+      verify:
+        script:
+            runtime: shell
+            run: |
+                d="$GLYPHRUN_RUN_DIR/snapshots"
+                if grep -q "PID NAME .*CPU%.* MEM  THR .*I/O USER" "$d/w120.txt" \
+                  && grep -q "PID NAME .*CPU%.* MEM  THR .*I/O USER" "$d/w99.txt" \
+                  && grep -q "PID NAME .*CPU%.* MEM  THR .*I/O USER" "$d/w80.txt" \
+                  && grep -q "PID NAME .*CPU%.* MEM  THR .*I/O" "$d/w57.txt" && ! grep -q "USER" "$d/w57.txt" \
+                  && grep -q "PID NAME .*CPU%.* MEM" "$d/w40.txt" && ! grep -q "THR" "$d/w40.txt" && ! grep -q "I/O" "$d/w40.txt" && ! grep -q "USER" "$d/w40.txt"; then
+                  echo '{"ok": true, "evidence": "7, 7, 7, 6, 4 columns at 120, 99, 80, 57, 40"}'
+                else
+                  echo '{"ok": false, "evidence": "the column set did not follow the width"}'
+                fi
+    - id: cores_one_per_row_at_40
+      description: at 40 columns the CPU tab shows the 8 cores one per row on adjacent rows, cpu0 through cpu7 all on screen
+      verify:
+        script:
+            runtime: shell
+            run: |
+                f="$GLYPHRUN_RUN_DIR/snapshots/cores40.txt"
+                ok=1
+                for i in 0 1 2 3 4 5 6; do
+                  if ! grep -A1 "cpu$i " "$f" | grep -q "cpu$((i + 1)) "; then ok=0; fi
+                done
+                if [ "$ok" = 1 ] && ! grep -q "cpu0 .*cpu1 " "$f"; then
+                  echo '{"ok": true, "evidence": "cpu0-cpu7 on 8 adjacent rows, one per row"}'
+                else
+                  echo '{"ok": false, "evidence": "the cores are not one per row on adjacent rows"}'
+                fi
+    - id: clean_exit
+      description: q quits the app and it exits 0
+      verify:
+        process:
+            exitCode: 0
+contractHash: sha256:08541c3a7d7b8ac12a76572ca97e597de8f3fad150ef9c2ca7b8fec136433ff2

@@ -265,3 +265,44 @@ func TestDetailRefreshTakesASample(t *testing.T) {
 		t.Fatalf("detail refresh kept the sample from %v", before)
 	}
 }
+
+// TestProcessColumnsHideByPriority: the Processes table hides columns by
+// their priority attribute (tuimark 0.3b) instead of @media breakpoints.
+// The natural widths are 7, 10 (c-name's min-width), 7, 8, 4, 9, and 10,
+// plus 6 one-cell gaps: 61, inside a rounded border and the 2-column mark
+// channel, so all seven show from 65 terminal columns. Below that c-user
+// (priority 1, the last of the two) hides first, then c-io (1), c-thr
+// (2), and c-mem (3); c-pid, c-name, and c-cpu have no priority and never
+// hide. The old @media rules hid c-io and c-user below 100 columns, c-thr
+// below 78, and c-mem below 58, even where they fit.
+func TestProcessColumnsHideByPriority(t *testing.T) {
+	s := newFixtureStudio(t)
+	must(t, s.ui.Set("view", "processes"))
+	must(t, s.publishProcs())
+	all := []string{"c-pid", "c-name", "c-cpu", "c-mem", "c-thr", "c-io", "c-user"}
+	for _, tc := range []struct {
+		cols, n int
+	}{
+		{120, 7}, {99, 7}, {80, 7}, {65, 7},
+		{64, 6}, {57, 6}, {54, 6},
+		{53, 5}, {44, 5},
+		{43, 4}, {40, 4},
+	} {
+		d, err := s.ui.Dump(tc.cols, 24)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(d.Errors) > 0 {
+			t.Errorf("%d columns: diagnostics %v", tc.cols, d.Errors)
+		}
+		var got []string
+		for _, n := range d.Nodes {
+			if n.Tag == "column" {
+				got = append(got, n.ID)
+			}
+		}
+		if want := all[:tc.n]; strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Errorf("%d columns: columns %v, want %v", tc.cols, got, want)
+		}
+	}
+}

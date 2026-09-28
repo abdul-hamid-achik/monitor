@@ -83,7 +83,10 @@ screen { color: $fg; background: $bg; }
 .top { width: 2fr; }
 
 #cores-view { scrollbar: auto; height: 1fr; }
-#cores { layout: grid; grid-columns: 4; grid-min-width: 22; gap: 1; }
+/* gap: 1 separates the core columns; row-gap: 0 keeps the core rows
+   adjacent, as the Bubble Tea studio draws them, so 12 cores in one
+   column are 12 rows tall, not 23. */
+#cores { layout: grid; grid-columns: 4; grid-min-width: 22; gap: 1; row-gap: 0; }
 .core { height: 1; gap: 1; }
 .core-label { width: 9; }
 
@@ -105,10 +108,10 @@ screen { color: $fg; background: $bg; }
 #procs > item:checked { color: $accent; }
 #procs > item.blocked { color: $danger; }
 #procs > item > text.hot { color: $warn; }
+/* The narrow-width column set comes from the columns' priority attributes
+   (studio.tui), not from @media: c-io and c-user hide first, then c-thr,
+   then c-mem, and only when the natural widths would not fit. */
 #c-name { width: 1fr; min-width: 10; max-width: 44; }
-@media (max-cols: 99) { #c-io, #c-user { display: none; } }
-@media (max-cols: 77) { #c-thr { display: none; } }
-@media (max-cols: 57) { #c-mem { display: none; } }
 
 #settings-list { border: rounded; border-color: $border; height: 1fr; }
 #settings-list:focus { border-color: $focus; }

@@ -222,3 +222,48 @@ func TestSmokeProcessesVisible(t *testing.T) {
 		t.Errorf("launchd should be visible once show_system_processes is on:\n%s", screen)
 	}
 }
+
+// TestCoreRowsAreAdjacent: the per-core grid separates its columns with
+// gap: 1 but its rows with row-gap: 0 (tuimark 0.3b), so the core rows
+// touch, as the Bubble Tea studio draws them, and at 40 columns the 8
+// fixture cores in one column are 8 rows tall instead of 15, which fits
+// #cores-view at 40x24 without scrolling.
+func TestCoreRowsAreAdjacent(t *testing.T) {
+	s := newFixtureStudio(t)
+	must(t, s.ui.Set("view", "cpu"))
+	for _, sz := range [][2]int{{40, 24}, {80, 24}, {120, 30}} {
+		d, err := s.ui.Dump(sz[0], sz[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ys []int
+		var grid, view *tuimark.DumpNode
+		for i, n := range d.Nodes {
+			switch {
+			case n.ID == "cores":
+				grid = &d.Nodes[i]
+			case n.ID == "cores-view":
+				view = &d.Nodes[i]
+			case n.Tag == "row" && len(n.Classes) > 0 && n.Classes[0] == "core":
+				if len(ys) == 0 || ys[len(ys)-1] != n.Y {
+					ys = append(ys, n.Y)
+				}
+			}
+		}
+		if grid == nil || view == nil || len(ys) == 0 {
+			t.Fatalf("%dx%d: no #cores, #cores-view, or core rows", sz[0], sz[1])
+		}
+		for i := 1; i < len(ys); i++ {
+			if ys[i] != ys[i-1]+1 {
+				t.Errorf("%dx%d: core rows at %v, want adjacent rows", sz[0], sz[1], ys)
+				break
+			}
+		}
+		if grid.H != len(ys) {
+			t.Errorf("%dx%d: #cores is %d rows tall for %d rows of cores", sz[0], sz[1], grid.H, len(ys))
+		}
+		if sz == [2]int{40, 24} && (view.Scroll == nil || view.Scroll.H == nil || *view.Scroll.H > view.H-2) {
+			t.Errorf("40x24: #cores-view (%d rows, border included) scrolls: %+v", view.H, view.Scroll)
+		}
+	}
+}

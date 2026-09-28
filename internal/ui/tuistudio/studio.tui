@@ -220,10 +220,10 @@
               <column id="c-pid" class="num" title="PID" width="7">{p.pid}</column>
               <column id="c-name" title="{h.name}">{p.name}</column>
               <column id="c-cpu" class="num" title="{h.cpu}" width="7" class:hot="p.cpu_hot" on:click="sort_cpu">{p.cpu}</column>
-              <column id="c-mem" class="num" title="{h.mem}" width="8" on:click="sort_mem">{p.mem}</column>
-              <column id="c-thr" class="num" title="THR" width="4">{p.threads}</column>
-              <column id="c-io" class="num" title="I/O" width="9">{p.io}</column>
-              <column id="c-user" title="USER" width="10">{p.user}</column>
+              <column id="c-mem" class="num" title="{h.mem}" width="8" priority="3" on:click="sort_mem">{p.mem}</column>
+              <column id="c-thr" class="num" title="THR" width="4" priority="2">{p.threads}</column>
+              <column id="c-io" class="num" title="I/O" width="9" priority="1">{p.io}</column>
+              <column id="c-user" title="USER" width="10" priority="1">{p.user}</column>
             </table>
           </col>
         </tab>
