@@ -2,6 +2,7 @@ package tuistudio
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -67,25 +68,110 @@ func TestFixtureNeverStartsARealTemperatureSubprocess(t *testing.T) {
 	}
 }
 
+// sparkRows returns, in document order, the cells each laid-out sparkline
+// paints at cols x rows (its row of the grid, from its x over its width).
+func sparkRows(t *testing.T, s *studio, cols, rows int) []string {
+	t.Helper()
+	d, err := s.ui.Dump(cols, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.OK || d.Wide {
+		t.Fatalf("dump %dx%d: ok=%v wide=%v errors=%v", cols, rows, d.OK, d.Wide, d.Errors)
+	}
+	var out []string
+	for _, n := range d.Nodes {
+		if n.Tag != "sparkline" {
+			continue
+		}
+		line := []rune(d.Grid[n.Y])
+		out = append(out, string(line[n.X:n.X+n.W]))
+	}
+	return out
+}
+
 // TestRateHistoriesShareOneScale: network and disk histories are bytes per
-// second; the view draws them with min="0" max="100", so the host maps both
-// series of a pair onto their shared min..max, like the Bubble Tea studio's
-// MultiSparkline. Binding raw bytes filled every column to the top.
+// second and are bound raw. Each panel's two sparklines carry one scale
+// group (scale="net_io", scale="disk_io"), so tuimark ranges both over the
+// values they show together, like the Bubble Tea studio's MultiSparkline:
+// the smaller series of a pair is drawn against the larger one's peak
+// instead of filling its own row. Two differences from the host-side
+// sharedScale this replaced are accepted (tuimark SPEC §30.6): the range
+// covers only the last W values each sparkline shows, not the whole
+// history, and a flat pair sits at half height (▄), not at 0.
 func TestRateHistoriesShareOneScale(t *testing.T) {
-	got := sharedScale([]float64{200_000, 800_000}, []float64{100_000, 400_000})
-	want := [][]any{{100.0 / 7, 100.0}, {0.0, 300.0 / 7}}
-	for i := range want {
-		for j := range want[i] {
-			if d := got[i][j].(float64) - want[i][j].(float64); d > 1e-9 || d < -1e-9 {
-				t.Fatalf("sharedScale = %v, want %v", got, want)
+	s := newFixtureStudio(t)
+	info := s.last
+	pairs := []struct {
+		view, a, b string
+		setA, setB *[]float64
+	}{
+		{"network", "network.down_hist", "network.up_hist", &info.Network.DownloadHistory, &info.Network.UploadHistory},
+		{"disk", "disk.read_hist", "disk.write_hist", &info.Disk.ReadHistory, &info.Disk.WriteHistory},
+	}
+	for _, p := range pairs {
+		*p.setA = []float64{200_000, 800_000}
+		*p.setB = []float64{100_000, 400_000}
+	}
+	must(t, s.publishMetrics(info, nil))
+	for _, p := range pairs {
+		// The host binds bytes per second as they are: no 0-100 mapping.
+		if got, _ := s.ui.Get(p.a); !reflect.DeepEqual(got, []any{200_000.0, 800_000.0}) {
+			t.Errorf("%s = %v, want the raw history", p.a, got)
+		}
+		if got, _ := s.ui.Get(p.b); !reflect.DeepEqual(got, []any{100_000.0, 400_000.0}) {
+			t.Errorf("%s = %v, want the raw history", p.b, got)
+		}
+		// One range for the pair, 100k..800k: 200k is level 1 (▁), 800k
+		// level 8 (█), 100k level 0 (blank), 400k level 3 (▃), exactly
+		// what sharedScale's 0-100 values drew under min="0" max="100".
+		must(t, s.ui.Set("view", p.view))
+		rows := sparkRows(t, s, 100, 24)
+		if len(rows) != 2 || !strings.HasSuffix(rows[0], "▁█") || !strings.HasSuffix(rows[1], " ▃") {
+			t.Errorf("%s at 100 columns: sparklines %q, want \"…▁█\" and \"… ▃\" on one scale", p.view, rows)
+		}
+	}
+
+	// A flat pair (hi <= lo) sits at half height, where sharedScale drew 0.
+	for _, p := range pairs {
+		*p.setA = []float64{5, 5}
+		*p.setB = []float64{5, 5}
+	}
+	must(t, s.publishMetrics(info, nil))
+	for _, p := range pairs {
+		must(t, s.ui.Set("view", p.view))
+		for _, row := range sparkRows(t, s, 100, 24) {
+			if !strings.HasSuffix(row, "▄▄") {
+				t.Errorf("%s: flat sparkline %q, want it at half height (▄▄)", p.view, row)
 			}
 		}
 	}
-	if flat := sharedScale([]float64{5, 5}); flat[0][0] != 0.0 || flat[0][1] != 0.0 {
-		t.Fatalf("a flat series maps to %v, want zeros", flat)
+
+	// The range covers the values shown: a peak older than the last W
+	// values sets it at 100 columns, where all 60 fit, and not at 40.
+	hist := func(first float64) []float64 {
+		h := make([]float64, studioHistorySize)
+		for i := range h {
+			h[i] = 100
+		}
+		h[0] = first
+		return h
+	}
+	info.Network.DownloadHistory, info.Network.UploadHistory = hist(1000), hist(100)
+	must(t, s.publishMetrics(info, nil))
+	must(t, s.ui.Set("view", "network"))
+	wide := sparkRows(t, s, 100, 24)
+	if len(wide) != 2 || !strings.Contains(wide[0], "█") || strings.TrimSpace(wide[1]) != "" {
+		t.Errorf("100 columns: sparklines %q, want the old peak as █ and the rest at the floor", wide)
+	}
+	narrow := sparkRows(t, s, 40, 24)
+	for _, row := range narrow {
+		if !strings.HasSuffix(row, "▄▄") || strings.Contains(row, "█") {
+			t.Errorf("40 columns: sparkline %q, want the shown values flat (▄) with the peak out of view", row)
+		}
 	}
 
-	s := newFixtureStudio(t)
+	s = newFixtureStudio(t)
 	for i := 0; i < 20; i++ {
 		must(t, s.refreshNow())
 	}

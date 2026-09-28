@@ -190,8 +190,8 @@
             </box>
             <box class="panel" title="disk i/o">
               <text class="muted">{disk.rate_note}</text>
-              <row class="meter"><text class="meter-label">read</text><sparkline class="spark" bind="disk.read_hist" min="0" max="100"/></row>
-              <row class="meter"><text class="meter-label">write</text><sparkline class="spark" bind="disk.write_hist" min="0" max="100"/></row>
+              <row class="meter"><text class="meter-label">read</text><sparkline class="spark" bind="disk.read_hist" scale="disk_io"/></row>
+              <row class="meter"><text class="meter-label">write</text><sparkline class="spark" bind="disk.write_hist" scale="disk_io"/></row>
             </box>
           </col>
         </tab>
@@ -199,8 +199,8 @@
           <col class="pane">
             <box class="panel" title="network">
               <text class="muted" wrap="truncate">{network.rate_note}</text>
-              <row class="meter"><text class="meter-label">download</text><sparkline class="spark" bind="network.down_hist" min="0" max="100"/></row>
-              <row class="meter"><text class="meter-label">upload</text><sparkline class="spark" bind="network.up_hist" min="0" max="100"/></row>
+              <row class="meter"><text class="meter-label">download</text><sparkline class="spark" bind="network.down_hist" scale="net_io"/></row>
+              <row class="meter"><text class="meter-label">upload</text><sparkline class="spark" bind="network.up_hist" scale="net_io"/></row>
               <text class="muted">{network.total_note}</text>
               <text class="muted">{network.packets_note}</text>
               <text class="warn" if="network.unavailable">{network.reason}</text>
