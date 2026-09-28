@@ -88,6 +88,36 @@ func TestRunWithoutTerminalReportsOnStderr(t *testing.T) {
 	}
 }
 
+// TestNoClippingInAnyTab is the monitor-side half of SPEC v0.3 §21 test 90
+// (tuimark's own examples/monitor carries the fixture half, test 89):
+// studio.tui is a version="3" document, so Validate() reports L008 (a text
+// cut without an ellipsis) and L009 (a node cutting a child on an axis it
+// does not scroll) at 40, 80, and 120 columns. Validate lays out only the
+// active tab, so each of the 9 is made active through the tabs' bind
+// (view), under both themes, matching tuimark's TestNoClippingInAnyTab.
+func TestNoClippingInAnyTab(t *testing.T) {
+	s := newFixtureStudio(t)
+	if err := s.publishProcs(); err != nil {
+		t.Fatal(err)
+	}
+	tabs := []string{"overview", "cpu", "memory", "thermal", "disk", "network", "processes", "settings", "trends"}
+	for _, theme := range []string{"dark", "light"} {
+		if err := s.ui.Set("@theme", theme); err != nil {
+			t.Fatal(err)
+		}
+		for _, tab := range tabs {
+			if err := s.ui.Set("view", tab); err != nil {
+				t.Fatal(err)
+			}
+			for _, d := range s.ui.Validate() {
+				if d.Code == "L008" || d.Code == "L009" {
+					t.Errorf("%s, tab %s: %s", theme, tab, d)
+				}
+			}
+		}
+	}
+}
+
 // TestOverviewPanelsAreNotClipped: the KPI grid takes the height its rows
 // need at every width (it once had a fixed height that cut the second
 // row at 80 columns). Each panel is a border plus two lines.
