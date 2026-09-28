@@ -6,7 +6,7 @@ require (
 	charm.land/bubbles/v2 v2.1.0
 	charm.land/bubbletea/v2 v2.0.7
 	charm.land/lipgloss/v2 v2.0.4
-	github.com/abdul-hamid-achik/tuimark v0.2.0
+	github.com/abdul-hamid-achik/tuimark v0.3.0
 	github.com/abdul-hamid-achik/veclite v0.22.1
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/charmbracelet/x/term v0.2.2
@@ -50,7 +50,3 @@ require (
 	golang.org/x/term v0.28.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-// Temporary until tuimark v0.3.0 is released: build against the local v0.3
-// checkout for the 0.3a API (LoadFS, Get, Batch, Play, version="3").
-replace github.com/abdul-hamid-achik/tuimark => ../tuimark

@@ -9,13 +9,16 @@ follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - **Experimental: `monitor studio --tuimark`.** The same 9 Studio tabs,
-  rendered by [Tuimark](https://github.com/abdul-hamid-achik/tuimark) v0.2.0
+  rendered by [Tuimark](https://github.com/abdul-hamid-achik/tuimark) v0.3.0
   instead of Bubble Tea, over the same collector, kill gate, settings,
   history and temperature sources. The view is a declarative `.tui`/`.tcss`
   pair embedded in the binary. `--fixture` swaps every source for
   deterministic offline data (no real process signaled, no config file or
   history store touched), and `--dump COLSxROWS` prints one frame as JSON
-  and exits. Plain `monitor studio` is unchanged.
+  and exits. Plain `monitor studio` is unchanged. The view is a Tuimark
+  `version="3"` document: at 40 columns nothing is cut silently (long host
+  and process names truncate with an ellipsis, and the overview scrolls),
+  and each sample is published atomically.
 
 ## [2.1.0] - 2026-09-26
 
