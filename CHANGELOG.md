@@ -9,7 +9,7 @@ follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - **Experimental: `monitor studio --tuimark`.** The same 9 Studio tabs,
-  rendered by [Tuimark](https://github.com/abdul-hamid-achik/tuimark) v0.3.0
+  rendered by [Tuimark](https://github.com/abdul-hamid-achik/tuimark) v0.3.1
   instead of Bubble Tea, over the same collector, kill gate, settings,
   history and temperature sources. The view is a declarative `.tui`/`.tcss`
   pair embedded in the binary. `--fixture` swaps every source for
