@@ -332,6 +332,10 @@ func (s *studio) collectionState() (state, sampled string) {
 	return state, sampled
 }
 
+// publishIdentity publishes one coherent sample of the identity row (host,
+// sampled_at, status_label, live, paused, waiting, stale) with one Batch,
+// so a frame never shows, say, the new status_label with the old live/
+// paused/waiting/stale flags.
 func (s *studio) publishIdentity() error {
 	state, sampled := s.collectionState()
 	label := map[string]string{"LIVE": "● LIVE", "PAUSED": "‖ PAUSED", "WAITING": "○ WAITING", "STALE": "▲ STALE"}[state]
@@ -341,121 +345,125 @@ func (s *studio) publishIdentity() error {
 	if host == "" {
 		host = "local"
 	}
-	return joinErrs([]error{
-		s.ui.Set("host", host),
-		s.ui.Set("sampled_at", sampled),
-		s.ui.Set("status_label", label),
-		s.ui.Set("live", state == "LIVE"),
-		s.ui.Set("paused", state == "PAUSED"),
-		s.ui.Set("waiting", state == "WAITING"),
-		s.ui.Set("stale", state == "STALE"),
+	return s.ui.Batch(func(b *tuimark.Batch) error {
+		_ = b.Set("host", host)
+		_ = b.Set("sampled_at", sampled)
+		_ = b.Set("status_label", label)
+		_ = b.Set("live", state == "LIVE")
+		_ = b.Set("paused", state == "PAUSED")
+		_ = b.Set("waiting", state == "WAITING")
+		_ = b.Set("stale", state == "STALE")
+		return nil
 	})
 }
 
 func pct(v float64) string { return fmt.Sprintf("%.1f%%", v) }
 
 // publishMetrics derives every Overview/CPU/Memory/Thermal/Disk/Network
-// binding from one SystemInfo. Every value here is either a number tuimark
-// lays out (a *_pct gauge fill) or a string the host has already
-// formatted: the document does no width, padding, truncation, or unit
-// math of its own.
+// binding from one SystemInfo and publishes all of it with one Batch, so a
+// frame never shows half of one sample (e.g. a new cpu reading next to a
+// stale disk one). Every value here is either a number tuimark lays out (a
+// *_pct gauge fill) or a string the host has already formatted: the
+// document does no width, padding, truncation, or unit math of its own.
 func (s *studio) publishMetrics(info collector.SystemInfo, alerts []collector.Alert) error {
-	var errs []error
-	set := func(path string, v any) { errs = append(errs, s.ui.Set(path, v)) }
 	// Settings change under s.mu from the Settings handlers; read a copy.
 	s.mu.Lock()
 	settings := *s.settings
 	s.mu.Unlock()
 
-	cpuNote := fmt.Sprintf("%d cores", info.CPU.CoreCount)
-	if info.CPU.FrequencyMHz >= 100 {
-		cpuNote += fmt.Sprintf(" · %.2f GHz", info.CPU.FrequencyMHz/1000)
-	}
-	set("cpu", map[string]any{
-		"value": "cpu " + pct(info.CPU.UsagePercent), "pct": info.CPU.UsagePercent, "note": cpuNote,
-		"hist": toAnySlice(info.CPU.History),
-		"stats": fmt.Sprintf("load %.2f %.2f %.2f · %d threads",
-			info.CPU.LoadAvg1, info.CPU.LoadAvg5, info.CPU.LoadAvg15, info.CPU.ThreadCount),
-	})
+	return s.ui.Batch(func(b *tuimark.Batch) error {
+		set := func(path string, v any) { _ = b.Set(path, v) }
 
-	cores := make([]any, len(info.CPU.PerCoreUsage))
-	for i, v := range info.CPU.PerCoreUsage {
-		cores[i] = map[string]any{"id": fmt.Sprintf("c%d", i), "label": fmt.Sprintf("cpu%d %.0f%%", i, v), "pct": v}
-	}
-	set("cores", cores)
+		cpuNote := fmt.Sprintf("%d cores", info.CPU.CoreCount)
+		if info.CPU.FrequencyMHz >= 100 {
+			cpuNote += fmt.Sprintf(" · %.2f GHz", info.CPU.FrequencyMHz/1000)
+		}
+		set("cpu", map[string]any{
+			"value": "cpu " + pct(info.CPU.UsagePercent), "pct": info.CPU.UsagePercent, "note": cpuNote,
+			"hist": toAnySlice(info.CPU.History),
+			"stats": fmt.Sprintf("load %.2f %.2f %.2f · %d threads",
+				info.CPU.LoadAvg1, info.CPU.LoadAvg5, info.CPU.LoadAvg15, info.CPU.ThreadCount),
+		})
 
-	memSuffix := ""
-	if info.Cgroup.Limited && info.Cgroup.MemLimitBytes > 0 {
-		memSuffix = " · cgroup"
-	}
-	set("mem", map[string]any{
-		"value": "mem " + pct(info.Memory.UsagePercent), "pct": info.Memory.UsagePercent,
-		"note":       fmt.Sprintf("%s / %s%s", collector.FormatBytes(info.Memory.UsedBytes), collector.FormatBytes(info.Memory.TotalBytes), memSuffix),
-		"hist":       toAnySlice(info.Memory.History),
-		"app":        collector.FormatBytes(info.Memory.AppMemory),
-		"wired":      collector.FormatBytes(info.Memory.WiredMemory),
-		"compressed": collector.FormatBytes(info.Memory.CompressedMemory),
-		"cache":      collector.FormatBytes(info.Memory.CacheMemory),
-		"purgeable":  collector.FormatBytes(info.Memory.PurgeableMemory),
-		"swap_value": "swap " + pct(swapPercent(info.Memory)),
-		"swap_pct":   swapPercent(info.Memory),
-		"swap_note":  fmt.Sprintf("%s / %s", collector.FormatBytes(info.Memory.SwapUsed), collector.FormatBytes(info.Memory.SwapTotal)),
-	})
+		cores := make([]any, len(info.CPU.PerCoreUsage))
+		for i, v := range info.CPU.PerCoreUsage {
+			cores[i] = map[string]any{"id": fmt.Sprintf("c%d", i), "label": fmt.Sprintf("cpu%d %.0f%%", i, v), "pct": v}
+		}
+		set("cores", cores)
 
-	set("thermal", thermalView(info.Temperature, settings.TemperatureUnit))
+		memSuffix := ""
+		if info.Cgroup.Limited && info.Cgroup.MemLimitBytes > 0 {
+			memSuffix = " · cgroup"
+		}
+		set("mem", map[string]any{
+			"value": "mem " + pct(info.Memory.UsagePercent), "pct": info.Memory.UsagePercent,
+			"note":       fmt.Sprintf("%s / %s%s", collector.FormatBytes(info.Memory.UsedBytes), collector.FormatBytes(info.Memory.TotalBytes), memSuffix),
+			"hist":       toAnySlice(info.Memory.History),
+			"app":        collector.FormatBytes(info.Memory.AppMemory),
+			"wired":      collector.FormatBytes(info.Memory.WiredMemory),
+			"compressed": collector.FormatBytes(info.Memory.CompressedMemory),
+			"cache":      collector.FormatBytes(info.Memory.CacheMemory),
+			"purgeable":  collector.FormatBytes(info.Memory.PurgeableMemory),
+			"swap_value": "swap " + pct(swapPercent(info.Memory)),
+			"swap_pct":   swapPercent(info.Memory),
+			"swap_note":  fmt.Sprintf("%s / %s", collector.FormatBytes(info.Memory.SwapUsed), collector.FormatBytes(info.Memory.SwapTotal)),
+		})
 
-	diskUnavailable := len(info.Disk.Partitions) == 0
-	diskValue, diskNote, diskPct := "unavailable", "no mounted volumes", 0.0
-	partitions := make([]any, 0, len(info.Disk.Partitions))
-	if !diskUnavailable {
-		root := info.Disk.Partitions[0]
-		for _, p := range info.Disk.Partitions {
-			if p.MountPoint == "/" {
-				root = p
-				break
+		set("thermal", thermalView(info.Temperature, settings.TemperatureUnit))
+
+		diskUnavailable := len(info.Disk.Partitions) == 0
+		diskValue, diskNote, diskPct := "unavailable", "no mounted volumes", 0.0
+		partitions := make([]any, 0, len(info.Disk.Partitions))
+		if !diskUnavailable {
+			root := info.Disk.Partitions[0]
+			for _, p := range info.Disk.Partitions {
+				if p.MountPoint == "/" {
+					root = p
+					break
+				}
+			}
+			diskValue, diskPct = pct(root.UsagePercent), root.UsagePercent
+			diskNote = fmt.Sprintf("%s · %s used", root.MountPoint, collector.FormatBytes(root.UsedBytes))
+			for _, p := range info.Disk.Partitions {
+				partitions = append(partitions, map[string]any{
+					"mount": p.MountPoint, "pct": p.UsagePercent,
+					"note": fmt.Sprintf("%s / %s", collector.FormatBytes(p.UsedBytes), collector.FormatBytes(p.TotalBytes)),
+				})
 			}
 		}
-		diskValue, diskPct = pct(root.UsagePercent), root.UsagePercent
-		diskNote = fmt.Sprintf("%s · %s used", root.MountPoint, collector.FormatBytes(root.UsedBytes))
-		for _, p := range info.Disk.Partitions {
-			partitions = append(partitions, map[string]any{
-				"mount": p.MountPoint, "pct": p.UsagePercent,
-				"note": fmt.Sprintf("%s / %s", collector.FormatBytes(p.UsedBytes), collector.FormatBytes(p.TotalBytes)),
-			})
+		diskHist := sharedScale(info.Disk.ReadHistory, info.Disk.WriteHistory)
+		set("disk", map[string]any{
+			"value": diskValue, "pct": diskPct, "note": diskNote, "partitions": partitions,
+			"unavailable": diskUnavailable, "reason": diskNote,
+			"rate_note":  fmt.Sprintf("read %s/s · write %s/s", collector.FormatBytes(info.Disk.ReadPerSec), collector.FormatBytes(info.Disk.WritePerSec)),
+			"read_hist":  diskHist[0],
+			"write_hist": diskHist[1],
+		})
+
+		netUnavailable := info.Network.MetricStates != nil && metricIssue(info.Network.MetricStates, "io") != ""
+		netHist := sharedScale(info.Network.DownloadHistory, info.Network.UploadHistory)
+		set("network", map[string]any{
+			"rate_note": fmt.Sprintf("download %s/s · upload %s/s",
+				collector.FormatBytes(info.Network.BytesRecvPerSec), collector.FormatBytes(info.Network.BytesSentPerSec)),
+			"down_hist":    netHist[0],
+			"up_hist":      netHist[1],
+			"total_note":   fmt.Sprintf("total down %s · up %s", collector.FormatBytes(info.Network.BytesRecv), collector.FormatBytes(info.Network.BytesSent)),
+			"packets_note": fmt.Sprintf("packets down %d · up %d", info.Network.PacketsRecv, info.Network.PacketsSent),
+			"unavailable":  netUnavailable, "reason": metricIssue(info.Network.MetricStates, "io"),
+		})
+
+		top := topByCPU(info.Processes, 5)
+		topRows := make([]any, len(top))
+		for i, p := range top {
+			topRows[i] = map[string]any{"pid": float64(p.PID), "name": p.Name, "cpu": pct(p.CPUPercent)}
 		}
-	}
-	diskHist := sharedScale(info.Disk.ReadHistory, info.Disk.WriteHistory)
-	set("disk", map[string]any{
-		"value": diskValue, "pct": diskPct, "note": diskNote, "partitions": partitions,
-		"unavailable": diskUnavailable, "reason": diskNote,
-		"rate_note":  fmt.Sprintf("read %s/s · write %s/s", collector.FormatBytes(info.Disk.ReadPerSec), collector.FormatBytes(info.Disk.WritePerSec)),
-		"read_hist":  diskHist[0],
-		"write_hist": diskHist[1],
+		set("top", topRows)
+
+		message := attentionMessage(alerts, &settings, info)
+		set("attention", map[string]any{"has": message != "", "message": message})
+
+		return nil
 	})
-
-	netUnavailable := info.Network.MetricStates != nil && metricIssue(info.Network.MetricStates, "io") != ""
-	netHist := sharedScale(info.Network.DownloadHistory, info.Network.UploadHistory)
-	set("network", map[string]any{
-		"rate_note": fmt.Sprintf("download %s/s · upload %s/s",
-			collector.FormatBytes(info.Network.BytesRecvPerSec), collector.FormatBytes(info.Network.BytesSentPerSec)),
-		"down_hist":    netHist[0],
-		"up_hist":      netHist[1],
-		"total_note":   fmt.Sprintf("total down %s · up %s", collector.FormatBytes(info.Network.BytesRecv), collector.FormatBytes(info.Network.BytesSent)),
-		"packets_note": fmt.Sprintf("packets down %d · up %d", info.Network.PacketsRecv, info.Network.PacketsSent),
-		"unavailable":  netUnavailable, "reason": metricIssue(info.Network.MetricStates, "io"),
-	})
-
-	top := topByCPU(info.Processes, 5)
-	topRows := make([]any, len(top))
-	for i, p := range top {
-		topRows[i] = map[string]any{"pid": float64(p.PID), "name": p.Name, "cpu": pct(p.CPUPercent)}
-	}
-	set("top", topRows)
-
-	message := attentionMessage(alerts, &settings, info)
-	set("attention", map[string]any{"has": message != "", "message": message})
-
-	return joinErrs(errs)
 }
 
 func swapPercent(m collector.MemoryInfo) float64 {

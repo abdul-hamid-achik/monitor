@@ -206,7 +206,14 @@ func (s *studio) publishProcs() error {
 			markedArr = append(markedArr, float64(pid))
 		}
 	}
-	return joinErrs([]error{s.ui.Set("procs", rows), s.ui.Set("marked_pids", markedArr)})
+	// One sample of the table (the rows and which of them are marked): a
+	// single Batch, so a frame never shows the new rows next to a stale
+	// marked set or vice versa.
+	return s.ui.Batch(func(b *tuimark.Batch) error {
+		_ = b.Set("procs", rows)
+		_ = b.Set("marked_pids", markedArr)
+		return nil
+	})
 }
 
 func (s *studio) findProcess(pid int32) (collector.ProcessInfo, bool) {
