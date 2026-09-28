@@ -50,3 +50,7 @@ require (
 	golang.org/x/term v0.28.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+// Temporary until tuimark v0.3.0 is released: build against the local v0.3
+// checkout for the 0.3a API (LoadFS, Get, Batch, Play, version="3").
+replace github.com/abdul-hamid-achik/tuimark => ../tuimark
