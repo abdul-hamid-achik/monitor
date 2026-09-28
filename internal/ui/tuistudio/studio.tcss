@@ -39,6 +39,12 @@ screen { color: $fg; background: $bg; }
 .waiting { color: $muted; }
 .stale { color: $danger; }
 .warn { color: $warn; }
+/* The identity row's fixed content (brand, status, and time) is 27-30
+   columns depending on the collection state; below that a long real
+   hostname can push the last item past the row's right edge (L009), so it
+   gets a bounded width (and an ellipsis, via wrap: truncate) at narrow
+   widths only. */
+@media (max-cols: 44) { .host { width: 10; wrap: truncate; } }
 
 #nav { height: 1fr; gap: 2; }
 .tab-label { color: $muted; }
@@ -51,16 +57,27 @@ screen { color: $fg; background: $bg; }
 
 .pane { gap: 1; }
 .panel { border: rounded; border-color: $border; title-color: $muted; }
-#panels { layout: grid; grid-columns: 4; grid-min-width: 28; gap: 1; height: auto; }
+/* The KPI grid is as tall as its rows (one row of 4 panels at 120
+   columns, two at 80). At a narrow width it would need most of the tab
+   (four stacked panels at 40 columns), so it stops at half the tab and
+   scrolls, like #cores-view, instead of forcing #lower off the screen. */
+#panels { layout: grid; grid-columns: 4; grid-min-width: 28; gap: 1; height: auto; max-height: 50%; overflow: scroll; }
 .meter { height: 1; gap: 1; }
 .meter-label { width: 16; }
 .gauge { width: 1fr; bar: eighths; color: $accent; }
 .spark { height: 1; color: $accent; width: 1fr; }
 .spark-big { height: 5; color: $accent; }
-.top-row { height: 1; }
+.top-row { height: 1; gap: 1; }
+/* The process name is the sole flexible child of its row (no spacer): it
+   takes exactly the width left after the cpu% column, so a name longer
+   than that gets an ellipsis (wrap: truncate) instead of overrunning the
+   row (L009) the way an unconstrained auto-width text would. */
+.top-name { width: 1fr; wrap: truncate; }
 .num { content-align: end; }
 .attention { height: 1; }
 
+/* The activity and top-cpu row takes the rest of the tab, so no blank
+   band opens under the KPI grid, and never less than its 7-row content. */
 #lower { height: 1fr; min-height: 7; gap: 1; }
 .activity { width: 3fr; }
 .top { width: 2fr; }
@@ -73,6 +90,12 @@ screen { color: $fg; background: $bg; }
 .breakdown { height: 1; gap: 1; }
 .bd-label { width: 11; color: $muted; }
 .mount-label { width: 24; }
+/* At 40 columns the fixed mount-label plus the used/total note (up to ~20
+   columns) does not fit the row alongside the gauge (L009); mount-label
+   already truncates with an ellipsis (wrap="truncate" in the markup), so
+   narrowing it here still shows a legible prefix while leaving the note
+   intact. */
+@media (max-cols: 44) { .mount-label { width: 12; } }
 
 #filter-row { height: 1; gap: 1; }
 #filter-row:focus-within > text { color: $accent; }

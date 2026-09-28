@@ -1,4 +1,4 @@
-<tui version="2" theme="auto" mouse="mouse_enabled">
+<tui version="3" theme="auto" mouse="mouse_enabled">
   <style src="studio.tcss"/>
   <keymap>
     <bind keys="q" action="quit" when="#app" label="quit"/>
@@ -44,7 +44,7 @@
     <col id="app">
       <row id="identity">
         <text class="brand">◆ monitor</text>
-        <text class="muted">{host}</text>
+        <text class="muted host">{host}</text>
         <spacer/>
         <text class="status" class:live="live" class:paused="paused" class:waiting="waiting" class:stale="stale">{status_label}</text>
         <text class="muted">{sampled_at}</text>
@@ -90,8 +90,7 @@
               <box class="panel top" title="top cpu">
                 <col each="top as t" key="t.pid">
                   <row class="top-row">
-                    <text>{t.name}</text>
-                    <spacer/>
+                    <text class="top-name">{t.name}</text>
                     <text class="num">{t.cpu}</text>
                   </row>
                 </col>
@@ -181,7 +180,7 @@
         <tab id="network" label="6 network" short="6 net">
           <col class="pane">
             <box class="panel" title="network">
-              <text class="muted">{network.rate_note}</text>
+              <text class="muted" wrap="truncate">{network.rate_note}</text>
               <row class="meter"><text class="meter-label">download</text><sparkline class="spark" bind="network.down_hist" min="0" max="100"/></row>
               <row class="meter"><text class="meter-label">upload</text><sparkline class="spark" bind="network.up_hist" min="0" max="100"/></row>
               <text class="muted">{network.total_note}</text>

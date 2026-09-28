@@ -88,37 +88,88 @@ func TestRunWithoutTerminalReportsOnStderr(t *testing.T) {
 	}
 }
 
+// TestNoClippingInAnyTab is the monitor-side half of SPEC v0.3 §21 test 90
+// (tuimark's own examples/monitor carries the fixture half, test 89):
+// studio.tui is a version="3" document, so Validate() reports L008 (a text
+// cut without an ellipsis) and L009 (a node cutting a child on an axis it
+// does not scroll) at 40, 80, and 120 columns. Validate lays out only the
+// active tab, so each of the 9 is made active through the tabs' bind
+// (view), under both themes, matching tuimark's TestNoClippingInAnyTab.
+func TestNoClippingInAnyTab(t *testing.T) {
+	s := newFixtureStudio(t)
+	if err := s.publishProcs(); err != nil {
+		t.Fatal(err)
+	}
+	tabs := []string{"overview", "cpu", "memory", "thermal", "disk", "network", "processes", "settings", "trends"}
+	for _, theme := range []string{"dark", "light"} {
+		if err := s.ui.Set("@theme", theme); err != nil {
+			t.Fatal(err)
+		}
+		for _, tab := range tabs {
+			if err := s.ui.Set("view", tab); err != nil {
+				t.Fatal(err)
+			}
+			for _, d := range s.ui.Validate() {
+				if d.Code == "L008" || d.Code == "L009" {
+					t.Errorf("%s, tab %s: %s", theme, tab, d)
+				}
+			}
+		}
+	}
+}
+
 // TestOverviewPanelsAreNotClipped: the KPI grid takes the height its rows
-// need at every width (it once had a fixed height that cut the second
-// row at 80 columns). Each panel is a border plus two lines.
+// need (it once had a fixed height that cut the second row at 80
+// columns). Where that is more than half the tab, as at 40 columns, it
+// scrolls (max-height: 50%; overflow: scroll) instead of pushing #lower
+// off the screen. At 120x30 it is exactly one row of panels, so no blank
+// band opens between it and #lower. Each panel is a border plus two
+// lines, never squashed.
 func TestOverviewPanelsAreNotClipped(t *testing.T) {
 	s := newFixtureStudio(t)
-	for _, sz := range [][2]int{{120, 30}, {100, 30}, {80, 24}, {60, 30}, {40, 30}} {
+	for _, sz := range [][2]int{{120, 30}, {100, 30}, {80, 24}, {60, 30}, {40, 30}, {40, 24}} {
 		d, err := s.ui.Dump(sz[0], sz[1])
 		if err != nil {
 			t.Fatal(err)
 		}
-		var grid *tuimark.DumpNode
+		var grid, lower *tuimark.DumpNode
 		for i := range d.Nodes {
-			if d.Nodes[i].ID == "panels" {
+			switch d.Nodes[i].ID {
+			case "panels":
 				grid = &d.Nodes[i]
+			case "lower":
+				lower = &d.Nodes[i]
 			}
 		}
-		if grid == nil {
-			t.Fatalf("%dx%d: no #panels node", sz[0], sz[1])
+		if grid == nil || lower == nil {
+			t.Fatalf("%dx%d: no #panels or #lower node", sz[0], sz[1])
+		}
+		// The panels lie in the grid's scroll extent, which is its own
+		// height when everything fits.
+		extent := grid.H
+		if grid.Scroll != nil && grid.Scroll.H != nil && *grid.Scroll.H > extent {
+			extent = *grid.Scroll.H
 		}
 		n := 0
 		for _, p := range d.Nodes {
-			if p.Tag != "box" || p.Y < grid.Y || p.Y >= grid.Y+grid.H || p.ID == "panels" {
+			// The four KPI panels are the boxes whose only class is "panel";
+			// #lower's boxes add "activity" or "top".
+			if p.Tag != "box" || len(p.Classes) != 1 || p.Classes[0] != "panel" {
 				continue
 			}
 			n++
-			if p.H != 4 || p.Y+p.H > grid.Y+grid.H {
-				t.Errorf("%dx%d: panel at %d,%d is %dx%d inside #panels %d+%d", sz[0], sz[1], p.X, p.Y, p.W, p.H, grid.Y, grid.H)
+			if p.H != 4 || p.Y < grid.Y || p.Y+p.H > grid.Y+extent {
+				t.Errorf("%dx%d: panel at %d,%d is %dx%d in #panels %d+%d", sz[0], sz[1], p.X, p.Y, p.W, p.H, grid.Y, extent)
 			}
 		}
 		if n != 4 {
-			t.Errorf("%dx%d: %d panels inside #panels, want 4", sz[0], sz[1], n)
+			t.Errorf("%dx%d: %d panels in #panels, want 4", sz[0], sz[1], n)
+		}
+		if lower.Y != grid.Y+grid.H+1 {
+			t.Errorf("%dx%d: #lower starts at row %d, want right under #panels (%d)", sz[0], sz[1], lower.Y, grid.Y+grid.H+1)
+		}
+		if sz == [2]int{120, 30} && grid.H != 4 {
+			t.Errorf("120x30: #panels is %d rows, want 4 (one row of panels, no blank band)", grid.H)
 		}
 	}
 }
