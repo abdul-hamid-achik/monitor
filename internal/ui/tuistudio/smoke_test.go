@@ -89,12 +89,16 @@ func TestRunWithoutTerminalReportsOnStderr(t *testing.T) {
 }
 
 // TestNoClippingInAnyTab is the monitor-side half of SPEC v0.3 §21 test 90
-// (tuimark's own examples/monitor carries the fixture half, test 89):
-// studio.tui is a version="3" document, so Validate() reports L008 (a text
-// cut without an ellipsis) and L009 (a node cutting a child on an axis it
-// does not scroll) at 40, 80, and 120 columns. Validate lays out only the
-// active tab, so each of the 9 is made active through the tabs' bind
-// (view), under both themes, matching tuimark's TestNoClippingInAnyTab.
+// (tuimark's own examples/monitor carries the fixture half, test 89), and
+// the diagnostics gate of the 0.3b port (tuimark SPEC §30.6): Validate()
+// reports nothing at all, in each of the 9 tabs, under both themes, at the
+// 40, 80, and 120 columns it lays out. studio.tui is a version="3"
+// document, so that includes L008 (a text cut without an ellipsis) and
+// L009 (a node cutting a child on an axis it does not scroll), and the
+// 0.3b vocabulary's own checks (keymap when groups, scale, priority,
+// row-gap). Validate lays out only the active tab, so each of the 9 is
+// made active through the tabs' bind (view), matching tuimark's
+// TestNoClippingInAnyTab.
 func TestNoClippingInAnyTab(t *testing.T) {
 	s := newFixtureStudio(t)
 	if err := s.publishProcs(); err != nil {
@@ -110,9 +114,7 @@ func TestNoClippingInAnyTab(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, d := range s.ui.Validate() {
-				if d.Code == "L008" || d.Code == "L009" {
-					t.Errorf("%s, tab %s: %s", theme, tab, d)
-				}
+				t.Errorf("%s, tab %s: %s", theme, tab, d)
 			}
 		}
 	}
