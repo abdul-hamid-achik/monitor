@@ -1,43 +1,61 @@
 <tui version="3" theme="auto" mouse="mouse_enabled">
   <style src="studio.tcss"/>
-  <keymap>
-    <bind keys="q" action="quit" when="#app" label="quit"/>
-    <bind keys="ctrl+c" action="quit"/>
-    <bind keys="?" action="help_open" when="#app" label="help"/>
-    <bind keys="tab,shift+tab" action="filter_apply" when="#filter"/>
-    <bind keys="esc" action="filter_cancel" when="#filter" label="cancel"/>
-    <bind keys="1" action="switch-to" to="#overview" when="#app" keycap="1-9" label="tabs"/>
-    <bind keys="2" action="switch-to" to="#cpu" when="#app"/>
-    <bind keys="3" action="switch-to" to="#memory" when="#app"/>
-    <bind keys="4" action="switch-to" to="#thermal" when="#app"/>
-    <bind keys="5" action="switch-to" to="#disk" when="#app"/>
-    <bind keys="6" action="switch-to" to="#network" when="#app"/>
-    <bind keys="7" action="switch-to" to="#processes" when="#app"/>
-    <bind keys="8" action="switch-to" to="#settings" when="#app"/>
-    <bind keys="9" action="switch-to" to="#trends" when="#app"/>
-    <bind keys="tab,right,l" action="move-next" to="#nav" when="#app"/>
-    <bind keys="shift+tab,left,h" action="move-prev" to="#nav" when="#app"/>
-    <bind keys="p" action="pause" when="#app" label="pause"/>
-    <bind keys="r" action="refresh" when="#app" label="refresh"/>
-    <bind keys="j" action="move-next" when="#procs:focus"/>
-    <bind keys="k" action="move-prev" when="#procs:focus"/>
-    <bind keys="space" action="check-toggle" when="#procs:focus" label="mark"/>
-    <bind keys="ctrl+a" action="check-all" when="#procs:focus" keycap="^A" label="all"/>
-    <bind keys="ctrl+d" action="check-none" when="#procs:focus" keycap="^D" label="none"/>
-    <bind keys="c" action="sort_cpu" when="#procs:focus" label="sort cpu"/>
-    <bind keys="m" action="sort_mem" when="#procs:focus" label="sort mem"/>
-    <bind keys="/" action="filter_open" when="#procs:focus" label="filter"/>
-    <bind keys="enter" action="diagnose" when="#procs:focus" label="details"/>
-    <bind keys="K" action="kill_ask" when="#procs:focus" label="kill"/>
-    <bind keys="X" action="kill_force_ask" when="#procs:focus" label="force kill"/>
-    <bind keys="y" action="kill_confirm" when="#kill" label="confirm"/>
-    <bind keys="n" action="kill_cancel" when="#kill" label="cancel"/>
-    <bind keys="enter,q" action="detail_close" when="#detail" label="close"/>
-    <bind keys="r" action="detail_refresh" when="#detail" label="refresh"/>
-    <bind keys="j" action="move-next" when="#settings-list:focus"/>
-    <bind keys="k" action="move-prev" when="#settings-list:focus"/>
-    <bind keys="enter,space" action="setting_next" when="#settings-list:focus" label="change"/>
-    <bind keys="-" action="setting_prev" when="#settings-list:focus" label="back"/>
+  <!-- The keymaps form one list in document order, and the first row
+       that matches a key wins, so the groups keep the rows' order: the
+       #filter rows stay before the #app tab/shift+tab rows, because while
+       the filter has focus the chain holds #app too and tab must apply
+       the filter, not switch tabs. A row's own when replaces its
+       keymap's; when="" means no when at all. -->
+  <keymap when="#app">
+    <bind keys="q" action="quit" label="quit"/>
+    <bind keys="ctrl+c" action="quit" when=""/>
+    <bind keys="?" action="help_open" label="help"/>
+  </keymap>
+  <keymap when="#filter">
+    <bind keys="tab,shift+tab" action="filter_apply"/>
+    <bind keys="esc" action="filter_cancel" label="cancel"/>
+  </keymap>
+  <keymap when="#app">
+    <bind keys="1" action="switch-to" to="#overview" keycap="1-9" label="tabs"/>
+    <bind keys="2" action="switch-to" to="#cpu"/>
+    <bind keys="3" action="switch-to" to="#memory"/>
+    <bind keys="4" action="switch-to" to="#thermal"/>
+    <bind keys="5" action="switch-to" to="#disk"/>
+    <bind keys="6" action="switch-to" to="#network"/>
+    <bind keys="7" action="switch-to" to="#processes"/>
+    <bind keys="8" action="switch-to" to="#settings"/>
+    <bind keys="9" action="switch-to" to="#trends"/>
+    <bind keys="tab,right,l" action="move-next" to="#nav"/>
+    <bind keys="shift+tab,left,h" action="move-prev" to="#nav"/>
+    <bind keys="p" action="pause" label="pause"/>
+    <bind keys="r" action="refresh" label="refresh"/>
+  </keymap>
+  <keymap when="#procs:focus">
+    <bind keys="j" action="move-next"/>
+    <bind keys="k" action="move-prev"/>
+    <bind keys="space" action="check-toggle" label="mark"/>
+    <bind keys="ctrl+a" action="check-all" keycap="^A" label="all"/>
+    <bind keys="ctrl+d" action="check-none" keycap="^D" label="none"/>
+    <bind keys="c" action="sort_cpu" label="sort cpu"/>
+    <bind keys="m" action="sort_mem" label="sort mem"/>
+    <bind keys="/" action="filter_open" label="filter"/>
+    <bind keys="enter" action="diagnose" label="details"/>
+    <bind keys="K" action="kill_ask" label="kill"/>
+    <bind keys="X" action="kill_force_ask" label="force kill"/>
+  </keymap>
+  <keymap when="#kill">
+    <bind keys="y" action="kill_confirm" label="confirm"/>
+    <bind keys="n" action="kill_cancel" label="cancel"/>
+  </keymap>
+  <keymap when="#detail">
+    <bind keys="enter,q" action="detail_close" label="close"/>
+    <bind keys="r" action="detail_refresh" label="refresh"/>
+  </keymap>
+  <keymap when="#settings-list:focus">
+    <bind keys="j" action="move-next"/>
+    <bind keys="k" action="move-prev"/>
+    <bind keys="enter,space" action="setting_next" label="change"/>
+    <bind keys="-" action="setting_prev" label="back"/>
     <bind keys="s" action="settings_save" when="#settings" label="save"/>
   </keymap>
   <screen id="studio">
