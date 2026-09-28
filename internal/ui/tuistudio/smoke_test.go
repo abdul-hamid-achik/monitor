@@ -89,12 +89,16 @@ func TestRunWithoutTerminalReportsOnStderr(t *testing.T) {
 }
 
 // TestNoClippingInAnyTab is the monitor-side half of SPEC v0.3 §21 test 90
-// (tuimark's own examples/monitor carries the fixture half, test 89):
-// studio.tui is a version="3" document, so Validate() reports L008 (a text
-// cut without an ellipsis) and L009 (a node cutting a child on an axis it
-// does not scroll) at 40, 80, and 120 columns. Validate lays out only the
-// active tab, so each of the 9 is made active through the tabs' bind
-// (view), under both themes, matching tuimark's TestNoClippingInAnyTab.
+// (tuimark's own examples/monitor carries the fixture half, test 89), and
+// the diagnostics gate of the 0.3b port (tuimark SPEC §30.6): Validate()
+// reports nothing at all, in each of the 9 tabs, under both themes, at the
+// 40, 80, and 120 columns it lays out. studio.tui is a version="3"
+// document, so that includes L008 (a text cut without an ellipsis) and
+// L009 (a node cutting a child on an axis it does not scroll), and the
+// 0.3b vocabulary's own checks (keymap when groups, scale, priority,
+// row-gap). Validate lays out only the active tab, so each of the 9 is
+// made active through the tabs' bind (view), matching tuimark's
+// TestNoClippingInAnyTab.
 func TestNoClippingInAnyTab(t *testing.T) {
 	s := newFixtureStudio(t)
 	if err := s.publishProcs(); err != nil {
@@ -110,9 +114,7 @@ func TestNoClippingInAnyTab(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, d := range s.ui.Validate() {
-				if d.Code == "L008" || d.Code == "L009" {
-					t.Errorf("%s, tab %s: %s", theme, tab, d)
-				}
+				t.Errorf("%s, tab %s: %s", theme, tab, d)
 			}
 		}
 	}
@@ -220,5 +222,50 @@ func TestSmokeProcessesVisible(t *testing.T) {
 	screen = strings.Join(d.Grid, "\n")
 	if !strings.Contains(screen, "launchd") {
 		t.Errorf("launchd should be visible once show_system_processes is on:\n%s", screen)
+	}
+}
+
+// TestCoreRowsAreAdjacent: the per-core grid separates its columns with
+// gap: 1 but its rows with row-gap: 0 (tuimark 0.3b), so the core rows
+// touch, as the Bubble Tea studio draws them, and at 40 columns the 8
+// fixture cores in one column are 8 rows tall instead of 15, which fits
+// #cores-view at 40x24 without scrolling.
+func TestCoreRowsAreAdjacent(t *testing.T) {
+	s := newFixtureStudio(t)
+	must(t, s.ui.Set("view", "cpu"))
+	for _, sz := range [][2]int{{40, 24}, {80, 24}, {120, 30}} {
+		d, err := s.ui.Dump(sz[0], sz[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ys []int
+		var grid, view *tuimark.DumpNode
+		for i, n := range d.Nodes {
+			switch {
+			case n.ID == "cores":
+				grid = &d.Nodes[i]
+			case n.ID == "cores-view":
+				view = &d.Nodes[i]
+			case n.Tag == "row" && len(n.Classes) > 0 && n.Classes[0] == "core":
+				if len(ys) == 0 || ys[len(ys)-1] != n.Y {
+					ys = append(ys, n.Y)
+				}
+			}
+		}
+		if grid == nil || view == nil || len(ys) == 0 {
+			t.Fatalf("%dx%d: no #cores, #cores-view, or core rows", sz[0], sz[1])
+		}
+		for i := 1; i < len(ys); i++ {
+			if ys[i] != ys[i-1]+1 {
+				t.Errorf("%dx%d: core rows at %v, want adjacent rows", sz[0], sz[1], ys)
+				break
+			}
+		}
+		if grid.H != len(ys) {
+			t.Errorf("%dx%d: #cores is %d rows tall for %d rows of cores", sz[0], sz[1], grid.H, len(ys))
+		}
+		if sz == [2]int{40, 24} && (view.Scroll == nil || view.Scroll.H == nil || *view.Scroll.H > view.H-2) {
+			t.Errorf("40x24: #cores-view (%d rows, border included) scrolls: %+v", view.H, view.Scroll)
+		}
 	}
 }

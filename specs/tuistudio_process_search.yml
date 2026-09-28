@@ -47,6 +47,13 @@ steps:
             contains: "/ filter"
         timeoutMs: 2000
     - type: "agent"
+    # "WindowServer" has no "a", so it is gone from the first typed letter:
+    # wait for the whole query in the filter row first, so the snapshot is
+    # the frame the complete filter draws.
+    - wait:
+        screen:
+            contains: "/ agent"
+        timeoutMs: 2000
     - wait:
         screen:
             notContains: "WindowServer"

@@ -431,22 +431,24 @@ func (s *studio) publishMetrics(info collector.SystemInfo, alerts []collector.Al
 				})
 			}
 		}
-		diskHist := sharedScale(info.Disk.ReadHistory, info.Disk.WriteHistory)
+		// The rate histories are bound raw (bytes per second): each panel's
+		// two sparklines share one scale="…" group in studio.tui, which
+		// ranges them over their shown values together, as the Bubble Tea
+		// studio's MultiSparkline does.
 		set("disk", map[string]any{
 			"value": diskValue, "pct": diskPct, "note": diskNote, "partitions": partitions,
 			"unavailable": diskUnavailable, "reason": diskNote,
 			"rate_note":  fmt.Sprintf("read %s/s · write %s/s", collector.FormatBytes(info.Disk.ReadPerSec), collector.FormatBytes(info.Disk.WritePerSec)),
-			"read_hist":  diskHist[0],
-			"write_hist": diskHist[1],
+			"read_hist":  toAnySlice(info.Disk.ReadHistory),
+			"write_hist": toAnySlice(info.Disk.WriteHistory),
 		})
 
 		netUnavailable := info.Network.MetricStates != nil && metricIssue(info.Network.MetricStates, "io") != ""
-		netHist := sharedScale(info.Network.DownloadHistory, info.Network.UploadHistory)
 		set("network", map[string]any{
 			"rate_note": fmt.Sprintf("download %s/s · upload %s/s",
 				collector.FormatBytes(info.Network.BytesRecvPerSec), collector.FormatBytes(info.Network.BytesSentPerSec)),
-			"down_hist":    netHist[0],
-			"up_hist":      netHist[1],
+			"down_hist":    toAnySlice(info.Network.DownloadHistory),
+			"up_hist":      toAnySlice(info.Network.UploadHistory),
 			"total_note":   fmt.Sprintf("total down %s · up %s", collector.FormatBytes(info.Network.BytesRecv), collector.FormatBytes(info.Network.BytesSent)),
 			"packets_note": fmt.Sprintf("packets down %d · up %d", info.Network.PacketsRecv, info.Network.PacketsSent),
 			"unavailable":  netUnavailable, "reason": metricIssue(info.Network.MetricStates, "io"),
@@ -548,37 +550,6 @@ func formatTemp(c float64, unit string) string {
 		return fmt.Sprintf("%.1f F", c*9/5+32)
 	}
 	return fmt.Sprintf("%.1f C", c)
-}
-
-// sharedScale maps rate histories (bytes per second) onto one 0-100 scale,
-// the global min and max of all of them, as widgets.MultiSparkline does
-// for the Bubble Tea studio's "recent rates · shared scale". The view's
-// sparklines take min="0" max="100": a Tuimark sparkline's min and max are
-// literals, so the shared scale has to be computed here.
-func sharedScale(series ...[]float64) [][]any {
-	lo, hi, seen := 0.0, 0.0, false
-	for _, s := range series {
-		for _, v := range s {
-			if !seen || v < lo {
-				lo = v
-			}
-			if !seen || v > hi {
-				hi = v
-			}
-			seen = true
-		}
-	}
-	if hi <= lo {
-		hi = lo + 1
-	}
-	out := make([][]any, len(series))
-	for i, s := range series {
-		out[i] = make([]any, len(s))
-		for j, v := range s {
-			out[i][j] = (v - lo) / (hi - lo) * 100
-		}
-	}
-	return out
 }
 
 func toAnySlice(v []float64) []any {

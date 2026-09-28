@@ -9,7 +9,7 @@ follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - **Experimental: `monitor studio --tuimark`.** The same 9 Studio tabs,
-  rendered by [Tuimark](https://github.com/abdul-hamid-achik/tuimark) v0.3.0
+  rendered by [Tuimark](https://github.com/abdul-hamid-achik/tuimark) v0.3.1
   instead of Bubble Tea, over the same collector, kill gate, settings,
   history and temperature sources. The view is a declarative `.tui`/`.tcss`
   pair embedded in the binary. `--fixture` swaps every source for
@@ -19,6 +19,24 @@ follows [Semantic Versioning](https://semver.org/).
   `version="3"` document: at 40 columns nothing is cut silently (long host
   and process names truncate with an ellipsis, and the overview scrolls),
   and each sample is published atomically.
+
+### Changed
+
+- **Experimental Tuimark studio: the Tuimark 0.3b vocabulary (v0.3.1).**
+  The view now states in the document what the host or `@media` rules
+  used to work out:
+  - The disk and network panels draw their two rate sparklines on one
+    shared `scale` instead of a host-side rescale. The range now covers
+    the values on screen rather than the whole minute of history, and a
+    flat pair sits at half height instead of on the floor.
+  - Processes columns hide by `priority` instead of at fixed widths, and
+    only when the columns would otherwise be cut: all seven show from 65
+    terminal columns (was 100), then USER, I/O, THR, and MEM hide in that
+    order, leaving four at 40 columns (was three).
+  - The per-core grid keeps its rows adjacent (`row-gap: 0`), as the
+    Bubble Tea studio does, so a single column of cores is half as tall.
+  - The keymap is grouped by context (`<keymap when>`) with the same rows
+    in the same order, so every key does what it did.
 
 ## [2.1.0] - 2026-09-26
 
