@@ -18,7 +18,6 @@ import (
 	"embed"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 
 	"github.com/abdul-hamid-achik/tuimark"
@@ -146,27 +145,10 @@ func Dump(opts Options, cols, rows int) (*tuimark.Dump, error) {
 	return s.ui.Dump(cols, rows)
 }
 
-// loadEmbeddedView extracts the embedded studio.tui/studio.tcss to a
-// throwaway temp directory and loads them from there, so <style
-// src="studio.tcss"/> resolves next to the .tui file (tuimark.Load
-// resolves a relative style src against the document's own directory).
-// The stylesheet is parsed inside Load itself, so the temp directory is
-// safe to remove immediately afterward.
+// loadEmbeddedView loads studio.tui straight out of the embedded file
+// system with tuimark.LoadFS (0.3a): a relative <style src="studio.tcss"/>
+// resolves inside viewFS itself, next to the document, so this no longer
+// needs to spill the embedded files to a throwaway temp directory first.
 func loadEmbeddedView() (*tuimark.App, error) {
-	dir, err := os.MkdirTemp("", "monitor-tuistudio-*")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(dir)
-
-	for _, name := range []string{"studio.tui", "studio.tcss"} {
-		b, err := viewFS.ReadFile(name)
-		if err != nil {
-			return nil, fmt.Errorf("tuistudio: embedded %s: %w", name, err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil {
-			return nil, err
-		}
-	}
-	return tuimark.Load(filepath.Join(dir, "studio.tui"))
+	return tuimark.LoadFS(viewFS, "studio.tui")
 }
