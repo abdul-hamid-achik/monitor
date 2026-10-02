@@ -1,0 +1,11 @@
+panic: assignment to entry in nil map [recovered, repanicked]
+
+goroutine 1 [running]:
+github.com/abdul-hamid-achik/monitor/sdk/go.Recover()
+	/home/dev/go/pkg/mod/github.com/abdul-hamid-achik/monitor/sdk/go@v0.1.0/monitor.go:217 +0x44
+panic({0x1006cb0c0?, 0x1006f76b0?})
+	/usr/local/go/src/runtime/panic.go:860 +0x12c
+main.load(...)
+	{{ROOT}}/main.go:6
+main.main()
+	{{ROOT}}/main.go:12 +0x54

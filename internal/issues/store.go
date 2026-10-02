@@ -487,7 +487,90 @@ func occurrenceFromInput(input OccurrenceInput, issueID string) Occurrence {
 		EvidenceRefs: cloneStrings(input.EvidenceRefs), Metadata: cloneMap(input.Metadata),
 		Run: cloneRun(input.Run), Evidence: cloneEvidence(input.Evidence), Count: input.Count,
 		Exception: input.Exception, DedupeKey: strings.TrimSpace(input.DedupeKey),
+		Breadcrumbs: cloneBreadcrumbs(input.Breadcrumbs), Tags: cloneTags(input.Tags),
 	}
+}
+
+// cloneBreadcrumbs copies bs, nil for none (so the field stays omitted).
+func cloneBreadcrumbs(bs []Breadcrumb) []Breadcrumb {
+	if len(bs) == 0 {
+		return nil
+	}
+	return append([]Breadcrumb(nil), bs...)
+}
+
+// boundBreadcrumbs keeps the newest MaxBreadcrumbs entries, oldest first,
+// trims every field to its bound and drops entries with no message.
+func boundBreadcrumbs(bs []Breadcrumb) []Breadcrumb {
+	out := make([]Breadcrumb, 0, len(bs))
+	for _, b := range bs {
+		b.Message = truncateRunes(strings.TrimSpace(b.Message), maxBreadcrumbMessage)
+		if b.Message == "" {
+			continue
+		}
+		b.Category = truncateRunes(strings.TrimSpace(b.Category), maxBreadcrumbCategory)
+		b.Level = truncateRunes(strings.ToLower(strings.TrimSpace(b.Level)), maxBreadcrumbLevelSize)
+		if !b.Timestamp.IsZero() {
+			b.Timestamp = b.Timestamp.UTC()
+		}
+		out = append(out, b)
+	}
+	if len(out) > MaxBreadcrumbs {
+		out = out[len(out)-MaxBreadcrumbs:]
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// cloneTags copies tags, nil for none (so the field stays omitted).
+func cloneTags(tags map[string]string) map[string]string {
+	if len(tags) == 0 {
+		return nil
+	}
+	return cloneMap(tags)
+}
+
+// boundTags keeps at most MaxTags entries (the lexically smallest keys,
+// so the choice is deterministic), trims keys and values to their bounds
+// and drops entries whose key or value is empty.
+func boundTags(tags map[string]string) map[string]string {
+	if len(tags) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(tags))
+	for k := range tags {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make(map[string]string, min(len(keys), MaxTags))
+	for _, k := range keys {
+		key := truncateRunes(strings.TrimSpace(k), maxTagKeySize)
+		value := truncateRunes(strings.TrimSpace(tags[k]), maxTagValueLen)
+		if key == "" || value == "" {
+			continue
+		}
+		if _, dup := out[key]; dup {
+			continue
+		}
+		out[key] = value
+		if len(out) == MaxTags {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
 }
 
 func (s *Store) saveIssue(record *veclite.Record, issue Issue) error {
@@ -884,6 +967,8 @@ func normalizeOccurrenceInput(input OccurrenceInput) OccurrenceInput {
 	if input.Count <= 0 {
 		input.Count = 1
 	}
+	input.Breadcrumbs = boundBreadcrumbs(input.Breadcrumbs)
+	input.Tags = boundTags(input.Tags)
 	return input
 }
 

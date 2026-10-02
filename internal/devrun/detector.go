@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/abdul-hamid-achik/monitor/internal/contextids"
+	"github.com/abdul-hamid-achik/monitor/internal/events"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/project"
 	"github.com/abdul-hamid-achik/monitor/internal/scrub"
@@ -158,6 +159,9 @@ type detector struct {
 	// flushAllPending's doc comment for the exact race this closes.
 	flushWG sync.WaitGroup
 
+	// sdkEvents counts the SDK events observeEvent took in, merged or not.
+	sdkEvents int64
+
 	// bannerMu serializes onNewIssue/onRepeat callback invocations.
 	// Independent fingerprints' coalesceWindow timers (and, since
 	// flushAllPending, the shutdown flush of every still-pending
@@ -173,9 +177,18 @@ type detector struct {
 // for the eventual single write) plus a running count of how many raw
 // events landed in the window.
 type coalesceEntry struct {
-	ex         stacktrace.Exception
-	block      stacktrace.Block
-	count      int64
+	ex    stacktrace.Exception
+	block stacktrace.Block
+	// count is how many times the scanned stream(s) showed this
+	// fingerprint in the window; sdkCount how many SDK events did (see
+	// observeEvent). The write records the larger: each source sees every
+	// repeat, so adding them would double-count.
+	count    int64
+	sdkCount int64
+	// sdk is the first SDK event in the window, nil when only the stream
+	// saw it. Its context (breadcrumbs, tags, pid, release) goes on the
+	// occurrence.
+	sdk        *events.Prepared
 	observedAt time.Time
 	timer      *time.Timer
 }
@@ -262,24 +275,34 @@ func (d *detector) process(ctx context.Context, blocks []stacktrace.Block) {
 // representative block for the live DedupeKey (see liveDedupeKey).
 func (d *detector) observe(ctx context.Context, block stacktrace.Block, ex stacktrace.Exception) {
 	stacktrace.ApplyGitRoot(&ex, d.opts.id.GitRoot)
-	scrubException(d.scrubber, &ex)
+	events.ScrubException(d.scrubber, &ex)
 
 	fingerprint := issues.FingerprintV2Exception(ex, d.opts.id.Slug)
 
 	d.mu.Lock()
 	if entry, exists := d.pending[fingerprint]; exists {
 		entry.count++
+		if len(entry.block.Lines) == 0 {
+			// An SDK event opened this window; the stream's block still
+			// supplies the DedupeKey a nested launch folds on.
+			entry.block = block
+		}
 		d.mu.Unlock()
 		return
 	}
-	entry := &coalesceEntry{ex: ex, block: block, count: 1, observedAt: time.Now()}
+	d.openLocked(ctx, fingerprint, &coalesceEntry{ex: ex, block: block, count: 1, observedAt: time.Now()})
+	d.mu.Unlock()
+}
+
+// openLocked opens fingerprint's coalescing window with entry and
+// schedules its flush coalesceWindow later. d.mu must be held.
+func (d *detector) openLocked(ctx context.Context, fingerprint string, entry *coalesceEntry) {
 	d.pending[fingerprint] = entry
 	d.flushWG.Add(1)
 	entry.timer = time.AfterFunc(coalesceWindow, func() {
 		defer d.flushWG.Done()
 		d.flush(ctx, fingerprint)
 	})
-	d.mu.Unlock()
 }
 
 // flush is the coalesceWindow timer's callback: it removes fingerprint's
@@ -375,20 +398,32 @@ func (d *detector) record(ctx context.Context, fingerprint string, entry *coales
 	// is downgraded to handled/error before it is persisted -- "caught and
 	// printed means handled" (goal decision 3). An unknown (-1) or
 	// non-zero exit leaves the parser's verdict untouched.
-	if d.childExitCode.Load() == 0 {
+	// An SDK event carries the exact handled flag, so only a window the
+	// stream alone saw is downgraded.
+	if entry.sdk == nil && d.childExitCode.Load() == 0 {
 		downgradeModuleFatal(&entry.ex)
 	}
-	dedupe := liveDedupeKey(d.opts.launch.Root, entry.block, entry.observedAt)
-	result, err := issues.RecordException(ctx, d.opts.storePath, issues.DefaultWriterWait, entry.ex, d.opts.id, d.opts.run, issues.RecordExceptionOptions{
-		ObservedAt: entry.observedAt,
-		Count:      entry.count,
-		DedupeKey:  dedupe,
+	count := max(entry.count, entry.sdkCount)
+	opts := issues.RecordExceptionOptions{ObservedAt: entry.observedAt, Count: count}
+	run := d.opts.run
+	if len(entry.block.Lines) > 0 {
+		opts.DedupeKey = liveDedupeKey(d.opts.launch.Root, entry.block, entry.observedAt)
 		// DedupeAliases (CC-3): the neighboring dedupe buckets, so a
 		// nested `monitor run --` pair whose observation times straddle a
 		// whole-second boundary still folds into one occurrence. See
 		// liveDedupeKeyNeighbors for the safety argument.
-		DedupeAliases: liveDedupeKeyNeighbors(d.opts.launch.Root, entry.block, entry.observedAt),
-	})
+		opts.DedupeAliases = liveDedupeKeyNeighbors(d.opts.launch.Root, entry.block, entry.observedAt)
+	} else if entry.sdk != nil {
+		opts.DedupeKey = entry.sdk.Options.DedupeKey
+	}
+	if entry.sdk != nil {
+		opts.PID = entry.sdk.Options.PID
+		opts.Breadcrumbs = entry.sdk.Options.Breadcrumbs
+		opts.Tags = entry.sdk.Options.Tags
+		opts.Metadata = entry.sdk.Options.Metadata
+		run = events.RunIDs(run, *entry.sdk)
+	}
+	result, err := issues.RecordException(ctx, d.opts.storePath, issues.DefaultWriterWait, entry.ex, d.opts.id, run, opts)
 	if err != nil {
 		// A store write failure must never bring down the detector, let
 		// alone the monitored child (there is nowhere else to report it
@@ -411,7 +446,7 @@ func (d *detector) record(ctx context.Context, fingerprint string, entry *coales
 		return
 	}
 
-	isNewIssue := result.Issue.OccurrenceCount == entry.count
+	isNewIssue := result.Issue.OccurrenceCount == count
 	// LUX-14: this write flipped a resolved issue back open -- a
 	// regression, announced as REGRESSED (and counted in the exit
 	// summary), never as a silent "again".
@@ -432,7 +467,7 @@ func (d *detector) record(ctx context.Context, fingerprint string, entry *coales
 	if regressed {
 		d.regressedIDs = append(d.regressedIDs, shortID)
 	}
-	d.occurrences += entry.count
+	d.occurrences += count
 	d.mu.Unlock()
 
 	switch {
@@ -462,7 +497,7 @@ func (d *detector) record(ctx context.Context, fingerprint string, entry *coales
 		d.bannerMu.Unlock()
 	case !isNewIssue && d.opts.onRepeat != nil:
 		d.bannerMu.Lock()
-		d.opts.onRepeat(shortID, entry.count)
+		d.opts.onRepeat(shortID, count)
 		d.bannerMu.Unlock()
 	}
 }
@@ -560,26 +595,6 @@ func culpritFunc(c *issues.Culprit) string {
 		return ""
 	}
 	return c.Function
-}
-
-// scrubException redacts ex's Type/Value and every frame's Function text,
-// recursively through Chained, using scrubber -- the golden rule that error
-// text is untrusted data and must be redacted before it is persisted or
-// printed (the naming ADR's "Scrub por defecto").
-// Filename/AbsPath are left alone: they are resolved, checked paths (see
-// stacktrace.ApplyGitRoot), not attacker- or user-controlled message text.
-func scrubException(scrubber *scrub.Scrubber, ex *stacktrace.Exception) {
-	if ex == nil {
-		return
-	}
-	ex.Type = scrubber.String(ex.Type)
-	ex.Value = scrubber.String(ex.Value)
-	for i := range ex.Frames {
-		ex.Frames[i].Function = scrubber.String(ex.Frames[i].Function)
-	}
-	for i := range ex.Chained {
-		scrubException(scrubber, &ex.Chained[i])
-	}
 }
 
 // downgradeModuleFatal downgrades ex in place when it is a Python

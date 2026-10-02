@@ -64,3 +64,7 @@ desktop/dist/
 desktop/release/
 desktop/captures/
 desktop/bin/
+
+# Python bytecode (sdk/python tests, examples)
+__pycache__/
+*.pyc

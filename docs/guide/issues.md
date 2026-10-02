@@ -5,17 +5,17 @@ groups recurring events into durable issues, keeps each occurrence with its run
 context and evidence references, and lets you triage the result without a
 hosted backend.
 
-This is not a Sentry SDK or protocol implementation: there is no client
-library to install, no envelope wire format, and issue data never leaves your
-machine. Monitor does ingest application exceptions, though — without an SDK.
-Its stack-trace parser turns a crash or a caught-and-printed error straight
-out of a process's stderr/stdout or an existing log file (Node, Deno, Bun,
-Python, Ruby, and Go are all covered) into a structured exception, and
-`issues.RecordException` turns that into a durable issue with a culprit
-`file:line`, its in-app frames, and its causal chain — see
-[Exception issues](#exception-issues) below. What monitor still does not do
-is symbolicate source maps for that exception path, accept a Sentry SDK
-envelope over the wire, or send issue data to a cloud service.
+This is not a Sentry SDK or protocol implementation: there is no envelope wire
+format, no account, and issue data never leaves your machine. Monitor ingests
+application exceptions without any SDK. Its stack-trace parser turns a crash or
+a caught-and-printed error straight out of a process's stderr/stdout or an
+existing log file (Node, Deno, Bun, Python, Ruby, and Go are all covered) into
+a structured exception, and `issues.RecordException` turns that into a durable
+issue with a culprit `file:line`, its in-app frames, and its causal chain — see
+[Exception issues](#exception-issues) below. For what a process never prints,
+monitor's own optional [SDKs](./sdks) report the same exceptions as
+[`monitor.event.v1`](/contracts/event-v1) files, with breadcrumbs and tags,
+and they group into the same issues.
 
 For the end-to-end crash-to-explained-issue journey (`monitor run --`,
 `monitor issues`, `monitor issue latest`), see

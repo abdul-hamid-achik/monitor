@@ -121,6 +121,7 @@ export default defineConfig({
             { text: 'Runtimes Matrix', link: '/guide/runtimes' },
             { text: 'Hot Lines', link: '/guide/hot-lines' },
             { text: 'Local Issues', link: '/guide/issues' },
+            { text: 'SDKs', link: '/guide/sdks' },
           ],
         },
         {
@@ -159,6 +160,7 @@ export default defineConfig({
             { text: 'Issue Context v1 (Draft)', link: '/contracts/issue-context-v1' },
             { text: 'Line Heatmap v1 (Draft)', link: '/contracts/line-heatmap-v1' },
             { text: 'App Protocol v1 (Draft)', link: '/contracts/app-protocol-v1' },
+            { text: 'Event v1 (Draft)', link: '/contracts/event-v1' },
           ],
         },
       ],

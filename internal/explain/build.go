@@ -296,6 +296,8 @@ func Build(ctx context.Context, store *issues.Store, id string, opts Options) (*
 		}
 	}
 
+	c.Event = eventContextFor(store, issue)
+
 	c.Impact = impactFor(ectx, root, culprit, degraded)
 	c.LastTouched = lastTouchedSection(ectx, root, culprit, issue, degraded)
 	if culprit != nil && culprit.Snippet != nil {
@@ -323,6 +325,35 @@ func Build(ctx context.Context, store *issues.Store, id string, opts Options) (*
 	}
 
 	return c, nil
+}
+
+// eventContextFor returns the SDK context of issue's newest occurrence an
+// SDK delivered (Metadata["source"] == "sdk"), or nil when none did or the
+// occurrences cannot be read: this section is additive context, never a
+// reason to fail the read.
+func eventContextFor(store *issues.Store, issue issues.Issue) *EventContext {
+	occurrences, err := store.Occurrences(issue.ID, 0)
+	if err != nil {
+		return nil
+	}
+	for _, occ := range occurrences {
+		if occ.Metadata["source"] != "sdk" {
+			continue
+		}
+		ev := &EventContext{
+			ObservedAt: occ.ObservedAt,
+			Kind:       occ.Metadata["event_kind"],
+			SDK:        occ.Metadata["sdk"],
+			Mode:       occ.Metadata["sdk_mode"],
+			Release:    occ.Release,
+			Tags:       occ.Tags,
+		}
+		for _, b := range occ.Breadcrumbs {
+			ev.Breadcrumbs = append(ev.Breadcrumbs, BreadcrumbEntry{Timestamp: b.Timestamp, Category: b.Category, Level: b.Level, Message: b.Message})
+		}
+		return ev
+	}
+	return nil
 }
 
 func shortID(id string) string {
@@ -621,6 +652,14 @@ func redactContext(c *Context) int {
 	}
 	if c.LastTouched.Subject != "" {
 		c.LastTouched.Subject = s.String(c.LastTouched.Subject)
+	}
+	if c.Event != nil {
+		for i := range c.Event.Breadcrumbs {
+			c.Event.Breadcrumbs[i].Message = s.String(c.Event.Breadcrumbs[i].Message)
+		}
+		for k, v := range c.Event.Tags {
+			c.Event.Tags[k] = s.String(v)
+		}
 	}
 	return s.Count()
 }

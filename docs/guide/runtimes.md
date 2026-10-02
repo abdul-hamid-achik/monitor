@@ -1,7 +1,11 @@
 # Runtimes Matrix
 
 Monitor's error tracking is SDK-free: it parses what a runtime already
-prints. What each runtime gets, at a glance:
+prints. Monitor's own optional [SDKs](./sdks) add what never gets printed
+(errors logged to files, swallowed rejections, dying threads), either
+loaded at launch with `monitor run --probes` (Node, Bun, Python) or
+imported in code (Node, Bun, Deno, Python, Go). What each runtime gets, at a
+glance:
 
 | Runtime | Crash parsing (`monitor run --` / `stacktrace parse`) | Live hot lines (`monitor hot`) | Exit-time profile (`monitor run --profile`) | Source maps |
 |---|---|---|---|---|

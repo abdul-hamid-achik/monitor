@@ -78,6 +78,22 @@ Destructive methods (process.kill, profile.capture) also require
 			}
 			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
+			// A writable session also records what monitor's own SDKs left
+			// in the inbox, so the client's issue.event stream shows them.
+			// The drainer is waited out before returning: exiting in the
+			// middle of a store write is what must never happen.
+			if !readOnly {
+				drainCtx, stopDrain := context.WithCancel(ctx)
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					drainInboxLoop(drainCtx)
+				}()
+				defer func() {
+					stopDrain()
+					<-done
+				}()
+			}
 			srv := appserver.New(newAppService(), appserver.Options{Version: Version, ReadOnly: readOnly})
 			return srv.Run(ctx, cmd.InOrStdin(), protocolOut)
 		},
@@ -85,6 +101,25 @@ Destructive methods (process.kill, profile.capture) also require
 	cmd.Flags().BoolVar(&stdio, "stdio", false, "speak monitor.app.v1 on stdin/stdout (required; the only transport)")
 	cmd.Flags().BoolVar(&readOnly, "read-only", false, "reject every mutating method (issues.set_status, process.kill, profile.capture)")
 	return cmd
+}
+
+// serveInboxPoll is how often a writable serve session drains the SDK
+// inbox.
+const serveInboxPoll = 2 * time.Second
+
+// drainInboxLoop drains the SDK inbox into the default store until ctx
+// ends (see drainInboxIntoDefaultStore for why only the default store).
+func drainInboxLoop(ctx context.Context) {
+	ticker := time.NewTicker(serveInboxPoll)
+	defer ticker.Stop()
+	for {
+		drainInboxIntoDefaultStore(ctx, "")
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // newAppService wires appserver.Service to the same logic the CLI and MCP

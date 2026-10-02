@@ -37,6 +37,7 @@ func newRunCmd() *cobra.Command {
 		store        string
 		inspect      bool
 		profile      bool
+		probes       bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run <glyphrun-spec> | run [flags] -- <cmd> [args...]",
@@ -60,8 +61,9 @@ is present:
       issues store: a full internal buffer drops lines and counts them
       rather than ever slowing the monitored command down.
 
-      Exports ONLY MONITOR_LAUNCH_ID, MONITOR_LAUNCH_SERVICE and
-      MONITOR_LAUNCH_ROOT -- never MONITOR=1, MONITOR_SERVICE, or
+      Exports ONLY MONITOR_LAUNCH_ID, MONITOR_LAUNCH_SERVICE,
+      MONITOR_LAUNCH_ROOT and MONITOR_EVENTS_DIR (this launch's private
+      directory for monitor's own SDKs) -- never MONITOR=1, MONITOR_SERVICE, or
       MONITOR_RUN_ID, which belong to the legacy spec runner and to
       internal/contextids respectively. cmd's own exit code (or
       128+signal, if it was killed by one) becomes monitor's exit
@@ -96,7 +98,18 @@ is present:
       Deno profiling instead). An exit shim (loaded via --require/
       --preload) makes even a bare Ctrl-C reach that exit hook, but only
       when cmd registers no SIGINT/SIGTERM handler of its own -- an app
-      with its own handler is left completely alone.`,
+      with its own handler is left completely alone.
+
+      --probes loads monitor's own SDKs into cmd at launch, by
+      environment only: NODE_OPTIONS=--require and BUN_OPTIONS=--preload
+      for Node and Bun, and a PYTHONPATH directory holding only a
+      bootstrap sitecustomize.py (which runs any sitecustomize it
+      shadows) for Python. They also record errors the app catches and
+      logs (console.error(err), logger.exception), rejections, thread
+      exceptions and recent console/log lines as breadcrumbs. They never
+      print and never change cmd's output or exit code. The same crash
+      seen by an SDK and on stderr is recorded once. Apps that import an
+      SDK themselves report to this launch with or without --probes.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if cmd.ArgsLenAtDash() < 0 {
 				return cobra.ExactArgs(1)(cmd, args)
@@ -141,6 +154,7 @@ is present:
 				StorePath:      store,
 				Inspect:        inspect,
 				Profile:        profile,
+				Probes:         probes,
 			})
 			if err != nil {
 				return err
@@ -168,5 +182,6 @@ is present:
 	cmd.Flags().StringVar(&store, "store", "", "issue store path (default: $MONITOR_ISSUES_STORE or XDG data dir)")
 	cmd.Flags().BoolVar(&inspect, "inspect", false, "open a debugger inspector (node/deno via NODE_OPTIONS; no-op for Bun, which speaks JSC, not V8 CDP) and register it for 'monitor hot <service>'")
 	cmd.Flags().BoolVar(&profile, "profile", false, "write a CPU profile at exit (node/bun; not yet available for Deno) via an exit shim that makes even Ctrl-C flush one, unless the app installs its own SIGINT/SIGTERM handler")
+	cmd.Flags().BoolVar(&probes, "probes", false, "load monitor's own SDKs into the command (node, bun, python) to also record caught-and-logged errors, rejections, thread exceptions and breadcrumbs; output and exit code stay unchanged")
 	return cmd
 }

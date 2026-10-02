@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/abdul-hamid-achik/monitor/internal/contextids"
+	"github.com/abdul-hamid-achik/monitor/internal/events"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/project"
 	"github.com/abdul-hamid-achik/monitor/internal/scrub"
@@ -90,6 +91,12 @@ type Options struct {
 	// profile.go). Deno has no env-injectable equivalent (verified live)
 	// and gets a one-line note instead.
 	Profile bool
+	// Probes is --probes: monitor's own SDKs load themselves into the
+	// child at launch, by environment only (NODE_OPTIONS/BUN_OPTIONS
+	// --require/--preload, a PYTHONPATH bootstrap sitecustomize), and
+	// report errors the process caught and logged, not just the ones it
+	// printed -- see applySDK.
+	Probes bool
 
 	// Stdin/Stdout/Stderr are monitor's own terminal streams, overridable
 	// in tests; nil defaults to os.Stdin/os.Stdout/os.Stderr. Stdin is
@@ -130,6 +137,10 @@ type Result struct {
 	// shutdown -- see detector.flushAllPending's bounded budget): counted,
 	// never silently lost, and surfaced in the exit summary.
 	FailedWrites int64
+	// SDKEvents is how many events monitor's own SDKs delivered during
+	// the run (each merged with the same crash on stderr when both saw
+	// it).
+	SDKEvents int64
 	// ProfilePath is the newest .cpuprofile --profile wrote (E3.3b), ""
 	// when --profile was not requested, was skipped for this runtime
 	// (Deno), or the process never reached its exit hook.
@@ -277,6 +288,34 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	env = augmentation.env
 
+	// Monitor's own SDKs report into a private per-launch directory (see
+	// applySDK). Setting it up must never block the launch: on failure the
+	// child simply runs without it, and --probes says why.
+	var eventsDir string
+	var sdkNotes []string
+	switch {
+	case opts.NoIssues:
+		if opts.Probes {
+			sdkNotes = append(sdkNotes, probesNoIssuesNote)
+		}
+	default:
+		dir, derr := events.LaunchDir(launch.ID)
+		if derr != nil {
+			if opts.Probes {
+				sdkNotes = append(sdkNotes, "--probes unavailable: "+derr.Error())
+			}
+			break
+		}
+		eventsDir = dir
+		defer handOff(eventsDir)
+		sdkAug, serr := applySDK(env, opts, eventsDir)
+		if serr != nil {
+			sdkNotes = append(sdkNotes, "--probes unavailable: "+serr.Error())
+		}
+		env = sdkAug.env
+		sdkNotes = append(sdkNotes, sdkAug.notes...)
+	}
+
 	cmd := exec.CommandContext(ctx, opts.Argv[0], opts.Argv[1:]...)
 	cmd.Env = env
 	cmd.Stdin = stdin
@@ -361,7 +400,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	// explain why a flag the caller explicitly passed has no effect here,
 	// which is exactly the kind of thing --quiet ("suppress the routine
 	// start/NEW/again banners") is not meant to hide.
-	for _, note := range augmentation.notes {
+	for _, note := range append(augmentation.notes, sdkNotes...) {
 		fmt.Fprintln(banner, NoteBanner(note))
 	}
 
@@ -502,6 +541,10 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			det.run(ctx, lines)
 		}()
 	}
+	var watcher *eventWatcher
+	if det != nil && eventsDir != "" {
+		watcher = startEventWatcher(ctx, eventsDir, det)
+	}
 
 	// Reap the child first, then drain: Wait never touches the scanned
 	// pipes (they are ours, not exec's), so everything the child wrote is
@@ -525,6 +568,11 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	// than drainFloor, enough to read what the child already wrote into the
 	// kernel pipe buffer before its exit.
 	drainPipes(&pumpWG, max(childIOGrace-time.Since(waitStart), drainFloor), stdoutPipe, stderrPipe)
+	// The SDK wrote each event before the child exited; take the last of
+	// them in before the stream closes, so they join the same final flush.
+	if watcher != nil {
+		watcher.finish(ctx)
+	}
 	close(lines)
 	<-detDone
 
@@ -543,6 +591,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		result.RegressedIDs = det.regressedIDs
 		result.Occurrences = det.occurrences
 		result.FailedWrites = det.failedWrites
+		result.SDKEvents = det.sdkEvents
 	}
 
 	if !opts.Quiet || dropped > 0 || result.FailedWrites > 0 {

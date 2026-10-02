@@ -1,0 +1,9 @@
+function parse(s) { return JSON.parse(s); }
+function load() {
+  try { parse("{bad"); } catch (e) { throw new Error("config load failed", { cause: e }); }
+}
+const fs = require("fs");
+process.on("uncaughtExceptionMonitor", (e) => {
+  fs.writeFileSync(process.env.OUT, JSON.stringify({ outer: e.stack, cause: e.cause.stack, name: e.name, cname: e.cause.name, cmsg: e.cause.message, msg: e.message }));
+});
+load();

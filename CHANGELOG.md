@@ -6,6 +6,45 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Monitor's own SDKs, with an auto mode that needs no install.** No Sentry
+  SDK is involved. They report errors that never reach stderr: an exception
+  logged to a file, a rejection the app's own listener swallows, a dying
+  worker thread.
+  - `monitor run --probes -- <cmd>` loads the SDK at launch, by environment
+    only: `NODE_OPTIONS=--require` for Node, `BUN_OPTIONS=--preload` for Bun,
+    and, for Python, a `PYTHONPATH` directory holding only a bootstrap
+    `sitecustomize.py` (it runs the one it shadows). The app's output and
+    exit code stay byte-identical, and the specs check that.
+  - Explicit SDKs for more context: `@monitorcli/sdk` (Node, Bun, Deno),
+    `monitorcli` (Python) and `github.com/abdul-hamid-achik/monitor/sdk/go`.
+    Each offers `init`, `captureException`/`CaptureError`, `captureMessage`,
+    breadcrumbs, tags, a `beforeSend` hook and Go's `Recover`. All have zero
+    dependencies.
+  - One contract, [`monitor.event.v1`](docs/contracts/event-v1.md): one JSON
+    file per event, written atomically into the launch's
+    `$MONITOR_EVENTS_DIR` or the global inbox. Monitor still parses the stack,
+    scrubs, fingerprints (V2) and picks the culprit. The SDK only sends the
+    runtime's own stack text.
+  - Under `monitor run`, the same crash seen by an SDK and on stderr is
+    recorded once, with the SDK's exact handled flag, breadcrumbs and tags.
+  - `monitor events` / `monitor events drain` show and drain the inbox.
+    `monitor issues`, `monitor issue` and `monitor serve` (when not
+    read-only) drain it into the default store.
+  - `monitor sdk` / `monitor sdk path <node|python>` print the bundled copies,
+    which can be installed before the packages are published.
+  - `monitor.issue_context.v1` gains an additive `event` section (kind, SDK,
+    mode, release, tags, breadcrumbs) and `truncated.breadcrumbs`. The
+    occurrence keeps `breadcrumbs` and `tags`. `monitor issue`, `--md` and
+    Monitor Desktop's issue page show them.
+
+### Fixed
+
+- **`bun run build:monitor` in `desktop/`** failed after a universal release
+  build, because `go build -o` refuses to overwrite a lipo binary. The script
+  now removes the old binary first.
+
 ### Changed
 
 - **Monitor Desktop uses the website's mark.** The app icon and the sidebar

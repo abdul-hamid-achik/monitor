@@ -67,6 +67,8 @@ child can detect it is being observed.`,
 		newTreeCmd(),
 		newConfigCmd(),
 		newStacktraceCmd(),
+		newEventsCmd(),
+		newSDKCmd(),
 	)
 
 	return root

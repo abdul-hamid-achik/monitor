@@ -37,6 +37,29 @@ jobs:
       - name: build
         run: go build -o bin/monitor ./cmd/monitor
 
+      # monitor's own SDKs. sdk/go is its own module, outside ./... above;
+      # the Node and Python SDKs have zero dependencies and test with the
+      # runtimes' built-in runners.
+      - name: Go SDK (sdk/go)
+        working-directory: sdk/go
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Node SDK (sdk/node)
+        run: node --test sdk/node/test/sdk.test.cjs
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Python SDK (sdk/python)
+        run: python3 -m unittest discover -s sdk/python/tests -v
+
   specs:
     name: glyphrun specs
     runs-on: ubuntu-latest

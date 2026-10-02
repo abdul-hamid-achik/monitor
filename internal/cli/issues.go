@@ -150,6 +150,7 @@ func newIssuesListCmd(storePath *string) *cobra.Command {
 			if err != nil {
 				return &issueCommandError{action: "list", err: err}
 			}
+			drainInboxIntoDefaultStore(cmd.Context(), *storePath)
 			store, err := issues.OpenReadOnly(path)
 			if err != nil {
 				return &issueCommandError{action: "list", err: err}
@@ -1159,6 +1160,7 @@ args>'.`,
 			if err != nil {
 				return &issueCommandError{action: "issue", err: err}
 			}
+			drainInboxIntoDefaultStore(cmd.Context(), storePath)
 			store, err := issues.OpenReadOnly(path)
 			if err != nil {
 				return &issueCommandError{action: "issue", id: rawID, err: err}
@@ -1298,6 +1300,9 @@ func writeIssuePageHuman(w io.Writer, c *explain.Context) error {
 		return err
 	}
 	if err := writeStackSection(w, c); err != nil {
+		return err
+	}
+	if err := writeEventSection(w, c); err != nil {
 		return err
 	}
 	if err := writeImpactSection(w, c.Impact); err != nil {
@@ -1549,6 +1554,63 @@ func writeCausesSection(w io.Writer, causes []explain.CauseEntry) error {
 func writeStackSection(w io.Writer, c *explain.Context) error {
 	_, err := fmt.Fprintf(w, "STACK    in-app %d%s\n", len(c.Frames), collapsedSuffix(c.Truncated.Frames))
 	return err
+}
+
+// issuePageBreadcrumbs is how many of the newest breadcrumbs the human
+// page shows; --json and --md carry the rest.
+const issuePageBreadcrumbs = 5
+
+// writeEventSection prints what monitor's own SDKs recorded with the
+// newest occurrence they saw: how (kind, SDK, mode), its tags, and the
+// newest breadcrumbs. Nothing when no SDK ever saw the issue.
+func writeEventSection(w io.Writer, c *explain.Context) error {
+	ev := c.Event
+	if ev == nil {
+		return nil
+	}
+	parts := []string{}
+	if ev.Kind != "" {
+		parts = append(parts, ev.Kind)
+	}
+	if ev.SDK != "" {
+		sdk := ev.SDK
+		if ev.Mode != "" {
+			sdk += " (" + ev.Mode + ")"
+		}
+		parts = append(parts, sdk)
+	}
+	if ev.Release != "" {
+		parts = append(parts, "release "+displayIssueValue(ev.Release))
+	}
+	if _, err := fmt.Fprintf(w, "EVENT    %s\n", strings.Join(parts, " · ")); err != nil {
+		return err
+	}
+	if len(ev.Tags) > 0 {
+		if _, err := fmt.Fprintf(w, "TAGS     %s\n", displayIssueValue(explain.FormatTags(ev.Tags))); err != nil {
+			return err
+		}
+	}
+	crumbs := ev.Breadcrumbs
+	earlier := c.Truncated.Breadcrumbs
+	if len(crumbs) > issuePageBreadcrumbs {
+		earlier += len(crumbs) - issuePageBreadcrumbs
+		crumbs = crumbs[len(crumbs)-issuePageBreadcrumbs:]
+	}
+	for i, crumb := range crumbs {
+		label := "TRAIL"
+		if i > 0 {
+			label = ""
+		}
+		if _, err := fmt.Fprintf(w, "%-8s %s %s\n", label, crumb.Timestamp.Local().Format("15:04:05"), truncateDisplay(displayIssueValue(crumb.Label()), 100)); err != nil {
+			return err
+		}
+	}
+	if earlier > 0 {
+		if _, err := fmt.Fprintf(w, "%-8s +%d earlier (--json for all)\n", "", earlier); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func collapsedSuffix(n int) string {

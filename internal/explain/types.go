@@ -53,6 +53,10 @@ type Context struct {
 	Culprit      *CulpritInfo  `json:"culprit,omitempty"`
 	Causes       []CauseEntry  `json:"causes"`
 	Frames       []FrameEntry  `json:"frames"`
+	// Event is what monitor's own SDKs recorded with the newest occurrence
+	// they saw; absent for an issue only ever seen in process output.
+	// Additive.
+	Event        *EventContext `json:"event,omitempty"`
 	Impact       ImpactInfo    `json:"impact"`
 	LastTouched  LastTouched   `json:"last_touched"`
 	RelatedNotes RelatedNotes  `json:"related_notes"`
@@ -205,6 +209,34 @@ type FrameEntry struct {
 	InApp    bool   `json:"in_app"`
 }
 
+// EventContext is Context.Event: the SDK-recorded context of the newest
+// occurrence an SDK delivered (monitor.event.v1), already scrubbed at
+// ingest.
+type EventContext struct {
+	// ObservedAt is that occurrence's time.
+	ObservedAt time.Time `json:"observed_at"`
+	// Kind is how the SDK saw it: uncaught, rejection, thread, logged,
+	// captured or message.
+	Kind string `json:"kind,omitempty"`
+	// SDK is "<name>/<version>" and Mode "auto" (monitor run --probes) or
+	// "explicit" (the app imported it).
+	SDK     string            `json:"sdk,omitempty"`
+	Mode    string            `json:"mode,omitempty"`
+	Release string            `json:"release,omitempty"`
+	Tags    map[string]string `json:"tags,omitempty"`
+	// Breadcrumbs are the steps before the event, oldest first; brief
+	// keeps the newest few (see Truncated.Breadcrumbs).
+	Breadcrumbs []BreadcrumbEntry `json:"breadcrumbs,omitempty"`
+}
+
+// BreadcrumbEntry is one EventContext breadcrumb.
+type BreadcrumbEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Category  string    `json:"category,omitempty"`
+	Level     string    `json:"level,omitempty"`
+	Message   string    `json:"message"`
+}
+
 // sectionStatus values shared by ImpactInfo, LastTouched, and RelatedNotes.
 const (
 	SectionOK      = "ok"
@@ -278,8 +310,9 @@ type NextAction struct {
 // tell "there was nothing else" from "budget cut this short" -- see
 // budget.go.
 type Truncated struct {
-	Frames int `json:"frames,omitempty"`
-	Causes int `json:"causes,omitempty"`
+	Frames      int `json:"frames,omitempty"`
+	Causes      int `json:"causes,omitempty"`
+	Breadcrumbs int `json:"breadcrumbs,omitempty"`
 }
 
 // Privacy is Context.Privacy.
