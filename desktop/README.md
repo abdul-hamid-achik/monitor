@@ -41,16 +41,23 @@ bin/monitor ./cmd/monitor`); a packaged app uses its bundled
 
 ```sh
 CSC_IDENTITY_AUTO_DISCOVERY=false bun run dist   # unsigned .app in release/
-bun run dist:release                             # universal, signed + notarized (needs the env below)
+bun run dist                                     # signed with the Developer ID in your keychain
+bun run setup:signing                            # once: notarization credentials -> keychain profile
+bun run dist:notarized                           # universal .dmg/.zip, signed + notarized
 ```
 
-Signing uses a Developer ID Application certificate (`CSC_LINK`,
-`CSC_KEY_PASSWORD`, or the login keychain); notarization runs when
-`APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID` are set. A
-`desktop-v*` tag runs the same in CI (`.github/workflows/desktop.yml`) and
-publishes a draft GitHub release; it needs the repository secrets
+`setup:signing` reads your Apple ID and an app-specific password (create one at
+https://account.apple.com → Sign-In and Security) and stores them with
+`xcrun notarytool store-credentials monitor-desktop`, so the password lives in
+the keychain, not in env vars or files.
+
+For CI, export the "Developer ID Application" certificate from Keychain Access
+as a .p12 and run `bun run setup:signing --github path/to/cert.p12`: it sets
 `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`,
-`APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID`.
+`APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID` with `gh secret set` (values
+on stdin, never in argv). A `desktop-v*` tag then runs
+`.github/workflows/desktop.yml`, which builds, signs, notarizes and publishes a
+draft GitHub release.
 
 ## Security
 
