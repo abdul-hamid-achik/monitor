@@ -226,7 +226,7 @@ BA42  12      src/cart.js:3</pre>
       </header>
       <div class="term desktop">
         <div class="term-bar">
-          <span><b class="accent">◆</b> <b>monitor desktop</b> <i>preview</i></span>
+          <span><b class="accent">◆</b> <b>monitor desktop</b> <i>coming soon</i></span>
           <span class="live-dot">● live</span>
         </div>
         <img
@@ -239,7 +239,7 @@ BA42  12      src/cart.js:3</pre>
       </div>
       <p class="more">
         <a :href="withBase('/guide/desktop')">Desktop guide →</a>
-        <a href="https://github.com/abdul-hamid-achik/monitor/releases?q=desktop-v">Download for macOS →</a>
+        <span class="soon">Download for macOS · coming soon</span>
       </p>
     </section>
     <!-- ── Agents ───────────────────────────────────────────────────── -->
@@ -494,6 +494,11 @@ h1 {
   height: auto;
   border-top: 1px solid var(--vp-c-divider);
   border-radius: 0 0 10px 10px;
+}
+
+/* A link-shaped label for what is not out yet. */
+.more .soon {
+  color: var(--vp-c-text-3);
 }
 
 /* Sections */

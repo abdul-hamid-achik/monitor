@@ -96,10 +96,6 @@ export default defineConfig({
             link: 'https://github.com/abdul-hamid-achik/monitor/releases/tag/v2.2.0',
           },
           {
-            text: 'Monitor Desktop',
-            link: 'https://github.com/abdul-hamid-achik/monitor/releases?q=desktop-v',
-          },
-          {
             text: 'All releases',
             link: 'https://github.com/abdul-hamid-achik/monitor/releases',
           },

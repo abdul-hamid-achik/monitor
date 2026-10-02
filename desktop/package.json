@@ -21,7 +21,7 @@
     "capture": "vite build && electron . --capture captures",
     "setup:signing": "sh scripts/setup-signing.sh",
     "dist:notarized": "APPLE_KEYCHAIN=$HOME/Library/Keychains/login.keychain-db APPLE_KEYCHAIN_PROFILE=monitor-desktop bun run dist:release",
-    "dist:notarized:tvault": "tvault run -p monitor-desktop -- bun run dist:release"
+    "dist:notarized:tvault": "tvault run -p monitor-desktop -- sh scripts/notarized-release.sh"
   },
   "dependencies": {},
   "devDependencies": {

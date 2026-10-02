@@ -48,33 +48,67 @@ bin/monitor ./cmd/monitor`); a packaged app uses its bundled
 ```sh
 CSC_IDENTITY_AUTO_DISCOVERY=false bun run dist   # unsigned .app in release/
 bun run dist                                     # signed with the Developer ID in your keychain
-bun run setup:signing                            # once: notarization credentials -> keychain profile
-bun run dist:notarized                           # universal .dmg/.zip, signed + notarized
-bun run dist:notarized:tvault                    # same, credentials from tvault project monitor-desktop
+bun run dist:notarized:tvault                    # universal .dmg/.zip, signed + notarized (credentials from tvault)
 ```
 
-`setup:signing` reads your Apple ID and an app-specific password (create one at
-https://account.apple.com → Sign-In and Security) and stores them with
-`xcrun notarytool store-credentials monitor-desktop`, so the password lives in
-the keychain, not in env vars or files.
+### Before the first release (one-time)
 
-Alternatively keep the credentials in tinyvault: the project `monitor-desktop`
-holds `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_SPECIFIC_PASSWORD` (set it with
-`read -rs P && printf %s "$P" | tvault set APPLE_APP_SPECIFIC_PASSWORD --stdin
--p monitor-desktop; unset P`), and `dist:notarized:tvault` injects them into the
-build only.
+1. **Developer ID certificate.** "Developer ID Application: abdul hamid achik
+   (XWEDJB8MA4)" must be in the login keychain. Check it with
+   `security find-identity -v -p codesigning`. electron-builder finds it there
+   and signs the app and the bundled `monitor`, with hardened runtime and a
+   timestamp.
+2. **Apple Developer Program agreement.** Notarization answers **HTTP 403 "A
+   required agreement is missing or has expired"** until the account holder
+   accepts the current Program License Agreement. Apple updates it from time to
+   time. Accept it at https://developer.apple.com/account (the banner at the
+   top, or Account → Agreements). Also check App Store Connect → Business. This
+   check is read-only and stops answering 403 once the agreement is in effect:
 
-A preview release is published as a GitHub **prerelease** (`gh release create
-desktop-vX.Y.Z --prerelease`), so it never becomes the repository's "latest"
-release, which the CLI install docs link to.
+   ```sh
+   tvault run -p monitor-desktop -- sh -c 'xcrun notarytool history --apple-id "$APPLE_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --team-id "$APPLE_TEAM_ID"'
+   ```
+3. **Notarization credentials** live in the tinyvault project `monitor-desktop`.
+   They are never committed or echoed, and only the build process receives
+   them.
+   - Preferred: an **App Store Connect API key**, scoped to App Store Connect.
+     The keys are `APPLE_API_KEY_P8` (the .p8 contents, set with
+     `tvault set APPLE_API_KEY_P8 --from-file AuthKey_XXXX.p8 -p monitor-desktop`),
+     `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`.
+   - Fallback: an Apple ID **app-specific password**. The keys are `APPLE_ID`,
+     `APPLE_TEAM_ID` and `APPLE_APP_SPECIFIC_PASSWORD`. Set the password with
+     `read -rs P && printf %s "$P" | tvault set APPLE_APP_SPECIFIC_PASSWORD --stdin -p monitor-desktop; unset P`.
 
-For CI, export the "Developer ID Application" certificate from Keychain Access
-as a .p12 and run `bun run setup:signing --github path/to/cert.p12`: it sets
-`MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`,
-`APPLE_APP_SPECIFIC_PASSWORD` and `APPLE_TEAM_ID` with `gh secret set` (values
-on stdin, never in argv). A `desktop-v*` tag then runs
-`.github/workflows/desktop.yml`, which builds, signs, notarizes and publishes a
-draft GitHub release.
+   `scripts/notarized-release.sh`, which `dist:notarized:tvault` runs, uses
+   the API key when all three of its values are present, otherwise the
+   password. It writes the .p8 to a private temp directory for the build only.
+   `bun run setup:signing` is the keychain-profile alternative
+   (`dist:notarized`).
+
+### Cutting a release
+
+```sh
+git switch main && git pull                      # release from main
+cd desktop && rm -rf release
+bun run dist:notarized:tvault                    # builds the universal monitor, the renderer, then signs + notarizes
+spctl --assess --type execute -vv "release/mac-universal/Monitor Desktop.app"   # must say: accepted, source=Notarized Developer ID
+"release/mac-universal/Monitor Desktop.app/Contents/MacOS/Monitor Desktop" --smoke   # {"ok":true,...}
+git tag -a desktop-v0.1.0 -m "Monitor Desktop 0.1.0 (preview)" && git push origin desktop-v0.1.0
+gh release create desktop-v0.1.0 --prerelease --title "Monitor Desktop 0.1.0 (preview)" --notes-file <release-notes.md> \
+  "release/Monitor Desktop-0.1.0-universal.dmg" "release/Monitor Desktop-0.1.0-universal-mac.zip"
+```
+
+- **Publish it as a prerelease.** A prerelease never becomes the repository's
+  "latest" release, which the CLI install docs (`releases/latest`) link to.
+- **Bump the version before the next release.** Change `version` in
+  `package.json` first; the artifact names come from it.
+- **CI can publish too.** Add the five GitHub secrets: export the "Developer
+  ID Application" certificate from Keychain Access as a .p12, then run
+  `bun run setup:signing --github path/to/cert.p12`. After that, a
+  `desktop-v*` tag runs `.github/workflows/desktop.yml`, which builds, signs,
+  notarizes and publishes a draft. Without those secrets the release job skips
+  on purpose, so a tag released by hand is never overwritten by an unsigned
+  build.
 
 ## Security
 

@@ -14,7 +14,16 @@ follows [Semantic Versioning](https://semver.org/).
 - **The website covers Monitor Desktop and `monitor serve`.** It adds a
   Desktop guide, a landing-page section with a real screenshot, an install
   section, the `serve` entry in the CLI reference, and the v2.2.0 version
-  marks.
+  marks. The Desktop download is marked "coming soon" until its first signed
+  release, and the site points at a source build meanwhile.
+- **Monitor Desktop's release runbook.** The desktop README now has the
+  one-time prerequisites and the steps for a release:
+  - the prerequisites are the Developer ID certificate, the Apple Developer
+    Program agreement (notarization answers 403 without it), and tinyvault
+    credentials;
+  - `dist:notarized:tvault` prefers an App Store Connect API key over an
+    app-specific password;
+  - preview releases are published as GitHub prereleases.
 
 ## [2.2.0] - 2026-10-01
 
