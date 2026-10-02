@@ -61,6 +61,9 @@ contextBridge.exposeInMainWorld("monitor", {
     remove: (/** @type {string} */ id) => invoke("launch:remove", id),
     list: () => invoke("launch:list"),
   },
+  chalupa: {
+    list: () => invoke("chalupa:list"),
+  },
   openInEditor: (/** @type {any} */ target) => invoke("editor:open", target),
   copy: (/** @type {string} */ text) => invoke("clipboard:write", text),
   openExternal: (/** @type {string} */ url) => invoke("shell:open-external", url),
@@ -68,6 +71,7 @@ contextBridge.exposeInMainWorld("monitor", {
     chooseDirectory: (/** @type {string | undefined} */ defaultPath) => invoke("dialog:choose-directory", defaultPath),
     chooseProfile: () => invoke("dialog:choose-profile"),
     chooseBinary: () => invoke("dialog:choose-binary"),
+    chooseChalupaConfig: () => invoke("dialog:choose-chalupa-config"),
   },
   /**
    * @param {string} channel

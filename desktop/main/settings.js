@@ -13,8 +13,10 @@ const EDITORS = ["vscode", "cursor", "zed", "idea", "none"];
  * @typedef {object} Connection
  * @property {string} id
  * @property {string} name
- * @property {"local" | "ssh"} kind
+ * @property {"local" | "ssh" | "chalupa"} kind
  * @property {string} [host]         ssh destination: an alias or user@host
+ * @property {string} [env]          chalupa managed environment name
+ * @property {string} [config]       chalupa.yml of a BYOC stack (absolute)
  * @property {string} [monitorPath]  remote binary, default "monitor"
  * @property {boolean} [readOnly]    spawn with --read-only
  */
@@ -44,6 +46,8 @@ const SSH_HOST_RE = /^[A-Za-z0-9_][A-Za-z0-9._@\-]{0,252}$/;
 /** A remote binary path: absolute or a bare command, no shell metacharacters. */
 const REMOTE_PATH_RE = /^[A-Za-z0-9_./~+\-]{1,512}$/;
 const CONNECTION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+/** A Chalupa environment name (Chalupa's own StackNameSchema, plus an instance suffix). */
+const CHALUPA_ENV_RE = /^[a-z0-9](?:[a-z0-9-]{0,126}[a-z0-9])?$/;
 
 /**
  * Validates one connection; returns a clean copy or throws.
@@ -58,7 +62,22 @@ function validateConnection(raw) {
   if (raw.kind === "local") {
     return { id, name, kind: "local", readOnly: Boolean(raw.readOnly) };
   }
-  if (raw.kind !== "ssh") throw new Error(`connection ${id}: kind must be local or ssh`);
+  if (raw.kind === "chalupa") {
+    // Exactly one target: a managed environment by name, or a BYOC stack by
+    // its chalupa.yml. Chalupa's door is always read-only; mirror it here.
+    const env = String(raw.env ?? "").trim();
+    const config = String(raw.config ?? "").trim();
+    if (env && config) throw new Error(`connection ${id}: set either a Chalupa environment or a chalupa.yml, not both`);
+    if (config) {
+      if (!path.isAbsolute(config) || /[\u0000-\u001f]/.test(config) || !/\.ya?ml$/.test(config)) {
+        throw new Error(`connection ${id}: the Chalupa config must be an absolute path to a .yml file`);
+      }
+      return { id, name, kind: "chalupa", config, readOnly: true };
+    }
+    if (!CHALUPA_ENV_RE.test(env)) throw new Error(`connection ${id}: ${JSON.stringify(env)} is not a Chalupa environment name`);
+    return { id, name, kind: "chalupa", env, readOnly: true };
+  }
+  if (raw.kind !== "ssh") throw new Error(`connection ${id}: kind must be local, ssh or chalupa`);
   const host = String(raw.host ?? "").trim();
   if (!SSH_HOST_RE.test(host)) {
     throw new Error(`connection ${id}: host must be an ssh alias or user@host (letters, digits, . _ - @), got ${JSON.stringify(host)}`);

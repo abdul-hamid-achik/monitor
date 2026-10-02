@@ -246,3 +246,30 @@ describe("binary + env", () => {
     expect(mergePath("/a:/b", "/b:/c", "", "/a:/d")).toBe("/a:/b:/c:/d");
   });
 });
+
+describe("chalupa connections", () => {
+  test("validates a managed env name or an absolute chalupa.yml, never both", () => {
+    expect(validateConnection({ id: "c", kind: "chalupa", env: "gpu-dev" })).toEqual({ id: "c", name: "c", kind: "chalupa", env: "gpu-dev", readOnly: true });
+    expect(validateConnection({ id: "c", kind: "chalupa", config: "/Users/me/app/chalupa.yml" }).config).toBe("/Users/me/app/chalupa.yml");
+    expect(() => validateConnection({ id: "c", kind: "chalupa", env: "--name=x" })).toThrow();
+    expect(() => validateConnection({ id: "c", kind: "chalupa", env: "Bad_Name" })).toThrow();
+    expect(() => validateConnection({ id: "c", kind: "chalupa", config: "relative/chalupa.yml" })).toThrow();
+    expect(() => validateConnection({ id: "c", kind: "chalupa", config: "/etc/passwd" })).toThrow();
+    expect(() => validateConnection({ id: "c", kind: "chalupa", env: "a", config: "/x/chalupa.yml" })).toThrow();
+  });
+
+  test("spawns Chalupa's stdio door, read-only by construction", () => {
+    expect(spawnArgs({ id: "c", name: "c", kind: "chalupa", env: "gpu-dev", readOnly: true }, null)).toEqual({
+      command: "chalupa",
+      args: ["monitor", "serve", "--name", "gpu-dev"],
+    });
+    expect(spawnArgs({ id: "c", name: "c", kind: "chalupa", config: "/w/chalupa.yml" }, null).args).toEqual(["monitor", "serve", "--config", "/w/chalupa.yml"]);
+  });
+
+  test("explains Chalupa's exits", () => {
+    const c = { id: "c", name: "c", kind: "chalupa", env: "gpu-dev" };
+    expect(explainExit(c, 64, ["No managed host for gpu-dev. Run: chalupa up --name gpu-dev"])).toContain("No managed host");
+    expect(explainExit(c, 1, ['Error: unknown command "serve" for "monitor"'])).toContain("pinned version");
+    expect(explainExit({ ...c, env: undefined, config: "/w/chalupa.yml" }, 69, ["bad yaml"])).toContain("could not load /w/chalupa.yml");
+  });
+});

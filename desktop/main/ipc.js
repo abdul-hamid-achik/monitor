@@ -8,6 +8,7 @@
  * RpcError's code survives the hop.
  */
 const { app, clipboard, dialog, ipcMain, shell } = require("electron");
+const { execFile } = require("node:child_process");
 const path = require("node:path");
 const { culpritPath, editorURL } = require("./editor");
 
@@ -19,6 +20,7 @@ const { culpritPath, editorURL } = require("./editor");
  * @param {() => Electron.BrowserWindow | null} deps.getWindow
  * @param {string} deps.rendererURL   the only page allowed to call in
  * @param {() => Promise<{path: string, source: string} | null>} deps.binaryInfo
+ * @param {() => Promise<NodeJS.ProcessEnv>} deps.env
  */
 function registerIpc(deps) {
   const { settings, connections, launches, getWindow, rendererURL } = deps;
@@ -81,6 +83,9 @@ function registerIpc(deps) {
   handle("editor:open", async ({ connId, root, file, line }) => {
     const editor = settings.get().editor;
     const conn = connections.get(String(connId)).config;
+    if (conn.kind === "chalupa") {
+      throw new Error(`the file lives on Chalupa environment ${conn.env}: open it over \`chalupa ssh\` (editors cannot reach a droplet's pinned SSH door)`);
+    }
     const abs = culpritPath(String(root ?? ""), String(file ?? ""));
     if (!abs) throw new Error("this issue has no absolute path to open (it was recorded without one)");
     const url = editorURL({ editor, absPath: abs, line: Number(line), sshHost: conn.kind === "ssh" ? conn.host : undefined });
@@ -91,6 +96,35 @@ function registerIpc(deps) {
     }
     await shell.openExternal(url);
     return { url };
+  });
+
+  // Chalupa environments the user can add as connections: `chalupa ls
+  // --json` (name, live, model, tier, expiresIn). A missing CLI or an
+  // offline console is an answer, not an error.
+  handle("chalupa:list", async () => {
+    const env = await deps.env();
+    return new Promise((resolve) => {
+      execFile("chalupa", ["ls", "--json"], { env, timeout: 20_000, maxBuffer: 1 << 20 }, (error, stdout, stderr) => {
+        if (error) {
+          const missing = /** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT";
+          resolve({ available: !missing, environments: [], error: missing ? "the chalupa CLI is not on PATH" : String(stderr || error.message).trim().slice(0, 400) });
+          return;
+        }
+        try {
+          const rows = JSON.parse(String(stdout).trim().split("\n").pop() || "[]");
+          const environments = (Array.isArray(rows) ? rows : [])
+            .filter((r) => r && typeof r.name === "string")
+            .map((r) => ({
+              name: r.name, live: Boolean(r.live), model: String(r.model ?? ""), tier: String(r.tier ?? ""), expiresIn: String(r.expiresIn ?? ""),
+              // What Chalupa provisioned (not a live probe); absent on older CLIs.
+              monitor: r.monitor && typeof r.monitor === "object" ? { installed: Boolean(r.monitor.installed), version: r.monitor.version ?? null } : null,
+            }));
+          resolve({ available: true, environments, error: null });
+        } catch (parseError) {
+          resolve({ available: true, environments: [], error: `could not read chalupa ls --json: ${/** @type {Error} */ (parseError).message}` });
+        }
+      });
+    });
   });
 
   handle("clipboard:write", (text) => {
@@ -122,6 +156,14 @@ function registerIpc(deps) {
     };
     const result = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
     return result.canceled ? null : result.filePaths[0];
+  });
+
+  handle("dialog:choose-chalupa-config", async () => {
+    const win = getWindow();
+    /** @type {Electron.OpenDialogOptions} */
+    const opts = { properties: ["openFile"], filters: [{ name: "Chalupa config", extensions: ["yml", "yaml"] }] };
+    const result = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+    return result.canceled ? null : path.resolve(result.filePaths[0]);
   });
 
   handle("dialog:choose-binary", async () => {

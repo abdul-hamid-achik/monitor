@@ -19,7 +19,7 @@ export interface Hello {
 export interface ConnSnapshot {
   id: string;
   name: string;
-  kind: "local" | "ssh";
+  kind: "local" | "ssh" | "chalupa";
   host: string | null;
   readOnly: boolean;
   state: ConnState;
@@ -30,8 +30,10 @@ export interface ConnSnapshot {
 export interface ConnectionConfig {
   id: string;
   name: string;
-  kind: "local" | "ssh";
+  kind: "local" | "ssh" | "chalupa";
   host?: string;
+  env?: string;
+  config?: string;
   monitorPath?: string;
   readOnly?: boolean;
 }
@@ -444,6 +446,20 @@ interface Bridge {
     remove(id: string): Promise<void>;
     list(): Promise<LocalLaunch[]>;
   };
+  chalupa: {
+    list(): Promise<{
+      available: boolean;
+      environments: {
+        name: string;
+        live: boolean;
+        model: string;
+        tier: string;
+        expiresIn: string;
+        monitor: { installed: boolean; version: string | null } | null;
+      }[];
+      error: string | null;
+    }>;
+  };
   openInEditor(target: { connId: string; root?: string; file?: string; line?: number }): Promise<{ url: string }>;
   copy(text: string): Promise<boolean>;
   openExternal(url: string): Promise<boolean>;
@@ -451,6 +467,7 @@ interface Bridge {
     chooseDirectory(defaultPath?: string): Promise<string | null>;
     chooseProfile(): Promise<string | null>;
     chooseBinary(): Promise<string | null>;
+    chooseChalupaConfig(): Promise<string | null>;
   };
   on(channel: string, listener: (payload: any) => void): () => void;
   smokeMode: boolean;

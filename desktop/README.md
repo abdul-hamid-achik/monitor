@@ -10,6 +10,12 @@ notifications, nothing else.
   your own ssh config, agent and keys (`BatchMode=yes`, so it never prompts).
   Issue data streams straight from the host and is never uploaded anywhere.
   A read-only connection starts the server with `--read-only`.
+- **Chalupa droplets:** the app spawns `chalupa monitor serve (--name ENV |
+  --config chalupa.yml)`, Chalupa's own stdio door. Chalupa resolves the
+  address, identity and pinned host key and runs the droplet's
+  `monitor serve --stdio --read-only`. The environment list comes from
+  `chalupa ls --json`. Nothing is stored in Chalupa's cloud: the bytes go
+  droplet → ssh → this app.
 
 ## Views
 

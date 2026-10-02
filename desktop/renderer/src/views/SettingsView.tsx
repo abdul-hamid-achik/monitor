@@ -16,8 +16,38 @@ export function SettingsView() {
   const [name, setName] = useState("");
   const [remotePath, setRemotePath] = useState("");
   const [readOnly, setReadOnly] = useState(false);
+  const [chalupa, setChalupa] = useState<Awaited<ReturnType<typeof bridge.chalupa.list>> | null>(null);
+  const [loadingChalupa, setLoadingChalupa] = useState(false);
 
   if (!settings) return null;
+
+  const loadChalupa = async () => {
+    setLoadingChalupa(true);
+    try {
+      setChalupa(await bridge.chalupa.list());
+    } finally {
+      setLoadingChalupa(false);
+    }
+  };
+
+  const addChalupa = async (target: { env?: string; config?: string }) => {
+    const key = target.env ?? target.config!.split("/").slice(-2).join("-");
+    const id = `chalupa-${key.replace(/[^A-Za-z0-9_-]/g, "-").slice(0, 48)}`;
+    if (settings.connections.some((c) => c.id === id)) {
+      toast("Already added", "error");
+      return;
+    }
+    const conn: ConnectionConfig = {
+      id,
+      name: target.env ? `${target.env} (Chalupa)` : `${target.config!.split("/").slice(-2, -1)[0] ?? "stack"} (Chalupa)`,
+      kind: "chalupa",
+      ...(target.env ? { env: target.env } : { config: target.config }),
+    };
+    if (await save({ connections: [...settings.connections, conn] })) {
+      await bridge.connections.connect(id).catch(() => {});
+      toast(`Connecting to ${conn.name}…`);
+    }
+  };
 
   const save = async (patch: Partial<Settings>) => {
     try {
@@ -82,14 +112,23 @@ export function SettingsView() {
                     <td>
                       <div>{c.name}</div>
                       <div className="faint mono" style={{ fontSize: 11 }}>
-                        {c.kind === "local" ? "this machine" : `ssh ${c.host} · ${c.monitorPath || "monitor"}`}
+                        {c.kind === "local"
+                          ? "this machine"
+                          : c.kind === "chalupa"
+                            ? `chalupa monitor serve ${c.env ? `--name ${c.env}` : `--config ${c.config}`} · always read-only`
+                            : `ssh ${c.host} · ${c.monitorPath || "monitor"}`}
                         {live?.hello ? ` · monitor ${live.hello.monitor_version} · ${live.hello.os}/${live.hello.arch}` : ""}
                       </div>
                       {live?.state === "error" && live.error ? <div className="untrusted" style={{ color: "var(--crit)", fontSize: 12, marginTop: 3 }}>{live.error}</div> : null}
                     </td>
                     <td>
                       <label className="check" title="Start the server with --read-only: no resolve, kill or capture">
-                        <input type="checkbox" checked={Boolean(c.readOnly)} onChange={(e) => update(c.id, { readOnly: e.target.checked })} />
+                        <input
+                          type="checkbox"
+                          checked={Boolean(c.readOnly)}
+                          disabled={c.kind === "chalupa"}
+                          onChange={(e) => update(c.id, { readOnly: e.target.checked })}
+                        />
                         read-only
                       </label>
                     </td>
@@ -103,7 +142,7 @@ export function SettingsView() {
                           <Icon name="refresh" /> Connect
                         </button>
                       )}
-                      {c.kind === "ssh" ? (
+                      {c.kind !== "local" ? (
                         <button className="btn small ghost danger" onClick={() => remove(c.id)}>
                           Remove
                         </button>
@@ -138,8 +177,67 @@ export function SettingsView() {
             <Notice
               kind="info"
               title="Remote hosts connect over your own ssh: keys, agent, ProxyJump and Tailscale all work, and nothing is uploaded to any service."
-              recovery="The host needs monitor with `monitor serve --stdio`. Non-interactive ssh shells often lack Homebrew or ~/go/bin on PATH — set the remote path (for example ~/go/bin/monitor or /usr/local/lib/chalupa/monitor on a Chalupa droplet)."
+              recovery="The host needs monitor with `monitor serve --stdio`. Non-interactive ssh shells often lack Homebrew or ~/go/bin on PATH — set the remote path (for example ~/go/bin/monitor). For Chalupa droplets use the Chalupa section below: Chalupa holds their keys and pinned host keys."
             />
+          </div>
+        </section>
+
+        <section className="card">
+          <div className="card-head">
+            <h2 className="card-title">Chalupa</h2>
+            <span className="faint">droplets through Chalupa's own SSH door, read-only</span>
+            <div className="spacer" />
+            <button className="btn small" disabled={loadingChalupa} onClick={loadChalupa}>
+              <Icon name="refresh" /> {chalupa ? "Refresh" : "List environments"}
+            </button>
+            <button
+              className="btn small"
+              onClick={async () => {
+                const config = await bridge.dialogs.chooseChalupaConfig();
+                if (config) await addChalupa({ config });
+              }}
+            >
+              <Icon name="plus" /> Add a chalupa.yml stack…
+            </button>
+          </div>
+          <div className="card-body">
+            {!chalupa ? (
+              <div className="muted">
+                Chalupa resolves each droplet's address, identity and pinned host key, then runs <span className="mono">monitor serve --stdio --read-only</span> there. Issue
+                text streams straight to this app; nothing is stored in Chalupa's cloud.
+              </div>
+            ) : !chalupa.available ? (
+              <Notice title={chalupa.error ?? "the chalupa CLI is not available"} recovery="Install it from https://chalupa.run" />
+            ) : (
+              <>
+                {chalupa.error ? <Notice title={chalupa.error} /> : null}
+                {chalupa.environments.length === 0 ? <div className="muted">No managed environments. A BYOC stack can be added from its chalupa.yml.</div> : null}
+                {chalupa.environments.length ? (
+                  <table className="table">
+                    <tbody>
+                      {chalupa.environments.map((e) => (
+                        <tr key={e.name}>
+                          <td style={{ width: 24 }}>
+                            <span className={`dot ${e.live ? "ready" : ""}`} />
+                          </td>
+                          <td className="mono">{e.name}</td>
+                          <td className="muted">{[e.tier, e.model].filter((x) => x && x !== "—").join(" · ")}</td>
+                          <td className="faint">{e.live ? `expires in ${e.expiresIn}` : "expired"}</td>
+                          <td className="muted">
+                            {e.monitor ? (e.monitor.installed ? `monitor ${e.monitor.version ?? ""}` : "no monitor provisioned") : ""}
+                          </td>
+                          <td style={{ textAlign: "right" }}>
+                            <button className="btn small" disabled={!e.live || e.monitor?.installed === false} onClick={() => addChalupa({ env: e.name })}>
+                              <Icon name="plus" /> Add
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : null}
+              </>
+            )}
           </div>
         </section>
 

@@ -290,7 +290,7 @@ if (!app.requestSingleInstanceLock() && !smokeMode && !captureDir) {
       env: childEnv,
       emit: send,
     });
-    registerIpc({ settings, connections, launches, getWindow, rendererURL, binaryInfo: monitorBinary });
+    registerIpc({ settings, connections, launches, getWindow, rendererURL, binaryInfo: monitorBinary, env: childEnv });
 
     connections.sync(settings.get().connections);
     for (const c of connections.list()) {

@@ -13,7 +13,7 @@ const os = require("node:os");
 const { RpcClient, RpcError, lineSplitter, timeoutFor } = require("./rpc");
 
 const PROTOCOL = "monitor.app.v1";
-const HELLO_TIMEOUT_MS = { local: 15_000, ssh: 30_000 };
+const HELLO_TIMEOUT_MS = { local: 15_000, ssh: 30_000, chalupa: 45_000 };
 const MAX_STDERR_LINES = 40;
 const MAX_RETRIES_BEFORE_READY = 4;
 const BACKOFF_MAX_MS = 30_000;
@@ -49,6 +49,13 @@ const ALLOWED_METHODS = new Set([
  */
 function spawnArgs(config, localBinary) {
   const serveArgs = ["serve", "--stdio", ...(config.readOnly ? ["--read-only"] : [])];
+  if (config.kind === "chalupa") {
+    // Chalupa owns the droplet's address, identity and pinned host key; its
+    // stdio door (`chalupa monitor serve`) runs the droplet's monitor with
+    // --read-only and writes nothing but protocol bytes to stdout.
+    const target = config.config ? ["--config", String(config.config)] : ["--name", String(config.env)];
+    return { command: "chalupa", args: ["monitor", "serve", ...target] };
+  }
   if (config.kind === "ssh") {
     return {
       command: "ssh",
@@ -77,6 +84,18 @@ function spawnArgs(config, localBinary) {
  */
 function explainExit(config, code, stderr) {
   const tail = stderr.slice(-6).join("\n").trim();
+  if (config.kind === "chalupa") {
+    if (/unknown command "serve"|unknown flag: --stdio/.test(tail)) {
+      return `the monitor on Chalupa environment ${config.env} is too old to speak ${PROTOCOL}: it needs a monitor release with \`monitor serve\` and Chalupa's pinned version raised to it.`;
+    }
+    if (/Unknown command|unknown command|Usage: chalupa|usage: chalupa/.test(tail) && /monitor/.test(tail)) {
+      return "this chalupa CLI has no `chalupa monitor serve` yet: update chalupa.";
+    }
+    if (code === 69) return `Chalupa could not load ${config.config ?? "the config"}${tail ? `: ${tail}` : ""}`;
+    // 64 and anything else: Chalupa's own one-line reason (unknown env,
+    // expired session, no compute address, monitor not provisioned).
+    return tail || `chalupa monitor serve exited with code ${code}`;
+  }
   if (config.kind === "ssh") {
     if (code === 127 || /command not found|No such file or directory/.test(tail)) {
       return `monitor was not found on ${config.host}. Install it there, or set this connection's remote monitor path (for example ~/go/bin/monitor).`;
@@ -135,7 +154,7 @@ class Connection {
       id: this.config.id,
       name: this.config.name,
       kind: this.config.kind,
-      host: this.config.host ?? null,
+      host: this.config.host ?? (this.config.kind === "chalupa" ? `chalupa:${this.config.env ?? this.config.config}` : null),
       readOnly: Boolean(this.config.readOnly),
       state: this.state,
       error: this.error,
@@ -208,7 +227,12 @@ class Connection {
     child.stdout?.on("data", lineSplitter((line) => rpc.handleLine(line)));
     child.stderr?.on("data", lineSplitter((line) => this.pushStderr(line)));
     child.stdin?.on("error", () => {});
-    child.on("error", (error) => this.fail(`could not start ${command}: ${error.message}`, true));
+    child.on("error", (error) => {
+      const missing = /** @type {NodeJS.ErrnoException} */ (error).code === "ENOENT";
+      if (missing && command === "chalupa") return this.fail("the chalupa CLI is not on PATH: install it from https://chalupa.run", false);
+      if (missing && command === "ssh") return this.fail("ssh is not on PATH", false);
+      this.fail(`could not start ${command}: ${error.message}`, true);
+    });
     child.on("exit", (code) => {
       clearTimeout(helloTimer);
       if (this.child !== child) return;
