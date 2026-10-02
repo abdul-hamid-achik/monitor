@@ -92,6 +92,11 @@ function explainExit(config, code, stderr) {
       return "this chalupa CLI has no `chalupa monitor serve` yet: update chalupa.";
     }
     if (code === 69) return `Chalupa could not load ${config.config ?? "the config"}${tail ? `: ${tail}` : ""}`;
+    if (/Host key verification failed/.test(tail)) {
+      // A BYOC box Chalupa never pinned: its key must already be in
+      // ~/.ssh/known_hosts, which chalupa tunnel/ssh add on first contact.
+      return "this box's SSH host key is not known yet: connect to it once with `chalupa tunnel` (or `chalupa ssh`), then retry.";
+    }
     // 64 and anything else: Chalupa's own one-line reason (unknown env,
     // expired session, no compute address, monitor not provisioned).
     return tail || `chalupa monitor serve exited with code ${code}`;

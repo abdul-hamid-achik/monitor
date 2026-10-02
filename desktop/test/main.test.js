@@ -271,5 +271,6 @@ describe("chalupa connections", () => {
     expect(explainExit(c, 64, ["No managed host for gpu-dev. Run: chalupa up --name gpu-dev"])).toContain("No managed host");
     expect(explainExit(c, 1, ['Error: unknown command "serve" for "monitor"'])).toContain("pinned version");
     expect(explainExit({ ...c, env: undefined, config: "/w/chalupa.yml" }, 69, ["bad yaml"])).toContain("could not load /w/chalupa.yml");
+    expect(explainExit({ ...c, env: undefined, config: "/w/chalupa.yml" }, 255, ["Host key verification failed."])).toContain("chalupa tunnel");
   });
 });
