@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-01
+
 ### Added
 
 - **`monitor serve --stdio`: the `monitor.app.v1` protocol.** JSON-RPC 2.0,
@@ -597,6 +599,8 @@ remaining pure CLI helpers.
 Initial release: a terminal system monitor for macOS with a Network tab,
 Settings documentation, and a GoReleaser + GitHub Actions release workflow.
 
+[2.2.0]: https://github.com/abdul-hamid-achik/monitor/compare/v2.1.0...v2.2.0
+[2.1.0]: https://github.com/abdul-hamid-achik/monitor/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.15.1...v2.0.0
 [1.15.1]: https://github.com/abdul-hamid-achik/monitor/compare/v1.15.0...v1.15.1
 [1.15.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.14.0...v1.15.0
