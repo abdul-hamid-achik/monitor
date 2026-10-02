@@ -1,0 +1,18 @@
+{
+  // Main + preload: plain CommonJS checked through JSDoc. This is the trust
+  // boundary (spawn, ssh argv, IPC, settings), where a type mistake costs a
+  // wedged child or a wrong path.
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2023", "DOM"],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": false,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["main/**/*.js", "preload/**/*.js"]
+}

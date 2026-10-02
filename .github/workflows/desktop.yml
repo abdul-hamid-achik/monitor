@@ -1,0 +1,110 @@
+name: Desktop
+
+# Monitor Desktop (desktop/): type checks, unit tests, and a smoke boot that
+# drives renderer -> preload -> main -> `monitor serve --stdio` end to end.
+# A desktop-v* tag builds the signed, notarized universal app as a draft
+# GitHub release. CLI releases stay on v* tags (release.yml).
+
+on:
+  push:
+    branches: [main]
+    tags: ["desktop-v*"]
+    paths:
+      - "desktop/**"
+      - "internal/appserver/**"
+      - "internal/cli/serve.go"
+      - "docs/contracts/app-protocol-v1.md"
+      - ".github/workflows/desktop.yml"
+  pull_request:
+    paths:
+      - "desktop/**"
+      - "internal/appserver/**"
+      - "internal/cli/serve.go"
+      - "docs/contracts/app-protocol-v1.md"
+      - ".github/workflows/desktop.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test + smoke (macOS)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: install
+        run: bun install --frozen-lockfile
+
+      - name: typecheck
+        run: bun run typecheck
+
+      - name: unit tests
+        run: bun test
+
+      - name: build monitor + renderer
+        run: |
+          (cd .. && go build -o bin/monitor ./cmd/monitor)
+          bunx vite build
+
+      - name: smoke boot
+        env:
+          MONITOR_ISSUES_STORE: ${{ runner.temp }}/issues.veclite
+        run: |
+          out=$(bunx electron . --smoke)
+          echo "$out"
+          echo "$out" | tail -1 | grep -q '"ok":true'
+
+  release:
+    name: signed release
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: test
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: install
+        run: bun install --frozen-lockfile
+
+      - name: build, sign, notarize, publish draft
+        env:
+          # Developer ID Application certificate (.p12, base64) and its password.
+          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          # Notarization through an app-specific password.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bun run build:monitor --universal
+          bunx vite build
+          bunx electron-builder --mac --universal --publish always

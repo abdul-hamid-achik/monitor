@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/devrun"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/procbind"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
@@ -172,13 +173,114 @@ func runHotPID(cmd *cobra.Command, pid int32, funcName, ptypeFlag, export, pprof
 	ctx, cancel := Context()
 	defer cancel()
 
+	addrExplicit := cmd.Flags().Changed("pprof-addr")
+	live, err := captureLiveHeat(ctx, pid, liveHeatOptions{
+		Func: funcName, PprofAddr: pprofAddr, AddrExplicit: addrExplicit,
+		HeatType: heatType, TypeLabel: ptypeFlag, Top: top, Duration: duration,
+	})
+	if err != nil {
+		var ambiguous *procbind.AmbiguousLeafError
+		if errors.As(err, &ambiguous) {
+			printAmbiguousLeaf(cmd, pid, live.Candidates)
+			os.Exit(2)
+			return nil
+		}
+		return err
+	}
+	defer live.Close()
+	src, hm := live.Src, live.Heatmap
+
+	if export != "" {
+		if src == nil && !strings.HasSuffix(strings.ToLower(export), ".json") {
+			return fmt.Errorf("--export %s is not available for a macOS sample capture (function-level only; no raw profile bytes to save) — export the JSON heatmap instead (--export out.json)", export)
+		}
+		if err := exportHot(src, hm, export); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "saved: %s\n", export)
+	}
+
+	if JSONOutput(cmd) {
+		return WriteJSON(hm)
+	}
+
+	header := hotLiveHeaderLine(ctx, pid, live.Binding, live.Method, pprofAddr, heatType, duration)
+	next := hotLiveNextHint(pid, ptypeFlag, pprofAddr, duration, addrExplicit, cmd.Flags().Changed("duration"))
+	return renderHotLiveHuman(cmd.OutOrStdout(), header, hm, funcName, next)
+}
+
+// liveHeatOptions configures captureLiveHeat. TypeLabel is the caller's own
+// spelling of HeatType (the CLI's --type value), used only in messages.
+type liveHeatOptions struct {
+	Func         string
+	PprofAddr    string
+	AddrExplicit bool
+	HeatType     profiler.HeatProfileType
+	TypeLabel    string
+	Top          int
+	Duration     time.Duration
+}
+
+// liveHeat is one live capture turned into a heatmap, plus what a caller
+// needs to render, export or explain it. Src is nil for a macOS `sample`
+// fallback (function-level only, no raw profile bytes). Candidates is set
+// only alongside a *procbind.AmbiguousLeafError. Close releases the
+// capture's temp files and must be called once the heatmap is no longer
+// needed.
+type liveHeat struct {
+	Heatmap    *profiler.Heatmap
+	Binding    procbind.Binding
+	Method     string
+	Src        *profiler.Source
+	Candidates []procbind.Candidate
+
+	prof    profiler.Profile
+	cleanup func()
+}
+
+// Close releases the capture's temp files (the staged source first, then
+// the raw profile — the order runHotPID's defers always ran in).
+func (l *liveHeat) Close() {
+	if l == nil {
+		return
+	}
+	if l.cleanup != nil {
+		l.cleanup()
+		l.cleanup = nil
+	}
+	discardTempProfilePath(&l.prof)
+}
+
+// liveHeatError is a capture that could not produce a profile. Status is
+// stepFailed or stepUnavailable (the latter will never work by retrying:
+// Bun's JSC inspector). Its Error text is the one `monitor hot` has always
+// printed: "limitation (recovery)".
+type liveHeatError struct {
+	Status     string
+	Limitation string
+	Recovery   string
+}
+
+func (e *liveHeatError) Error() string {
+	if e.Recovery != "" {
+		return fmt.Sprintf("%s (%s)", e.Limitation, e.Recovery)
+	}
+	return e.Limitation
+}
+
+// captureLiveHeat is the shared core of `monitor hot <pid>` and the app
+// server's profile.capture: resolve pid's real runtime leaf, capture live
+// through captureRuntimeAwareProfile (falling back to a function-level
+// macOS `sample` for a non-JS CPU target with no other path), build the
+// heatmap and lay the issue overlay on it. On error the returned liveHeat
+// holds nothing to Close, except Candidates for an ambiguous leaf.
+func captureLiveHeat(ctx context.Context, pid int32, opts liveHeatOptions) (*liveHeat, error) {
+	heatType := opts.HeatType
 	binding, candidates, err := procbind.ResolveLeaf(ctx, pid, procbind.LeafOptions{})
 	if err != nil {
 		var ambiguous *procbind.AmbiguousLeafError
 		if errors.As(err, &ambiguous) {
-			printAmbiguousLeaf(cmd, pid, candidates)
-			os.Exit(2)
-			return nil
+			return &liveHeat{Candidates: candidates}, err
 		}
 		// LUX-7: a plain compiled Go binary (`go build` output -- no
 		// "go" in argv, no .test suffix, the normal way to run a Go
@@ -202,17 +304,25 @@ func runHotPID(cmd *cobra.Command, pid int32, funcName, ptypeFlag, export, pprof
 	// BEFORE any capture is attempted, with a recovery that names a command
 	// that actually works, is both faster and honest.
 	if heatType != profiler.HeatCPU && isJSRuntime(binding.Runtime) {
-		return fmt.Errorf("monitor hot %d: --type %s needs a Go pprof target; %s has no per-line heap/goroutine detail here — "+
-			"use `monitor profile %d -t heap` (function-level only) instead", pid, ptypeFlag, binding.Runtime, pid)
+		return &liveHeat{}, fmt.Errorf("monitor hot %d: --type %s needs a Go pprof target; %s has no per-line heap/goroutine detail here — "+
+			"use `monitor profile %d -t heap` (function-level only) instead", pid, opts.TypeLabel, binding.Runtime, pid)
 	}
 
-	addrExplicit := cmd.Flags().Changed("pprof-addr")
+	// A Node/Deno process launched by `monitor run --inspect` opened its
+	// inspector through NODE_OPTIONS, which argv-based detection cannot
+	// see; the launch registry recorded which pid owns which port, so a
+	// raw pid finds it the same way `monitor hot <service>` does.
+	inspectAddr := ""
+	if binding.InspectAddr == "" && isJSRuntime(binding.Runtime) {
+		inspectAddr, _ = registeredInspectorFor(binding.PID)
+	}
+
 	// allowInspectorHeap is always false: the guard above already refused
 	// every case that flag exists for (an explicit heap/goroutine request
 	// against a JS runtime), so `hot` itself never needs a CDP heap
 	// snapshot — only monitor_profile_capture type:heap (an explicit,
 	// caller-requested capture with its OWN function-level rendering) does.
-	prof, method, step := captureRuntimeAwareProfile(ctx, binding.PID, &binding, heatTypeToProfileType(heatType), pprofAddr, "", addrExplicit, duration, false)
+	prof, method, step := captureRuntimeAwareProfile(ctx, binding.PID, &binding, heatTypeToProfileType(heatType), opts.PprofAddr, inspectAddr, opts.AddrExplicit, opts.Duration, false)
 	sampleFallback := false
 	if step.Status != stepOK {
 		// E3.2/AC-1's darwin `sample` fallback: any non-JS leaf (Python,
@@ -224,48 +334,46 @@ func runHotPID(cmd *cobra.Command, pid int32, funcName, ptypeFlag, export, pprof
 		// no such columns) or for a JS runtime (already handled, with its
 		// own clear recovery, above).
 		if heatType == profiler.HeatCPU && runtime.GOOS == "darwin" && !isJSRuntime(binding.Runtime) {
-			if sampleProf, _, sampleStep := captureRuntimeAwareProfile(ctx, binding.PID, &binding, profiler.ProfileSample, pprofAddr, "", addrExplicit, duration, false); sampleStep.Status == stepOK {
+			if sampleProf, _, sampleStep := captureRuntimeAwareProfile(ctx, binding.PID, &binding, profiler.ProfileSample, opts.PprofAddr, "", opts.AddrExplicit, opts.Duration, false); sampleStep.Status == stepOK {
 				prof, method, step = sampleProf, "sample", sampleStep
 				sampleFallback = true
 			}
 		}
 		if step.Status != stepOK {
-			msg := step.Limitation
-			if step.Recovery != "" {
-				msg = fmt.Sprintf("%s (%s)", msg, step.Recovery)
-			}
-			return fmt.Errorf("%s", msg)
+			return &liveHeat{}, &liveHeatError{Status: step.Status, Limitation: step.Limitation, Recovery: step.Recovery}
 		}
 	}
-	defer discardTempProfilePath(&prof)
+	live := &liveHeat{Binding: binding, Method: method, prof: prof}
 
-	var hm *profiler.Heatmap
-	var src *profiler.Source
 	if sampleFallback {
-		hm, err = profiler.BuildHeatmapFromSample(ctx, prof, profiler.HeatOptions{
-			Func: funcName, Top: top, Runtime: string(binding.Runtime),
+		hm, err := profiler.BuildHeatmapFromSample(ctx, prof, profiler.HeatOptions{
+			Func: opts.Func, Top: opts.Top, Runtime: string(binding.Runtime),
 			CodeRoots: []string{binding.CodebaseRoot}, // SEC-8: the leaf's own codebase stays readable when monitor runs elsewhere
 		})
 		if err != nil {
-			return fmt.Errorf("monitor hot %d: %w", pid, err)
+			live.Close()
+			return &liveHeat{}, fmt.Errorf("monitor hot %d: %w", pid, err)
 		}
+		live.Heatmap = hm
 	} else {
-		var cleanup func()
-		src, cleanup, err = profilerSourceFromCapture(prof)
+		src, cleanup, err := profilerSourceFromCapture(prof)
 		if err != nil {
-			return fmt.Errorf("monitor hot %d: %w", pid, err)
+			live.Close()
+			return &liveHeat{}, fmt.Errorf("monitor hot %d: %w", pid, err)
 		}
-		defer cleanup()
+		live.Src, live.cleanup = src, cleanup
 
-		hm, err = profiler.BuildHeatmap(ctx, src, profiler.HeatOptions{
-			Func: funcName, Top: top, ProfileType: heatType, Runtime: string(binding.Runtime),
+		hm, err := profiler.BuildHeatmap(ctx, src, profiler.HeatOptions{
+			Func: opts.Func, Top: opts.Top, ProfileType: heatType, Runtime: string(binding.Runtime),
 			CodeRoots: []string{binding.CodebaseRoot}, // SEC-8: the leaf's own codebase stays readable when monitor runs elsewhere
 		})
 		if err != nil {
-			return err
+			live.Close()
+			return &liveHeat{}, err
 		}
+		live.Heatmap = hm
 	}
-	if funcName != "" && !hasHeatFunction(hm, funcName) {
+	if opts.Func != "" && !hasHeatFunction(live.Heatmap, opts.Func) {
 		// Same reasoning as newHotCmd's own --func-miss branch: hm was built
 		// WITH the --func filter (target resolution stays untouched here),
 		// so recover the sampled-names list for the error with one more,
@@ -273,38 +381,38 @@ func runHotPID(cmd *cobra.Command, pid int32, funcName, ptypeFlag, export, pprof
 		// never a second live capture.
 		var names []string
 		if sampleFallback {
-			if full, ferr := profiler.BuildHeatmapFromSample(ctx, prof, profiler.HeatOptions{Top: top, Runtime: string(binding.Runtime)}); ferr == nil {
+			if full, ferr := profiler.BuildHeatmapFromSample(ctx, prof, profiler.HeatOptions{Top: opts.Top, Runtime: string(binding.Runtime)}); ferr == nil {
 				names = heatmapFunctionNames(full)
 			}
-		} else if src != nil {
-			if full, ferr := profiler.BuildHeatmap(ctx, src, profiler.HeatOptions{Top: top, ProfileType: heatType, Runtime: string(binding.Runtime)}); ferr == nil {
+		} else if live.Src != nil {
+			if full, ferr := profiler.BuildHeatmap(ctx, live.Src, profiler.HeatOptions{Top: opts.Top, ProfileType: heatType, Runtime: string(binding.Runtime)}); ferr == nil {
 				names = heatmapFunctionNames(full)
 			}
 		}
-		return funcNotFoundError(names, funcName, fmt.Sprintf("pid %d", pid), "try a longer --duration")
+		live.Close()
+		return &liveHeat{}, funcNotFoundError(names, opts.Func, fmt.Sprintf("pid %d", pid), "try a longer --duration")
 	}
 	projectSlug := resolveHeatProjectSlug(firstNonEmpty(binding.CodebaseRoot, binding.Cwd), binding.Name)
-	if warn := applyIssueOverlay(hm, projectSlug); warn != "" {
-		hm.Warnings = append(hm.Warnings, warn)
+	if warn := applyIssueOverlay(live.Heatmap, projectSlug); warn != "" {
+		live.Heatmap.Warnings = append(live.Heatmap.Warnings, warn)
 	}
+	return live, nil
+}
 
-	if export != "" {
-		if src == nil && !strings.HasSuffix(strings.ToLower(export), ".json") {
-			return fmt.Errorf("--export %s is not available for a macOS sample capture (function-level only; no raw profile bytes to save) — export the JSON heatmap instead (--export out.json)", export)
+// registeredInspectorFor finds the inspector a live `monitor run --inspect`
+// launch registered for leafPID, across every project's registry (a raw pid
+// carries no project). Only a port is ever read back — 127.0.0.1:<port> —
+// never the registry's ws:// URL.
+func registeredInspectorFor(leafPID int32) (string, bool) {
+	for _, l := range devrun.ListRegistryEntries() {
+		if !l.Alive {
+			continue
 		}
-		if err := exportHot(src, hm, export); err != nil {
-			return err
+		if addr, ok := registeredInspectAddr(l.Entry, leafPID); ok {
+			return addr, true
 		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "saved: %s\n", export)
 	}
-
-	if JSONOutput(cmd) {
-		return WriteJSON(hm)
-	}
-
-	header := hotLiveHeaderLine(ctx, pid, binding, method, pprofAddr, heatType, duration)
-	next := hotLiveNextHint(pid, ptypeFlag, pprofAddr, duration, addrExplicit, cmd.Flags().Changed("duration"))
-	return renderHotLiveHuman(cmd.OutOrStdout(), header, hm, funcName, next)
+	return "", false
 }
 
 // isJSRuntime reports whether r is one of the runtimes captureRuntimeAwareProfile

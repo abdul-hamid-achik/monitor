@@ -46,9 +46,17 @@ type doctorReport struct {
 
 func buildDoctorReport(ctx context.Context) doctorReport {
 	wd, _ := os.Getwd()
+	return buildDoctorReportIn(ctx, wd)
+}
+
+// buildDoctorReportIn is buildDoctorReport with code_intel probed against
+// dir instead of the working directory: the app server asks about a
+// project's own checkout, which has nothing to do with where `monitor
+// serve` happens to run.
+func buildDoctorReportIn(ctx context.Context, dir string) doctorReport {
 	report := doctorReport{
 		Status:    ecosystem.Probe(ctx),
-		CodeIntel: ecosystem.ProbeCodeIntel(ctx, wd),
+		CodeIntel: ecosystem.ProbeCodeIntel(ctx, dir),
 	}
 	report.Binaries.Self = selfBinary{Version: Version}
 	if exe, err := os.Executable(); err == nil {

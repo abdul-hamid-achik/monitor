@@ -6,8 +6,37 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-01
+
 ### Added
 
+- **`monitor serve --stdio`: the `monitor.app.v1` protocol.** JSON-RPC 2.0,
+  one message per line on stdin/stdout, for a desktop client running locally
+  or as `ssh <host> monitor serve --stdio`. Nothing listens on a port, and
+  EOF on stdin ends the server.
+  - Methods: issues (list, get as `issue_context.v1`, occurrences, 24 h
+    histograms, projects, resolve/ignore/reopen), host snapshots and
+    processes, kill, live line heatmaps, saved profiles, launches, logs,
+    incidents and doctor.
+  - Subscriptions: `host.tick` (the collector plus `monitor watch`'s rules
+    and cooldown) and `issue.event` (new, regressed, occurrence, status).
+  - Process text is scrubbed and marked untrusted. Inspectors are reported
+    by port only, never as `ws://` URLs.
+  - Destructive methods need `confirm: true`. `--read-only` rejects every
+    write.
+  - See `docs/contracts/app-protocol-v1.md`.
+- **Preview: Monitor Desktop (`desktop/`).** An Electron app over
+  `monitor serve --stdio`:
+  - an issue inbox with 24 h sparklines, live updates and bulk actions;
+  - the issue page (culprit snippet, cause chain, stack, codemap impact,
+    last commit, degradations, copy-for-agent, open in editor, including
+    VS Code Remote-SSH);
+  - hot lines with errors × heat, live host metrics and processes, a
+    launch panel that runs commands under `monitor run`, logs, incidents
+    and doctor;
+  - OS notifications for new and regressed issues;
+  - remote hosts over the user's own ssh (BatchMode, never uploaded
+    anywhere).
 - **Experimental: `monitor studio --tuimark`.** The same 9 Studio tabs,
   rendered by [Tuimark](https://github.com/abdul-hamid-achik/tuimark) v0.3.1
   instead of Bubble Tea, over the same collector, kill gate, settings,
@@ -22,6 +51,11 @@ follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`monitor hot <pid>` finds an inspector `monitor run --inspect` opened.**
+  That inspector comes through `NODE_OPTIONS`, so the pid's argv never
+  showed it, and a raw-pid capture failed with "no inspector address".
+  The launch registry's port for that pid is now used, the same way
+  `monitor hot <service>` already did.
 - **Experimental Tuimark studio: the Tuimark 0.3b vocabulary (v0.3.1).**
   The view now states in the document what the host or `@media` rules
   used to work out:
@@ -565,6 +599,8 @@ remaining pure CLI helpers.
 Initial release: a terminal system monitor for macOS with a Network tab,
 Settings documentation, and a GoReleaser + GitHub Actions release workflow.
 
+[2.2.0]: https://github.com/abdul-hamid-achik/monitor/compare/v2.1.0...v2.2.0
+[2.1.0]: https://github.com/abdul-hamid-achik/monitor/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.15.1...v2.0.0
 [1.15.1]: https://github.com/abdul-hamid-achik/monitor/compare/v1.15.0...v1.15.1
 [1.15.0]: https://github.com/abdul-hamid-achik/monitor/compare/v1.14.0...v1.15.0

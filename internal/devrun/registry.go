@@ -340,3 +340,51 @@ func ListRegisteredServiceNames(project string) []string {
 	sort.Strings(names)
 	return names
 }
+
+// RegisteredLaunch is one registry entry as ListRegistryEntries reports
+// it: the entry itself (WS URLs included -- callers that show it anywhere
+// must drop them, naming ADR §8) plus whether its pid is still alive.
+type RegisteredLaunch struct {
+	Entry RegistryEntry
+	Alive bool
+}
+
+// ListRegistryEntries reads every launch registered under every project,
+// newest StartedAt first. Like ListRegisteredServiceNames it never creates
+// the registry directory, and a missing directory is an empty list rather
+// than an error; an unreadable or undecodable entry is skipped.
+func ListRegistryEntries() []RegisteredLaunch {
+	root, err := registryRootPath()
+	if err != nil {
+		return nil
+	}
+	projects, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var out []RegisteredLaunch
+	for _, p := range projects {
+		if !p.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, p.Name())
+		files, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			if f.IsDir() || !strings.HasSuffix(f.Name(), ".json") {
+				continue
+			}
+			entry, err := readRegistryEntryFile(filepath.Join(dir, f.Name()))
+			if err != nil {
+				continue
+			}
+			out = append(out, RegisteredLaunch{Entry: entry, Alive: processAlive(entry.PID)})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Entry.StartedAt.After(out[j].Entry.StartedAt)
+	})
+	return out
+}

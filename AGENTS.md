@@ -49,6 +49,9 @@ Linux, built for people and for agents. The binary does two jobs:
 - A PR is done when build, vet, gofmt, `go test -race` and `scripts/specs.sh`
   are all green. The CI matrix is ubuntu plus macOS for tests, and ubuntu with
   node, deno, bun, ruby and python provisioned for specs.
+- A PR touching `desktop/` also needs `bun run typecheck`, `bun test` and
+  `bun run smoke` (in `desktop/`; `.github/workflows/desktop.yml` runs them on
+  macOS).
 
 ---
 
@@ -130,6 +133,10 @@ internal/
                   local resume registry
   mcp/            MCP stdio server (tools, typed inputs, confirm gate); the
                   logic lives in cli/mcp.go's Service
+  appserver/      `monitor serve --stdio`: monitor.app.v1 (JSON-RPC over
+                  stdio) for Monitor Desktop, local or over SSH; method table,
+                  subscriptions (host ticks, issue events); the logic lives in
+                  cli/serve.go's Service
   collector/      host/process metric collection (canonical metric types)
   analyzer/       anomaly rules + cross-signal diagnosis; NewDefaultEngine is
                   shared by watch/Studio/MCP
@@ -146,6 +153,9 @@ internal/
                   collector/kill/config/history/temperature read-only.
   widgets/        sparklines, gauges, CodeFrame (line-heatmap renderer)
 
+desktop/            Monitor Desktop: Electron over `monitor serve --stdio`
+                    (main/ connections, ssh, launches, IPC; preload/ the
+                    bridge; renderer/ React views). Bun only. See its README.
 examples/polyglot/  js (node/bun/deno), python, ruby, go-pprof, go-plain,
                     go-crash, go-zap-stdout workloads; WORKLOAD_SECONDS
                     shortens them
@@ -215,10 +225,12 @@ invents a hot line for an idle or diffuse profile.
 - `line-heatmap-v1.md`
 - `doctor-v1.md`: the stable presence contract.
 - `monitor-incident-v1.md`: fcheap bundles and ArtifactRefV1.
+- `app-protocol-v1.md`: `monitor serve --stdio` for Monitor Desktop.
 
-Keep JSON changes additive. Chalupa and cairntrace parse `investigate --json`,
-and glyphrun procmon parses `monitor profile --json` (`text` and `symbols`
-must stay).
+Keep JSON changes additive. Chalupa CI parses `investigate --json`;
+cairntrace parses `process`, `tree`, `resolve` and `profile --json`
+(hand-rolled, no schema, so key renames break it silently); glyphrun procmon
+parses `monitor profile --json` (`text` and `symbols` must stay).
 
 ### MCP server (`internal/mcp`)
 
@@ -238,6 +250,28 @@ Confirmation is enforced in two layers. The SDK rejects a call that omits
 gets a structured `refused: true` payload. Handlers only copy fields; the
 business logic lives in the Service in `internal/cli/mcp.go`. Tool handlers
 take `*mcp.CallToolRequest` as their second argument.
+
+### App server (`internal/appserver`)
+
+`monitor serve --stdio` speaks `monitor.app.v1` (JSON-RPC 2.0, one message
+per line) for Monitor Desktop. The app spawns it locally, or as
+`ssh <host> monitor serve --stdio` for a remote host, so there is no port,
+token or listener; EOF on stdin ends it.
+
+- It is never the only write path: writes go through `issues.WithWriter`,
+  reads through `OpenReadOnly`, exactly like the CLI.
+- stdout carries protocol messages only; `serve` points `os.Stdout` at
+  stderr for the session so a stray print cannot corrupt the stream.
+- `--read-only` rejects every mutating method (Chalupa's `task monitor`
+  door is read-only). Destructive methods (`process.kill`,
+  `profile.capture`) also need `confirm: true`; protected processes are
+  refused regardless.
+- The `issues` topic stats the store file and diffs digests after a silent
+  baseline; the `host` topic runs `analyzer.NewDefaultEngine` with watch's
+  cooldown gate.
+- Same split as MCP: handlers decode and copy; rules (scrub, safety, store
+  access) live in `internal/cli/serve.go`. Live hot lines share
+  `captureLiveHeat` with `monitor hot <pid>`.
 
 ### Environment variable ownership
 

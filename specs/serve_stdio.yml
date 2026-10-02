@@ -1,0 +1,139 @@
+version: 1
+name: monitor_serve_stdio
+
+intent: |
+  `monitor serve --stdio` speaks monitor.app.v1 (JSON-RPC 2.0, one message
+  per line) for Monitor Desktop, locally or as `ssh host monitor serve --stdio`:
+  1. The first line is a hello notification naming the protocol and methods.
+  2. issues.list returns a seeded issue and marks its text untrusted.
+  3. A destructive method (process.kill) refuses without "confirm": true.
+  4. --read-only rejects mutating methods and leaves them out of hello.
+  5. EOF on stdin ends the server with exit 0.
+  6. Without --stdio, serve exits non-zero and names the flag.
+
+target:
+  cmd: ["sh", "-c", "printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}' | ./bin/monitor serve --stdio"]
+  cwd: "."
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "command -v go"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exited: true
+      timeoutMs: 10000
+
+outcomes:
+  - id: clean_exit_at_eof
+    description: the server exits 0 once stdin reaches EOF and its requests are answered
+    verify:
+      process:
+        exitCode: 0
+
+  - id: hello_first_then_pong
+    description: the first line is the hello notification for monitor.app.v1, then ping's answer
+    timeoutMs: 10000
+    verify:
+      command:
+        run: |
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"ping"}' | ./bin/monitor serve --stdio | python3 -c '
+          import json, sys
+          lines = [json.loads(l) for l in sys.stdin if l.strip()]
+          hello = lines[0]
+          assert hello["method"] == "hello", hello
+          assert hello["params"]["protocol"] == "monitor.app.v1", hello["params"]
+          assert "issues.list" in hello["params"]["methods"], hello["params"]["methods"]
+          assert "issues" in hello["params"]["topics"], hello["params"]["topics"]
+          pong = [l for l in lines if l.get("id") == 1][0]
+          assert pong["result"] == {"pong": True}, pong
+          '
+        timeoutMs: 10000
+
+  - id: issues_list_returns_seeded_issue
+    description: issues.list answers a seeded exception with text_is_untrusted, and issues.get builds its issue_context
+    timeoutMs: 60000
+    verify:
+      command:
+        run: |
+          set -e
+          d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
+          export MONITOR_ISSUES_STORE="$d/issues.veclite"
+          id=$(go run ./internal/explain/testdata/seed --store "$MONITOR_ISSUES_STORE" --scenario stack \
+            --project polyglot --service workload --root "$(pwd)" \
+            --file examples/polyglot/js/workload.js --line 49 --function detonate \
+            --type Error --value "node workload intentional uncaught failure" \
+            --level fatal --handled=false --observed-ago-seconds 30)
+          printf '%s\n%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"issues.list","params":{"project":"polyglot"}}' \
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"issues.get\",\"params\":{\"id\":\"$id\"}}" \
+            | ./bin/monitor serve --stdio > "$d/out.ndjson"
+          python3 -c '
+          import json, sys
+          msgs = {m.get("id"): m for m in map(json.loads, open(sys.argv[1])) if "id" in m}
+          lst = msgs[1]["result"]
+          assert [i["id"] for i in lst["items"]] == [sys.argv[2]], lst
+          assert lst["privacy"]["text_is_untrusted"] is True, lst["privacy"]
+          ctx = msgs[2]["result"]["context"]
+          assert ctx["schema"] == "monitor.issue_context.v1", ctx.get("schema")
+          assert ctx["culprit"]["line"] == 49, ctx["culprit"]
+          ' "$d/out.ndjson" "$id"
+        timeoutMs: 60000
+
+  - id: kill_requires_confirm
+    description: process.kill without confirm answers CodeConfirmRequired (-32001) and signals nothing
+    timeoutMs: 10000
+    verify:
+      command:
+        run: |
+          sleep 30 & victim=$!
+          printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"process.kill\",\"params\":{\"pid\":$victim}}" \
+            | ./bin/monitor serve --stdio | python3 -c '
+          import json, sys
+          resp = [m for m in map(json.loads, sys.stdin) if m.get("id") == 1][0]
+          assert resp["error"]["code"] == -32001, resp
+          '
+          rc=$?
+          kill -0 "$victim" && alive=yes || alive=no
+          kill "$victim" 2>/dev/null
+          [ "$rc" -eq 0 ] && [ "$alive" = yes ]
+        timeoutMs: 10000
+
+  - id: read_only_rejects_writes
+    description: --read-only leaves issues.set_status out of hello and answers it with CodeReadOnly (-32002)
+    timeoutMs: 10000
+    verify:
+      command:
+        run: |
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"issues.set_status","params":{"ids":["ISS-0000"],"status":"resolved"}}' \
+            | ./bin/monitor serve --stdio --read-only | python3 -c '
+          import json, sys
+          lines = [json.loads(l) for l in sys.stdin if l.strip()]
+          hello = lines[0]["params"]
+          assert hello["read_only"] is True, hello
+          assert "issues.set_status" not in hello["methods"], hello["methods"]
+          resp = [m for m in lines if m.get("id") == 1][0]
+          assert resp["error"]["code"] == -32002, resp
+          '
+        timeoutMs: 10000
+
+  - id: requires_stdio_flag
+    description: plain `monitor serve` exits non-zero and tells the user to pass --stdio
+    timeoutMs: 10000
+    verify:
+      command:
+        run: |
+          out=$(./bin/monitor serve </dev/null 2>&1); rc=$?
+          [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'serve --stdio'
+        timeoutMs: 10000

@@ -146,6 +146,15 @@ func resolveRoot(opts Options, issue issues.Issue, degraded map[string]Degraded)
 	return root
 }
 
+// RecordedRoot is the checkout an issue was recorded under, reconstructed
+// from its own stored frames (see rootFromRecordedFrame), or "" when the
+// issue carries no usable absolute path. Unlike Build's root it never falls
+// back to the caller's working directory, so a desktop client can join it
+// with Culprit.File to open the right file, or know it cannot.
+func RecordedRoot(issue issues.Issue) string {
+	return rootFromRecordedFrame(issue)
+}
+
 // rootFromRecordedFrame reconstructs the git root an issue was recorded
 // under from its own stored data: any in_app frame (they all share one root
 // -- stacktrace.ApplyGitRoot applies a single gitRoot to the whole exception

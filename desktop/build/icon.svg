@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Monitor Desktop app icon: the docs logo mark (bars + sparkline) on the
+       macOS icon grid (824 px squircle-ish tile, 100 px margin). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1A2230"/>
+      <stop offset="100%" stop-color="#0E131A"/>
+    </linearGradient>
+    <linearGradient id="red" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FF8A80"/>
+      <stop offset="100%" stop-color="#EF4444"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="185.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.08"/>
+  <line x1="236" y1="720" x2="788" y2="720" stroke="#FFFFFF" stroke-opacity="0.18" stroke-width="6" stroke-linecap="round"/>
+  <rect x="250" y="560" width="70" height="160" rx="12" fill="url(#red)" opacity="0.5"/>
+  <rect x="356" y="490" width="70" height="230" rx="12" fill="url(#red)" opacity="0.7"/>
+  <rect x="462" y="380" width="70" height="340" rx="12" fill="url(#red)" opacity="0.85"/>
+  <rect x="568" y="300" width="70" height="420" rx="12" fill="url(#red)"/>
+  <path d="M 236 640 L 340 540 L 446 560 L 552 420 L 640 350 L 712 380 L 788 300"
+        fill="none" stroke="#FFFFFF" stroke-width="22" stroke-linecap="round" stroke-linejoin="round" opacity="0.92"/>
+  <circle cx="788" cy="300" r="30" fill="#FFFFFF"/>
+</svg>
