@@ -1,24 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <!-- Monitor Desktop app icon: the docs logo mark (bars + sparkline) on the
-       macOS icon grid (824 px squircle-ish tile, 100 px margin). -->
+  <!-- Monitor Desktop app icon: the website's mark (docs/public/favicon.svg)
+       — Studio's titled frame (╭─◆───╮) holding a KPI gauge (━━━━──) —
+       drawn on the macOS icon grid: an 824 px tile with a 100 px margin, so
+       the favicon's 64-unit artwork is scaled by 824/64. -->
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#1A2230"/>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#18202A"/>
       <stop offset="100%" stop-color="#0E131A"/>
     </linearGradient>
-    <linearGradient id="red" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#FF8A80"/>
-      <stop offset="100%" stop-color="#EF4444"/>
+    <linearGradient id="brand" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFA39B"/>
+      <stop offset="100%" stop-color="#FF8A80"/>
     </linearGradient>
   </defs>
-  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)"/>
-  <rect x="100.5" y="100.5" width="823" height="823" rx="185.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.08"/>
-  <line x1="236" y1="720" x2="788" y2="720" stroke="#FFFFFF" stroke-opacity="0.18" stroke-width="6" stroke-linecap="round"/>
-  <rect x="250" y="560" width="70" height="160" rx="12" fill="url(#red)" opacity="0.5"/>
-  <rect x="356" y="490" width="70" height="230" rx="12" fill="url(#red)" opacity="0.7"/>
-  <rect x="462" y="380" width="70" height="340" rx="12" fill="url(#red)" opacity="0.85"/>
-  <rect x="568" y="300" width="70" height="420" rx="12" fill="url(#red)"/>
-  <path d="M 236 640 L 340 540 L 446 560 L 552 420 L 640 350 L 712 380 L 788 300"
-        fill="none" stroke="#FFFFFF" stroke-width="22" stroke-linecap="round" stroke-linejoin="round" opacity="0.92"/>
-  <circle cx="788" cy="300" r="30" fill="#FFFFFF"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="184.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.07"/>
+  <g transform="translate(100 100) scale(12.875)">
+    <path d="M30 17H48a5 5 0 0 1 5 5V45a5 5 0 0 1-5 5H16a5 5 0 0 1-5-5V22a5 5 0 0 1 5-5h1"
+          fill="none" stroke="#5A626E" stroke-width="3" stroke-linecap="round"/>
+    <path d="M23.5 10.5L30 17L23.5 23.5L17 17Z" fill="url(#brand)"/>
+    <path d="M19 34.5H36" stroke="#FF8A80" stroke-width="5" stroke-linecap="round"/>
+    <path d="M40 34.5H45" stroke="#5A626E" stroke-width="5" stroke-linecap="round"/>
+  </g>
 </svg>

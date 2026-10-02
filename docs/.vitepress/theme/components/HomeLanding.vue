@@ -60,7 +60,7 @@ const topCPU = [
     <section class="shell hero">
       <div class="hero-copy">
         <p class="eyebrow">
-          <span class="live-dot">●</span> v2.0.0 · local-first · macOS + Linux
+          <span class="live-dot">●</span> v2.2.0 · local-first · macOS + Linux
         </p>
         <h1>Crashes that point<br />at the line.</h1>
         <p class="lede">
@@ -213,6 +213,35 @@ BA42  12      src/cart.js:3</pre>
       <p class="more"><a :href="withBase('/guide/tui')">Studio guide →</a></p>
     </section>
 
+    <!-- ── Desktop ─────────────────────────────────────────────────── -->
+    <!-- A real screenshot of the app over real crashes (examples/polyglot). -->
+    <section class="shell block">
+      <header class="head">
+        <h2>Or keep it open in a window.</h2>
+        <p>
+          Monitor Desktop puts the same issues, culprit lines and hot lines in a macOS app, for this Mac,
+          any host you reach over SSH, or a Chalupa droplet. It is one more client of
+          <code>monitor serve --stdio</code>: nothing listens on a port and nothing is uploaded.
+        </p>
+      </header>
+      <div class="term desktop">
+        <div class="term-bar">
+          <span><b class="accent">◆</b> <b>monitor desktop</b> <i>preview</i></span>
+          <span class="live-dot">● live</span>
+        </div>
+        <img
+          :src="withBase('/desktop/issue.png')"
+          alt="Monitor Desktop showing an issue: the culprit line highlighted in its source, the stack, codemap impact, the last commit that touched the line and the next commands"
+          width="1600"
+          height="1022"
+          loading="lazy"
+        />
+      </div>
+      <p class="more">
+        <a :href="withBase('/guide/desktop')">Desktop guide →</a>
+        <a href="https://github.com/abdul-hamid-achik/monitor/releases?q=desktop-v">Download for macOS →</a>
+      </p>
+    </section>
     <!-- ── Agents ───────────────────────────────────────────────────── -->
     <section class="shell block">
       <header class="head">
@@ -456,6 +485,15 @@ h1 {
 
 .term-foot {
   padding: 10px 18px 12px;
+}
+
+/* Desktop: the app screenshot inside the same terminal chrome. */
+.desktop img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-top: 1px solid var(--vp-c-divider);
+  border-radius: 0 0 10px 10px;
 }
 
 /* Sections */

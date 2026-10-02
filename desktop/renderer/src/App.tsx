@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { bridge, type IssuesList } from "./api";
-import { ConfirmHost, Icon, setActiveConnection, Toasts, useRpc } from "./components/ui";
+import { BrandMark, ConfirmHost, Icon, setActiveConnection, Toasts, useRpc } from "./components/ui";
 import { activeConnection, navigate, useStore, type View } from "./store";
 import { DoctorView } from "./views/DoctorView";
 import { HostView } from "./views/HostView";
@@ -40,7 +40,7 @@ export function App() {
       <div className="titlebar-drag" />
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-mark">m</span> Monitor
+          <BrandMark /> Monitor
         </div>
 
         <div className="conn-switch">

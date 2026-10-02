@@ -34,6 +34,25 @@ export function Icon({ name, className = "nav-icon" }: { name: keyof typeof path
   );
 }
 
+/** The website's mark (docs/public/favicon.svg): Studio's titled frame with a KPI gauge. */
+export function BrandMark({ size = 20 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden>
+      <rect width="64" height="64" rx="14" fill="#11161D" />
+      <path
+        d="M30 17H48a5 5 0 0 1 5 5V45a5 5 0 0 1-5 5H16a5 5 0 0 1-5-5V22a5 5 0 0 1 5-5h1"
+        fill="none"
+        stroke="#5A626E"
+        strokeWidth="3"
+        strokeLinecap="round"
+      />
+      <path d="M23.5 10.5L30 17L23.5 23.5L17 17Z" fill="#FF8A80" />
+      <path d="M19 34.5H36" stroke="#FF8A80" strokeWidth="5" strokeLinecap="round" />
+      <path d="M40 34.5H45" stroke="#5A626E" strokeWidth="5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 // ---------- confirm dialog (promise-based) ----------
 
 interface ConfirmRequest {

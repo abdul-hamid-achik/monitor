@@ -154,15 +154,10 @@ textarea {
   letter-spacing: -0.01em;
 }
 
-.brand-mark {
-  width: 18px;
-  height: 18px;
+.brand svg {
+  flex: none;
   border-radius: 5px;
-  background: var(--brand);
-  display: grid;
-  place-items: center;
-  color: var(--on-brand);
-  font: 700 11px var(--font-mono);
+  box-shadow: 0 0 0 1px var(--divider);
 }
 
 .conn-switch {

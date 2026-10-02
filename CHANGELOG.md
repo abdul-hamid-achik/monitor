@@ -6,6 +6,16 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Monitor Desktop uses the website's mark.** The app icon and the sidebar
+  logo now use the Studio frame with its ◆ and gauge, from the site's favicon,
+  instead of a placeholder chart.
+- **The website covers Monitor Desktop and `monitor serve`.** It adds a
+  Desktop guide, a landing-page section with a real screenshot, an install
+  section, the `serve` entry in the CLI reference, and the v2.2.0 version
+  marks.
+
 ## [2.2.0] - 2026-10-01
 
 ### Added

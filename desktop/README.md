@@ -50,12 +50,23 @@ CSC_IDENTITY_AUTO_DISCOVERY=false bun run dist   # unsigned .app in release/
 bun run dist                                     # signed with the Developer ID in your keychain
 bun run setup:signing                            # once: notarization credentials -> keychain profile
 bun run dist:notarized                           # universal .dmg/.zip, signed + notarized
+bun run dist:notarized:tvault                    # same, credentials from tvault project monitor-desktop
 ```
 
 `setup:signing` reads your Apple ID and an app-specific password (create one at
 https://account.apple.com → Sign-In and Security) and stores them with
 `xcrun notarytool store-credentials monitor-desktop`, so the password lives in
 the keychain, not in env vars or files.
+
+Alternatively keep the credentials in tinyvault: the project `monitor-desktop`
+holds `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_SPECIFIC_PASSWORD` (set it with
+`read -rs P && printf %s "$P" | tvault set APPLE_APP_SPECIFIC_PASSWORD --stdin
+-p monitor-desktop; unset P`), and `dist:notarized:tvault` injects them into the
+build only.
+
+A preview release is published as a GitHub **prerelease** (`gh release create
+desktop-vX.Y.Z --prerelease`), so it never becomes the repository's "latest"
+release, which the CLI install docs link to.
 
 For CI, export the "Developer ID Application" certificate from Keychain Access
 as a .p12 and run `bun run setup:signing --github path/to/cert.p12`: it sets

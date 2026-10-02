@@ -20,7 +20,8 @@
     "dist:release": "bun run build:monitor --universal && vite build && electron-builder --mac --universal --publish never",
     "capture": "vite build && electron . --capture captures",
     "setup:signing": "sh scripts/setup-signing.sh",
-    "dist:notarized": "APPLE_KEYCHAIN=$HOME/Library/Keychains/login.keychain-db APPLE_KEYCHAIN_PROFILE=monitor-desktop bun run dist:release"
+    "dist:notarized": "APPLE_KEYCHAIN=$HOME/Library/Keychains/login.keychain-db APPLE_KEYCHAIN_PROFILE=monitor-desktop bun run dist:release",
+    "dist:notarized:tvault": "tvault run -p monitor-desktop -- bun run dist:release"
   },
   "dependencies": {},
   "devDependencies": {
