@@ -1,0 +1,107 @@
+version: 1
+name: monitor_run_probes_node
+
+intent: |
+  `monitor run --probes -- node app.js` loads monitor's own Node SDK by
+  NODE_OPTIONS alone. The app's output and exit code are byte-identical to
+  a run without --probes. The crash and the console.error'd config error,
+  which the SDK and the stderr parser both see, are recorded ONCE each. A
+  promise rejection the app's own listener writes to a log file (invisible
+  on stderr) becomes a third issue only --probes can find. The crash
+  carries the SDK's breadcrumbs (the console lines before it).
+
+target:
+  cmd: ["./bin/monitor", "run", "--probes", "--", "node", "examples/polyglot/sdk/app.js"]
+  cwd: "."
+  env:
+    XDG_STATE_HOME: "/tmp/monitor-spec-probes-node/state"
+    MONITOR_ISSUES_STORE: "/tmp/monitor-spec-probes-node/data/issues.veclite"
+    APP_LOG_DIR: "/tmp/monitor-spec-probes-node"
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v node"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-probes-node && mkdir -p /tmp/monitor-spec-probes-node/state /tmp/monitor-spec-probes-node/data"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      screen:
+        contains: "queue worker crashed"
+      timeoutMs: 15000
+  - wait:
+      process:
+        exitCode: 1
+      timeoutMs: 15000
+
+outcomes:
+  - id: exit_code_propagated
+    description: monitor exits with node's uncaught-exception code
+    verify:
+      process:
+        exitCode: 1
+
+  - id: three_issues_each_recorded_once
+    description: the logged error and the crash are recorded once each (SDK and stderr merged), plus the file-logged rejection only the SDK saw
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          MONITOR_ISSUES_STORE=/tmp/monitor-spec-probes-node/data/issues.veclite ./bin/monitor issues list --json > /tmp/monitor-spec-probes-node/issues.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/monitor-spec-probes-node/issues.json'))
+          by = {i['exception_type']: i for i in d}
+          assert sorted(by) == ['Error', 'SyntaxError', 'TypeError'], sorted(by)
+          for i in d:
+              assert i['occurrence_count'] == 1, i
+          assert by['Error']['culprit']['line'] == 35 and by['Error']['handled'] is False, by['Error']
+          assert by['SyntaxError']['culprit']['line'] == 19 and by['SyntaxError']['handled'] is True, by['SyntaxError']
+          assert by['TypeError']['culprit']['line'] == 29, by['TypeError']
+          assert by['TypeError']['culprit']['file'] == 'examples/polyglot/sdk/app.js', by['TypeError']
+          print('ok')
+          PY
+        timeoutMs: 15000
+
+  - id: crash_carries_sdk_breadcrumbs
+    description: the crash's issue page shows the SDK event and the console lines before it
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          id=$(python3 -c "import json; print([i['id'] for i in json.load(open('/tmp/monitor-spec-probes-node/issues.json')) if i['exception_type'] == 'Error'][0])")
+          MONITOR_ISSUES_STORE=/tmp/monitor-spec-probes-node/data/issues.veclite ./bin/monitor issue "$id" --json > /tmp/monitor-spec-probes-node/issue.json
+          python3 - <<'PY'
+          import json
+          c = json.load(open('/tmp/monitor-spec-probes-node/issue.json'))
+          ev = c['event']
+          assert ev['kind'] == 'uncaught' and ev['mode'] == 'auto' and ev['sdk'].startswith('monitor.node/'), ev
+          msgs = [b['message'] for b in ev['breadcrumbs']]
+          assert msgs[0] == 'booting', msgs
+          assert any(m.startswith('config failed:') for m in msgs), msgs
+          print('ok')
+          PY
+        timeoutMs: 15000
+
+  - id: output_identical_without_probes
+    description: the app prints the same bytes and exits the same way with and without --probes
+    timeoutMs: 20000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-probes-node/cmp; rm -rf "$d"; mkdir -p "$d/state"
+          export XDG_STATE_HOME="$d/state" APP_LOG_DIR="$d"
+          MONITOR_ISSUES_STORE="$d/a.veclite" ./bin/monitor run --quiet -- node examples/polyglot/sdk/app.js >"$d/a.out" 2>"$d/a.err"; a=$?
+          MONITOR_ISSUES_STORE="$d/b.veclite" ./bin/monitor run --quiet --probes -- node examples/polyglot/sdk/app.js >"$d/b.out" 2>"$d/b.err"; b=$?
+          test "$a" = "$b" && cmp "$d/a.out" "$d/b.out" && cmp "$d/a.err" "$d/b.err"
+        timeoutMs: 20000

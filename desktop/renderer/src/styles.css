@@ -853,6 +853,16 @@ label.check {
   color: var(--text-3);
 }
 
+.frame-list .crumb-cat {
+  min-width: 72px;
+}
+
+.frame-list .crumb-msg {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .cmd-list {
   margin: 0;
   padding: 0;

@@ -1,0 +1,13 @@
+package main
+
+import monitor "github.com/abdul-hamid-achik/monitor/sdk/go"
+
+func load(cfg map[string]int) {
+	cfg["retries"] = 3
+}
+
+func main() {
+	defer monitor.Recover()
+	var cfg map[string]int
+	load(cfg)
+}

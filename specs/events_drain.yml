@@ -1,0 +1,75 @@
+version: 1
+name: monitor_events_drain
+
+intent: |
+  An app that uses monitor's own SDK explicitly, outside `monitor run`,
+  writes its events into the global inbox ($XDG_STATE_HOME/monitor/events/
+  inbox). `monitor events` reports them as pending; `monitor events drain`
+  records them into the issue store (scrubbed, grouped, attributed to the
+  app's project) and empties the inbox.
+
+target:
+  cmd: ["./bin/monitor", "events", "drain", "--store", "/tmp/monitor-spec-events-drain/data/issues.veclite"]
+  cwd: "."
+  env:
+    XDG_STATE_HOME: "/tmp/monitor-spec-events-drain/state"
+
+terminal:
+  cols: 160
+  rows: 40
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-events-drain && mkdir -p /tmp/monitor-spec-events-drain/state /tmp/monitor-spec-events-drain/data"
+      timeoutMs: 5000
+    - run: |
+        XDG_STATE_HOME=/tmp/monitor-spec-events-drain/state PYTHONPATH=sdk/python python3 -c '
+        import monitorcli
+        monitorcli.init(service="billing", release="1.4.0")
+        monitorcli.add_breadcrumb("charging order 42", category="billing")
+        try:
+            raise ValueError("card declined for token sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc")
+        except ValueError:
+            monitorcli.capture_exception(tags={"order": "42"})
+        '
+      timeoutMs: 10000
+    - run: "XDG_STATE_HOME=/tmp/monitor-spec-events-drain/state ./bin/monitor events | grep -q 'pending  1 event'"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      process:
+        exitCode: 0
+      timeoutMs: 15000
+
+outcomes:
+  - id: drain_reports_the_event
+    description: drain prints what it recorded
+    verify:
+      screen:
+        contains: "recorded 1 event(s) into 1 issue(s)"
+
+  - id: issue_recorded_scrubbed_with_context
+    description: the event is an issue with its release and tags, its secret redacted, and the inbox is empty
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          XDG_STATE_HOME=/tmp/monitor-spec-events-drain/state ./bin/monitor events | grep -q 'pending  0 event'
+          MONITOR_ISSUES_STORE=/tmp/monitor-spec-events-drain/data/issues.veclite ./bin/monitor issue latest --json > /tmp/monitor-spec-events-drain/issue.json
+          python3 - <<'PY'
+          import json
+          c = json.load(open('/tmp/monitor-spec-events-drain/issue.json'))
+          assert c['issue']['exception_type'] == 'ValueError', c['issue']
+          assert 'sk_live_' not in json.dumps(c), 'secret survived'
+          ev = c['event']
+          assert ev['release'] == '1.4.0' and ev['tags']['order'] == '42' and ev['mode'] == 'explicit', ev
+          assert [b['message'] for b in ev['breadcrumbs']] == ['charging order 42'], ev
+          print('ok')
+          PY
+        timeoutMs: 15000

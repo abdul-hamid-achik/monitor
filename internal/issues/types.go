@@ -173,6 +173,32 @@ type ExceptionInfo struct {
 	DroppedCauses int `json:"dropped_causes,omitempty"`
 }
 
+// Breadcrumb is one step an SDK recorded before an event (a query, a
+// request, a user action), bounded and scrubbed before it is stored. It
+// only ever comes from monitor's own SDKs (monitor.event.v1); stack
+// parsing never produces one.
+type Breadcrumb struct {
+	Timestamp time.Time `json:"timestamp"`
+	Category  string    `json:"category,omitempty"`
+	Message   string    `json:"message"`
+	Level     string    `json:"level,omitempty"`
+}
+
+// Bounds applied to breadcrumbs at ingest, so one event can never bloat an
+// occurrence.
+const (
+	MaxBreadcrumbs         = 30
+	maxBreadcrumbMessage   = 300
+	maxBreadcrumbCategory  = 64
+	maxBreadcrumbLevelSize = 16
+	// MaxTags bounds an SDK event's tags the same way; keys and values
+	// longer than their bound are trimmed, and an empty key or value is
+	// dropped.
+	MaxTags        = 24
+	maxTagKeySize  = 64
+	maxTagValueLen = 200
+)
+
 // RunContext correlates a local event with an ephemeral/CI run without
 // affecting issue identity. It matches Monitor and Chalupa's shared IDs.
 type RunContext struct {
@@ -233,6 +259,13 @@ type Occurrence struct {
 	// issue, the store folds the repeat into this existing row instead of
 	// inserting a duplicate -- see UpsertResult.Deduped.
 	DedupeKey string `json:"dedupe_key,omitempty"`
+	// Breadcrumbs are the steps an SDK recorded before this event, oldest
+	// first (at most MaxBreadcrumbs). Additive: occurrences parsed from
+	// process output have none.
+	Breadcrumbs []Breadcrumb `json:"breadcrumbs,omitempty"`
+	// Tags are an SDK event's key/value labels (at most MaxTags).
+	// Additive, like Breadcrumbs.
+	Tags map[string]string `json:"tags,omitempty"`
 }
 
 // Event is the local-Sentry event model. Each persisted event is an
@@ -298,6 +331,11 @@ type OccurrenceInput struct {
 	// neighbor buckets as aliases; only the primary DedupeKey is retained
 	// on the occurrence.
 	DedupeAliases []string
+	// Breadcrumbs are an SDK event's recorded steps; bounded by
+	// normalizeOccurrenceInput.
+	Breadcrumbs []Breadcrumb
+	// Tags are an SDK event's labels; bounded by normalizeOccurrenceInput.
+	Tags map[string]string
 }
 
 // UpsertResult is UpsertOccurrence's richer sibling return

@@ -1,0 +1,39 @@
+{
+  "name": "@thelacanians/monitor",
+  "version": "0.1.0",
+  "description": "Monitor's own error SDK for Node, Bun and Deno: zero dependencies, local-first, writes monitor.event.v1 files for the monitor CLI.",
+  "license": "MIT",
+  "homepage": "https://monitorcli.dev/guide/sdks",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/abdul-hamid-achik/monitor.git",
+    "directory": "sdk/node"
+  },
+  "main": "./index.cjs",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.cjs"
+    },
+    "./auto": "./auto.cjs"
+  },
+  "files": [
+    "index.cjs",
+    "index.mjs",
+    "index.d.ts",
+    "auto.cjs",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": [
+    "./auto.cjs"
+  ],
+  "scripts": {
+    "test": "node --test test/sdk.test.cjs"
+  }
+}

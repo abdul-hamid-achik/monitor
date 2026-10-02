@@ -1,0 +1,103 @@
+version: 1
+name: monitor_run_probes_python
+
+intent: |
+  `monitor run --probes -- python3 app.py` loads monitor's own Python SDK
+  through a PYTHONPATH bootstrap sitecustomize alone. The app's output and
+  exit status are byte-identical to a run without --probes. The crash and
+  the dead worker thread, which the SDK and the stderr parser both see,
+  are recorded ONCE each. An exception the app logs with
+  logger.exception into a log FILE (invisible on stderr) becomes a third,
+  handled issue only --probes can find.
+
+target:
+  cmd: ["./bin/monitor", "run", "--probes", "--", "python3", "examples/polyglot/sdk/app.py"]
+  cwd: "."
+  env:
+    XDG_STATE_HOME: "/tmp/monitor-spec-probes-python/state"
+    MONITOR_ISSUES_STORE: "/tmp/monitor-spec-probes-python/data/issues.veclite"
+    APP_LOG_DIR: "/tmp/monitor-spec-probes-python"
+
+terminal:
+  cols: 200
+  rows: 60
+  profile: xterm-256color
+
+preconditions:
+  commands:
+    - run: "test -x ./bin/monitor"
+      timeoutMs: 5000
+    - run: "command -v python3"
+      timeoutMs: 5000
+    - run: "rm -rf /tmp/monitor-spec-probes-python && mkdir -p /tmp/monitor-spec-probes-python/state /tmp/monitor-spec-probes-python/data"
+      timeoutMs: 5000
+
+steps:
+  - wait:
+      screen:
+        contains: "settlement failed"
+      timeoutMs: 15000
+  - wait:
+      process:
+        exitCode: 1
+      timeoutMs: 15000
+
+outcomes:
+  - id: exit_code_propagated
+    description: monitor exits with python's uncaught-exception status
+    verify:
+      process:
+        exitCode: 1
+
+  - id: three_issues_each_recorded_once
+    description: the crash and the thread are recorded once each (SDK and stderr merged), plus the file-logged exception only the SDK saw
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          MONITOR_ISSUES_STORE=/tmp/monitor-spec-probes-python/data/issues.veclite ./bin/monitor issues list --json > /tmp/monitor-spec-probes-python/issues.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/monitor-spec-probes-python/issues.json'))
+          by = {i['exception_type']: i for i in d}
+          assert sorted(by) == ['RuntimeError', 'ZeroDivisionError', 'json.decoder.JSONDecodeError'], sorted(by)
+          for i in d:
+              assert i['occurrence_count'] == 1, i
+          assert by['RuntimeError']['handled'] is False, by['RuntimeError']
+          logged = by['json.decoder.JSONDecodeError']
+          assert logged['handled'] is True, logged
+          assert logged['culprit']['file'] == 'examples/polyglot/sdk/app.py' and logged['culprit']['line'] == 23, logged
+          print('ok')
+          PY
+        timeoutMs: 15000
+
+  - id: logged_exception_carries_breadcrumbs
+    description: the file-logged exception's issue page shows the SDK event and the log record before it
+    timeoutMs: 15000
+    verify:
+      command:
+        run: |
+          id=$(python3 -c "import json; print([i['id'] for i in json.load(open('/tmp/monitor-spec-probes-python/issues.json')) if i['exception_type'] == 'json.decoder.JSONDecodeError'][0])")
+          MONITOR_ISSUES_STORE=/tmp/monitor-spec-probes-python/data/issues.veclite ./bin/monitor issue "$id" --json > /tmp/monitor-spec-probes-python/issue.json
+          python3 - <<'PY'
+          import json
+          c = json.load(open('/tmp/monitor-spec-probes-python/issue.json'))
+          ev = c['event']
+          assert ev['kind'] == 'logged' and ev['mode'] == 'auto' and ev['sdk'].startswith('monitor.python/'), ev
+          assert [b['message'] for b in ev['breadcrumbs']] == ['loaded 3 plans'], ev['breadcrumbs']
+          print('ok')
+          PY
+        timeoutMs: 15000
+
+  - id: output_identical_without_probes
+    description: the app prints the same bytes and exits the same way with and without --probes
+    timeoutMs: 20000
+    verify:
+      command:
+        run: |
+          d=/tmp/monitor-spec-probes-python/cmp; rm -rf "$d"; mkdir -p "$d/state"
+          export XDG_STATE_HOME="$d/state" APP_LOG_DIR="$d"
+          MONITOR_ISSUES_STORE="$d/a.veclite" ./bin/monitor run --quiet -- python3 examples/polyglot/sdk/app.py >"$d/a.out" 2>"$d/a.err"; a=$?
+          MONITOR_ISSUES_STORE="$d/b.veclite" ./bin/monitor run --quiet --probes -- python3 examples/polyglot/sdk/app.py >"$d/b.out" 2>"$d/b.err"; b=$?
+          test "$a" = "$b" && cmp "$d/a.out" "$d/b.out" && cmp "$d/a.err" "$d/b.err"
+        timeoutMs: 20000

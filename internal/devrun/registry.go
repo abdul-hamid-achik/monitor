@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/abdul-hamid-achik/monitor/internal/statedir"
 )
 
 //	RegistrySchema is the launch registry's contract tag (naming ADR §1's "Registro de
@@ -57,17 +59,7 @@ type RegistryEntry struct {
 // registryRootPath/registryProjectDirPath below (which deliberately do
 // not, for a read-only lookup).
 func monitorStateRoot() (string, error) {
-	root := strings.TrimSpace(os.Getenv("XDG_STATE_HOME"))
-	if root == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("resolve home directory: %w", err)
-		}
-		root = filepath.Join(home, ".local", "state")
-	} else if !filepath.IsAbs(root) {
-		return "", fmt.Errorf("XDG_STATE_HOME must be an absolute path: %q", root)
-	}
-	return filepath.Join(root, "monitor"), nil
+	return statedir.Root()
 }
 
 // monitorStateSubdir returns (creating it, mode 0700)

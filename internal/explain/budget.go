@@ -6,8 +6,9 @@ import "encoding/json"
 // (docs/contracts/issue-context-v1.md: "frames collapsed to in-app frames
 // only ... causes capped to what fits").
 const (
-	briefFrameLimit = 5
-	briefCauseLimit = 2
+	briefFrameLimit      = 5
+	briefCauseLimit      = 2
+	briefBreadcrumbLimit = 5
 )
 
 // Fixed free-text caps applied by capFreeText, in runes, before the
@@ -24,6 +25,7 @@ const (
 	standardTitleMaxRunes = 2000
 	freeTextFieldMaxRunes = 400
 	snippetLineMaxRunes   = 300
+	briefBreadcrumbRunes  = 160
 )
 
 // truncateRunes shortens s to at most max runes, marking the cut with a
@@ -72,6 +74,11 @@ func capFreeText(c *Context, budget Budget) {
 			c.Culprit.Snippet.Lines[i] = truncateRunes(line, snippetLineMaxRunes)
 		}
 	}
+	if c.Event != nil && budget == BudgetBrief {
+		for i := range c.Event.Breadcrumbs {
+			c.Event.Breadcrumbs[i].Message = truncateRunes(c.Event.Breadcrumbs[i].Message, briefBreadcrumbRunes)
+		}
+	}
 }
 
 // applyBudget trims c's section detail to match budget. It first applies
@@ -105,6 +112,11 @@ func applyBudget(c *Context, budget Budget) {
 			c.Truncated.Causes += len(c.Causes) - briefCauseLimit
 			c.Causes = c.Causes[len(c.Causes)-briefCauseLimit:]
 		}
+		// The steps right before the event matter most: keep the newest.
+		if c.Event != nil && len(c.Event.Breadcrumbs) > briefBreadcrumbLimit {
+			c.Truncated.Breadcrumbs += len(c.Event.Breadcrumbs) - briefBreadcrumbLimit
+			c.Event.Breadcrumbs = c.Event.Breadcrumbs[len(c.Event.Breadcrumbs)-briefBreadcrumbLimit:]
+		}
 	}
 
 	var target int
@@ -125,6 +137,9 @@ func applyBudget(c *Context, budget Budget) {
 		switch {
 		case c.Culprit != nil && c.Culprit.Snippet != nil && len(c.Culprit.Snippet.Lines) > 1:
 			shrinkSnippet(c.Culprit.Snippet)
+		case c.Event != nil && len(c.Event.Breadcrumbs) > 0:
+			c.Truncated.Breadcrumbs++
+			c.Event.Breadcrumbs = c.Event.Breadcrumbs[1:]
 		case len(c.Frames) > 0:
 			c.Truncated.Frames++
 			c.Frames = c.Frames[:len(c.Frames)-1]

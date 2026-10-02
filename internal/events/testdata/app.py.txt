@@ -1,0 +1,17 @@
+import json, os, sys, traceback
+def parse(s):
+    return json.loads(s)
+def load():
+    try:
+        parse("{bad")
+    except ValueError as e:
+        raise RuntimeError("config load failed") from e
+def hook(t, e, tb):
+    c = e.__cause__
+    open(os.environ["OUT"], "w").write(json.dumps({
+        "outer": "".join(traceback.format_exception(t, e, tb, chain=False)),
+        "cause": "".join(traceback.format_exception(type(c), c, c.__traceback__, chain=False)),
+        "name": t.__name__, "cname": type(c).__name__, "msg": str(e), "cmsg": str(c)}))
+    sys.__excepthook__(t, e, tb)
+sys.excepthook = hook
+load()

@@ -37,7 +37,10 @@ Linux, built for people and for agents. The binary does two jobs:
   - `go build -o bin/monitor ./cmd/monitor`, or `task build` when the `task`
     binary works on your machine.
   - Run the CLI with `./bin/monitor --help`.
-- **Tests:** `go test -race -count=1 ./...`
+- **Tests:** `go test -race -count=1 ./...`, plus the SDKs:
+  `(cd sdk/go && go test -race ./...)`, `node --test sdk/node/test/sdk.test.cjs`
+  and `python3 -m unittest discover -s sdk/python/tests` (CI's test job runs
+  all three).
 - **Lint and format:** `go vet ./...` and `gofmt -l .`. The gofmt command must
   print nothing.
 - **Specs:** `GLYPH=glyph scripts/specs.sh`. It is the same script local runs,
@@ -103,7 +106,15 @@ internal/
                   registers them
   devrun/         `monitor run -- <cmd>`: launch, copy output to the
                   terminal, detect exceptions, record issues; env, signals,
-                  banners, launch registry
+                  banners, launch registry; --probes and the live SDK event
+                  watcher (sdkevents.go)
+  events/         monitor.event.v1, the SDK event contract: Decode (bounds),
+                  ToException (stack via stacktrace.Detect, structured
+                  frames, causes), Prepare (scrub, breadcrumbs, tags,
+                  DedupeKey), the file inbox (Write/Pending/Load/Reject) and
+                  Ingest (one writer lock per drain)
+  statedir/       $XDG_STATE_HOME/monitor resolution, shared by devrun,
+                  events and sdk
   stacktrace/     SDK-free stack-trace detection: Joiner and parsers for
                   V8/Deno/Bun, Python, Ruby, Go panics, zap +
                   pkg/errors, typescript-logging; InApp;
@@ -153,12 +164,17 @@ internal/
                   collector/kill/config/history/temperature read-only.
   widgets/        sparklines, gauges, CodeFrame (line-heatmap renderer)
 
+sdk/                monitor's own SDKs. node/ (Node, Bun, Deno; auto.cjs is
+                    what --probes preloads) and python/ (monitorcli + the
+                    bootstrap sitecustomize) are embedded by sdk/assets.go and
+                    materialized to $XDG_STATE_HOME/monitor/sdk/<hash>/. go/ is
+                    its OWN module (explicit only), outside ./...
 desktop/            Monitor Desktop: Electron over `monitor serve --stdio`
                     (main/ connections, ssh, launches, IPC; preload/ the
                     bridge; renderer/ React views). Bun only. See its README.
 examples/polyglot/  js (node/bun/deno), python, ruby, go-pprof, go-plain,
                     go-crash, go-zap-stdout workloads; WORKLOAD_SECONDS
-                    shortens them
+                    shortens them; sdk/ holds the --probes demo apps
 specs/              glyphrun behavioral specs (run through scripts/specs.sh)
 scripts/specs.sh    the one spec runner (PASS/SKIP/FAIL, skip-list, exit code)
 docs/               VitePress site; docs/contracts/ holds the versioned
@@ -180,6 +196,31 @@ monitor stacktrace parse      non-blocking send to a bounded channel (drops are 
 monitor issues / issue <id>   explain.Build -> monitor.issue_context.v1 (CLI human | --json | --md, MCP brief)
 ```
 
+Monitor's own SDKs feed the same pipeline:
+
+```
+sdk (auto via --probes, or imported) -> one monitor.event.v1 file, atomic rename
+  -> $MONITOR_EVENTS_DIR (monitor run --: eventWatcher, live, merged per coalesce window)
+  |  global inbox (monitor issues / issue / serve, default store only; monitor events drain)
+  -> events.Prepare (stacktrace.Detect on the runtime's own stack text, scrub) -> RecordException
+```
+
+- **The SDK sends text, Go decides.** An SDK sends the stack exactly as its
+  runtime formats it (Go sends structured frames). Parsing, scrubbing,
+  FingerprintV2 and the culprit stay in Go, so an SDK event and the same
+  crash on stderr fingerprint alike (tested per runtime in
+  `internal/events`).
+- **One crash, one occurrence.** In `monitor run`, an SDK event joins the
+  same coalescing window as the stderr block with its fingerprint. Count =
+  max of the two sources; SDK data (handled, frames, breadcrumbs, tags)
+  wins; the stream block keeps the nested-launch DedupeKey. An SDK-only
+  window dedupes on `sdk:<event_id>`.
+- **SDKs only observe.** Byte-identical output and exit code with and
+  without `--probes` (specs `run_probes_*`). Node: read the `err.stack`
+  string only after the app's own `console.error` ran (Bun prints an error
+  differently once its stack was read); never `Error.prepareStackTrace`;
+  never an `unhandledRejection` listener (it stops the crash). Python: wrap
+  `Logger.handle`, never add a handler (it disables `lastResort`).
 - **FingerprintV2** hashes the outer exception type, the top 5 in_app frames of
   the outer exception (`func@relfile`, no line numbers) and the innermost cause
   type. Service, PID, release, codemap FQNs and sampled symbols never go into
@@ -226,6 +267,8 @@ invents a hot line for an idle or diffuse profile.
 - `doctor-v1.md`: the stable presence contract.
 - `monitor-incident-v1.md`: fcheap bundles and ArtifactRefV1.
 - `app-protocol-v1.md`: `monitor serve --stdio` for Monitor Desktop.
+- `event-v1.md`: the SDK event file (`monitor.event.v1`), its transport,
+  bounds and merge rule.
 
 Keep JSON changes additive. Chalupa CI parses `investigate --json`;
 cairntrace parses `process`, `tree`, `resolve` and `profile --json`
@@ -280,7 +323,9 @@ token or listener; EOF on stdin ends it.
 | `MONITOR=1`, `MONITOR_RUN_DIR` | legacy `monitor run <spec.yml>` (glyphrun/cairntrace react to them) |
 | `MONITOR_RUN_ID`, `MONITOR_SERVICE`, `MONITOR_PROJECT`, `CHALUPA_CI_*` | read by `contextids` / `project` |
 | `MONITOR_LAUNCH_ID`, `MONITOR_LAUNCH_SERVICE`, `MONITOR_LAUNCH_ROOT` | exported ONLY by `monitor run -- <cmd>`; `LAUNCH_ROOT` is the outermost launch's ID (nested runs dedupe, siblings don't) |
+| `MONITOR_EVENTS_DIR` | exported ONLY by `monitor run -- <cmd>` (not with `--no-issues`): the launch's private SDK events directory, replacing any inherited value; SDKs fall back to the global inbox |
 | `NODE_OPTIONS`, `BUN_OPTIONS`, `PYTHONUNBUFFERED` | only ever appended to, or set when unset, at launch |
+| `PYTHONPATH` | `--probes` only: the ONE prepend. A directory holding only the bootstrap `sitecustomize.py` goes first (the first sitecustomize on the path is the only one Python runs); the bootstrap runs the one it shadowed and removes itself from `sys.path` |
 
 ### Stores
 
@@ -302,7 +347,15 @@ v0.22.1.
 
 - **Never inject into a running process.** No SIGUSR1, `sys.remote_exec`,
   ptrace or late `--inspect`. Injection happens only at launch, only through
-  the environment, and only by appending.
+  the environment, and only by appending (the one exception is `--probes`'
+  PYTHONPATH bootstrap, see the table above).
+- **SDKs never change what the app does.** No printing, no handlers that
+  alter output, no listeners that alter exit codes; output must stay
+  byte-identical (`run_probes_*` specs, `sdk/*` tests). SDK payloads never
+  carry locals, arguments, argv, env, headers or bodies.
+- **Automatic inbox drains target the default store only.** A command
+  pointed at `--store` or `MONITOR_ISSUES_STORE` must never pull the user's
+  inbox into it; MCP tools never drain.
 - **Never print inspector `ws://` URLs** in the CLI, `--json` or MCP output.
   Show the port only. The full URL may live only in the registry file, which
   is mode 0600.
@@ -370,6 +423,12 @@ v0.22.1.
 
 ## Common tasks
 
+- **Change an SDK.** Keep `sdk/node` and `sdk/python` dependency-free and
+  silent. Run `node --test sdk/node/test/sdk.test.cjs`,
+  `python3 -m unittest discover -s sdk/python/tests` and
+  `(cd sdk/go && go test -race ./...)`. A new field goes into
+  `docs/contracts/event-v1.md` and `internal/events` first (additive only).
+
 - **Add a CLI command.**
   1. Create `internal/cli/<name>.go` with `newXxxCmd()`.
   2. Register it in `root.go`.
@@ -430,6 +489,9 @@ v0.22.1.
     function-level only.
   - Python and Ruby get errors only; their hot lines need launch-time probes,
     which are the next epic.
+- **SDK auto mode (`--probes`):** Node, Bun and Python. Deno has no env
+  preload (import the SDK); Ruby is not done yet; Go is explicit only. Bun's
+  app-handled rejections are not seen. `python -S` / `-I` skip the bootstrap.
 - **Host metrics:** load averages are always 0 on macOS, because gopsutil
   does not expose them. Linux temperature is always estimated.
 

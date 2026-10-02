@@ -50,7 +50,7 @@ example, which carries `culprit.snippet`, `causes`, `impact`, `last_touched`,
 
 | Budget | Target size | Every section is present; budget controls detail |
 |---|---|---|
-| `brief` | ≤ 4 KB | `frames` capped to 5 in-app entries (the rest counted in `truncated.frames`); `causes` capped to the 2 closest to the innermost cause (the rest counted in `truncated.causes`); `last_touched.author_email` always omitted. A pathologically long culprit/snippet still over budget after those fixed caps is shrunk further (snippet lines first, then frames, then causes) until it fits — see `truncated` below. |
+| `brief` | ≤ 4 KB | `frames` capped to 5 in-app entries (the rest counted in `truncated.frames`); `causes` capped to the 2 closest to the innermost cause (the rest counted in `truncated.causes`); `event.breadcrumbs` capped to the newest 5, each at most 160 characters (the rest counted in `truncated.breadcrumbs`); `last_touched.author_email` always omitted. A pathologically long culprit/snippet still over budget after those fixed caps is shrunk further (snippet lines first, then breadcrumbs, then frames, then causes) until it fits — see `truncated` below. |
 | `standard` | ≤ 16 KB | The same fixed caps do not apply — every in-app frame (already bounded to 12 at ingest) and every cause (bounded to 3) — but the same shrink-until-it-fits backstop still runs if 16 KB is somehow exceeded. |
 | `full` | unbounded | Everything `standard` has; the backstop never runs. |
 
@@ -173,6 +173,23 @@ second call to be useful. The CLI's `monitor issue <id>` defaults to
     { "function": "loadUser", "file": "src/users.ts", "line": 42, "in_app": true }
   ],
 
+  // event is present only when one of monitor's own SDKs delivered an
+  // occurrence of this issue (monitor.event.v1); built from the newest such
+  // occurrence. Additive.
+  "event": {
+    "observed_at": "2026-09-22T10:41:07Z",
+    "kind": "uncaught", // uncaught | rejection | thread | logged | captured | message
+    "sdk": "monitor.node/0.1.0",
+    "mode": "auto", // "auto" (monitor run --probes) | "explicit" (imported)
+    "release": "1.4.0",
+    "tags": { "environment": "dev", "region": "mx" },
+    "breadcrumbs": [
+      // oldest first; brief keeps the newest 5 (the rest counted in
+      // truncated.breadcrumbs) with each message capped at 160 characters
+      { "timestamp": "2026-09-22T10:41:06Z", "category": "console", "level": "info", "message": "booting" }
+    ]
+  },
+
   "impact": {
     "status": "ok", // "ok" | "skipped"
     "callers": 3,
@@ -211,7 +228,7 @@ second call to be useful. The CLI's `monitor issue <id>` defaults to
     { "cli": "monitor issue a07e --md", "why": "paste-ready fix context for your agent" }
   ],
 
-  "truncated": {}, // e.g. {"frames": 7} when brief's cap (or the size backstop) dropped 7 frames; {"causes": N} likewise; omitted keys mean nothing was cut
+  "truncated": {}, // e.g. {"frames": 7} when brief's cap (or the size backstop) dropped 7 frames; {"causes": N} and {"breadcrumbs": N} likewise; omitted keys mean nothing was cut
   // scrubbed: a count of values a defense-in-depth scrub pass redacted from
   // this READ (title/snippet/commit subject) -- separate from, and on top
   // of, whatever internal/scrub already redacted before this text was ever
@@ -277,6 +294,9 @@ degraded incluye la recuperación".
   `{not_found: true, recovery: "..."}` — never an `error` field or a
   protocol-level failure; an ordinary, expected outcome (a healthy project
   between crashes), not a broken tool.
+- `event` (monitor's own SDKs, [`monitor.event.v1`](./event-v1)) and
+  `truncated.breadcrumbs` are additive: absent for an issue no SDK ever
+  saw. The size backstop drops the oldest breadcrumbs before any frame.
 - `suspects` and `similar` (later epics, L1/L3) will be added the same way:
   additive fields with `status: "skipped"` until they exist, never a
   breaking rename.

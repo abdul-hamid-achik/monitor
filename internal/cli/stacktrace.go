@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/abdul-hamid-achik/monitor/internal/contextids"
+	"github.com/abdul-hamid-achik/monitor/internal/events"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/project"
 	"github.com/abdul-hamid-achik/monitor/internal/scrub"
@@ -798,7 +799,7 @@ func fileSettled(f *os.File, fallback time.Time) (settled bool, mtime time.Time)
 // against each other correctly.
 func recordParsedExceptionOnStore(store *issues.Store, dev, inode uint64, generation int, blockOffset int64, block stacktrace.Block, ex *stacktrace.Exception, id project.Identity, run contextids.IDs, scrubber *scrub.Scrubber, mtime time.Time) (deduped bool, err error) {
 	stacktrace.ApplyGitRoot(ex, id.GitRoot)
-	scrubException(scrubber, ex)
+	events.ScrubException(scrubber, ex)
 
 	observedAt := ex.ObservedAt
 	if observedAt.IsZero() {
@@ -851,26 +852,6 @@ func tailBlockHeldBack(b stacktrace.Block, ex *stacktrace.Exception) bool {
 		return false
 	}
 	return b.Kind == "python" || b.Kind == "python-syntax"
-}
-
-// scrubException redacts ex's Type/Value and every frame's Function text,
-// recursively through Chained, using scrubber -- the golden rule that error
-// text is untrusted data and must be redacted before it is persisted or
-// printed (the naming ADR's "Scrub por defecto").
-// Filename/AbsPath are left alone: they are resolved, checked paths (see
-// stacktrace.ApplyGitRoot), not attacker- or user-controlled message text.
-func scrubException(scrubber *scrub.Scrubber, ex *stacktrace.Exception) {
-	if ex == nil {
-		return
-	}
-	ex.Type = scrubber.String(ex.Type)
-	ex.Value = scrubber.String(ex.Value)
-	for i := range ex.Frames {
-		ex.Frames[i].Function = scrubber.String(ex.Frames[i].Function)
-	}
-	for i := range ex.Chained {
-		scrubException(scrubber, &ex.Chained[i])
-	}
 }
 
 // checkpointLineReader is lineReader's --record sibling: it additionally

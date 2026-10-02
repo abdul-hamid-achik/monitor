@@ -165,3 +165,49 @@ func TestTruncateRunesNoOpUnderLimit(t *testing.T) {
 		t.Fatalf("truncateRunes = %q, want unchanged", got)
 	}
 }
+
+func withBreadcrumbs(c *Context, n int) *Context {
+	c.Event = &EventContext{Kind: "uncaught", SDK: "monitor.node/0.1.0", Mode: "auto", Tags: map[string]string{"region": "mx"}}
+	for i := 0; i < n; i++ {
+		c.Event.Breadcrumbs = append(c.Event.Breadcrumbs, BreadcrumbEntry{
+			Timestamp: time.Now().UTC(), Category: "console",
+			Message: fmt.Sprintf("step %02d %s", i, strings.Repeat("x", 280)),
+		})
+	}
+	return c
+}
+
+// brief keeps the newest few breadcrumbs, short, and still fits; standard
+// keeps them all.
+func TestApplyBudgetBriefKeepsTheNewestBreadcrumbs(t *testing.T) {
+	c := withBreadcrumbs(bigContext(), 30)
+	applyBudget(c, BudgetBrief)
+	data, _ := json.Marshal(c)
+	if len(data) > briefMaxBytes {
+		t.Fatalf("brief with breadcrumbs = %d bytes, want <= %d", len(data), briefMaxBytes)
+	}
+	crumbs := c.Event.Breadcrumbs
+	if len(crumbs) == 0 || len(crumbs) > briefBreadcrumbLimit {
+		t.Fatalf("brief kept %d breadcrumbs", len(crumbs))
+	}
+	if last := crumbs[len(crumbs)-1].Message; !strings.HasPrefix(last, "step 29") {
+		t.Fatalf("brief dropped the newest breadcrumb: last = %.20q", last)
+	}
+	if got := len([]rune(crumbs[0].Message)); got > briefBreadcrumbRunes {
+		t.Fatalf("breadcrumb message kept %d runes", got)
+	}
+	if c.Truncated.Breadcrumbs != 30-len(crumbs) {
+		t.Fatalf("truncated.breadcrumbs = %d, want %d", c.Truncated.Breadcrumbs, 30-len(crumbs))
+	}
+
+	// A normal-sized page (not bigContext's deliberately oversized one)
+	// has room for every breadcrumb at standard.
+	std := withBreadcrumbs(bigContext(), 30)
+	std.Culprit.Snippet.Lines = std.Culprit.Snippet.Lines[:9]
+	std.Frames, std.Causes = std.Frames[:5], std.Causes[:2]
+	std.Budget = string(BudgetStandard)
+	applyBudget(std, BudgetStandard)
+	if len(std.Event.Breadcrumbs) != 30 || std.Truncated.Breadcrumbs != 0 {
+		t.Fatalf("standard kept %d breadcrumbs (truncated %d)", len(std.Event.Breadcrumbs), std.Truncated.Breadcrumbs)
+	}
+}

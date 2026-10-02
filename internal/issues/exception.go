@@ -393,6 +393,12 @@ type RecordExceptionOptions struct {
 	Kind string
 	// Severity overrides the default (ex.Level: "fatal"|"error"|"warning").
 	Severity string
+	// Breadcrumbs carry an SDK event's recorded steps onto the occurrence
+	// (bounded at ingest; see OccurrenceInput.Breadcrumbs).
+	Breadcrumbs []Breadcrumb
+	// Tags carry an SDK event's labels onto the occurrence (bounded at
+	// ingest; see OccurrenceInput.Tags).
+	Tags map[string]string
 }
 
 // RecordException turns a parsed stacktrace.Exception into a durable issue
@@ -501,6 +507,8 @@ func recordExceptionInput(ex stacktrace.Exception, id project.Identity, run cont
 		TreeHash:           opts.TreeHash,
 		EvidenceRefs:       opts.EvidenceRefs,
 		Metadata:           opts.Metadata,
+		Breadcrumbs:        opts.Breadcrumbs,
+		Tags:               opts.Tags,
 		Run:                runContextFromIDs(run),
 		Evidence:           opts.Evidence,
 		Count:              opts.Count,

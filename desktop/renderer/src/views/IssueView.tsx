@@ -225,6 +225,41 @@ export function IssueView({ id }: { id: string }) {
               </div>
             </section>
 
+            {ctx.event ? (
+              <section className="card">
+                <div className="card-head">
+                  <h2 className="card-title">Event</h2>
+                  <span className="faint">
+                    {[ctx.event.kind, ctx.event.sdk, ctx.event.mode, ctx.event.release ? `release ${ctx.event.release}` : ""].filter(Boolean).join(" · ")}
+                  </span>
+                  {ctx.truncated.breadcrumbs ? <span className="faint">{ctx.truncated.breadcrumbs} earlier steps cut</span> : null}
+                </div>
+                <div className="card-body">
+                  {ctx.event.tags && Object.keys(ctx.event.tags).length ? (
+                    <div className="mono untrusted" style={{ marginBottom: 8 }}>
+                      {Object.entries(ctx.event.tags)
+                        .sort(([a], [b]) => a.localeCompare(b))
+                        .map(([k, v]) => `${k}=${v}`)
+                        .join("  ")}
+                    </div>
+                  ) : null}
+                  {ctx.event.breadcrumbs?.length ? (
+                    <ul className="frame-list">
+                      {ctx.event.breadcrumbs.map((b, i) => (
+                        <li key={i}>
+                          <span className="faint">{new Date(b.timestamp).toLocaleTimeString()}</span>
+                          <span className="muted crumb-cat">{b.category || ""}</span>
+                          <span className="untrusted crumb-msg">{b.message}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="muted">No steps recorded before this event.</div>
+                  )}
+                </div>
+              </section>
+            ) : null}
+
             <section className="card">
               <div className="card-head">
                 <h2 className="card-title">Activity</h2>

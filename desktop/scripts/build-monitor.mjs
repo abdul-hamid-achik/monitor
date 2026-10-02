@@ -15,7 +15,7 @@ const version = JSON.parse(readFileSync(join(desktop, "package.json"), "utf8")).
 
 function gitDescribe() {
   try {
-    return execFileSync("git", ["describe", "--tags", "--always", "--dirty"], { cwd: repo, encoding: "utf8" }).trim();
+    return execFileSync("git", ["describe", "--tags", "--match", "v[0-9]*", "--always", "--dirty"], { cwd: repo, encoding: "utf8" }).trim();
   } catch {
     return `desktop-${version}`;
   }
@@ -34,6 +34,9 @@ function build(goarch, out) {
 
 mkdirSync(outDir, { recursive: true });
 const target = join(outDir, "monitor");
+// go build -o refuses to overwrite a file it does not recognize as its own
+// output, and a universal (lipo) binary from an earlier release build is one.
+rmSync(target, { force: true });
 if (universal && process.platform === "darwin") {
   const arm = join(outDir, "monitor-arm64");
   const amd = join(outDir, "monitor-amd64");

@@ -12,6 +12,7 @@ traces to stderr every few seconds, and crashes with an uncaught error after
 | `ruby/` | Ruby 3.x | `heavy_stringify` | `flaky_parse` (caught), uncaught `RuntimeError` |
 | `go-pprof/` | Go, exposes `net/http/pprof` on 127.0.0.1:6069 | `main.heavyStringify` (`json.Marshal`) | caught errors, `panic` |
 | `go-plain/` | Go, no pprof | `main.heavyStringify` | caught errors, `panic` |
+| `sdk/` | Node (`app.js`), Python (`app.py`) | — | errors only `monitor run --probes` can see (a rejection logged to a file, `logger.exception` into a file), plus a crash and a printed error it merges with stderr; `APP_LOG_DIR` picks the log directory |
 
 The Go examples are separate modules (own `go.mod`) so they stay out of
 monitor's own build.

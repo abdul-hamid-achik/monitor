@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "monitorcli"
+version = "0.1.0"
+description = "Monitor's own error SDK for Python: zero dependencies, local-first, writes monitor.event.v1 files for the monitor CLI."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Debuggers",
+]
+
+[project.urls]
+Homepage = "https://monitorcli.dev/guide/sdks"
+Source = "https://github.com/abdul-hamid-achik/monitor/tree/main/sdk/python"
+
+[tool.setuptools]
+packages = ["monitorcli"]

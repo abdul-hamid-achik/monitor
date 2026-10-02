@@ -19,10 +19,10 @@ The subcommands group into four purposes:
 - **Act** — change something: [`kill`](#kill).
 - **Diagnose** — capture and analyze: [`analyze`](#analyze), [`profile`](#profile),
   [`hot`](#hot), [`investigate`](#investigate), [`stash`](#stash), [`incidents`](#incidents),
-  [`issues`](#issues), [`issue`](#issue), [`logs`](#logs), [`history`](#history), [`baseline`](#baseline),
+  [`issues`](#issues), [`issue`](#issue), [`events`](#events), [`logs`](#logs), [`history`](#history), [`baseline`](#baseline),
   [`diff`](#diff).
 - **Ecosystem & runtime** — talk to sibling tools and the running TUI:
-  [`config`](#config), [`doctor`](#doctor), [`run`](#run), [`reload`](#reload),
+  [`config`](#config), [`doctor`](#doctor), [`run`](#run), [`sdk`](#sdk), [`reload`](#reload),
   [`mcp`](#mcp), [`vault`](#vault), [`studio`](#studio).
 
 ## Global flags
@@ -783,6 +783,32 @@ docker compose logs --timestamps --no-log-prefix api > api.log
 monitor stacktrace parse --record --file api.log --line-timestamps --path-map /app="$PWD"
 ```
 
+### `events`
+
+Show and drain the inbox where monitor's own [SDKs](./sdks) leave
+[`monitor.event.v1`](/contracts/event-v1) files when no `monitor run --`
+launch gave them a directory (`$XDG_STATE_HOME/monitor/events/inbox`).
+`monitor issues` and `monitor issue` drain it into the default issue store
+before they read, and `monitor serve` drains it while it runs (not with
+`--read-only`). A command pointed at another store never touches it.
+
+| Command | Effect |
+|---|---|
+| `monitor events` | Print the inbox path and how many events wait in it. |
+| `monitor events drain` | Record every pending event into the store, oldest first, and delete each file once stored. Unrecordable files move to `.rejected/`. |
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--dir` | the inbox | Events directory to read. |
+| `--store` | `$MONITOR_ISSUES_STORE` or XDG data dir | Issue store to record into (`drain`). |
+| `--limit` | `500` | Most events one drain records (`drain`). |
+| `--json` | `false` | Machine-readable output. |
+
+```bash
+monitor events
+monitor events drain --json
+```
+
 ### `logs`
 
 Manage captured process logs in the durable local veclite store at
@@ -1167,17 +1193,40 @@ One verb, two commands, distinguished by whether a `--` is present:
   exit code becomes monitor's. `--name` registers the launch for
   `monitor hot <service>`, `--inspect` opens a debugger inspector for live
   Node/Deno hot lines, and `--profile` writes an exit-time `.cpuprofile`
-  for Node/Bun. `--redact-env` adds environment variable names whose exact
-  values must be redacted from recorded text.
+  for Node/Bun. `--probes` loads monitor's own [SDKs](./sdks) into the
+  command at launch (Node, Bun, Python; by environment only), so errors the
+  app catches and logs, rejections, dying threads and breadcrumbs are
+  recorded too. Output and exit code stay byte-identical. `--redact-env`
+  adds environment variable names whose exact values must be redacted from
+  recorded text.
+
+  `run --` exports `MONITOR_EVENTS_DIR`, this launch's private directory for
+  SDK events, so an app that imports an SDK reports to the launch with or
+  without `--probes`. The same crash seen by an SDK and on stderr is
+  recorded once.
 
   ```bash
   monitor run -- node server.js
+  monitor run --probes -- python app.py
   monitor run --name api --inspect -- yarn start
   monitor stacktrace parse --record --file app.log   # replay a log instead
   ```
 
 See [Your First Issue](./first-issue) for the full journey and
 [Runtimes Matrix](./runtimes) for per-runtime support.
+
+### `sdk`
+
+Print where the [SDKs](./sdks) bundled in this binary are. They are written to
+`$XDG_STATE_HOME/monitor/sdk/<hash>/` once per build. `monitor sdk path
+<node|python>` prints one directory, for installing an SDK before it is
+published.
+
+```bash
+monitor sdk
+npm install "$(monitor sdk path node)"
+pip install "$(monitor sdk path python)"
+```
 
 ### `reload`
 

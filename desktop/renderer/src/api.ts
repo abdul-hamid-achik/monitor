@@ -163,6 +163,16 @@ export interface IssueContext {
   };
   causes: { type: string; culprit?: { function?: string; file?: string; line?: number } }[];
   frames: { function?: string; file?: string; line?: number; in_app: boolean }[];
+  /** What monitor's own SDKs recorded with the newest occurrence they saw (monitor.event.v1). */
+  event?: {
+    observed_at: string;
+    kind?: string;
+    sdk?: string;
+    mode?: string;
+    release?: string;
+    tags?: Record<string, string>;
+    breadcrumbs?: { timestamp: string; category?: string; level?: string; message: string }[];
+  };
   impact: {
     status: string;
     detail?: string;
@@ -185,7 +195,7 @@ export interface IssueContext {
   };
   degraded: { component: string; state: string; detail?: string; recovery?: string }[];
   next: { cli?: string; mcp?: string; why: string }[];
-  truncated: { frames?: number; causes?: number };
+  truncated: { frames?: number; causes?: number; breadcrumbs?: number };
   privacy: Privacy;
 }
 
