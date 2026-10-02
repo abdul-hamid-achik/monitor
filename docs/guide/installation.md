@@ -106,17 +106,14 @@ If you use [Task](https://taskfile.dev/), create `bin/` first, then
 `bin/monitor` path. You can also run a source build without installing it by
 using `./bin/monitor`.
 
-## Install Monitor Desktop (preview)
+## Monitor Desktop (coming soon)
 
-[Monitor Desktop](/guide/desktop) is a macOS app over the same binary: issues,
-culprit lines, hot lines and host metrics in a window, for this Mac, SSH hosts
-or Chalupa droplets. Its first signed release is not out yet; the
-[Desktop guide](/guide/desktop#install) shows how to build it from source. Once
-released, download `Monitor Desktop-<version>-universal.dmg` from the
-[Monitor Desktop releases](https://github.com/abdul-hamid-achik/monitor/releases?q=desktop-v)
-and drag it to Applications. It will be signed, notarized and universal, and it
-needs macOS 12 or later. The app bundles its own `monitor`, so the CLI is
-optional. Remote hosts need Monitor 2.2 or later for `monitor serve`.
+[Monitor Desktop](/guide/desktop) is a macOS app over the same binary. It shows
+issues, culprit lines, hot lines and host metrics in a window, for this Mac,
+SSH hosts or Chalupa droplets. A signed, notarized, universal download is
+**coming soon**. Until then, the
+[Desktop guide](/guide/desktop#build-from-source) shows how to build it from
+source. Remote hosts need Monitor 2.2 or later for `monitor serve`.
 
 ## Platform capabilities
 

@@ -11,10 +11,10 @@ Every answer comes from `monitor` itself. The app spawns
 Nothing listens on a port, and no account is involved. Issue data is never
 uploaded anywhere.
 
-::: tip Preview
-Monitor Desktop is a preview. Its first signed release (`desktop-v0.1.0`) is not
-out yet; until then, [build it from source](#install). The CLI, TUI and MCP
-server stay the primary surfaces, and the app is one more client of the same
+::: tip Download coming soon
+A signed, notarized download of Monitor Desktop is **coming soon**. Until then
+you can [build it from source](#build-from-source). The CLI, TUI and MCP server
+stay the primary surfaces, and the app is one more client of the same
 contracts.
 :::
 
@@ -22,17 +22,19 @@ contracts.
 
 ## Install
 
-Once it is released, download `Monitor Desktop-<version>-universal.dmg` from
-the [Monitor Desktop releases](https://github.com/abdul-hamid-achik/monitor/releases?q=desktop-v)
-and drag it to Applications. The build is universal (Apple silicon and Intel),
-signed with a Developer ID and notarized, and it needs macOS 12 or later.
+**Download: coming soon.** Each release will publish a universal
+`Monitor Desktop-<version>-universal.dmg` for Apple silicon and Intel. It will
+be signed with a Developer ID and notarized, and it needs macOS 12 or later.
+Drag it to Applications.
 
 The app bundles its own `monitor` binary, so it works without the CLI
 installed. If you also have the CLI from Homebrew, [Doctor](#views) shows both
 binaries. **Settings → Local monitor binary** can point the app at a
 different one.
 
-Until then, or to run the latest `main`, build it from source:
+### Build from source
+
+Until the download is out, or to run the latest `main`:
 
 ```bash
 git clone https://github.com/abdul-hamid-achik/monitor && cd monitor
