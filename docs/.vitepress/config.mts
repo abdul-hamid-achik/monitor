@@ -156,6 +156,7 @@ export default defineConfig({
             { text: 'Doctor v1', link: '/contracts/doctor-v1' },
             { text: 'Issue Context v1 (Draft)', link: '/contracts/issue-context-v1' },
             { text: 'Line Heatmap v1 (Draft)', link: '/contracts/line-heatmap-v1' },
+            { text: 'App Protocol v1 (Draft)', link: '/contracts/app-protocol-v1' },
           ],
         },
       ],
