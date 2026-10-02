@@ -1,0 +1,126 @@
+name: SDK release
+
+# Publishes monitor's own SDKs when a `sdk/v<version>` tag is pushed:
+#   - @thelacanians/monitor (sdk/node) to npm;
+#   - monitorcli (sdk/python) to PyPI.
+# The Go SDK needs no registry: its own `sdk/go/v<version>` tag is the
+# release (go get github.com/abdul-hamid-achik/monitor/sdk/go@v<version>).
+#
+# Both registries are reached through trusted publishing (GitHub Actions
+# OIDC), so no long-lived token lives in this repository:
+#   - PyPI: a trusted publisher for this workflow, environment "pypi"
+#     (a "pending" one creates the project on the first publish);
+#   - npm: a trusted publisher for this workflow on the package's settings.
+#     npm only offers that once the package exists, so the FIRST publish
+#     uses the NPM_TOKEN secret; remove the secret after configuring the
+#     trusted publisher. npm trusted publishing needs npm >= 11.5.1.
+on:
+  push:
+    tags:
+      - "sdk/v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: test and version check
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Require the tag to match both packages
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#sdk/v}"
+          node_version="$(node -p 'require("./sdk/node/package.json").version')"
+          py_version="$(python3 -c 'import tomllib; print(tomllib.load(open("sdk/python/pyproject.toml","rb"))["project"]["version"])')"
+          sdk_version="$(sed -n "s/^__version__ = \"\(.*\)\"$/\1/p" sdk/python/monitorcli/__init__.py)"
+          node_const="$(sed -n "s/^  const VERSION = '\(.*\)';$/\1/p" sdk/node/index.cjs)"
+          for v in "$node_version" "$py_version" "$sdk_version" "$node_const"; do
+            if [ "$v" != "$tag" ]; then
+              echo "tag $GITHUB_REF_NAME does not match every SDK version (node $node_version/$node_const, python $py_version/$sdk_version)" >&2
+              exit 1
+            fi
+          done
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Node SDK tests
+        run: node --test sdk/node/test/sdk.test.cjs
+
+      - name: Python SDK tests
+        run: python3 -m unittest discover -s sdk/python/tests -v
+
+  npm:
+    name: npm (@thelacanians/monitor)
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+
+      - name: Install OIDC-capable npm
+        run: |
+          npm install --global npm@11.6.2
+          test "$(npm --version)" = "11.6.2"
+
+      - name: Publish
+        working-directory: sdk/node
+        run: |
+          if [ -n "$NODE_AUTH_TOKEN" ]; then
+            echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > .npmrc
+          fi
+          npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  pypi:
+    name: PyPI (monitorcli)
+    needs: check
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/monitorcli/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Build sdist and wheel
+        working-directory: sdk/python
+        run: |
+          python3 -m pip install --upgrade build twine
+          python3 -m build
+          python3 -m twine check dist/*
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: sdk/python/dist

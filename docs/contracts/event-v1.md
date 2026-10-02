@@ -1,6 +1,6 @@
 # `monitor.event.v1`: the SDK event (Draft)
 
-Monitor's own SDKs (`@monitorcli/sdk` for Node and Bun, `monitorcli` for
+Monitor's own SDKs (`@thelacanians/monitor` for Node and Bun, `monitorcli` for
 Python, `github.com/abdul-hamid-achik/monitor/sdk/go`) report errors as
 `monitor.event.v1` documents. Anything else may write them too: the format is
 small, and the CLI validates every field it reads.

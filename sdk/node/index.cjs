@@ -4,7 +4,7 @@
 // Two ways in:
 //   - auto: `monitor run --probes -- <cmd>` preloads auto.cjs through
 //     NODE_OPTIONS/BUN_OPTIONS. Nothing to install, no code to change.
-//   - explicit: `require('@monitorcli/sdk')` (or import) and call init(),
+//   - explicit: `require('@thelacanians/monitor')` (or import) and call init(),
 //     captureException(), captureMessage(), addBreadcrumb(), setTag().
 //
 // Either way it only observes: it never prints, never changes the app's

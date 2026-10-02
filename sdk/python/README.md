@@ -50,4 +50,4 @@ events drain` read.
 
 Monitor redacts secrets, emails and card numbers from every event before it
 stores one. At most 50 events are written per 10 seconds; the rest are
-dropped. Python 3.8 or newer.
+dropped. Python 3.9 or newer.

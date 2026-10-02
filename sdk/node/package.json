@@ -1,5 +1,5 @@
 {
-  "name": "@monitorcli/sdk",
+  "name": "@thelacanians/monitor",
   "version": "0.1.0",
   "description": "Monitor's own error SDK for Node, Bun and Deno: zero dependencies, local-first, writes monitor.event.v1 files for the monitor CLI.",
   "license": "MIT",

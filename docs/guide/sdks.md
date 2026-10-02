@@ -94,7 +94,7 @@ The packages are not on npm or PyPI yet. Install them from the copies that
 ship in the binary:
 
 ```sh
-npm install "$(monitor sdk path node)"      # @monitorcli/sdk
+npm install "$(monitor sdk path node)"      # @thelacanians/monitor
 pip install "$(monitor sdk path python)"    # monitorcli
 go get github.com/abdul-hamid-achik/monitor/sdk/go
 ```
@@ -102,7 +102,7 @@ go get github.com/abdul-hamid-achik/monitor/sdk/go
 ### Node, Bun, Deno
 
 ```js
-const monitor = require('@monitorcli/sdk'); // or: import * as monitor from '@monitorcli/sdk'
+const monitor = require('@thelacanians/monitor'); // or: import * as monitor from '@thelacanians/monitor'
 
 monitor.init({ service: 'api', release: process.env.GIT_SHA, environment: 'dev' });
 monitor.setTag('region', 'mx');
@@ -138,7 +138,7 @@ except PaymentError:
 monitorcli.capture_message("cache rebuilt")
 ```
 
-Python 3.8 or newer.
+Python 3.9 or newer.
 
 ### Go
 

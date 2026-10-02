@@ -17,7 +17,7 @@ follows [Semantic Versioning](https://semver.org/).
     and, for Python, a `PYTHONPATH` directory holding only a bootstrap
     `sitecustomize.py` (it runs the one it shadows). The app's output and
     exit code stay byte-identical, and the specs check that.
-  - Explicit SDKs for more context: `@monitorcli/sdk` (Node, Bun, Deno),
+  - Explicit SDKs for more context: `@thelacanians/monitor` (Node, Bun, Deno),
     `monitorcli` (Python) and `github.com/abdul-hamid-achik/monitor/sdk/go`.
     Each offers `init`, `captureException`/`CaptureError`, `captureMessage`,
     breadcrumbs, tags, a `beforeSend` hook and Go's `Recover`. All have zero

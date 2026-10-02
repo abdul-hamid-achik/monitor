@@ -1,4 +1,4 @@
-# @monitorcli/sdk
+# @thelacanians/monitor
 
 Monitor's own error SDK for Node, Bun and Deno. It has zero dependencies, runs
 locally, and never talks to a server. Every error becomes one
@@ -27,7 +27,7 @@ reads arguments, environment variables, headers or bodies.
 ## In code, for more context
 
 ```js
-const monitor = require('@monitorcli/sdk'); // or: import * as monitor from '@monitorcli/sdk'
+const monitor = require('@thelacanians/monitor'); // or: import * as monitor from '@thelacanians/monitor'
 
 monitor.init({ service: 'api', release: process.env.GIT_SHA, environment: 'dev' });
 monitor.setTag('region', 'mx');

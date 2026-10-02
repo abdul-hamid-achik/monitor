@@ -1,4 +1,4 @@
-// Types for @monitorcli/sdk (monitor.event.v1 producer).
+// Types for @thelacanians/monitor (monitor.event.v1 producer).
 
 export type Level = 'fatal' | 'error' | 'warning' | 'info';
 

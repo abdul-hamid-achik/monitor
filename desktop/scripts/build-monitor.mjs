@@ -15,7 +15,7 @@ const version = JSON.parse(readFileSync(join(desktop, "package.json"), "utf8")).
 
 function gitDescribe() {
   try {
-    return execFileSync("git", ["describe", "--tags", "--always", "--dirty"], { cwd: repo, encoding: "utf8" }).trim();
+    return execFileSync("git", ["describe", "--tags", "--match", "v[0-9]*", "--always", "--dirty"], { cwd: repo, encoding: "utf8" }).trim();
   } catch {
     return `desktop-${version}`;
   }
