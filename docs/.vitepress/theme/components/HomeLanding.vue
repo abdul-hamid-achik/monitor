@@ -239,7 +239,7 @@ BA42  12      src/cart.js:3</pre>
       </div>
       <p class="more">
         <a :href="withBase('/guide/desktop')">Desktop guide →</a>
-        <a href="https://github.com/abdul-hamid-achik/monitor/releases?q=desktop-v">Download for macOS →</a>
+        <a :href="withBase('/guide/desktop#install')">Install →</a>
       </p>
     </section>
     <!-- ── Agents ───────────────────────────────────────────────────── -->
