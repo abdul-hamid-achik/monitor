@@ -58,3 +58,9 @@ docs/.vitepress/dist/
 /monitor
 .vercel
 .env*
+
+# Monitor Desktop build output
+desktop/dist/
+desktop/release/
+desktop/captures/
+desktop/bin/

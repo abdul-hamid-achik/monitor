@@ -73,7 +73,7 @@ views to enable.
 | `issues.get` | `id` (an id, a short id or prefix, or `"latest"`), `budget` (`brief`, `standard`, or `full`; default `full`), `markdown`, and for `"latest"`: `project`, `service`, `kind` | `{context: monitor.issue_context.v1, root, markdown?}` or `{not_found: true, recovery}`. `root` is the checkout the issue was recorded under, so `root + culprit.file` is the file to open. |
 | `issues.occurrences` | `id`, `limit` (default 50, max 500) | `{items: Occurrence[], total, truncated, privacy}`, newest first |
 | `issues.histogram` | `ids[]` (empty means every issue with activity), `since` (a duration, default `24h`, max 30 days), `buckets` (default 24, max 240) | `{start, bucket_seconds, buckets, series: {id: number[]}, note}`. Every series has exactly `buckets` entries, oldest first. Counts cover retained occurrences only. |
-| `projects.list` | none | `{projects: [{project, services[], open, total, last_seen}]}` |
+| `projects.list` | none | `{projects: [{project, services[], open, total, last_seen, root?}]}`. `root` is the checkout where the project's latest issue was recorded. |
 | `issues.set_status` *(mutating)* | `ids[]`, `status` (`open`, `resolved`, or `ignored`) | `{updated: Issue[], failed: [{id, error}]}`. One bad id never aborts the rest. |
 | `host.snapshot` | `process_limit`, `process_filter` | A host tick: `{snapshot: CompactSnapshot, per_core_usage[], load_avg[3], alerts?}` |
 | `processes.list` | `sort` (`cpu`, `memory`, `pid`, or `name`), `limit`, `filter`, `include_system` | The `monitor processes --json` envelope |
@@ -83,7 +83,7 @@ views to enable.
 | `launches.list` | none | `{launches: [{launch_id, name, project, pid, started_at, scan, alive, inspector_ports[]}]}` |
 | `logs.search` | `query`, `levels[]`, `process`, `pid`, `since_seconds`, `limit` (default 200, max 1000) | `{entries: [{timestamp, pid, process, level, message, raw}], privacy}` |
 | `incidents.list` | none | `{stashes[], pending[], stash_error?, pending_error?}` |
-| `doctor` | none | The `monitor doctor --json` report (see [Doctor v1](./doctor-v1)) |
+| `doctor` | `dir` (absolute, optional) | The `monitor doctor --json` report (see [Doctor v1](./doctor-v1)). If `dir` is set, `code_intel` is probed against that checkout instead of the server's working directory. |
 | `subscribe` | `topics[]`, `host: {interval_ms, process_limit, process_filter}` | `{subscribed: [...]}` |
 | `unsubscribe` | `topics[]` | `{subscribed: [...]}` |
 

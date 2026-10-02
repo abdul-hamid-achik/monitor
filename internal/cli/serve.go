@@ -112,9 +112,7 @@ func newAppService() *appserver.Service {
 		Launches:  appLaunches,
 		Logs:      appLogs,
 		Incidents: appIncidents,
-		Doctor: func(ctx context.Context) (any, error) {
-			return buildDoctorReport(ctx), nil
-		},
+		Doctor:    appDoctor,
 	}
 }
 
@@ -426,8 +424,13 @@ func appProjects(_ context.Context) (appserver.ProjectsResult, error) {
 		if issue.Status == issues.StatusOpen {
 			sum.Open++
 		}
-		if issue.LastSeen.After(sum.LastSeen) {
-			sum.LastSeen = issue.LastSeen
+		if issue.LastSeen.After(sum.LastSeen) || sum.Root == "" {
+			if issue.LastSeen.After(sum.LastSeen) {
+				sum.LastSeen = issue.LastSeen
+			}
+			if root := explain.RecordedRoot(issue); root != "" {
+				sum.Root = root
+			}
 		}
 		if issue.Service != "" && !services[name][issue.Service] {
 			services[name][issue.Service] = true
@@ -794,6 +797,23 @@ func appLogs(_ context.Context, p appserver.LogsParams) (appserver.LogsResult, e
 	}
 	result.Privacy.Scrubbed = s.Count()
 	return result, nil
+}
+
+// appDoctor is `monitor doctor --json`, with code_intel probed against the
+// project checkout the client names (absolute, existing) rather than the
+// server's own working directory.
+func appDoctor(ctx context.Context, p appserver.DoctorParams) (any, error) {
+	dir := strings.TrimSpace(p.Dir)
+	if dir == "" {
+		return buildDoctorReport(ctx), nil
+	}
+	if !filepath.IsAbs(dir) {
+		return nil, invalidParams("dir must be absolute, got %q", p.Dir)
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return nil, appserver.NewError(appserver.CodeNotFound, "no such directory on this host: "+dir, nil)
+	}
+	return buildDoctorReportIn(ctx, dir), nil
 }
 
 // appIncidents lists archived incident stashes (through fcheap) and the

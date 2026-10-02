@@ -197,8 +197,12 @@ loop:
 			}()
 		}
 	}
-	cancel()
+	// EOF is a client saying "no more requests", not "abandon the ones in
+	// flight": they finish under a live context and their answers are
+	// written (a 5 s profile capture piped in by a script must not be cut
+	// short). A signal cancels ctx itself, which does stop them.
 	inflight.Wait()
+	cancel()
 	s.stopAllSubscriptions()
 	var err error
 	select {

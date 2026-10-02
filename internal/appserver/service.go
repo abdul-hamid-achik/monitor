@@ -53,7 +53,13 @@ type Service struct {
 	Launches  func(ctx context.Context) (LaunchesResult, error)
 	Logs      func(ctx context.Context, p LogsParams) (LogsResult, error)
 	Incidents func(ctx context.Context) (any, error)
-	Doctor    func(ctx context.Context) (any, error)
+	Doctor    func(ctx context.Context, p DoctorParams) (any, error)
+}
+
+// DoctorParams points code_intel at a project's checkout (Dir, absolute);
+// empty means the server's working directory, like `monitor doctor`.
+type DoctorParams struct {
+	Dir string `json:"dir,omitempty"`
 }
 
 // Privacy marks every payload that carries process text. TextIsUntrusted is
@@ -145,13 +151,16 @@ type HistogramResult struct {
 	Note          string             `json:"note"`
 }
 
-// ProjectSummary is one projects.list row.
+// ProjectSummary is one projects.list row. Root is the checkout the
+// project's most recent issue was recorded under ("" when no issue carries
+// an absolute path), so a client can ask doctor about that checkout.
 type ProjectSummary struct {
 	Project  string    `json:"project"`
 	Services []string  `json:"services"`
 	Open     int       `json:"open"`
 	Total    int       `json:"total"`
 	LastSeen time.Time `json:"last_seen"`
+	Root     string    `json:"root,omitempty"`
 }
 
 // ProjectsResult is projects.list's answer, most recently active first.

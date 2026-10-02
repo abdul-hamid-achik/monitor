@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/abdul-hamid-achik/monitor/internal/collector"
+	"github.com/abdul-hamid-achik/monitor/internal/devrun"
 	"github.com/abdul-hamid-achik/monitor/internal/issues"
 	"github.com/abdul-hamid-achik/monitor/internal/procbind"
 	"github.com/abdul-hamid-achik/monitor/internal/profiler"
@@ -307,12 +308,21 @@ func captureLiveHeat(ctx context.Context, pid int32, opts liveHeatOptions) (*liv
 			"use `monitor profile %d -t heap` (function-level only) instead", pid, opts.TypeLabel, binding.Runtime, pid)
 	}
 
+	// A Node/Deno process launched by `monitor run --inspect` opened its
+	// inspector through NODE_OPTIONS, which argv-based detection cannot
+	// see; the launch registry recorded which pid owns which port, so a
+	// raw pid finds it the same way `monitor hot <service>` does.
+	inspectAddr := ""
+	if binding.InspectAddr == "" && isJSRuntime(binding.Runtime) {
+		inspectAddr, _ = registeredInspectorFor(binding.PID)
+	}
+
 	// allowInspectorHeap is always false: the guard above already refused
 	// every case that flag exists for (an explicit heap/goroutine request
 	// against a JS runtime), so `hot` itself never needs a CDP heap
 	// snapshot — only monitor_profile_capture type:heap (an explicit,
 	// caller-requested capture with its OWN function-level rendering) does.
-	prof, method, step := captureRuntimeAwareProfile(ctx, binding.PID, &binding, heatTypeToProfileType(heatType), opts.PprofAddr, "", opts.AddrExplicit, opts.Duration, false)
+	prof, method, step := captureRuntimeAwareProfile(ctx, binding.PID, &binding, heatTypeToProfileType(heatType), opts.PprofAddr, inspectAddr, opts.AddrExplicit, opts.Duration, false)
 	sampleFallback := false
 	if step.Status != stepOK {
 		// E3.2/AC-1's darwin `sample` fallback: any non-JS leaf (Python,
@@ -387,6 +397,22 @@ func captureLiveHeat(ctx context.Context, pid int32, opts liveHeatOptions) (*liv
 		live.Heatmap.Warnings = append(live.Heatmap.Warnings, warn)
 	}
 	return live, nil
+}
+
+// registeredInspectorFor finds the inspector a live `monitor run --inspect`
+// launch registered for leafPID, across every project's registry (a raw pid
+// carries no project). Only a port is ever read back — 127.0.0.1:<port> —
+// never the registry's ws:// URL.
+func registeredInspectorFor(leafPID int32) (string, bool) {
+	for _, l := range devrun.ListRegistryEntries() {
+		if !l.Alive {
+			continue
+		}
+		if addr, ok := registeredInspectAddr(l.Entry, leafPID); ok {
+			return addr, true
+		}
+	}
+	return "", false
 }
 
 // isJSRuntime reports whether r is one of the runtimes captureRuntimeAwareProfile

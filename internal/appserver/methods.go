@@ -153,8 +153,12 @@ func (s *Server) buildMethods() map[string]method {
 	add("incidents.list", svc.Incidents != nil, method{family: "incidents", call: func(ctx context.Context, _ json.RawMessage) (any, error) {
 		return svc.Incidents(ctx)
 	}})
-	add("doctor", svc.Doctor != nil, method{family: "doctor", call: func(ctx context.Context, _ json.RawMessage) (any, error) {
-		return svc.Doctor(ctx)
+	add("doctor", svc.Doctor != nil, method{family: "doctor", call: func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p DoctorParams
+		if err := decode(raw, &p); err != nil {
+			return nil, err
+		}
+		return svc.Doctor(ctx, p)
 	}})
 	return m
 }

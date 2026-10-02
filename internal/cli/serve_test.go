@@ -187,8 +187,11 @@ func TestServeAppServiceEndToEnd(t *testing.T) {
 	}
 
 	projects := c.call("projects.list", nil)["projects"].([]any)
-	if len(projects) != 1 || projects[0].(map[string]any)["project"] != "shop" {
-		t.Fatalf("projects = %v", projects)
+	if len(projects) != 1 || projects[0].(map[string]any)["project"] != "shop" || projects[0].(map[string]any)["root"] != "/repo" {
+		t.Fatalf("projects = %v, want shop recorded under /repo", projects)
+	}
+	if resp := c.callRaw("doctor", map[string]any{"dir": "relative/dir"}); resp["error"].(map[string]any)["code"].(float64) != appserver.CodeInvalidParams {
+		t.Fatalf("doctor with a relative dir = %v", resp)
 	}
 
 	// Live events: subscribe, then a new issue and a regression.

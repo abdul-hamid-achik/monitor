@@ -1,0 +1,97 @@
+{
+  "name": "monitor-desktop",
+  "productName": "Monitor Desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Monitor Desktop \u2014 a local-first error tracker and host monitor over `monitor serve --stdio`, locally or over SSH",
+  "license": "MIT",
+  "author": "Abdul Hamid Achik",
+  "homepage": "https://monitorcli.dev",
+  "main": "main/main.js",
+  "scripts": {
+    "build:monitor": "bun scripts/build-monitor.mjs",
+    "build:renderer": "vite build",
+    "dev": "bun run build:monitor && vite build && electron .",
+    "start": "electron .",
+    "smoke": "electron . --smoke",
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.main.json --noEmit",
+    "dist": "bun run build:monitor && vite build && electron-builder --mac --dir",
+    "dist:release": "bun run build:monitor --universal && vite build && electron-builder --mac --universal --publish never",
+    "capture": "vite build && electron . --capture captures"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@fontsource-variable/geist": "5.3.0",
+    "@fontsource-variable/geist-mono": "5.3.0",
+    "@types/node": "^26.6.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.2"
+  },
+  "trustedDependencies": [
+    "electron"
+  ],
+  "build": {
+    "appId": "dev.monitorcli.desktop",
+    "productName": "Monitor Desktop",
+    "copyright": "MIT \u00a9 Abdul Hamid Achik",
+    "directories": {
+      "buildResources": "build",
+      "output": "release"
+    },
+    "files": [
+      "main/**/*",
+      "preload/**/*",
+      "dist/renderer/**/*",
+      "!dist/renderer/**/*.map",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "bin/monitor",
+        "to": "bin/monitor"
+      }
+    ],
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.png",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "minimumSystemVersion": "12.0"
+    },
+    "dmg": {
+      "title": "Monitor Desktop ${version}"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development",
+      "icon": "build/icon.png"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "abdul-hamid-achik",
+        "repo": "monitor",
+        "releaseType": "draft",
+        "tagNamePrefix": "desktop-v"
+      }
+    ]
+  }
+}

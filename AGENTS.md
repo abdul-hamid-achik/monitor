@@ -49,6 +49,9 @@ Linux, built for people and for agents. The binary does two jobs:
 - A PR is done when build, vet, gofmt, `go test -race` and `scripts/specs.sh`
   are all green. The CI matrix is ubuntu plus macOS for tests, and ubuntu with
   node, deno, bun, ruby and python provisioned for specs.
+- A PR touching `desktop/` also needs `bun run typecheck`, `bun test` and
+  `bun run smoke` (in `desktop/`; `.github/workflows/desktop.yml` runs them on
+  macOS).
 
 ---
 
@@ -150,6 +153,9 @@ internal/
                   collector/kill/config/history/temperature read-only.
   widgets/        sparklines, gauges, CodeFrame (line-heatmap renderer)
 
+desktop/            Monitor Desktop: Electron over `monitor serve --stdio`
+                    (main/ connections, ssh, launches, IPC; preload/ the
+                    bridge; renderer/ React views). Bun only. See its README.
 examples/polyglot/  js (node/bun/deno), python, ruby, go-pprof, go-plain,
                     go-crash, go-zap-stdout workloads; WORKLOAD_SECONDS
                     shortens them

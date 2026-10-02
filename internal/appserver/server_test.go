@@ -232,7 +232,7 @@ func TestServiceErrorsKeepTheirCode(t *testing.T) {
 
 func TestPanicBecomesInternalError(t *testing.T) {
 	s := startSession(t, &Service{
-		Doctor: func(context.Context) (any, error) { panic("boom") },
+		Doctor: func(context.Context, DoctorParams) (any, error) { panic("boom") },
 	}, Options{})
 	s.notification("hello")
 	s.send(`{"jsonrpc":"2.0","id":1,"method":"doctor"}`)
@@ -246,7 +246,7 @@ func TestPanicBecomesInternalError(t *testing.T) {
 func TestSlowMethodDoesNotBlockOthers(t *testing.T) {
 	release := make(chan struct{})
 	s := startSession(t, &Service{
-		Doctor: func(ctx context.Context) (any, error) {
+		Doctor: func(ctx context.Context, _ DoctorParams) (any, error) {
 			select {
 			case <-release:
 			case <-ctx.Done():
@@ -287,6 +287,31 @@ func TestEOFEndsTheSession(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after stdin closed")
+	}
+}
+
+func TestEOFLetsInFlightRequestsFinish(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s := startSession(t, &Service{
+		Doctor: func(ctx context.Context, _ DoctorParams) (any, error) {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			return map[string]bool{"finished": true}, nil
+		},
+	}, Options{})
+	s.notification("hello")
+	s.send(`{"jsonrpc":"2.0","id":1,"method":"doctor"}`)
+	<-started
+	_ = s.in.Close() // EOF while doctor is still running
+	close(release)
+	r := s.response(1)
+	if r["error"] != nil || r["result"].(map[string]any)["finished"] != true {
+		t.Fatalf("in-flight request after EOF = %v, want it to finish", r)
 	}
 }
 
