@@ -1215,6 +1215,30 @@ input; `monitor_analyze` is read-only and has no confirm gate. See the
 [MCP Server](/guide/mcp) guide for the full tool surface and confirmation
 model.
 
+### `serve`
+
+Serve [`monitor.app.v1`](/contracts/app-protocol-v1), the protocol
+[Monitor Desktop](/guide/desktop) speaks: JSON-RPC 2.0, one message per line on
+stdin/stdout. `--stdio` is required, since it is the only transport. The same
+command serves a local client or a remote one through SSH. Nothing listens on a
+port, and EOF on stdin ends the server.
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--stdio` | `false` | Speak the protocol on stdin/stdout (**required**). |
+| `--read-only` | `false` | Reject every mutating method: `issues.set_status`, `process.kill`, `profile.capture`. |
+
+```bash
+monitor serve --stdio
+ssh dev-box monitor serve --stdio --read-only
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"issues.list"}' | monitor serve --stdio
+```
+
+The first line is always a `hello` notification that names the protocol and
+the methods this build answers. Writes go through the same short-lived store
+writers the CLI uses, so `serve` is never the only way to write. Destructive
+methods also need `"confirm": true`.
+
 ### `vault`
 
 Run a command with secrets injected via tinyvault. Wraps the command with

@@ -60,7 +60,7 @@ export default defineConfig({
       name: 'Monitor',
       applicationCategory: 'DeveloperApplication',
       operatingSystem: 'macOS, Linux',
-      softwareVersion: '2.0.0',
+      softwareVersion: '2.2.0',
       description: 'A terminal-based, agent-harnessable system monitor for macOS and Linux. Interactive TUI, JSON CLI, and MCP server.',
       url: 'https://monitorcli.dev',
       downloadUrl: 'https://github.com/abdul-hamid-achik/monitor/releases',
@@ -86,13 +86,18 @@ export default defineConfig({
     nav: [
       { text: 'Install', link: '/guide/installation' },
       { text: 'Guide', link: '/guide/getting-started' },
+      { text: 'Desktop', link: '/guide/desktop' },
       { text: 'Reference', link: '/reference/architecture' },
       {
-        text: 'v2.0.0',
+        text: 'v2.2.0',
         items: [
           {
             text: 'Release notes',
-            link: 'https://github.com/abdul-hamid-achik/monitor/releases/tag/v2.0.0',
+            link: 'https://github.com/abdul-hamid-achik/monitor/releases/tag/v2.2.0',
+          },
+          {
+            text: 'Monitor Desktop',
+            link: 'https://github.com/abdul-hamid-achik/monitor/releases?q=desktop-v',
           },
           {
             text: 'All releases',
@@ -111,6 +116,7 @@ export default defineConfig({
             { text: 'Getting Started', link: '/guide/getting-started' },
             { text: 'Your First Issue', link: '/guide/first-issue' },
             { text: 'The TUI', link: '/guide/tui' },
+            { text: 'Monitor Desktop', link: '/guide/desktop' },
           ],
         },
         {

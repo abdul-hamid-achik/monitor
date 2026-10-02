@@ -301,7 +301,13 @@ if (!app.requestSingleInstanceLock() && !smokeMode && !captureDir) {
     buildMenu();
     if (smokeMode) installSmokeHarness();
     mainWindow = createMainWindow();
-    if (captureDir) mainWindow.webContents.once("did-finish-load", () => void runCapture());
+    if (captureDir) {
+      mainWindow.webContents.once("did-finish-load", () => {
+        // Screenshots may be published: keep the machine's hostname out.
+        void mainWindow?.webContents.insertCSS(".sidebar-foot { visibility: hidden; }");
+        void runCapture();
+      });
+    }
     app.on("activate", () => {
       if (!getWindow()) mainWindow = createMainWindow();
     });

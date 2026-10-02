@@ -106,6 +106,16 @@ If you use [Task](https://taskfile.dev/), create `bin/` first, then
 `bin/monitor` path. You can also run a source build without installing it by
 using `./bin/monitor`.
 
+## Install Monitor Desktop (preview)
+
+[Monitor Desktop](/guide/desktop) is a macOS app over the same binary: issues,
+culprit lines, hot lines and host metrics in a window, for this Mac, SSH hosts
+or Chalupa droplets. Download `Monitor Desktop-<version>-universal.dmg` from
+the [Monitor Desktop releases](https://github.com/abdul-hamid-achik/monitor/releases?q=desktop-v)
+and drag it to Applications. It is signed, notarized and universal, and it
+needs macOS 12 or later. The app bundles its own `monitor`, so the CLI is
+optional. Remote hosts need Monitor 2.2 or later for `monitor serve`.
+
 ## Platform capabilities
 
 Monitor's core CPU, memory, disk, network, and process metrics work on macOS
@@ -127,5 +137,6 @@ Every temperature payload includes its source, and Studio badges readings as
 - Follow the [two-minute tour](/guide/getting-started).
 - Learn the [Studio keyboard controls](/guide/tui).
 - Explore the [JSON CLI](/guide/cli) or [MCP server](/guide/mcp).
+- Keep it open in a window with [Monitor Desktop](/guide/desktop).
 
 [releases]: https://github.com/abdul-hamid-achik/monitor/releases/latest
